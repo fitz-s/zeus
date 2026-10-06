@@ -1,6 +1,6 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-10-04
-# Lifecycle: created=2026-05-11; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Last reused/audited: 2026-10-06
+# Lifecycle: created=2026-05-11; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Protect collector isolation, optional native capture and offline 2t knots without prediction-budget regression.
 # Reuse: Inspect source-run, land-mask and shared-deadline contracts; use private DB/GRIB fixtures and fake HTTP.
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.5
@@ -57,6 +57,7 @@ def _native_temperature_knots_fixture(tmp_path, *, fault=None, steps=(0, 3, 6), 
             try:
                 headers = {"centre": "ecmf", **grid, "dataDate": 20261003, "dataTime": hour * 100,
                            "productDefinitionTemplateNumber": 0 if member == 0 else 1,
+                           "typeOfGeneratingProcess": 2 if member == 0 else 4,
                            "generatingProcessIdentifier": 161, "paramId": 167,
                            "dataType": "fc" if member == 0 else "pf", "step": step}
                 if member:
@@ -309,9 +310,9 @@ def test_native_temperature_knots_never_relabels_original_extrema_as_instant(tmp
     assert result["extrema_status"] == "NOT_COMPUTED"
 
 
-def _native_temperature_transport_fixture(tmp_path, *, fault=None, land_mask=False):
+def _native_temperature_transport_fixture(tmp_path, *, fault=None, land_mask=False, steps=(0, 3), hour=0):
     """Mock HTTP serves only actual synthetic GRIB/index originals."""
-    inputs = _native_temperature_knots_fixture(tmp_path, steps=(0, 3))
+    inputs = _native_temperature_knots_fixture(tmp_path, steps=steps, hour=hour)
     sources, indexes = {}, {}
     for proof in inputs["message_source_evidence"].values():
         url = proof["source_url"].replace("https://data.ecmwf.int/forecasts", "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com")
@@ -357,6 +358,14 @@ def _native_temperature_transport_fixture(tmp_path, *, fault=None, land_mask=Fal
     class Response:
         def __init__(self, body, status, headers):
             self.body, self.status_code, self.headers = body, status, headers
+            self._native_body_complete = True  # Private HTTP is already in-memory, never a blocking stream.
+        @property
+        def content(self):
+            return self.body
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                import requests
+                raise requests.HTTPError(f"HTTP {self.status_code}", response=self)
         def iter_content(self, chunk_size):
             for offset in range(0, len(self.body), chunk_size):
                 yield self.body[offset:offset + chunk_size]
@@ -379,6 +388,1436 @@ def _native_temperature_transport_fixture(tmp_path, *, fault=None, land_mask=Fal
     output = tmp_path / "packet"
     output.mkdir()
     return inputs["expected_run_utc"], output, Session(), calls
+
+
+def _normal_native_http(tmp_path, monkeypatch, *, steps=(0, 3), fault=None, hour=0):
+    from src.data import ecmwf_open_data as module
+    import ecmwf.opendata
+
+    run, _, session, calls = _native_temperature_transport_fixture(tmp_path, steps=steps, fault=fault, hour=hour)
+    class Client:
+        verify = True
+        def __init__(self, **kwargs):
+            self.session = session
+        def _get_urls(self, **kwargs):
+            step = kwargs["step"][0]
+            stream, kind = ("oper", "fc") if kwargs["type"] == ["fc"] else ("enfo", "ef")
+            url = (f"https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{run:%Y%m%d}/"
+                f"{run:%H}z/ifs/0p25/{stream}/{run:%Y%m%d%H}0000-{step}h-{stream}-{kind}.grib2")
+            return SimpleNamespace(urls=[url], for_index={"param": ["2t"]}, target=kwargs["target"])
+    monkeypatch.setattr(ecmwf.opendata, "Client", Client)
+    monkeypatch.setattr(module, "_RateLimitedSession", lambda: session)
+    monkeypatch.setattr(module, "_NativeDeadlineSession", lambda: session)
+    # This legacy original-body fixture supplies one endpoint. The configured
+    # pool fixture below explicitly supplies both official replicas.
+    monkeypatch.setattr(module, "_DOWNLOAD_SOURCES", ("aws",))
+    paths = module.OpenDataPaths(raw_root=tmp_path / "normal", asset_root=tmp_path,
+        extract_script=Path("unused"), manifest_path=Path("unused"), origin="private-fixture")
+    conn = sqlite3.connect(tmp_path / "normal-forecasts.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    conn.commit()
+    return SimpleNamespace(module=module, run=run, session=session, calls=calls, paths=paths, conn=conn,
+        args=dict(conn=conn, run_utc=run, required_steps=list(steps), _paths=paths,
+            _priority=lambda: True, cycle_deadline_monotonic=time.monotonic() + 30))
+
+
+def test_normal_native_capture_source_scope_preserves_unqualified_role(tmp_path, monkeypatch):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    try:
+        result = s.module.collect_native_temperature_source(**s.args)
+        row = s.conn.execute("SELECT * FROM source_run").fetchone()
+        assert result["status"] == "AVAILABLE", result
+        assert (row["ingest_mode"], row["origin_mode"]) == ("SCHEDULED_LIVE", "SCHEDULED_LIVE")
+        assert (row["status"], row["completeness_status"]) == ("SUCCESS", "COMPLETE")
+        assert row["source_issue_time"] is row["source_release_time"] is row["source_available_at"] is None
+        scope_dir = tmp_path / "scope"
+        scope_dir.mkdir()
+        inputs = _native_temperature_knots_fixture(scope_dir, steps=(0, 3))
+        scope = _native_source_scope(s.conn, SimpleNamespace(source_run_id=result["source_run_id"]),
+            Path(result["manifest_path"]), inputs)
+        assert scope.status == "AVAILABLE", scope
+        assert len(scope.native_knots) == 102
+        assert scope.qualification_status == "UNKNOWN"
+        assert scope.available_at is None and scope.static_validity_status == "UNKNOWN"
+        assert scope.temporal_representation == "acquired_native_knots"
+        assert {k["step_hours"] for k in scope.native_knots} == {0, 3}
+        unknown = _native_source_scope(s.conn, SimpleNamespace(source_run_id=result["source_run_id"]),
+            Path(result["manifest_path"]), inputs, qualified_prefix_cut_utc=None)
+        assert unknown.status == "UNKNOWN"
+        assert unknown.qualification_status == "UNKNOWN" and unknown.available_at is None
+        assert s.conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0] == 0
+        assert s.conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 0
+        payload = json.loads(Path(result["manifest_path"]).read_bytes())
+        saved = payload["messages"][0]
+        proof = json.loads(Path(saved["path"]).with_suffix(".grib2.proof.json").read_bytes())
+        receipt_path = Path(saved["path"]).parent / proof["index_path"]
+        receipt_bytes = receipt_path.with_suffix(".http.json").read_bytes()
+        receipt = json.loads(receipt_bytes)
+        assert hashlib.sha256(receipt_bytes).hexdigest() == proof["index_receipt_sha256"]
+        assert receipt["http"]["status"] == 200
+        assert receipt["fetch_started_at"] <= receipt["source_fetched_at"] <= proof["source_fetched_at"]
+    finally:
+        s.conn.close()
+
+
+@pytest.fixture
+def configured_native_pool(tmp_path, monkeypatch):
+    """Two configured official replicas serve actual synthetic original bytes."""
+    import ecmwf.opendata
+    s = _normal_native_http(tmp_path, monkeypatch)
+    client = ecmwf.opendata.Client
+    class RoutedClient(client):
+        def __init__(self, **kwargs):
+            self.mirror = kwargs["source"]
+            super().__init__(**kwargs)
+        def _get_urls(self, **kwargs):
+            result = super()._get_urls(**kwargs)
+            if self.mirror == "google":
+                result.urls = [url.replace("https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com",
+                    "https://storage.googleapis.com/ecmwf-open-data") for url in result.urls]
+            return result
+    monkeypatch.setattr(ecmwf.opendata, "Client", RoutedClient)
+    monkeypatch.setattr(s.module, "_DOWNLOAD_SOURCES", ("aws", "google"))
+    s.clock, s.hosts, s.mode, s.google_fault = [100.], [], "fast503", None
+    monkeypatch.setattr(s.module.time, "monotonic", lambda: s.clock[0])
+    get = s.session.get
+    def private_get(url, **kwargs):
+        google = "storage.googleapis.com" in url
+        s.hosts.append("google" if google else "aws")
+        response = get(url.replace("https://storage.googleapis.com/ecmwf-open-data",
+            "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com"), **kwargs)
+        if not google and s.mode in {"fast503", "full503"}:
+            if s.mode == "full503":
+                s.clock[0] = s.session._zeus_deadline
+            response.status_code = 503
+        elif not google and s.mode == "partial503":
+            if "Range" in kwargs.get("headers", {}):
+                s.clock[0] += 58.
+            elif "-0h-enfo-ef.index" in url:
+                s.clock[0] += 1.
+                response.status_code = 503
+        elif google and s.google_fault == "prefix" and "-0h-oper-fc.grib2" in url:
+            import eccodes as ec
+            gid = ec.codes_new_from_message(response.body)
+            try:
+                ec.codes_set_values(gid, ec.codes_get_values(gid) + 1.)
+                changed = ec.codes_get_message(gid)
+                assert len(changed) == len(response.body)
+                response.body = changed
+            finally:
+                ec.codes_release(gid)
+        return response
+    s.session.get = private_get
+    s.cache = s.paths.raw_root / "raw/ecmwf_open_ens/native_2t_scheduled" / f"{s.run:%Y%m%dT%HZ}"
+    s.receipt = s.cache / "mirror-attempt.json"
+    def poll():
+        return s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": s.clock[0] + 59})
+    s.poll = poll
+    try:
+        yield s
+    finally:
+        s.conn.close()
+
+
+def test_normal_native_fast_503_uses_configured_google_originals(configured_native_pool):
+    s = configured_native_pool
+    result = s.poll()
+    assert result["status"] == "AVAILABLE" and result["observed_count"] == 102, result
+    assert s.hosts[0] == "aws" and set(s.hosts[1:]) == {"google"}
+    assert s.clock[0] == 100.
+    receipt = json.loads(s.receipt.read_bytes())
+    assert receipt["last_attempted_mirror"] == "google" and receipt["status"] == "COMPLETE"
+    manifest = json.loads(Path(result["manifest_path"]).read_bytes())
+    assert len(manifest["messages"]) == 102
+    assert all(row["source_url"].startswith("https://storage.googleapis.com/ecmwf-open-data/") for row in manifest["messages"])
+    row = s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (result["source_run_id"],)).fetchone()
+    assert row["source_id"] == "ecmwf_open_data" and row["completeness_status"] == "COMPLETE"
+    assert row["source_issue_time"] is row["source_available_at"] is None
+    assert result["qualification_status"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("crash", (False, True), ids=("fullcut", "crash"))
+def test_normal_native_full_cut_or_crash_rotates_from_durable_mirror_attempt(configured_native_pool, crash):
+    s = configured_native_pool
+    s.mode = "full503"
+    first = s.poll()
+    assert first["status"] == "DEFERRED" and first["observed_count"] == 0
+    assert s.hosts == ["aws"] and s.clock[0] == 159.
+    receipt = json.loads(s.receipt.read_bytes())
+    assert receipt["last_attempted_mirror"] == "aws" and receipt["status"] == "FAILED"
+    if crash:
+        receipt.update(status="RUNNING", attempt_finished_at=None, reason=None)
+        s.receipt.write_text(json.dumps(receipt))  # Actual durable pre-GET marker left by an interrupted attempt.
+    s.conn.close()
+    s.conn = sqlite3.connect(s.paths.raw_root.parent / "normal-forecasts.db")
+    s.conn.row_factory = sqlite3.Row
+    s.args["conn"] = s.conn
+    s.clock[0] += 60.
+    s.hosts.clear()
+    second = s.poll()
+    assert second["status"] == "AVAILABLE" and second["observed_count"] == 102, second
+    assert set(s.hosts) == {"google"}  # A fresh connection restores the cursor, not an in-memory latch.
+    assert s.clock[0] == 219.
+
+
+@pytest.mark.parametrize("diverged", (False, True), ids=("equal_prefix", "different_prefix"))
+def test_normal_native_partial_mirror_prefix_keeps_original_clocks_and_can_reset(configured_native_pool, diverged):
+    s = configured_native_pool
+    s.mode = "partial503"
+    first = s.poll()
+    assert first["status"] == "INCOMPLETE" and first["observed_count"] == 1, first
+    original = s.cache / "step000-member00.grib2"
+    proof = original.with_suffix(".grib2.proof.json")
+    original_bytes, proof_bytes = original.read_bytes(), proof.read_bytes()
+    before = json.loads(Path(first["manifest_path"]).read_bytes())["retained_identities"][0]
+    s.clock[0] += 60.
+    s.google_fault = "prefix" if diverged else None
+    second = s.poll()
+    if diverged:
+        assert second["status"] == "UNKNOWN" and second["reason"] == "NATIVE_2T_MIRROR_COHORT_DIVERGED", second
+        assert len(list(s.cache.glob("step*-member*.grib2"))) == 1
+        s.mode = "fast503"
+        s.clock[0] += 60.
+        repeated = s.poll()
+        assert repeated["status"] == "UNKNOWN" and repeated["reason"] == "NATIVE_2T_MIRROR_COHORT_DIVERGED"
+        receipt = json.loads(s.receipt.read_bytes())
+        assert receipt["last_attempted_mirror"] == "google" and receipt["status"] == "FAILED"
+        # Restore the original mirror normally; its valid cohort can drain
+        # without deleting the conflicting replica or recapturing old bytes.
+        s.mode = "healthy"
+        s.clock[0] += 60.
+        second = s.poll()
+    assert second["status"] == "AVAILABLE" and second["observed_count"] == 102, second
+    assert (original.read_bytes(), proof.read_bytes()) == (original_bytes, proof_bytes)
+    after = json.loads(Path(second["manifest_path"]).read_bytes())["retained_identities"]
+    assert next(row for row in after if (row["member"], row["step_hours"]) == (0, 0)) == before
+    assert second["qualification_status"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("debt", ("wrong_run", "receipt_alias", "stage_alias"))
+def test_normal_native_mirror_diagnostic_debt_is_scoped_and_restorable(configured_native_pool, debt):
+    s = configured_native_pool
+    s.mode = "full503"
+    assert s.poll()["status"] == "DEFERRED"
+    saved = s.receipt.read_bytes()
+    stage = s.cache / f".mirror-{s.module._resume_source_namespace('google')}.partial"
+    if debt == "wrong_run":
+        payload = json.loads(saved)
+        payload["run_time_utc"] = (s.run - timedelta(hours=6)).isoformat()
+        s.receipt.write_text(json.dumps(payload))
+    elif debt == "receipt_alias":
+        original = s.receipt.with_name("private-saved-diagnostic.json")
+        s.receipt.rename(original)
+        s.receipt.symlink_to(original)
+    else:
+        outside = s.cache.parent / "private-stage-target"
+        outside.mkdir()
+        stage.symlink_to(outside, target_is_directory=True)
+    s.clock[0] += 60.
+    s.hosts.clear()
+    failed = s.poll()
+    assert failed["status"] == "UNKNOWN", failed
+    assert s.hosts == [] and not list(s.cache.glob("step*-member*.grib2"))
+    if debt == "receipt_alias":
+        s.receipt.unlink()
+        original.rename(s.receipt)
+    elif debt == "wrong_run":
+        s.receipt.write_bytes(saved)
+    else:
+        stage.unlink()
+    s.mode = "fast503"
+    recovered = s.poll()
+    assert recovered["status"] == "AVAILABLE" and recovered["observed_count"] == 102, recovered
+
+
+def test_normal_native_google_wrong_bucket_does_not_publish_originals(configured_native_pool, monkeypatch):
+    import ecmwf.opendata
+    s = configured_native_pool
+    client = ecmwf.opendata.Client
+    class WrongBucketClient(client):
+        def _get_urls(self, **kwargs):
+            result = super()._get_urls(**kwargs)
+            result.urls = [url.replace("/ecmwf-open-data/", "/private-other-bucket/") for url in result.urls]
+            return result
+    monkeypatch.setattr(ecmwf.opendata, "Client", WrongBucketClient)
+    get = s.session.get
+    s.session.get = lambda url, **kwargs: get(url.replace("/private-other-bucket/", "/ecmwf-open-data/"), **kwargs)
+    result = s.poll()
+    assert result["status"] == "UNKNOWN" and result["reason"] == "NATIVE_2T_SOURCE_HOST_INVALID", result
+    assert not list(s.cache.glob("step*-member*.grib2"))
+    assert s.conn.execute("SELECT COUNT(*) FROM source_run").fetchone()[0] == 0
+
+
+def test_normal_native_mirror_switch_cannot_remint_tampered_prefix(configured_native_pool):
+    s = configured_native_pool
+    s.mode = "partial503"
+    first = s.poll()
+    assert first["observed_count"] == 1
+    path = s.cache / "step000-member00.grib2"
+    original, proof = path.read_bytes(), path.with_suffix(".grib2.proof.json").read_bytes()
+    path.write_bytes(original[:-1] + b"0")
+    s.clock[0] += 60.
+    s.hosts.clear()
+    rejected = s.poll()
+    assert rejected["status"] == "UNKNOWN" and s.hosts == []
+    assert path.with_suffix(".grib2.proof.json").read_bytes() == proof
+    path.write_bytes(original)
+    restored = s.poll()
+    assert restored["status"] == "AVAILABLE" and restored["observed_count"] == 102, restored
+    assert path.with_suffix(".grib2.proof.json").read_bytes() == proof
+
+
+def test_normal_native_google_cache_expiry_never_refreshes_original_receipts(configured_native_pool):
+    s = configured_native_pool
+    before = s.poll()
+    manifest = Path(before["manifest_path"]).read_bytes()
+    originals = {path: path.read_bytes() for path in s.cache.glob("step*-member*.grib2*")}
+    s.receipt.write_text("invalid diagnostic cannot authorize anything")
+    s.hosts.clear()
+    after = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": s.clock[0] - 1})
+    assert after["status"] == "AVAILABLE" and s.hosts == []
+    assert Path(after["manifest_path"]).read_bytes() == manifest
+    assert {path: path.read_bytes() for path in originals} == originals
+    assert after["qualification_status"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("retained_prefix", (False, True), ids=("new_cohort", "old_prefix"))
+def test_normal_native_interrupted_mirror_promotion_restores_exact_staged_proof(configured_native_pool, monkeypatch, retained_prefix):
+    s = configured_native_pool
+    if retained_prefix:
+        s.mode = "partial503"
+        assert s.poll()["observed_count"] == 1
+        s.mode = "fast503"
+        s.clock[0] += 60.
+    member = "01" if retained_prefix else "00"
+    link = s.module.os.link
+    interrupted = [False]
+    def interrupt(origin, destination, **kwargs):
+        destination = Path(destination)
+        if destination.parent == s.cache and destination.name == f"step000-member{member}.grib2.proof.json" and not interrupted[0]:
+            interrupted[0] = True
+            raise OSError("private promotion interruption")
+        return link(origin, destination, **kwargs)
+    monkeypatch.setattr(s.module.os, "link", interrupt)
+    first = s.poll()
+    assert first["status"] == "UNKNOWN" and interrupted[0]
+    original = s.cache / f"step000-member{member}.grib2"
+    assert original.exists() and not original.with_suffix(".grib2.proof.json").exists()
+    stage = s.cache / f".mirror-{s.module._resume_source_namespace('google')}.partial"
+    staged_proof = (stage / original.name).with_suffix(".grib2.proof.json").read_bytes()
+    s.clock[0] += 60.
+    second = s.poll()
+    assert second["status"] == "AVAILABLE" and second["observed_count"] == 102, second
+    assert original.with_suffix(".grib2.proof.json").read_bytes() == staged_proof
+
+
+@pytest.mark.parametrize("debt", ("archive_role", "wrong_namespace"))
+def test_normal_native_interrupted_publication_rejects_misplaced_proof_before_link(configured_native_pool, monkeypatch, debt):
+    s = configured_native_pool
+    link = s.module.os.link
+    interrupted = [False]
+    original = s.cache / "step000-member00.grib2"
+    proof_path = original.with_suffix(".grib2.proof.json")
+    def interrupt(origin, destination, **kwargs):
+        if Path(destination) == proof_path and not interrupted[0]:
+            interrupted[0] = True
+            raise OSError("private promotion interruption")
+        return link(origin, destination, **kwargs)
+    monkeypatch.setattr(s.module.os, "link", interrupt)
+    assert s.poll()["status"] == "UNKNOWN" and interrupted[0]
+    body = original.read_bytes()
+    google_stage = s.cache / f".mirror-{s.module._resume_source_namespace('google')}.partial"
+    staged_proof = (google_stage / original.name).with_suffix(".grib2.proof.json")
+    proof_bytes = staged_proof.read_bytes()
+    aws_stage = s.cache / f".mirror-{s.module._resume_source_namespace('aws')}.partial"
+    if debt == "archive_role":
+        proof = json.loads(proof_bytes)
+        proof["ingest_mode"] = "ARCHIVE_BACKFILL"
+        staged_proof.write_text(json.dumps(proof))
+        reason = "NATIVE_2T_ORIGIN_ROLE_CHANGED"
+    else:
+        for path in google_stage.iterdir():
+            if path.is_file():
+                (aws_stage / path.name).write_bytes(path.read_bytes())
+        reason = "NATIVE_2T_MIRROR_STAGE_ORIGIN_INVALID"
+    s.clock[0] += 60.
+    s.hosts.clear()
+    rejected = s.poll()
+    assert rejected["status"] == "UNKNOWN" and reason in rejected["reason"], rejected
+    assert not proof_path.exists() and original.read_bytes() == body and s.hosts == []
+    # Restore exact evidence, retaining misplaced originals as forensics.
+    if debt == "archive_role":
+        staged_proof.write_bytes(proof_bytes)
+    else:
+        aws_stage.rename(s.cache / "private-misplaced-stage-forensics")
+        aws_stage.mkdir()
+    restored = s.poll()
+    assert restored["status"] == "AVAILABLE" and restored["observed_count"] == 102, restored
+    assert proof_path.read_bytes() == proof_bytes and original.read_bytes() == body
+
+
+def test_normal_native_uncommitted_stage_does_not_permanently_block_healthy_replica(configured_native_pool):
+    import eccodes as ec
+    s = configured_native_pool
+    s.mode = "full503"
+    assert s.poll()["status"] == "DEFERRED"
+    aws_stage = s.cache / f".mirror-{s.module._resume_source_namespace('aws')}.partial"
+    orphan = aws_stage / "step000-member00.grib2"
+    with (s.paths.raw_root.parent / "native-2t.grib2").open("rb") as handle:
+        gid = ec.codes_grib_new_from_file(handle)
+        try:
+            orphan.write_bytes(ec.codes_get_message(gid))
+        finally:
+            ec.codes_release(gid)
+    # Both endpoints have failed after a real AWS RUNNING marker. Returning
+    # to AWS must record stage failure, not freeze the cursor at Google.
+    attempt = json.loads(s.receipt.read_bytes())
+    attempt.update(last_attempted_mirror="google", status="FAILED")
+    s.receipt.write_text(json.dumps(attempt))
+    s.clock[0] += 60.
+    s.hosts.clear()
+    failed = s.poll()
+    assert failed["status"] == "UNKNOWN" and s.hosts == []
+    assert json.loads(s.receipt.read_bytes())["last_attempted_mirror"] == "aws"
+    original = orphan.read_bytes()
+    recovered = s.poll()
+    assert recovered["status"] == "AVAILABLE" and recovered["observed_count"] == 102, recovered
+    assert orphan.read_bytes() == original and set(s.hosts) == {"google"}
+
+
+def test_normal_native_expired_queue_reads_only_fully_verified_cache(tmp_path, monkeypatch):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    try:
+        first = s.module.collect_native_temperature_source(**s.args)
+        assert first["status"] == "AVAILABLE"
+        before = Path(first["manifest_path"]).read_bytes()
+        s.calls.clear()
+        s.args["cycle_deadline_monotonic"] = time.monotonic() - 1
+        cached = s.module.collect_native_temperature_source(**s.args)
+        assert cached["status"] == "AVAILABLE", cached
+        assert s.calls == [] and Path(first["manifest_path"]).read_bytes() == before
+        original = Path(json.loads(before)["messages"][0]["path"])
+        original.write_bytes(original.read_bytes()[:-1] + b"0")
+        damaged = s.module.collect_native_temperature_source(**s.args)
+        assert damaged["status"] == "UNKNOWN", damaged
+        assert s.calls == []
+    finally:
+        s.conn.close()
+
+
+@pytest.fixture
+def native_deadline_http():
+    """Actual loopback only; no provider HTTP, production clock or credentials."""
+    stop = threading.Event()
+    state = SimpleNamespace(mode="valid", body=b"x" * 200, calls=0)
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def log_message(self, *args):
+            pass
+        def do_GET(self):
+            state.calls += 1
+            try:
+                if state.mode == "slow_headers":
+                    for char in b"HTTP/1.1 206 Partial Content\r\nContent-Length: 200\r\n\r\n":
+                        if stop.wait(.03):
+                            return
+                        self.wfile.write(bytes([char]))
+                    return
+                self.send_response(200 if state.mode == "ignored_range" else 206)
+                chunked = state.mode in {"unknown_size", "ignored_range"}
+                if chunked:
+                    self.send_header("Transfer-Encoding", "chunked")
+                else:
+                    self.send_header("Content-Length", str(len(state.body)))
+                requested = self.headers.get("Range", "bytes=0-199")[6:]
+                self.send_header("Content-Range", "bytes " + ("1-200" if state.mode == "wrong_range" else requested) + "/100000")
+                self.send_header("Content-Encoding", "gzip" if state.mode == "encoding" else "identity")
+                self.send_header("Set-Cookie", "private_fixture_secret=must_not_capture")
+                self.end_headers()
+                if chunked:
+                    for _ in range(32):
+                        self.wfile.write(b"100\r\n" + b"x" * 256 + b"\r\n")
+                    self.wfile.write(b"0\r\n\r\n")
+                elif state.mode == "trickle":
+                    for chunk in (state.body[:len(state.body) // 2], state.body[len(state.body) // 2:]):
+                        if stop.wait(.45):
+                            return
+                        self.wfile.write(chunk)
+                else:
+                    self.wfile.write(state.body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                self.close_connection = True
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state.url = f"http://127.0.0.1:{server.server_port}/original"
+    try:
+        yield state
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(2)
+
+
+@pytest.mark.parametrize("mode", ("slow_headers", "trickle", "unknown_size", "ignored_range", "wrong_range", "encoding", "valid"))
+def test_native_deadline_curl_actual_loopback_has_total_cut_and_body_cap(native_deadline_http, monkeypatch, mode):
+    import requests
+    from src.data import ecmwf_open_data as source
+    state = native_deadline_http
+    state.mode = mode
+    session = source._NativeDeadlineSession()
+    session.trust_env = False  # Private loopback, never a production-route change.
+    run = source.subprocess.run
+    output_sizes, commands = [], []
+    def checked_run(command, **kwargs):
+        commands.append(command)
+        result = run(command, **kwargs)
+        if "--output" in command:
+            output = Path(command[command.index("--output") + 1])
+            if output.exists():
+                output_sizes.append(output.stat().st_size)
+        return result
+    monkeypatch.setattr(source.subprocess, "run", checked_run)
+    started = time.monotonic()
+    session._zeus_deadline = started + .6
+    try:
+        if mode in {"slow_headers", "trickle"}:
+            with pytest.raises(requests.Timeout, match="STEP_DEADLINE_EXCEEDED"):
+                session.get(state.url, headers={"Range": "bytes=0-199"})
+            assert time.monotonic() - started < .8  # Includes bounded process-reap/CPU cleanup, not mathematical zero slack.
+        elif mode in {"unknown_size", "ignored_range"}:
+            with pytest.raises(requests.RequestException, match="TRANSFER_FAILED:63"):
+                session.get(state.url, headers={"Range": "bytes=0-199"})
+            assert output_sizes and max(output_sizes) <= 200
+        elif mode == "encoding":
+            with pytest.raises(ValueError, match="ENCODING_UNSUPPORTED"):
+                session.get(state.url, headers={"Range": "bytes=0-199"})
+        else:
+            response = session.get(state.url, headers={"Range": "bytes=0-199"})
+            if mode == "wrong_range":
+                with pytest.raises(requests.RequestException):
+                    source._validate_range_response(response, offset=0, length=200)
+            else:
+                source._validate_range_response(response, offset=0, length=200)
+                assert response.content == state.body and response._native_body_complete
+            assert "Set-Cookie" not in response.headers
+            response.close()
+        command = next(command for command in commands if "--output" in command)
+        assert command[1] == "-q" and "--location" not in command and "--insecure" not in command
+        assert "--cacert" in command and "Accept-Encoding: identity" in command
+    finally:
+        session.close()
+
+
+def test_native_deadline_shared_bucket_wait_expires_without_starting_http(native_deadline_http):
+    import requests
+    from src.data import ecmwf_open_data as source
+    bucket = source._fetch_bucket
+    with bucket._lock:
+        original = bucket._tokens, bucket._last_refill
+        bucket._tokens, bucket._last_refill = 0., time.monotonic()
+    session = source._NativeDeadlineSession()
+    started = time.monotonic()
+    session._zeus_deadline = started + .05
+    try:
+        with pytest.raises(requests.Timeout, match="STEP_DEADLINE_EXCEEDED"):
+            session.get(native_deadline_http.url, headers={"Range": "bytes=0-199"})
+        assert time.monotonic() - started < .2
+        assert not session._curl_checked and native_deadline_http.calls == 0
+    finally:
+        session.close()
+        with bucket._lock:
+            bucket._tokens, bucket._last_refill = original
+
+
+def test_native_deadline_actual_proxy_route_and_tls_are_preserved(native_deadline_http, monkeypatch):
+    from src.data import ecmwf_open_data as source
+    session = source._NativeDeadlineSession()
+    session.trust_env = False
+    session.proxies = {"http": native_deadline_http.url.replace("/original", "")}
+    session._zeus_deadline = time.monotonic() + 2.
+    run = source.subprocess.run
+    observed = []
+    def checked(command, **kwargs):
+        if "--url" in command:
+            observed.append((kwargs["env"].get("http_proxy"), command))
+        return run(command, **kwargs)
+    monkeypatch.setattr(source.subprocess, "run", checked)
+    try:
+        # This destination cannot resolve. Success proves the authorized local
+        # HTTP proxy handled it; the native transport did not silently bypass.
+        response = session.get("http://native-fixture.invalid/original", headers={"Range": "bytes=0-199"})
+        assert response.status_code == 206 and response.content == native_deadline_http.body
+        assert native_deadline_http.calls == 1
+        assert observed[0][0] == session.proxies["http"]
+        command = observed[0][1]
+        assert session.proxies["http"] not in command and "--insecure" not in command
+        assert "--cacert" in command and "--location" not in command
+        with pytest.raises(ValueError, match="TLS_VERIFICATION_REQUIRED"):
+            session.get(native_deadline_http.url, verify=False)
+        assert native_deadline_http.calls == 1
+        response.close()
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("failure", ("old_version", "missing"))
+def test_native_deadline_unsupported_tool_cannot_fall_back_to_unbounded_requests(tmp_path, monkeypatch, failure):
+    from src.data import ecmwf_open_data as source
+    NativeSession = source._NativeDeadlineSession
+    s = _normal_native_http(tmp_path, monkeypatch)
+    commands = []
+    def unavailable(command, **kwargs):
+        commands.append(command)
+        if failure == "missing":
+            raise FileNotFoundError("private missing-tool fixture")
+        return SimpleNamespace(returncode=0, stdout=b"curl 7.88.1", stderr=b"private stderr must not enter source reason")
+    monkeypatch.setattr(source, "_NativeDeadlineSession", NativeSession)
+    monkeypatch.setattr(source.subprocess, "run", unavailable)
+    try:
+        result = source.collect_native_temperature_source(**s.args)
+        assert result["status"] == "DEFERRED" and result["inventory_status"] == "UNKNOWN", result
+        assert "BOUNDED_HTTP_UN" in result["reason"] and "private stderr" not in result["reason"]
+        assert len(commands) == 1 and commands[0] == ["/usr/bin/curl", "-q", "--version"]
+        assert s.calls == []
+        assert s.conn.execute("SELECT COUNT(*) FROM source_run").fetchone()[0] == 0
+    finally:
+        s.conn.close()
+
+
+@pytest.mark.parametrize("mode", ("slow_headers", "trickle"))
+def test_normal_native_actual_total_http_failure_can_resume_next_poll(tmp_path, monkeypatch, native_deadline_http, mode):
+    from src.data import ecmwf_open_data as source
+    NativeSession = source._NativeDeadlineSession
+    s = _normal_native_http(tmp_path, monkeypatch)
+    state = native_deadline_http
+    state.mode = mode
+    original_get = s.session.get
+    bounded = NativeSession()
+    bounded.trust_env = False
+    injected = [False]
+    def get(url, **kwargs):
+        original = original_get(url, **kwargs)
+        if not injected[0] and "Range" in kwargs.get("headers", {}):
+            injected[0] = True
+            state.body = original.body
+            bounded._zeus_deadline = s.session._zeus_deadline
+            return bounded.get(state.url, **kwargs)
+        return original
+    s.session.get = get
+    started = time.monotonic()
+    try:
+        first = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": started + .6})
+        assert first["status"] == "DEFERRED" and first["observed_count"] == 0, first
+        assert time.monotonic() - started < .8
+        assert not list(s.paths.raw_root.rglob("step*-member*.grib2"))
+        s.session.get = original_get
+        complete = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": time.monotonic() + 30})
+        assert complete["status"] == "AVAILABLE" and complete["observed_count"] == 102, complete
+        assert complete["qualification_status"] == "UNKNOWN" and complete["source_issued_at"] is None
+    finally:
+        bounded.close()
+        s.conn.close()
+
+
+def test_normal_native_one_part_resume_preserves_first_possession(tmp_path, monkeypatch):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    clock = [10.]
+    monkeypatch.setattr(s.module.time, "monotonic", lambda: clock[0])
+    original_get = s.session.get
+    def get(url, **kwargs):
+        response = original_get(url, **kwargs)
+        if not url.endswith(".index"):
+            clock[0] = 49.
+        return response
+    monkeypatch.setattr(s.session, "get", get)
+    try:
+        # Completion of the first valid part spends the poll, not its clock.
+        def priority():
+            if any("Range" in c[1].get("headers", {}) for c in s.calls):
+                clock[0] = 50.
+            return True
+        first = s.module.collect_native_temperature_source(**{**s.args, "_priority": priority,
+            "cycle_deadline_monotonic": 50.})
+        assert first["status"] == "INCOMPLETE", first
+        assert first["observed_count"] == 1
+        manifest = Path(first["manifest_path"])
+        saved = json.loads(manifest.read_bytes())["messages"][0]
+        retained = Path(saved["path"]).read_bytes()
+        proof = Path(saved["path"]).with_suffix(".grib2.proof.json").read_bytes()
+        monkeypatch.setattr(s.session, "get", original_get)
+        s.calls.clear()
+        clock[0] = 60.
+        final = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": 100.})
+        assert final["status"] == "AVAILABLE", final
+        assert Path(saved["path"]).read_bytes() == retained
+        assert Path(saved["path"]).with_suffix(".grib2.proof.json").read_bytes() == proof
+        current = next(m for m in json.loads(manifest.read_bytes())["messages"]
+            if (m["member"], m["step_hours"]) == (saved["member"], saved["step_hours"]))
+        assert current == saved
+        assert len([c for c in s.calls if "Range" in c[1].get("headers", {})]) == 101
+    finally:
+        s.conn.close()
+
+
+@pytest.mark.parametrize("cause", ("priority", "expired", "503"))
+def test_normal_native_defer_is_bounded_and_next_poll_resets(tmp_path, monkeypatch, cause):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    original_get = s.session.get
+    failed = [False]
+    def get(url, **kwargs):
+        if not failed[0]:
+            failed[0] = True
+            s.calls.append((url, kwargs))
+            raise __import__("requests").HTTPError("private HTTP 503",
+                response=SimpleNamespace(status_code=503))
+        return original_get(url, **kwargs)
+    args = dict(s.args)
+    if cause == "priority":
+        args["_priority"] = lambda: False
+    elif cause == "expired":
+        args["cycle_deadline_monotonic"] = time.monotonic() - 1
+    else:
+        monkeypatch.setattr(s.session, "get", get)
+    try:
+        result = s.module.collect_native_temperature_source(**args)
+        assert result["status"] == "DEFERRED", result
+        assert len(s.calls) == (1 if cause == "503" else 0)
+        final = s.module.collect_native_temperature_source(**s.args)
+        assert final["status"] == "AVAILABLE", final
+    finally:
+        s.conn.close()
+
+
+@pytest.mark.parametrize("fault", ("body", "index", "index_receipt", "clock", "role"))
+def test_normal_native_retained_tamper_never_remints(tmp_path, monkeypatch, fault):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    try:
+        source = s.module.collect_native_temperature_source(**s.args)
+        saved = json.loads(Path(source["manifest_path"]).read_bytes())["messages"][0]
+        body = Path(saved["path"])
+        proof_path = body.with_suffix(".grib2.proof.json")
+        proof = json.loads(proof_path.read_bytes())
+        if fault == "body":
+            body.write_bytes(body.read_bytes()[:-1] + b"0")
+        elif fault == "index":
+            (body.parent / proof["index_path"]).write_bytes(b"{}\n")
+        elif fault == "index_receipt":
+            (body.parent / proof["index_path"]).with_suffix(".http.json").write_bytes(b"{}\n")
+        else:
+            proof["source_fetched_at" if fault == "clock" else "ingest_mode"] = (
+                "2099-01-01T00:00:00+00:00" if fault == "clock" else "ARCHIVE_BACKFILL")
+            proof_path.write_text(json.dumps(proof))
+        s.calls.clear()
+        result = s.module.collect_native_temperature_source(**s.args)
+        assert result["status"] in {"INCOMPLETE", "UNKNOWN"}, result
+        assert s.calls == []
+        assert result["qualification_status"] == "UNKNOWN"
+    finally:
+        s.conn.close()
+
+
+def test_normal_native_six_hour_knots_are_not_hourly_or_prior_observations(tmp_path, monkeypatch):
+    s = _normal_native_http(tmp_path, monkeypatch, steps=(144, 150))
+    try:
+        result = s.module.collect_native_temperature_source(**s.args)
+        assert result["status"] == "AVAILABLE", result
+        directory = tmp_path / "scope"
+        directory.mkdir()
+        inputs = _native_temperature_knots_fixture(directory, steps=(144, 150))
+        scope = _native_source_scope(s.conn, SimpleNamespace(source_run_id=result["source_run_id"]),
+            Path(result["manifest_path"]), inputs,
+            qualified_prefix_cut_utc=s.run + timedelta(hours=145))
+        assert scope.status == "AVAILABLE", scope
+        assert {k["step_hours"] for k in scope.native_knots} == {144, 150}
+        assert scope.temporal_representation == "acquired_native_knots"
+        assert scope.available_at is None and scope.qualification_status == "UNKNOWN"
+        assert scope.projection_status == "NOT_PERFORMED" and scope.extrema_status == "NOT_COMPUTED"
+    finally:
+        s.conn.close()
+
+
+def test_normal_native_singleflight_defers_only_itself_and_releases(tmp_path, monkeypatch):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    try:
+        s.module._native_temperature_source_lock.acquire()
+        try:
+            first = s.module.collect_native_temperature_source(**s.args)
+            assert first["reason"] == "NATIVE_2T_SINGLEFLIGHT_BUSY"
+            assert s.calls == []
+        finally:
+            s.module._native_temperature_source_lock.release()
+        assert s.module.collect_native_temperature_source(**s.args)["status"] == "AVAILABLE"
+        assert not s.module._native_temperature_source_lock.locked()
+    finally:
+        s.conn.close()
+
+
+def test_normal_native_cannot_overwrite_archive_source_identity(tmp_path, monkeypatch):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    try:
+        result = s.module.collect_native_temperature_source(**s.args)
+        scheduled_row = dict(s.conn.execute("SELECT * FROM source_run").fetchone())
+        archive_id = scheduled_row["source_run_id"].removesuffix(":origin:scheduled_live")
+        write_source_run(s.conn, source_run_id=archive_id, source_id="ecmwf_open_data",
+            track="2t_instant_native_knots", release_calendar_key="ecmwf_open_data",
+            source_cycle_time=s.run, ingest_mode="ARCHIVE_BACKFILL", origin_mode="ARCHIVE_BACKFILL",
+            status="PARTIAL", completeness_status="PARTIAL", partial_run=True, manifest_hash="archive-immutable")
+        s.conn.commit()
+        archive_before = dict(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (archive_id,)).fetchone())
+        again = s.module.collect_native_temperature_source(**s.args)
+        assert again["source_run_id"] == result["source_run_id"]
+        assert dict(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (archive_id,)).fetchone()) == archive_before
+        with pytest.raises(ValueError, match="NATIVE_2T_ORIGIN_ROLE_CHANGED"):
+            s.module.persist_native_temperature_source_run(s.conn,
+                cache_dir=Path(result["manifest_path"]).parent, manifest_path=Path(result["manifest_path"]),
+                expected_run_utc=s.run, product_steps=[0, 3])
+        # Even a colliding row tagged archive at the scheduled ID is immutable.
+        s.conn.execute("UPDATE source_run SET ingest_mode='ARCHIVE_BACKFILL', origin_mode='ARCHIVE_BACKFILL' "
+            "WHERE source_run_id=?", (result["source_run_id"],))
+        s.conn.commit()
+        conflict_before = dict(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?",
+            (result["source_run_id"],)).fetchone())
+        conflict = s.module.collect_native_temperature_source(**s.args)
+        assert conflict["status"] == "UNKNOWN"
+        assert dict(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?",
+            (result["source_run_id"],)).fetchone()) == conflict_before
+    finally:
+        s.conn.close()
+
+
+def test_normal_native_close_failure_cannot_freeze_singleflight(tmp_path, monkeypatch):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    close = s.session.close
+    def fail_close():
+        raise OSError("private close failure")
+    monkeypatch.setattr(s.session, "close", fail_close)
+    try:
+        with pytest.raises(OSError, match="private close failure"):
+            s.module.collect_native_temperature_source(**s.args)
+        assert not s.module._native_temperature_source_lock.locked()
+        monkeypatch.setattr(s.session, "close", close)
+        assert s.module.collect_native_temperature_source(**s.args)["status"] == "AVAILABLE"
+    finally:
+        s.conn.close()
+
+
+@pytest.mark.parametrize("fault", ("manifest_missing", "manifest_and_original_missing", "manifest_unbound"))
+def test_normal_native_canonical_anchor_prevents_remint_and_restores(tmp_path, monkeypatch, fault):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    try:
+        first = s.module.collect_native_temperature_source(**s.args)
+        manifest = Path(first["manifest_path"])
+        manifest_bytes = manifest.read_bytes()
+        original = json.loads(manifest_bytes)["messages"][0]
+        body = Path(original["path"])
+        proof = body.with_suffix(".grib2.proof.json")
+        body_bytes, proof_bytes = body.read_bytes(), proof.read_bytes()
+        before = dict(s.conn.execute("SELECT * FROM source_run").fetchone())
+        if fault == "manifest_unbound":
+            changed = json.loads(manifest_bytes)
+            changed["retained_identities"] = []
+            manifest.write_text(json.dumps(changed))
+        else:
+            manifest.unlink()
+        if fault == "manifest_and_original_missing":
+            body.unlink()
+            proof.unlink()
+        s.calls.clear()
+        refused = s.module.collect_native_temperature_source(**s.args)
+        assert refused["status"] == "UNKNOWN", refused
+        assert s.calls == []
+        assert dict(s.conn.execute("SELECT * FROM source_run").fetchone()) == before
+        # Restore exact known originals, never new clocks or a freshly fetched substitute.
+        manifest.write_bytes(manifest_bytes)
+        body.write_bytes(body_bytes)
+        proof.write_bytes(proof_bytes)
+        restored = s.module.collect_native_temperature_source(**s.args)
+        assert restored["status"] == "AVAILABLE", restored
+        assert restored["source_run_id"] == first["source_run_id"]
+        assert s.calls == []
+        assert json.loads(manifest.read_bytes())["messages"][0] == original
+        assert s.conn.execute("SELECT manifest_hash FROM source_run").fetchone()[0] == before["manifest_hash"]
+        scope_dir = tmp_path / "restore-scope"
+        scope_dir.mkdir()
+        inputs = _native_temperature_knots_fixture(scope_dir, steps=(0, 3))
+        scope = _native_source_scope(s.conn, SimpleNamespace(source_run_id=first["source_run_id"]), manifest, inputs)
+        assert scope.status == "AVAILABLE", scope
+        assert scope.qualification_status == "UNKNOWN" and scope.available_at is None
+    finally:
+        s.conn.close()
+
+
+def test_normal_native_legitimate_step_append_preserves_old_first_clocks(tmp_path, monkeypatch):
+    s = _normal_native_http(tmp_path, monkeypatch, steps=(0, 3, 6))
+    try:
+        first = s.module.collect_native_temperature_source(**{**s.args, "required_steps": [0, 3]})
+        manifest = Path(first["manifest_path"])
+        before = json.loads(manifest.read_bytes())
+        old = {(m["member"], m["step_hours"]): m for m in before["messages"]}
+        s.calls.clear()
+        appended = s.module.collect_native_temperature_source(**s.args)
+        assert appended["status"] == "AVAILABLE", appended
+        assert appended["source_run_id"] == first["source_run_id"]
+        after = json.loads(manifest.read_bytes())
+        assert after["product_steps"] == [0, 3, 6]
+        assert len(after["messages"]) == 153
+        assert all(saved == old[(saved["member"], saved["step_hours"])]
+            for saved in after["messages"] if saved["step_hours"] != 6)
+        assert len([c for c in s.calls if "Range" in c[1].get("headers", {})]) == 51
+        assert s.conn.execute("SELECT manifest_hash FROM source_run").fetchone()[0] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+        assert hashlib.sha256(json.dumps(before, sort_keys=True, separators=(",", ":")).encode()).hexdigest() != hashlib.sha256(manifest.read_bytes()).hexdigest()
+    finally:
+        s.conn.close()
+
+
+def test_normal_native_complete_target_subset_does_not_wait_for_other_append(tmp_path, monkeypatch):
+    s = _normal_native_http(tmp_path, monkeypatch, steps=(0, 3, 6))
+    try:
+        first = s.module.collect_native_temperature_source(**{**s.args, "required_steps": [0, 3]})
+        clock = [100.]
+        monkeypatch.setattr(s.module.time, "monotonic", lambda: clock[0])
+        get = s.session.get
+        spent = [False]
+        def partial_get(url, **kwargs):
+            if spent[0] and url.endswith(".index"):
+                clock[0] += 1.
+            response = get(url, **kwargs)
+            if "Range" in kwargs.get("headers", {}):
+                spent[0] = True
+                clock[0] += 58.
+            return response
+        s.session.get = partial_get
+        partial = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": 159.})
+        assert partial["status"] == "INCOMPLETE"
+        manifest = Path(first["manifest_path"])
+        before = manifest.read_bytes()
+        s.calls.clear()
+        subset = s.module.collect_native_temperature_source(**{**s.args,
+            "required_steps": [0, 3], "cycle_deadline_monotonic": 159.})
+        assert subset["status"] == "AVAILABLE", subset
+        assert subset["required_steps"] == [0, 3] and subset["missing_count"] == 0
+        assert manifest.read_bytes() == before and s.calls == []
+        row = s.conn.execute("SELECT * FROM source_run").fetchone()
+        assert (row["status"], row["completeness_status"]) == ("PARTIAL", "PARTIAL")
+        scope_dir = tmp_path / "target-subset"
+        scope_dir.mkdir()
+        inputs = _native_temperature_knots_fixture(scope_dir, steps=(0, 3))
+        scope = _native_source_scope(s.conn, SimpleNamespace(source_run_id=subset["source_run_id"]), manifest, inputs)
+        assert scope.status == "AVAILABLE" and len(scope.native_knots) == 102
+        assert scope.available_at is None and scope.qualification_status == "UNKNOWN"
+    finally:
+        s.conn.close()
+
+
+def _native_source_cache_fixture(tmp_path, *, steps=(0, 3, 6), missing=()):
+    """Retained synthetic originals, never a network or real-provider claim."""
+    inputs = _native_temperature_knots_fixture(tmp_path, steps=steps)
+    cache = tmp_path / "source-cache"
+    cache.mkdir()
+    for offset, evidence in inputs["message_source_evidence"].items():
+        row = json.loads(evidence["original_index_bytes"])
+        member, step = int(row.get("number", 0)), int(row["step"])
+        if (member, step) in missing:
+            continue
+        path = cache / f"step{step:03d}-member{member:02d}.grib2"
+        path.write_bytes(evidence["original_range_bytes"])
+        index_path = path.with_suffix(".index.body")
+        index_path.write_bytes(evidence["original_index_bytes"])
+        proof = {key: value for key, value in evidence.items()
+                 if key not in ("original_index_bytes", "original_range_bytes")}
+        proof.update(member=member, step_hours=step, index_path=index_path.name,
+                     range_http={"status": 206, "headers": {
+                         "Content-Length": str(len(evidence["original_range_bytes"])),
+                         "Content-Range": f"bytes {row['_offset']}-{row['_offset']+row['_length']-1}/{row['_offset']+row['_length']}"}})
+        path.with_suffix(".grib2.proof.json").write_text(json.dumps(proof))
+    conn = sqlite3.connect(tmp_path / "private-forecasts.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    conn.commit()
+    return inputs, cache, conn, tmp_path / "native-source-manifest.json"
+
+
+def test_native_source_archive_missing_manifest_cannot_replace_canonical_inventory(tmp_path):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path, steps=(0, 3))
+    try:
+        args = dict(cache_dir=cache, manifest_path=manifest,
+            expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3])
+        first = module.persist_native_temperature_source_run(conn, **args)
+        manifest_bytes = manifest.read_bytes()
+        before = dict(conn.execute("SELECT * FROM source_run").fetchone())
+        original = json.loads(manifest_bytes)["messages"][0]
+        body = Path(original["path"])
+        proof = body.with_suffix(".grib2.proof.json")
+        body_bytes, proof_bytes = body.read_bytes(), proof.read_bytes()
+        manifest.unlink()
+        body.unlink()
+        proof.unlink()
+        with pytest.raises(ValueError, match="NATIVE_2T_CANONICAL_MANIFEST_MISSING"):
+            module.persist_native_temperature_source_run(conn, **args)
+        assert dict(conn.execute("SELECT * FROM source_run").fetchone()) == before
+        manifest.write_bytes(manifest_bytes)
+        body.write_bytes(body_bytes)
+        proof.write_bytes(proof_bytes)
+        restored = module.persist_native_temperature_source_run(conn, **args)
+        assert restored.source_run_id == first.source_run_id
+        assert restored.status == "AVAILABLE"
+        assert json.loads(manifest.read_bytes())["messages"][0] == original
+    finally:
+        conn.close()
+
+
+def test_native_source_partial_is_nullable_quantity_not_extrema(tmp_path):
+    from src.data import ecmwf_open_data as module
+
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path, missing=((50, 6),))
+    try:
+        result = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        row = conn.execute("SELECT * FROM source_run").fetchone()
+        assert result.status == "INCOMPLETE"
+        assert (row["ingest_mode"], row["origin_mode"]) == ("ARCHIVE_BACKFILL", "ARCHIVE_BACKFILL")
+        assert (row["status"], row["completeness_status"], row["partial_run"]) == ("PARTIAL", "PARTIAL", 1)
+        assert row["temperature_metric"] is None
+        assert row["physical_quantity"] == "native_2m_temperature_instantaneous_knots"
+        assert row["source_issue_time"] is None and row["source_release_time"] is None
+        assert row["source_available_at"] is None
+        assert row["observed_count"] == 152
+        assert conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def _native_source_scope(conn, source, manifest, inputs, **changes):
+    from src.data import ecmwf_open_data as module
+    args = dict(source_run_id=source.source_run_id, manifest_path=manifest,
+        required_steps=inputs["required_steps"], qualified_prefix_cut_utc=inputs["expected_run_utc"] + timedelta(hours=1),
+        local_day_end_utc=inputs["expected_run_utc"] + timedelta(hours=max(inputs["required_steps"])),
+        explicit_manifest=inputs["explicit_manifest"], mask_grib_path=inputs["mask_grib_path"],
+        mask_proof_path=inputs["mask_proof_path"])
+    args.update(changes)
+    return module.read_native_temperature_scope(conn, **args)
+
+
+def test_normal_land_mask_cache_keeps_original_clock_without_http(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as module
+    import ecmwf.opendata
+    inputs = _native_temperature_knots_fixture(tmp_path)
+    path, proof_path = inputs["mask_grib_path"], inputs["mask_proof_path"]
+    # Existing normal cache shape (proof beside body), including its original
+    # possession, must never be replaced just because a new poll is later.
+    path.with_suffix(".proof.json").write_bytes(proof_path.read_bytes())
+    before = path.read_bytes(), path.with_suffix(".proof.json").read_bytes()
+    class NoHTTP:
+        def __init__(self, **kwargs):
+            raise AssertionError("existing original must not be downloaded again")
+    monkeypatch.setattr(ecmwf.opendata, "Client", NoHTTP)
+    proof = module._fetch_cycle_land_mask(cycle_date=inputs["expected_run_utc"].date(),
+        cycle_hour=0, output_path=path)
+    assert proof["source_fetched_at"] == (inputs["expected_run_utc"] + timedelta(hours=1)).isoformat()
+    assert (path.read_bytes(), path.with_suffix(".proof.json").read_bytes()) == before
+
+
+def _physical_static_originals(inputs, *, directory=None, track="mx2t6_high"):
+    """Enrich only private synthetic originals with their actual index entities."""
+    import eccodes as ec
+    run = inputs["expected_run_utc"]
+    url = f"https://data.ecmwf.int/forecasts/{run:%Y%m%d}/{run:%H}z/ifs/0p25/oper/{run:%Y%m%d%H}0000-0h-oper-fc.grib2"
+    mask = inputs["mask_grib_path"] if directory is None else directory / f".{track}_{run:%Y%m%d}_{run:%H}z_lsm.grib2"
+    mask.parent.mkdir(parents=True, exist_ok=True)
+    phi = mask.with_suffix(".z.grib2")
+    messages = []
+    for param, source in (("lsm", inputs["mask_grib_path"]), ("z", inputs["surface_geopotential_grib_path"])):
+        gid = ec.codes_new_from_message(source.read_bytes())
+        try:
+            ec.codes_set(gid, "typeOfGeneratingProcess", 2)
+            ec.codes_set(gid, "dataType", "fc")
+            ec.codes_set(gid, "generatingProcessIdentifier", 161)
+            body = ec.codes_get_message(gid)
+        finally:
+            ec.codes_release(gid)
+        target = mask if param == "lsm" else phi
+        target.write_bytes(body)
+        messages.append((param, target, body))
+    index = b"".join(json.dumps(dict(param=param, levtype="sfc", stream="oper", type="fc",
+        date=run.strftime("%Y%m%d"), time=run.strftime("%H%M"), step="0", **{"class": "od"},
+        _offset=offset, _length=len(body))).encode() + b"\n"
+        for offset, (param, _, body) in zip((0, 512), messages))
+    for offset, (param, path, body) in zip((0, 512), messages):
+        proof = dict(source=f"ecmwf_open_data_ifs_oper_fc_step0_{param}", source_url=url,
+            source_index_url=url[:-6] + ".index", source_cycle_time=run.isoformat(),
+            source_fetched_at=(run + timedelta(hours=1)).isoformat(),
+            source_index_offset=offset, source_index_length=len(body),
+            source_index_sha256=hashlib.sha256(index).hexdigest(),
+            audit_scope="AUDIT_ONLY_NOT_DECISION_INPUT", source_issued_at=None,
+            **{"mask_sha256" if param == "lsm" else "raw_message_sha256": hashlib.sha256(body).hexdigest()})
+        path.with_suffix(".proof.json").write_text(json.dumps(proof))
+        path.with_suffix(".index.body").write_bytes(index)
+    inputs.update(mask_grib_path=mask, mask_proof_path=mask.with_suffix(".proof.json"),
+        surface_geopotential_grib_path=phi, surface_geopotential_proof_path=phi.with_suffix(".proof.json"))
+    return mask, phi
+
+
+@pytest.mark.parametrize("metric,role", (("high", "remaining_X"), ("low", "full_Y")))
+def test_native_physical_scope_strict_pit_and_honest_station_unknown(tmp_path, metric, role):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    try:
+        _physical_static_originals(inputs)
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        first = inputs["expected_run_utc"] + timedelta(hours=1)
+        args = dict(surface_geopotential_grib_path=inputs["surface_geopotential_grib_path"],
+            surface_geopotential_proof_path=inputs["surface_geopotential_proof_path"],
+            metric=metric, role=role, local_day_start_utc=inputs["expected_run_utc"])
+        before = _native_source_scope(conn, source, manifest, inputs, decision_at_utc=first, **args)
+        after = _native_source_scope(conn, source, manifest, inputs, decision_at_utc=first + timedelta(microseconds=1), **args)
+        assert before.pit_status == "AFTER_DECISION", before
+        assert after.pit_status == "AVAILABLE", after
+        assert after.physical_dependency_available_at == after.temperature_scope_first_possession_at == first.isoformat()
+        assert after.available_at is None and after.qualification_status == "OFFLINE_ONLY"
+        witness = after.physical_witness
+        assert witness["quantity"] == dict(param_id=167, units="K", height_agl_m=2, step_type="instant")
+        assert witness["station_equivalence_status"] == witness["sensor_agl_status"] == "UNKNOWN"
+        assert all(d["original_role"] == "AUDIT_ONLY_NOT_DECISION_INPUT" for d in witness["static_dependencies"])
+        point = witness["selected_cities"]["London"]
+        assert point["selected_flat_index"] == 2 and point["selected_land_fraction"] == pytest.approx(.8)
+        assert [p["raw_phi_m2_s2"] for p in point["four_neighbors"]] == [100., 200., 313.75, 400.]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("fault", ("missing", "tamper", "prior_run", "process", "process_id", "grid", "quantity"))
+def test_native_physical_dependency_gap_preserves_temperature_clock_and_resets(tmp_path, fault):
+    from src.data import ecmwf_open_data as module
+    import eccodes as ec
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    try:
+        mask, phi = _physical_static_originals(inputs)
+        committed = {p: p.read_bytes() for p in (phi, phi.with_suffix(".proof.json"), phi.with_suffix(".index.body"))}
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        body = phi.read_bytes()
+        if fault == "missing":
+            phi.unlink()
+        elif fault == "tamper":
+            phi.with_suffix(".index.body").write_bytes(b"tampered")
+        else:
+            gid = ec.codes_new_from_message(body)
+            try:
+                ec.codes_set(gid, {"prior_run": "dataDate", "process": "typeOfGeneratingProcess", "grid": "longitudeOfFirstGridPointInDegrees",
+                    "quantity": "paramId", "process_id": "generatingProcessIdentifier"}[fault],
+                    {"prior_run": 20261002, "process": 4, "grid": .125, "quantity": 172, "process_id": 158}[fault])
+                phi.write_bytes(ec.codes_get_message(gid))
+            finally:
+                ec.codes_release(gid)
+            changed_proof = json.loads(phi.with_suffix(".proof.json").read_bytes())
+            changed_proof["raw_message_sha256"] = hashlib.sha256(phi.read_bytes()).hexdigest()
+            phi.with_suffix(".proof.json").write_text(json.dumps(changed_proof))
+        decision = inputs["expected_run_utc"] + timedelta(hours=2)
+        gap = _native_source_scope(conn, source, manifest, inputs, decision_at_utc=decision, metric="high")
+        assert gap.status == "AVAILABLE" and gap.pit_status == "UNKNOWN", gap
+        assert gap.temperature_scope_first_possession_at == (inputs["expected_run_utc"] + timedelta(hours=1)).isoformat()
+        for path, data in committed.items():
+            path.write_bytes(data)
+        restored = _native_source_scope(conn, source, manifest, inputs, decision_at_utc=decision, metric="high")
+        assert restored.pit_status == "AVAILABLE", restored
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("publication_failure", (False, True))
+def test_normal_land_mask_uncommitted_orphan_drains_without_reclocking_commit(tmp_path, monkeypatch, publication_failure):
+    from src.data import ecmwf_open_data as module
+    import ecmwf.opendata
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    inputs = _native_temperature_knots_fixture(seed, steps=(0, 3))
+    mask, _ = _physical_static_originals(inputs)
+    body, index = mask.read_bytes(), mask.with_suffix(".index.body").read_bytes()
+    url = json.loads(mask.with_suffix(".proof.json").read_bytes())["source_url"]
+    calls = []
+    class Response:
+        def __init__(self, data, status, headers):
+            self.data, self.status_code, self.headers = data, status, headers
+        def iter_content(self, **kwargs):
+            yield self.data
+        def close(self):
+            pass
+    class Session:
+        def get(self, request, **kwargs):
+            calls.append(request)
+            return Response(index, 200, {}) if request.endswith(".index") else Response(body, 206,
+                {"Content-Length": str(len(body)), "Content-Range": f"bytes 0-{len(body)-1}/{len(body)}"})
+    class Client:
+        verify = True
+        def __init__(self, **kwargs):
+            self.session = Session()
+        def _get_urls(self, **kwargs):
+            return SimpleNamespace(urls=[url], for_index={"param": ["lsm"]})
+    monkeypatch.setattr(ecmwf.opendata, "Client", Client)
+    monkeypatch.setattr(module, "_RateLimitedSession", Session)
+    dest = tmp_path / "normal-lsm.grib2"
+    args = dict(cycle_date=inputs["expected_run_utc"].date(), cycle_hour=0, output_path=dest)
+    if publication_failure:
+        replace = module.os.replace
+        def fail_proof(src, dst):
+            if Path(dst) == dest.with_suffix(".proof.json"):
+                raise OSError("private commit marker failure")
+            return replace(src, dst)
+        monkeypatch.setattr(module.os, "replace", fail_proof)
+        with pytest.raises(ValueError, match="ENS_LAND_MASK_UNAVAILABLE"):
+            module._fetch_cycle_land_mask(**args)
+        monkeypatch.setattr(module.os, "replace", replace)
+    else:
+        dest.write_bytes(body)  # No commit marker or canonical possession exists.
+    first = module._fetch_cycle_land_mask(**args)
+    assert first["index_http"]["status"] == 200 and first["range_http"]["status"] == 206
+    assert first["source_index_sha256"] == hashlib.sha256(index).hexdigest()
+    assert datetime.fromisoformat(first["index_first_possession_at"]) <= datetime.fromisoformat(first["source_fetched_at"])
+    before = tuple(p.read_bytes() for p in (dest, dest.with_suffix(".proof.json"), dest.with_suffix(".index.body")))
+    count = len(calls)
+    second = module._fetch_cycle_land_mask(**args)
+    assert len(calls) == count
+    assert first["source_fetched_at"] == second["source_fetched_at"]
+    assert tuple(p.read_bytes() for p in (dest, dest.with_suffix(".proof.json"), dest.with_suffix(".index.body"))) == before
+    assert list(tmp_path.glob("normal-lsm*.uncommitted-*"))
+
+
+@pytest.mark.parametrize("track,metric", (("mx2t6_high", "high"), ("mn2t6_low", "low")))
+def test_normal_native_physical_readback_uses_real_normal_static_cache(tmp_path, monkeypatch, track, metric):
+    s = _normal_native_http(tmp_path, monkeypatch, steps=(0, 3))
+    try:
+        captured = s.module.collect_native_temperature_source(**s.args)
+        scope_dir = tmp_path / "scope"
+        scope_dir.mkdir()
+        inputs = _native_temperature_knots_fixture(scope_dir, steps=(0, 3))
+        normal_directory = s.module._download_output_path(run_date=s.run.date(), run_hour=s.run.hour,
+            param="2t", raw_root=s.paths.raw_root).parent
+        mask, phi = _physical_static_originals(inputs, directory=normal_directory, track=track)
+        # The dependency producer is the existing normal land acquisition; its
+        # second call is real cache readback, not a mocked qualification.
+        committed = mask.read_bytes(), mask.with_suffix(".proof.json").read_bytes()
+        s.module._fetch_cycle_land_mask(cycle_date=s.run.date(), cycle_hour=s.run.hour, output_path=mask)
+        assert (mask.read_bytes(), mask.with_suffix(".proof.json").read_bytes()) == committed
+        manifest = Path(captured["manifest_path"])
+        first_records = json.loads(manifest.read_bytes())["messages"]
+        args = dict(source_run_id=captured["source_run_id"], manifest_path=manifest,
+            required_steps=[0, 3], qualified_prefix_cut_utc=s.run + timedelta(hours=1),
+            local_day_end_utc=s.run + timedelta(hours=3), explicit_manifest=inputs["explicit_manifest"],
+            decision_at_utc=datetime.now(timezone.utc), metric=metric, _paths=s.paths)
+        result = s.module.read_native_temperature_scope(s.conn, **args)
+        assert result.status == result.pit_status == "AVAILABLE", result
+        assert result.physical_witness["origin_mode"] == "SCHEDULED_LIVE"
+        assert result.qualification_status == "UNKNOWN" and result.available_at is None
+        assert len(result.native_knots) == 102
+        assert result.physical_witness["static_dependencies"][0]["proof"]["source_fetched_at"] == (s.run + timedelta(hours=1)).isoformat()
+        s.args["cycle_deadline_monotonic"] = time.monotonic() + 30
+        count = len(s.calls)
+        again = s.module.collect_native_temperature_source(**s.args)
+        assert len(s.calls) == count
+        assert json.loads(manifest.read_bytes())["messages"] == first_records
+        later = s.module.read_native_temperature_scope(s.conn, **args)
+        assert later.temperature_scope_first_possession_at == result.temperature_scope_first_possession_at
+        assert later.physical_dependency_available_at == result.physical_dependency_available_at
+    finally:
+        s.conn.close()
+
+
+def test_native_source_full_scope_real_knots_and_no_geophysical_clock_upgrade(tmp_path):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    try:
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        result = _native_source_scope(conn, source, manifest, inputs)
+        assert source.status == result.status == "AVAILABLE", result
+        row = conn.execute("SELECT * FROM source_run").fetchone()
+        assert (row["ingest_mode"], row["origin_mode"]) == ("ARCHIVE_BACKFILL", "ARCHIVE_BACKFILL")
+        assert len(result.native_knots) == 153
+        assert {k["step_hours"] for k in result.native_knots} == {0, 3, 6}
+        assert all(k["selected_point"]["selected_flat_index"] == 2 for k in result.native_knots)
+        assert all(k["surface_class"] == "MIXED_LAND_WATER" for k in result.native_knots)
+        assert result.temperature_first_possession_at == (inputs["expected_run_utc"] + timedelta(hours=1)).isoformat()
+        assert result.available_at is None and result.static_validity_status == "UNKNOWN"
+        assert result.qualification_status == "OFFLINE_ONLY"
+        assert result.projection_status == "NOT_PERFORMED" and result.extrema_status == "NOT_COMPUTED"
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM source_run_coverage").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_native_source_missing_body_resume_preserves_identity_and_first_possession(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    missing = cache / "step006-member50.grib2"
+    raw, proof = missing.read_bytes(), missing.with_suffix(".grib2.proof.json").read_bytes()
+    missing.unlink()
+    monkeypatch.setattr(module.requests, "Session", lambda: pytest.fail("source-only resume made HTTP"))
+    try:
+        first = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        before = json.loads(manifest.read_bytes())["messages"]
+        # A failed external 503 leaves originals alone: repeated normal inventory
+        # neither requests nor renews cached proof clocks.
+        retry = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        assert retry == first and json.loads(manifest.read_bytes())["messages"] == before
+        missing.write_bytes(raw)
+        missing.with_suffix(".grib2.proof.json").write_bytes(proof)
+        final = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        assert final.source_run_id == first.source_run_id and final.status == "AVAILABLE"
+        row = conn.execute("SELECT * FROM source_run").fetchone()
+        assert (row["ingest_mode"], row["origin_mode"]) == ("ARCHIVE_BACKFILL", "ARCHIVE_BACKFILL")
+        after = json.loads(manifest.read_bytes())["messages"]
+        assert all(m in after for m in before)
+        result = _native_source_scope(conn, final, manifest, inputs)
+        changed_scope = _native_source_scope(conn, final, manifest, inputs,
+            qualified_prefix_cut_utc=inputs["expected_run_utc"] + timedelta(hours=2))
+        assert result.temperature_first_possession_at == changed_scope.temperature_first_possession_at
+        assert result.qualification_status == changed_scope.qualification_status == "OFFLINE_ONLY"
+        assert conn.execute("SELECT COUNT(*) FROM source_run").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("fault", ["raw", "index", "clock", "range", "dewpoint", "duplicate"])
+def test_native_source_original_tamper_fails_closed(tmp_path, fault):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    try:
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        path = cache / "step006-member50.grib2"
+        proof_path = path.with_suffix(".grib2.proof.json")
+        proof = json.loads(proof_path.read_bytes())
+        if fault == "raw":
+            path.write_bytes(path.read_bytes()[:-1] + b"0")
+        elif fault == "index":
+            (cache / proof["index_path"]).write_bytes(b"{}\n")
+        elif fault == "clock":
+            proof["source_fetched_at"] = (inputs["expected_run_utc"] + timedelta(hours=2)).isoformat()
+            proof_path.write_text(json.dumps(proof))
+        elif fault == "range":
+            proof["range_http"]["status"] = 200
+            proof_path.write_text(json.dumps(proof))
+        elif fault == "dewpoint":
+            ec = pytest.importorskip("eccodes")
+            gid = ec.codes_new_from_message(path.read_bytes())
+            try:
+                ec.codes_set(gid, "paramId", 168)
+                raw = ec.codes_get_message(gid)
+            finally:
+                ec.codes_release(gid)
+            path.write_bytes(raw)
+            proof["raw_message_sha256"] = hashlib.sha256(raw).hexdigest()
+            proof_path.write_text(json.dumps(proof))
+        else:
+            duplicate = cache / "step006-member50-duplicate.grib2"
+            duplicate.write_bytes(path.read_bytes())
+            duplicate.with_suffix(".grib2.proof.json").write_bytes(proof_path.read_bytes())
+        # A new unreferenced duplicate does not rewrite the old immutable
+        # manifest generation; inventorying it must nevertheless fail closed.
+        assert _native_source_scope(conn, source, manifest, inputs).status == ("AVAILABLE" if fault == "duplicate" else "UNKNOWN")
+        updated = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        assert updated.status == "INCOMPLETE"
+        assert conn.execute("SELECT status FROM source_run").fetchone()[0] == "PARTIAL"
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("fault", ["prefix", "left", "right", "mask", "manifest", "native_gap"])
+def test_native_source_scope_qualification_not_guessed(tmp_path, fault):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    try:
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        changes = {}
+        if fault == "prefix":
+            changes["qualified_prefix_cut_utc"] = None
+        elif fault == "left":
+            changes["required_steps"] = [3, 6]
+        elif fault == "right":
+            changes["local_day_end_utc"] = inputs["expected_run_utc"] + timedelta(hours=7)
+        elif fault == "mask":
+            inputs["mask_grib_path"].write_bytes(b"not-original")
+        elif fault == "native_gap":
+            changes["required_steps"] = [0, 6]
+        else:
+            manifest.write_bytes(manifest.read_bytes() + b" ")
+        result = _native_source_scope(conn, source, manifest, inputs, **changes)
+        assert result.status == "UNKNOWN" and result.native_knots == ()
+        if fault == "manifest":
+            with pytest.raises(ValueError, match="PREVIOUS_MANIFEST_UNBOUND"):
+                module.persist_native_temperature_source_run(conn, cache_dir=cache,
+                    manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+    finally:
+        conn.close()
+
+
+def test_native_source_46_of_51_one_knot_is_not_six_knot_shape(tmp_path):
+    from src.data import ecmwf_open_data as module
+    steps = (9, 12, 15, 18, 21, 24)
+    missing = {(m, s) for s in steps for m in range(51) if s != 9 or m >= 46}
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path, steps=steps, missing=missing)
+    try:
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=list(steps))
+        assert source.status == "INCOMPLETE" and source.observed_count == 46
+        assert len(source.missing_member_steps) == 260
+        result = _native_source_scope(conn, source, manifest, inputs)
+        assert result.status == "INCOMPLETE" and not result.native_knots
+        assert result.available_at is None
+    finally:
+        conn.close()
+
+
+def test_native_source_tampered_then_missing_cannot_reset_clock_anchor(tmp_path):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    args = dict(cache_dir=cache, manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+    try:
+        original = module.persist_native_temperature_source_run(conn, **args)
+        proof_path = cache / "step006-member50.grib2.proof.json"
+        original_proof = proof_path.read_bytes()
+        proof = json.loads(original_proof)
+        proof["source_fetched_at"] = (inputs["expected_run_utc"] + timedelta(hours=2)).isoformat()
+        proof_path.write_text(json.dumps(proof))
+        assert module.persist_native_temperature_source_run(conn, **args).status == "INCOMPLETE"
+        assert module.persist_native_temperature_source_run(conn, **args).status == "INCOMPLETE"
+        proof_path.write_bytes(original_proof)
+        restored = module.persist_native_temperature_source_run(conn, **args)
+        assert restored.status == "AVAILABLE" and restored.source_run_id == original.source_run_id
+        assert _native_source_scope(conn, restored, manifest, inputs).temperature_first_possession_at == json.loads(original_proof)["source_fetched_at"]
+    finally:
+        conn.close()
+
+
+def test_native_source_all_bodies_pruned_degrades_same_identity_without_eviction(tmp_path):
+    from src.data import ecmwf_open_data as module
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    args = dict(cache_dir=cache, manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+    try:
+        original = module.persist_native_temperature_source_run(conn, **args)
+        # Only private generated fixture bodies are pruned here.
+        for path in cache.glob("*.grib2"):
+            path.unlink()
+        pruned = module.persist_native_temperature_source_run(conn, **args)
+        assert pruned.status == "INCOMPLETE" and pruned.observed_count == 0
+        assert pruned.source_run_id == original.source_run_id
+        assert conn.execute("SELECT status FROM source_run").fetchone()[0] == "PARTIAL"
+        assert len(json.loads(manifest.read_bytes())["retained_identities"]) == 153
+    finally:
+        conn.close()
 
 
 def test_native_temperature_capture_original_index_range_global_once(tmp_path):
@@ -2331,6 +3770,515 @@ def _record_raw_authority(
             ),
         )
     conn.commit()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkeypatch, metric, _bootstrap_only=False):
+    """Normal capture/commit/cleanup feeds the unmocked public role reader."""
+    import eccodes as ec
+    import numpy as np
+    from tests import test_replacement_forecast_materializer as fixture
+    from src.data import ecmwf_open_data as native
+    from src.data import day0_hourly_vectors as hourly
+
+    # Retention owns storage candidates, not probability qualification. The
+    # real collector/extractor/action reader may decode; each refs scan may not.
+    refs_reader = native._role_original_snapshot_references
+    gc_decode_calls = []
+    def metadata_only_refs(*args, **kwargs):
+        def forbidden_decode(*args, **kwargs):
+            gc_decode_calls.append(True)
+            raise RuntimeError("GC_PUBLIC_ROLE_DECODE_FORBIDDEN")
+        with monkeypatch.context() as gc:
+            gc.setattr(hourly, "read_native_measurement_role", forbidden_decode)
+            gc.setattr(ec, "codes_get_values", forbidden_decode)
+            return refs_reader(*args, **kwargs)
+    monkeypatch.setattr(native, "_role_original_snapshot_references", metadata_only_refs)
+
+    # Actual original bytes are controlled before transport/index/capture.
+    # No capture header, possession, role qualification or width is mocked.
+    set_values = ec.codes_set_values
+    def atom_values(gid, values):
+        if ec.codes_get(gid, "paramId") in {167, 228026, 228027}:
+            ec.codes_set(gid, "packingType", "grid_ieee")
+            ec.codes_set(gid, "precision", 2)
+            values = np.full(len(values), 284.15)
+        return set_values(gid, values)
+    monkeypatch.setattr(ec, "codes_set_values", atom_values)
+    shape_reader = fixture.materializer_mod._read_current_evidence_shape
+    class Verified(BaseException):
+        pass
+    def check_retained_role(conn, request, **kwargs):
+        assert not gc_decode_calls, "GC must not decode/qualify the full grid"
+        shape = shape_reader(conn, request, **kwargs)
+        assert shape is not None
+        point = shape.native_point_model
+        assert point["member_points_c"] == [11.] * 51
+        paths = native._resolve_opendata_paths()
+        source = native._download_output_path(run_date=date(2026, 10, 3), run_hour=12,
+            param="mx2t3" if metric == "high" else "mn2t3", raw_root=paths.raw_root)
+        assert not source.exists()  # Real operator zero-grace cleanup executed.
+        snapshot = conn.execute("SELECT provenance_json FROM ensemble_snapshots WHERE snapshot_id=?",
+            (shape.snapshot_id,)).fetchone()
+        capture = json.loads(snapshot[0])["native_capture_receipt"]["messages"][0]
+        retained = native._role_message_path(paths.raw_root, capture["raw_message_sha256"])
+        original = retained.read_bytes()
+        clocks = (point["interval_snapshot_available_at"], point["interval_snapshot_written_at"])
+        assert clocks == ("2026-10-03T22:00:00+00:00", "2026-10-03T22:00:00.000+00:00")
+        retained.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        assert shape_reader(conn, request, **kwargs) is None
+        retained.write_bytes(original)  # Exact evidence restoration, no new clock.
+        restored = shape_reader(conn, request, **kwargs)
+        assert restored is not None
+        assert (restored.native_point_model["interval_snapshot_available_at"],
+                restored.native_point_model["interval_snapshot_written_at"]) == clocks
+
+        # Real private canonical reference rows, not a mocked references API.
+        # This is a custody ledger fixture; it grants no venue/q admission.
+        from src import config
+        from src.state import db as state_db
+        from src.data import replacement_forecast_production as production
+        from src.data.replacement_forecast_cycle_policy import replacement_source_cycle_max_age_hours
+        from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+        from src.execution.command_bus import CommandState
+        ledgers = tmp_path / "ledgers"
+        ledgers.mkdir()
+        world_path, trade_path = ledgers / "zeus-world.db", ledgers / "zeus_trades.db"
+        world, trade = sqlite3.connect(world_path), sqlite3.connect(trade_path)
+        state_db.init_schema_world_only(world)
+        state_db.init_schema_trade_only(trade)
+        world.commit(); trade.commit()
+        monkeypatch.setattr(config, "STATE_DIR", ledgers)
+        monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
+        queued = {name: tmp_path / name for name in ("seed_dir", "request_dir", "inflight_dir")}
+        for directory in queued.values():
+            directory.mkdir()
+        monkeypatch.setattr(production, "_replacement_forecast_live_materialization_queue_config", lambda: queued)
+        provenance = {"bayes_precision_fusion": {"current_evidence_shape": shape.as_payload()}}
+        # Retain actual primary AND actual paired original identities.
+        posterior_hash = "private-custody-posterior-" + metric
+        cycle = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+        if not _bootstrap_only:
+            cursor = conn.execute("""INSERT INTO forecast_posteriors(source_id,product_id,data_version,city,
+            target_date,temperature_metric,source_cycle_time,source_available_at,computed_at,
+            q_json,posterior_method,posterior_identity_hash,provenance_json)
+            VALUES('TEST_ONLY_CUSTODY','TEST_ONLY_CUSTODY','TEST_ONLY_CUSTODY','London','2026-10-04',?,?,?,?,?,'TEST_ONLY_CUSTODY',?,?)""",
+            (metric, cycle.isoformat(), clocks[0], request.computed_at.isoformat(), "[]", posterior_hash, json.dumps(provenance)))
+            posterior_id = cursor.lastrowid
+            conn.commit()
+        boundary = cycle + timedelta(hours=replacement_source_cycle_max_age_hours()) + 2 * FRESHNESS_WINDOW_DEFAULT
+        def sweep(at):
+            plan = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+                reference_date=at.date(), reference_time=at)
+            assert plan.role_reference_complete, plan.role_reference_errors
+            return native._apply_decoded_open_data_raw_retention(plan)
+        if not _bootstrap_only:
+            assert sweep(boundary)["role_message_deleted_count"] >= 0
+            assert retained.exists()  # <= the real derived deadline remains live.
+            late = boundary + timedelta(microseconds=1)
+            replicas = {p: p.read_bytes() for p in retained.parent.glob("*.grib2")}
+            assert sweep(late)["role_message_deleted_count"] > 0
+            assert not retained.exists()  # +epsilon without consumers really clears.
+            for path, body in replicas.items():
+                path.write_bytes(body)  # Restore only the exact previously captured bytes.
+
+        # A new ordinary collector capture replaces the legal Y frontier,
+        # without unpinning the old frozen posterior/unfinished dependencies.
+        from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+        from scripts import extract_open_ens_localday as decoder
+        from src.config import runtime_coordinate_manifest_json
+        next_run = cycle + timedelta(hours=6)
+        next_now = next_run + timedelta(hours=10)
+        conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) VALUES('next-normal-frontier','London','2026-10-04',?,'next-normal-token','11C')", (metric,))
+        conn.commit()
+        class NextClock(native.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return next_now.astimezone(tz or timezone.utc)
+        monkeypatch.setattr(native, "datetime", NextClock)
+        monkeypatch.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: next_now.isoformat())
+        sql_clock = sqlite3.connect(":memory:")
+        conn.create_function("strftime", 2, lambda fmt, value:
+            next_now.isoformat(timespec="milliseconds") if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now")
+            else sql_clock.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
+        coord_json = runtime_coordinate_manifest_json()
+        coord_sha = hashlib.sha256(coord_json.encode()).hexdigest()
+        coord = tmp_path / "next-coordinate-manifest.json"
+        coord.write_text(coord_json)
+        static_dir = tmp_path / "next-static"
+        static_dir.mkdir()
+        static = _native_temperature_knots_fixture(static_dir, steps=(0, 3), hour=18)
+        for next_metric, track_name in (("high", "mx2t6_high"), ("low", "mn2t6_low")):
+            folder = tmp_path / ("next-" + track_name)
+            folder.mkdir()
+            original_path, _, _, _ = _tiny_native_grib(folder, track_name, issue=next_run, horizon=36)
+            track = decoder.TRACKS[track_name]
+            target = native._download_output_path(run_date=next_run.date(), run_hour=18,
+                param=track.open_data_param, raw_root=paths.raw_root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            bodies = []
+            with original_path.open("rb") as stream:
+                while (gid := ec.codes_grib_new_from_file(stream)) is not None:
+                    try:
+                        ec.codes_set(gid, "generatingProcessIdentifier", 161)
+                        bodies.append(ec.codes_get_message(gid))
+                    finally:
+                        ec.codes_release(gid)
+            target.write_bytes(b"".join(bodies))
+            mask, phi = _physical_static_originals(static, directory=target.parent, track=track_name)
+            extracted = decoder.extract_open_ens_localday(grib_path=target, track_name=track_name,
+                manifest_path=coord, cities_filter={"London"},
+                output_root=paths.raw_root / "raw/coordinate_manifests" / coord_sha,
+                mask_grib_path=mask, mask_proof_path=mask.with_suffix(".proof.json"),
+                surface_geopotential_grib_path=phi, surface_geopotential_proof_path=phi.with_suffix(".proof.json"))
+            sample = json.loads(Path(extracted["sample_outputs"][0]).read_text())
+            collected = native.collect_open_ens_cycle(track=track_name, skip_download=True,
+                skip_extract=True, conn=conn, now_utc=next_now, _paths=paths,
+                grid_surface_source_evidence=sample["grid_surface_evidence"])
+            assert collected["status"] == "ok", collected
+            assert not target.exists()
+            assert conn.execute("SELECT COUNT(*) FROM ensemble_snapshots WHERE city='London' AND temperature_metric=? AND source_cycle_time=?",
+                (next_metric, next_run.isoformat())).fetchone()[0] > 0
+        if _bootstrap_only:
+            from src.config import runtime_cities_by_name
+            from src.data.day0_hourly_vectors import read_native_measurement_role
+            assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+            assert not any(p.is_file() for d in queued.values() for p in d.rglob("*.json"))
+            assert conn.execute("SELECT COUNT(*) FROM source_run WHERE track='2t_instant_native_knots' AND source_cycle_time=?",
+                (next_run.isoformat(),)).fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM source_run WHERE source_cycle_time=? AND status='SUCCESS' AND completeness_status='COMPLETE' AND partial_run=0",
+                (next_run.isoformat(),)).fetchone()[0] == 2
+            city = runtime_cities_by_name()["London"]
+            y = read_native_measurement_role(conn=conn, city=city, target_date="2026-10-04",
+                decision_time=next_now, metric=metric, role="full_Y",
+                scope_start=datetime(2026, 10, 3, 23, tzinfo=timezone.utc), _paths=paths)
+            assert y["native_snapshot_id"] == shape.snapshot_id
+            assert len(y["member_points_native"]) == 51
+            current_snapshot = conn.execute("SELECT snapshot_id FROM ensemble_snapshots WHERE city='London' AND target_date='2026-10-04' AND temperature_metric=? AND source_cycle_time=?",
+                (metric, next_run.isoformat())).fetchone()[0]
+            with pytest.raises(ValueError, match="MEASUREMENT_ROLE_NATIVE_POINT_UNAVAILABLE"):
+                read_native_measurement_role(conn=conn, city=city, target_date="2026-10-04",
+                    decision_time=next_now, metric=metric, role="remaining_X", scope_start=next_now,
+                    snapshot_id=current_snapshot, _paths=paths)
+            assert sweep(next_now)["role_message_deleted_count"] == 0
+            assert native._read_role_message_bytes(paths.raw_root, capture) == original
+            assert y["interval_snapshot_available_at"] == clocks[0]
+            # Missing candidate geometry is UNKNOWN for this scope, not a
+            # license to erase its possible originals or authorize an action.
+            saved_provenance = conn.execute("SELECT provenance_json FROM ensemble_snapshots WHERE snapshot_id=?",
+                (shape.snapshot_id,)).fetchone()[0]
+            malformed = json.loads(saved_provenance)
+            malformed["native_capture_receipt"].pop("selected_point")
+            conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
+                (json.dumps(malformed), shape.snapshot_id))
+            conn.commit()
+            unknown = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+                reference_date=next_now.date(), reference_time=next_now)
+            assert "ROLE_RETENTION_NATIVE_FRONTIER_UNKNOWN" in unknown.role_reference_errors
+            assert capture["raw_message_sha256"] in unknown.live_role_hashes
+            conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
+                (saved_provenance, shape.snapshot_id))
+            conn.commit()
+            assert "ROLE_RETENTION_NATIVE_FRONTIER_UNKNOWN" not in native._plan_decoded_open_data_raw_retention(
+                conn, raw_root=paths.raw_root, reference_date=next_now.date(), reference_time=next_now).role_reference_errors
+            assert not gc_decode_calls
+            sql_clock.close(); world.close(); trade.close()
+            raise Verified
+        assert sweep(next_now)["role_message_deleted_count"] == 0
+        assert retained.exists()  # A new frontier alone cannot erase old authority.
+        aggregate_root = paths.raw_root / "raw/ecmwf_open_ens/ecmwf"
+        parked_root = aggregate_root.with_name("private-aggregate-parked")
+        aggregate_root.rename(parked_root)
+        assert sweep(next_now)["role_message_deleted_count"] == 0
+        assert retained.exists()  # Missing aggregates do not imply missing consumers.
+        postday = datetime(2026, 10, 5, tzinfo=timezone.utc)
+        batch = queued["inflight_dir"] / "claimed-real-request"
+        batch.mkdir()
+        pending = batch / "request.json"
+        pending.write_text(json.dumps({"city": "London", "target_date": "2026-10-04",
+            "temperature_metric": metric, "computed_at": request.computed_at.isoformat(),
+            "posterior_id": posterior_id}))
+        sweep(postday)  # Unreferenced new-run bodies may already drain.
+        assert retained.exists()  # Immutable request cut is not wall-clock age.
+        from src.data import replacement_forecast_live_materialization_queue as queue
+        staged = batch.with_name(queue._STAGING_PREFIX + "actual-old-cut")
+        batch.rename(staged)
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        assert retained.exists()  # Normal unpublished atomic-claim window.
+        staged.rename(batch)
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        recovered = queued["request_dir"] / "request.json"
+        (batch / pending.name).rename(recovered)
+        batch.rmdir()
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        assert retained.exists()  # Normal reverse recovery still holds the cut.
+        capture_dir = queued["request_dir"].parent / queue._REQUEST_ALIAS_DIR / (queue._CAPTURE_PREFIX + "actual-old-cut")
+        payload_dir = capture_dir / queue._CAPTURE_PAYLOAD_DIR
+        payload_dir.mkdir(parents=True)
+        recovered.rename(payload_dir / recovered.name)
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        assert retained.exists()  # Regular capture payload awaits normal recovery.
+        assert queue._settle_capture(capture_dir, queued["request_dir"]) is None
+        assert recovered.exists()
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        moved_batch = queued["inflight_dir"] / "private-moving-claim"
+        moved_batch.mkdir()
+        actual_read = queue.read_regular_request
+        moved = []
+        def move_during_read(path):
+            result = actual_read(path)
+            if path == recovered and not moved:
+                recovered.rename(moved_batch / recovered.name)
+                moved.append(True)
+            return result
+        with monkeypatch.context() as concurrent_move:
+            concurrent_move.setattr(queue, "read_regular_request", move_during_read)
+            changing = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+                reference_date=postday.date(), reference_time=postday)
+        assert "ROLE_RETENTION_REFERENCE_MUTATED" in changing.role_reference_errors
+        assert not changing.role_reference_complete
+        assert native._apply_decoded_open_data_raw_retention(changing)["role_message_deleted_count"] == 0
+        assert retained.exists()
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        (moved_batch / recovered.name).unlink()
+        moved_batch.rmdir()
+        empty_plan = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+            reference_date=postday.date(), reference_time=postday)
+        assert capture["raw_message_sha256"] not in empty_plan.live_role_hashes
+        recovered.write_text(json.dumps({"city": "London", "target_date": "2026-10-04",
+            "temperature_metric": metric, "computed_at": request.computed_at.isoformat(),
+            "posterior_id": posterior_id}))
+        refreshed = native._apply_decoded_open_data_raw_retention(empty_plan)
+        assert not refreshed["errors"] and retained.exists()
+        recovered.unlink()  # A valid new exact reference also defeats stale GC.
+        # A derived Day0 q_version must resolve through the actual command
+        # attribution and WORLD parent edge, not string-match posterior hash.
+        for cert_id, digest, body in (("parent", "parent-hash", {"posterior_id": posterior_id}),
+                                     ("child", "child-hash", {"TEST_ONLY_CUSTODY_REFERENCE": True})):
+            world.execute("""INSERT INTO decision_certificates(certificate_id,certificate_type,schema_version,
+                canonicalization_version,semantic_key,claim_type,mode,decision_time,authority_id,
+                authority_version,algorithm_id,algorithm_version,payload_json,payload_hash,
+                certificate_hash,verifier_status,created_at)
+                VALUES(?, 'TEST_ONLY_CUSTODY_REFERENCE',1,'v1',?,'TEST_ONLY_CUSTODY_REFERENCE','LIVE',?,
+                'TEST_ONLY_CUSTODY','v1','TEST_ONLY_CUSTODY','v1',?,'TEST_ONLY_CUSTODY',?,'VERIFIED',?)""",
+                (cert_id, cert_id, cycle.isoformat(), json.dumps(body), digest, cycle.isoformat()))
+        world.execute("INSERT INTO decision_certificate_edges VALUES('child','forecast_parent','parent-hash','TEST_ONLY_CUSTODY_REFERENCE',1,?)", (cycle.isoformat(),))
+        world.commit()
+        conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) VALUES('custody-ref','London','2026-10-04',?,'custody-token','11C')", (metric,))
+        conn.commit()
+        trade.execute("""INSERT INTO venue_commands(command_id,snapshot_id,envelope_id,position_id,
+            decision_id,idempotency_key,intent_kind,market_id,token_id,side,size,price,state,
+            created_at,updated_at,q_version) VALUES('custody-command','TEST_ONLY','TEST_ONLY','TEST_ONLY',
+            'NOT_A_CERTIFICATE_HASH','custody-command','ENTRY','TEST_ONLY','custody-token','BUY',1,.5,?,?,?,'derived-day0-q-version')""",
+            (CommandState.INTENT_CREATED.value, cycle.isoformat(), cycle.isoformat()))
+        trade.execute("""INSERT INTO position_decision_attribution(attribution_id,position_id,command_id,
+            decision_certificate_hash,resolution,source,intent_kind,created_at,schema_version)
+            VALUES('custody-ref','TEST_ONLY','custody-command','child-hash','ATTRIBUTED','LIVE_DECISION','ENTRY',?,1)""", (cycle.isoformat(),))
+        trade.commit()
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        assert retained.exists()
+        world.execute("DELETE FROM decision_certificate_edges WHERE child_certificate_id='child'")
+        world.commit()
+        # Missing mapping is scoped UNKNOWN, never absence of a consumer.
+        uncertain = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+            reference_date=postday.date(), reference_time=postday)
+        assert "ROLE_RETENTION_COMMAND_REFERENCE_UNKNOWN" in uncertain.role_reference_errors
+        native._apply_decoded_open_data_raw_retention(uncertain)
+        assert retained.exists()
+        trade.execute("UPDATE venue_commands SET state=? WHERE command_id='custody-command'", (CommandState.FILLED.value,))
+        trade.commit()
+        cleared = sweep(postday)
+        assert cleared["role_message_deleted_count"] > 0
+        assert not retained.exists()  # Normal clearing of real references resets GC.
+        parked_root.rename(aggregate_root)
+        world.close(); trade.close()
+        sql_clock.close()
+        raise Verified
+    monkeypatch.setattr(fixture.materializer_mod, "_read_current_evidence_shape", check_retained_role)
+    surfaces = fixture._hko_native_surfaces.__wrapped__(tmp_path, monkeypatch)
+    next(surfaces)
+    ground = fixture._hko_source_surface.__wrapped__(tmp_path, monkeypatch, None)
+    next(ground)
+    try:
+        with pytest.raises(Verified):
+            fixture.test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkeypatch, metric)
+    finally:
+        ground.close()
+        surfaces.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_unqualified_new_run_keeps_legal_Y_bootstrap_originals(tmp_path, monkeypatch, metric):
+    test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkeypatch, metric,
+        _bootstrap_only=True)
+
+
+@pytest.mark.parametrize("replacement", ("root", "parent"))
+def test_role_original_gc_rejects_replaced_symlink_ancestor(tmp_path, replacement):
+    from src.data import ecmwf_open_data as native
+    raw_root = tmp_path / "owned"
+    root = raw_root / "raw/ecmwf_open_ens/ecmwf"
+    root.mkdir(parents=True)
+    body = native._role_message_path(raw_root, "a" * 64)
+    body.parent.mkdir()
+    body.write_bytes(b"outside evidence must remain")
+    plan = native._RawRetentionPlan(root, (), 0, 0, 0, 0)
+    component = root if replacement == "root" else root.parent
+    saved = component.with_name(component.name + "-original")
+    component.rename(saved)
+    component.symlink_to(saved, target_is_directory=True)
+    result = native._apply_decoded_open_data_raw_retention(plan)
+    assert result["status"] == "ERROR"
+    assert result["role_message_deleted_count"] == 0
+    assert body.read_bytes() == b"outside evidence must remain"
+
+
+def test_role_original_publication_failure_retains_group_and_normal_retry_resets(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as native
+    from scripts.extract_open_ens_localday import _native_message_capture
+    ec = pytest.importorskip("eccodes")
+    gid = ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+    try:
+        ec.codes_set(gid, "productDefinitionTemplateNumber", 11)
+        ec.codes_set(gid, "paramId", 228026)
+        raw, capture = ec.codes_get_message(gid), _native_message_capture(gid)
+        assert capture["capture_status"] == "OBSERVED", capture
+    finally:
+        ec.codes_release(gid)
+    raw_root = tmp_path / "owned"
+    root = raw_root / "raw/ecmwf_open_ens/ecmwf"
+    source = root / "20261003" / "open_ens_20261003_12z_steps_test_params_mx2t3.grib2"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(raw)
+    plan = native._RawRetentionPlan(root, (source,), 1, 0, 0, len(raw),
+        (((source,), (capture,)),), frozenset({capture["raw_message_sha256"]}))
+    original_link = os.link
+    def interrupt_publish(*args, **kwargs):
+        raise OSError("private publication interruption")
+    monkeypatch.setattr(os, "link", interrupt_publish)
+    failed = native._apply_decoded_open_data_raw_retention(plan)
+    assert failed["status"] == "ERROR" and source.read_bytes() == raw
+    assert failed["role_message_deleted_count"] == 0
+    monkeypatch.setattr(os, "link", original_link)
+    reset = native._apply_decoded_open_data_raw_retention(plan)
+    assert reset["status"] == "APPLIED" and not source.exists()
+    assert native._read_role_message_bytes(raw_root, capture) == raw
+    body = native._role_message_path(raw_root, capture["raw_message_sha256"])
+    body.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(raw)
+    bad_original = native._apply_decoded_open_data_raw_retention(plan)
+    assert bad_original["status"] == "ERROR" and source.exists()
+    assert body.read_bytes() != raw  # No overwrite/re-capture of committed identity.
+    body.write_bytes(raw)
+    assert native._apply_decoded_open_data_raw_retention(plan)["status"] == "APPLIED"
+
+
+@pytest.mark.parametrize("fault", ("symlink", "fifo", "malformed", "batch_alias", "root_alias", "staging_alias"))
+def test_role_original_gc_keeps_unknown_claim_and_releases_after_real_removal(tmp_path, monkeypatch, fault):
+    from src import config
+    from src.state import db as state_db
+    from src.data import ecmwf_open_data as native
+    from src.data import replacement_forecast_production as production
+    conn = _make_conn(tmp_path)
+    ledgers = tmp_path / "ledgers"
+    ledgers.mkdir()
+    world_path, trade_path = ledgers / "zeus-world.db", ledgers / "zeus_trades.db"
+    world, trade = sqlite3.connect(world_path), sqlite3.connect(trade_path)
+    state_db.init_schema_world_only(world)
+    state_db.init_schema_trade_only(trade)
+    world.commit(); trade.commit(); world.close(); trade.close()
+    monkeypatch.setattr(config, "STATE_DIR", ledgers)
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
+    cfg = {key: tmp_path / key for key in ("seed_dir", "request_dir", "inflight_dir")}
+    for directory in cfg.values():
+        directory.mkdir()
+    monkeypatch.setattr(production, "_replacement_forecast_live_materialization_queue_config", lambda: cfg)
+    batch = cfg["inflight_dir"] / "actual-claim"
+    batch.mkdir()
+    entry = batch / "captured.json"
+    if fault == "symlink":
+        entry.symlink_to(tmp_path / "missing-worker-held-request.json")
+    elif fault == "fifo":
+        os.mkfifo(entry)
+    elif fault == "malformed":
+        entry.write_bytes(b"{unreadable original request")
+    else:
+        if fault == "staging_alias":
+            from src.data import replacement_forecast_live_materialization_queue as queue
+            staged = batch.with_name(queue._STAGING_PREFIX + "actual-claim")
+            batch.rename(staged)
+            batch = staged
+            entry = batch / "captured.json"
+        directory = batch if fault == "batch_alias" else cfg["inflight_dir"]
+        if fault == "staging_alias":
+            directory = batch
+        saved = directory.with_name(directory.name + "-original")
+        directory.rename(saved)
+        directory.symlink_to(saved, target_is_directory=True)
+    raw_root = tmp_path / "owned"
+    root = raw_root / "raw/ecmwf_open_ens/ecmwf"
+    root.mkdir(parents=True)
+    original = native._role_message_path(raw_root, "a" * 64)
+    original.parent.mkdir()
+    original.write_bytes(b"worker-held evidence")
+    now = datetime(2026, 10, 6, tzinfo=timezone.utc)
+    def plan():
+        return native._plan_decoded_open_data_raw_retention(conn, raw_root=raw_root,
+            reference_date=now.date(), reference_time=now)
+    unknown = plan()
+    assert not unknown.role_reference_complete, unknown.role_reference_errors
+    assert ("ROLE_RETENTION_UNFINISHED_REFERENCE_UNKNOWN" if fault in {"symlink", "fifo", "malformed"}
+            else "ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN") in unknown.role_reference_errors
+    assert native._apply_decoded_open_data_raw_retention(unknown)["role_message_deleted_count"] == 0
+    assert original.exists()
+    if fault in {"symlink", "fifo", "malformed"}:
+        entry.unlink()
+    else:
+        directory.unlink()
+        saved.rename(directory)
+    known = plan()
+    assert known.role_reference_complete, known.role_reference_errors
+    # A second normal producer publishes after the first deletion plan.
+    # The old plan may release only its observed object, never this new one.
+    from scripts.extract_open_ens_localday import _native_message_capture
+    ec = pytest.importorskip("eccodes")
+    gid = ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+    try:
+        ec.codes_set(gid, "productDefinitionTemplateNumber", 11)
+        ec.codes_set(gid, "paramId", 228026)
+        raw, capture = ec.codes_get_message(gid), _native_message_capture(gid)
+    finally:
+        ec.codes_release(gid)
+    native._publish_role_message(raw_root, capture, raw)
+    concurrent = native._role_message_path(raw_root, capture["raw_message_sha256"])
+    assert native._apply_decoded_open_data_raw_retention(known)["role_message_deleted_count"] == 1
+    assert not original.exists()
+    assert concurrent.read_bytes() == raw
+    # New unfinished evidence on an already-observed object must also defeat
+    # the old plan. Its actual pending bad-entry classification is re-read.
+    later = plan()
+    entry.write_bytes(b"{new worker-held immutable request")
+    assert native._apply_decoded_open_data_raw_retention(later)["role_message_deleted_count"] == 0
+    assert concurrent.read_bytes() == raw
+    entry.unlink()
+    assert native._apply_decoded_open_data_raw_retention(plan())["role_message_deleted_count"] == 1
+    assert not concurrent.exists()
+    # The owning terminal receipt is different from an unfinished regular
+    # capture. A stable quarantined alias is not a q consumer forever.
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    capture_dir = cfg["request_dir"].parent / queue._REQUEST_ALIAS_DIR / (queue._CAPTURE_PREFIX + "terminal-alias")
+    payload_dir = capture_dir / queue._CAPTURE_PAYLOAD_DIR
+    payload_dir.mkdir(parents=True)
+    (payload_dir / "captured.json").symlink_to(tmp_path / "terminal-missing.json")
+    (capture_dir / queue._ALIAS_RECEIPT_NAME).write_text(json.dumps({
+        "status": "QUARANTINED_REQUEST_ALIAS", "request_name": "captured.json"}))
+    native._publish_role_message(raw_root, capture, raw)
+    terminal = plan()
+    assert terminal.role_reference_complete, terminal.role_reference_errors
+    assert native._apply_decoded_open_data_raw_retention(terminal)["role_message_deleted_count"] == 1
+    assert not concurrent.exists()
+    conn.close()
 
 
 def test_raw_retention_deletes_only_old_complete_verified_groups(tmp_path):

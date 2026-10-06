@@ -462,6 +462,7 @@ def _read_surface_geopotential(path: Path, proof_path: Path) -> dict[str, Any]:
             if codes_get_message(gid) != raw:
                 raise ValueError("ENS_SURFACE_GEOPOTENTIAL_BODY_INVALID")
             return {"values": values, "fields": fields, "observed_headers": headers,
+                    "missing_value": codes_get(gid, "missingValue"),
                     "proof": proof, "grid_identity_hash": _grid_identity(fields),
                     "audit_observed_at_utc": audit_observed_at.isoformat()}
         finally:
@@ -625,6 +626,85 @@ def _open_ens_original_grid(section: bytes) -> dict[str, Any]:
         "scanningMode": section[71]}
 
 
+def read_native_static_dependency(*, path: Path, proof_path: Path, param: str,
+                                  run: datetime, grid_sha256: str,
+                                  index_path: Path | None = None,
+                                  index_proof_path: Path | None = None) -> dict[str, Any]:
+    """Read a same-run model surface entity without changing its historical role.
+
+    Old LSM acquisitions did not retain an index. The independently captured
+    same-envelope z index may bind that original LSM, but never a reconstructed
+    line or a new possession clock. Missing originals are a scoped source gap.
+    """
+    if param not in {"lsm", "z"}:
+        raise ValueError("ENS_POINT_STATIC_QUANTITY_INVALID")
+    index_path = index_path or path.with_suffix(".index.body")
+    index_proof_path = index_proof_path or proof_path
+    paths = (path, proof_path, index_path, index_proof_path)
+    if any(p.is_symlink() for p in paths):
+        raise ValueError("ENS_POINT_STATIC_SYMLINK")
+    if not 100 <= path.stat().st_size <= 1024 * 1024 or any(
+            p.stat().st_size > (1024 * 1024 if p == index_path else 65536) for p in paths[1:]):
+        raise ValueError("ENS_POINT_STATIC_BOUNDS_INVALID")
+    before = tuple(p.read_bytes() for p in paths)
+    raw, proof_bytes, index, index_proof_bytes = before
+    proof, index_proof = json.loads(proof_bytes), json.loads(index_proof_bytes)
+    observed = (_read_land_mask(path, proof_path) if param == "lsm"
+                else _read_surface_geopotential(path, proof_path))
+    capture = _open_ens_original_surface_capture(path)
+    h = capture["observed_headers"]
+    sections = {s["section_number"]: base64.b64decode(s["bytes_base64"], validate=True)
+                for s in capture["metadata_sections"]}
+    s1, s3, s4 = sections[1], sections[3], sections[4]
+    if (h["paramId"] != (172 if param == "lsm" else 129) or h["shortName"] != param
+            or h["units"] != ("(0 - 1)" if param == "lsm" else "m**2 s**-2")
+            or h["typeOfLevel"] != "surface" or h["level"] != 0
+            or h["dataType"] != "fc" or h["typeOfGeneratingProcess"] != 2
+            or h["generatingProcessIdentifier"] != 161 or s4[13] != 161
+            or h["productDefinitionTemplateNumber"] != 0 or h["stepType"] != "instant"
+            or h["startStep"] != 0 or h["endStep"] != 0
+            or (h["dataDate"], h["dataTime"]) != (int(run.strftime("%Y%m%d")), run.hour * 100)
+            or tuple(s1[14:19]) != (run.month, run.day, run.hour, 0, 0)
+            or int.from_bytes(s1[12:14], "big") != run.year or s1[20] != 1
+            or s4[11] != 2 or int.from_bytes(s4[7:9], "big") != 0
+            or hashlib.sha256(s3).hexdigest() != grid_sha256
+            or _open_ens_original_grid(s3) != observed["fields"]
+            or proof["source_cycle_time"] != run.isoformat()
+            or index_proof["source_cycle_time"] != run.isoformat()
+            or index_proof["source_url"] != proof["source_url"]
+            or index_proof["source_index_url"] != proof["source_index_url"]
+            or index_proof["source_index_sha256"] != hashlib.sha256(index).hexdigest()):
+        raise ValueError("ENS_POINT_STATIC_IDENTITY_INVALID")
+    matches = [line for line in index.splitlines() if json.loads(line).get("_offset") == proof["source_index_offset"]
+               and json.loads(line).get("_length") == proof["source_index_length"]]
+    if len(matches) != 1:
+        raise ValueError("ENS_POINT_STATIC_INDEX_AMBIGUOUS")
+    from urllib.parse import urlparse
+    envelope = urlparse(str(proof["source_url"]))
+    if (envelope.hostname not in {"data.ecmwf.int", "ecmwf-forecasts.s3.eu-central-1.amazonaws.com"}
+            and not (envelope.hostname == "storage.googleapis.com" and envelope.path.startswith("/ecmwf-open-data/"))):
+        raise ValueError("ENS_POINT_STATIC_SOURCE_HOST_INVALID")
+    binding = _open_ens_source_binding(raw, {**proof,
+        "original_index_bytes": index, "original_range_bytes": raw,
+        "source_index_sha256": hashlib.sha256(index).hexdigest(),
+        "source_index_line_sha256": hashlib.sha256(matches[0]).hexdigest(),
+        "raw_message_sha256": hashlib.sha256(raw).hexdigest()}, h, param=param, member=0, step=0, run=run)
+    index_clock = index_proof.get("index_first_possession_at", index_proof["source_fetched_at"])
+    index_at = datetime.fromisoformat(str(index_clock))
+    if index_at.tzinfo is None or not run <= index_at <= datetime.now(timezone.utc):
+        raise ValueError("ENS_POINT_STATIC_INDEX_CLOCK_INVALID")
+    if tuple(p.read_bytes() for p in paths) != before:
+        raise ValueError("ENS_POINT_STATIC_GENERATION_CHANGED")
+    return {"proof": proof, "binding": binding, "observed_headers": h,
+        "values": observed["values"], "fields": observed["fields"],
+        "grid_sha256": grid_sha256, "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
+        "index_proof_sha256": hashlib.sha256(index_proof_bytes).hexdigest(),
+        "index_first_possession_at": index_at.isoformat(),
+        "missing_value": observed.get("missing_value"),
+        "available_at": max((binding["source_fetched_at"], index_at.isoformat()), key=datetime.fromisoformat),
+        "original_role": proof.get("audit_scope", "UNKNOWN")}
+
+
 def decode_open_ens_temperature_knots(
     *, grib_path: Path, explicit_manifest: list[dict], expected_run_utc: datetime,
     required_steps: list[int], mask_grib_path: Path, mask_proof_path: Path,
@@ -731,7 +811,8 @@ def decode_open_ens_temperature_knots(
                             or h["shortName"] != "2t" or h["units"] != "K"
                             or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
                             or h["stepType"] != "instant" or h["stepUnits"] != 1
-                            or h["generatingProcessIdentifier"] != 161 or template not in (0, 1)):
+                            or h["generatingProcessIdentifier"] != 161 or template not in (0, 1)
+                            or h["typeOfGeneratingProcess"] != (2 if h["dataType"] == "fc" else 4)):
                         raise ValueError("ENS_POINT_PHYSICAL_OR_50R1_PROCESS_INVALID")
                     # GRIB2 discipline 0 / category 0 / parameter 0 is temperature.
                     # The original 2m level below distinguishes 2t from other heights;

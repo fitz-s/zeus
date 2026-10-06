@@ -18732,7 +18732,7 @@ shaad18158f6d35b041893e9917fdfa2261a0d6664ecd937394f0154a06857faec9.
 The owning scope reader returns NATIVE_2T_MEMBER_STEP_SET_INCOMPLETE, not an
 issued-NULL, station-equivalence or latest-X pin failure. The original two
 body hashes and first-possession clocks must survive normal cross-poll resume.
-Native512/102 or separate kernel tests are not substitutes for the actual
+Native102 or separate kernel tests are not substitutes for the actual
 required510-role-to-public-consumer closure. The earlier ID confusion was a
 diagnostic relation mistake (posterior_id versus snapshot_id), not DB replacement;
 held actual FORECAST FDs and canonical path/inode independently refuted it.
@@ -18772,3 +18772,55 @@ its own approved scope; parent does not edit deploy/preflight/smoke. Existing
 code-first warm permits old-v6 fresh/degraded handover, so boot/rc0 is not role
 or probability success. No source-only temporary release or bypass is permitted.
 ROOT must approve the final exact candidate and loading gates before landing.
+
+ROOT separately approves the independent loader owner, exactly four existing
+paths: scripts/deploy_live.py; scripts/check_live_restart_preflight.py;
+tests/test_ops_scripts_smoke.py; tests/test_check_live_restart_preflight.py.
+Parent must not write those paths. The gate triggers only a real owning semantic
+upgrade (immutable old MAIN loaded SHA/constants to new owning constants), not
+same-semantic DATA_DEGRADED restart. Unknown different-SHA revisions refuse;
+same-SHA remains normal. After warm and before STOP, only necessary statistical
+held families require current-revision public original/role/identity replay;
+terminal or qualified absorbing scopes may be excluded by their owning proof.
+No executable book band or venue JIT order is required to prove source grade.
+Failure leaves old MAIN/watchdog monitoring, releasing only the exact unused
+restart guard via existing CAS; no postSTOP unused cleanup. RESET is ordinary
+source/seed current evidence completion, without forced fetch/materialization.
+
+Recovery implementation checkpoint (not a release verdict): parent docs were
+normally rebased onto5dc; the sole PLAN append conflict preserved both rollback
+author text and this task's actual prior loading record. Backup ref
+recovery/native-q-before-5dc-f52fb06 retains the earlier d2d history. Only the
+approved14 source/test paths are restored mechanically from a577 (ECMWF and
+its collector test from frozen740); main/reactor_wake have zero current-base
+diff. The only new production delta is the canonical snapshot-written UTC
+adapter, hourly SHA43b486d403f8e0973586e753eab4d3c34faa2040cc4cb7e6e430ded551db9710.
+Actual HK clock predicate reproduction exits1 with offset-naive/aware TypeError;
+the five new parser controls pass, not a full source/consumer verdict.
+
+The new same-epoch Google/legacy-SQLite H/L node reuses the existing actual
+public consumer fixture, retaining real private canonical WORLD/TRADE references
+and normal zero-grace CAS retention. Normal AWS HTTP503 leaves2 native parts;
+the next configured Google collector turn appends originals without rewriting
+the retained body/proof bytes. A510-role incomplete negative precedes normal
+complete readback, using the legacy canonical table DEFAULT CURRENT_TIMESTAMP
+and one shared private causal clock. Original proofs never receive test SQL
+updates. Equal acquisition/decision is correctly rejected; decision is then
+advanced beyond the actual max possession/write dependency, not vice versa.
+Prior failed fixture XMLs remain /tmp/zeus-restored-google-sqlite-clock-first.xml,
+/tmp/zeus-restored-google-sqlite-clock-high.xml and
+/tmp/zeus-restored-google-sqlite-clock-high2.xml. The first two failures were
+invalid fixture priority/deadline inputs; the third correctly rejected equal
+PIT. Neither is relabelled as a production probability regression. Final
+/tmp/zeus-restored-google-sqlite-clock-high-causal.xml is running at this save;
+public materialization already has a private current-revision successor, but
+ENTRY/held/JIT final completion and LOW remain pending.
+
+Required release/money proof routes have been read, not passed:
+.github/workflows/money-path-required.yml selects registered relationship tests
+and invariant/test-quality/schema checks;
+.github/workflows/money-path-release-gate.yml additionally requires single-live
+semantics and its declared executable antibodies. The hosted manual
+live-release-gate cannot prove local loaded/runtime qualification. These gates
+and the separately owned new preSTOP source-grade proof remain OPEN; earlier
+large-suite evidence is not relabelled as current5dc recovery proof.
