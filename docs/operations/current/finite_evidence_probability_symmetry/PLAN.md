@@ -17959,3 +17959,55 @@ metric/unit/precision and owning current-role q metadata. Actual remaining-membe
 reconstruction still replays originals and current source state. Old/missing
 roles retain the daily snapshot refusal; current public payload C/F and metric
 negative controls reject. The legacy REJECTED row is not rewritten VERIFIED.
+
+### Integrated private acceptance checkpoint — 2026-10-06
+
+Integrated ordinary candidate b33ab387654a3fcf20c18a798e0165942028d15c contains
+the saved probability repair, d724 run/replica-clock identity correction, the
+complete approved native f99a374b6..f372bf724 source span, custody ad5cb9,
+metadata a104 and 8fe398c, and the accepted 33-line attempt timing repair.
+Source changes remain unpushed and unloaded. The 123 original raw files and
+ignored settings example (SHA e95eb2066414092e2b4416cd24b94a9a08ff050493df2ebff1d38a543d519a3b)
+remain preserved and uncommitted; the superseded native/timing preservation
+stash remains available, not reapplied over the approved native source.
+
+Executable integrated core proof: 41 passed in 194.14s, XML
+/tmp/zeus-XY-integrated-61182-focused.xml. Required 14-file batch: 297 passed,
+6 failed and 4 skipped in 38.93s, XML
+/tmp/zeus-XY-required14-integrated611.xml. All six failed nodes were executed
+again with original d724 Python git-object sources; node, exception/cause,
+logs and normalized trace messages agree (6 failed in 29.96s, XML
+/tmp/zeus-XY-required6-d724-baseline.xml). These are pre-existing HKO fixture
+connection reuse, two WU fake-response missing-content cases, legacy
+force_exit signature mismatch, identical 22 structural violations, and three
+missing WAL checkpoint observability decorators. No production bypass or
+unrelated fixture repair was made. Four private-schema skips are not passes.
+Two unchanged required custody files reuse the accepted 392-test evidence
+with exact source/test byte identity to custody ad5cb9.
+
+Named independent core and registry delta review found no Critical/Important
+within its reviewed scope; duplicate families and changed centers reject both
+public replay and normal coverage, restoration resets, and original H/L C/F
+role views retain affine point/bound consistency. A complete F-city
+ENTRY/held/JIT positive was not run. Private synthetic original GRIB evidence
+does not prove current Hong Kong native availability, runtime market speed,
+profit or live action readiness.
+
+Final narrow boundary check remains open: adapter's current Day0 preparation
+at its owning predictive-sigma check still requires strictly positive sigma,
+whereas the new point law permits a correctly proved zero-width atom. The
+original helper and original branch, executed privately with zero sigma,
+return GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID. This is a branch
+reproduction, not a complete public zero-width producer/consumer acceptance.
+ROOT has been notified; no source change or clean final approval is claimed.
+Existing original-body, current-role and revision qualification must stay
+mandatory if this boundary is corrected; legacy direct-entry behavior is
+outside this proposed narrow correction.
+
+Delivery remains gated on final ROOT acceptance and the registered loader:
+fresh origin/live ancestry and clean runtime surface; exact candidate source
+warm/preflight and canonical required-scope proof; continuously monitored
+capital before STOP; invocation-generation entry guard/CAS ownership; actual
+loader return code and boot SHA/PID/heartbeat; and normal post-load q/reader/
+ENTRY/held/JIT receipts plus named degraded reasons. This slice does not run
+the loader, clear guards, manufacture new source evidence or force a cycle.
