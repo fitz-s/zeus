@@ -19331,3 +19331,10 @@ b36765554b79abc90c086b10475829a99959d198c765d9249a344dcf529b6202.
 Only literal setattr control-field expansion changed. Existing lane setter
 and ordinary report note twin pass; no old expected value changed. AST/diff
 check pass; no whole CLI or production source/q change. Await XY named closure.
+
+Approved8322 test-only reactor fix was applied normally as c3cc97eed12170bf1c8b0cd4de50566dbbb8909b,
+only tests/events/test_reactor.py, byte-exact child SHA2565b5d49ae34f9dcc7070ad68f8423977b7fdff5c54717a93a7161b16103154783.
+Two parking/proof-progress twins and adjacent canonical debt RESET passed3P
+2.36s, XML /tmp/zeus-reactor-8322-merged-controls.xml SHA256
+bdc14da4dd569c5270f27a27b7ea3ab68b5b8afca0db9286f00d9305b76d352b.
+This is narrow merged behavior, not full required union or production readiness.
