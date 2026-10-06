@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-01 (rivals = structurally valid current paths only)
+# Last reused/audited: 2026-10-06 (metaviatelecom UUWW display-id structure restored)
 """Station-bound current observations and their settlement roles.
 
 Adapters own fixed endpoints. Configuration cannot inject URLs, SQL, or code.
@@ -166,7 +166,9 @@ def _source(row: dict[str, Any], role: SourceRole, seen: set) -> PhysicalCurrent
             or unit not in ({"C", "F"} if row["provider"] == "noaa_wrh" else {"C"})
             or (row["provider"] == "noaa_wrh" and
                 (native_id != row["station_id"] or identity.get("resolver_view") not in {"hourly", "all"}))
-            or (row["provider"] in {"mgm_metar", "imd_olbs_metar"} and native_id != row["station_id"])
+            or (row["provider"] in {"mgm_metar", "metaviatelecom_metar", "imd_olbs_metar"} and native_id != row["station_id"])
+            or (row["provider"] == "metaviatelecom_metar" and
+                not re.fullmatch(r"[0-9]{1,8}", str(identity.get("display_id", ""))))
             or not kinds or any(t not in {"noaa", "wu_icao"} for t in kinds)):
             raise ValueError("PHYSICAL_CURRENT_ADAPTER_INVALID")
         seen.add(key)

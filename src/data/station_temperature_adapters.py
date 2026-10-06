@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-03
+# Last reused/audited: 2026-10-06 (metaviatelecom UUWW route re-admitted by operator decision)
 """Fixed-endpoint station observations with independent receipt and valid clocks.
 
 Provider names select parsers, never arbitrary URLs or executable config. Native
@@ -40,6 +40,7 @@ CHANNELS = {
     "noaa_wrh": "noaa_wrh_temperature",
     "mgm_metar": "mgm_metar_temperature",
     "imd_olbs_metar": "imd_olbs_metar_temperature",
+    "metaviatelecom_metar": "metaviatelecom_metar_temperature",
 }
 
 
@@ -329,6 +330,16 @@ def _fetch_public_metar(route, client):
         params = None
         post_data = {"icaos": route.station_id, "type": "metar"}
         key = (route.provider, route.station_id, id(client))
+    elif route.provider == "metaviatelecom_metar":
+        display_id = str(route.identity.get("display_id", ""))
+        if not re.fullmatch(r"[0-9]{1,8}", display_id):
+            raise ValueError("PUBLIC_METAR_DISPLAY_ID_INVALID")
+        # The origin serves only plaintext HTTP (its HTTPS certificate is
+        # self-signed); the operator accepted that risk on 2026-10-06. No TLS
+        # is involved, so there is no verification to disable.
+        url = "http://display.meteocenter.ru/" + display_id
+        params = None
+        key = (route.provider, display_id, id(client))
     else:
         raise ValueError("PUBLIC_METAR_PROVIDER_UNKNOWN")
     headers = {"User-Agent": "zeus-free-public-obs/4"}
@@ -389,7 +400,7 @@ def parse_station_payload(route, body: bytes, *, received_at: datetime,
     digest = hashlib.sha256(body).hexdigest()
     values = []
     station_reference = None
-    if provider in {"mgm_metar", "imd_olbs_metar"}:
+    if provider in {"mgm_metar", "imd_olbs_metar", "metaviatelecom_metar"}:
         values = _public_metar_values(route, body, received_at)
     elif provider == "noaa_wrh":
         from src.data.noaa_wrh_timeseries import rows_from_payload, station_reference_from_payload
@@ -498,7 +509,7 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
     if route.provider == "fmi_wfs":
         from src.data.fmi_airport_temperature import fetch_temperature
         return fetch_temperature(start=start, end=end, station=route.station, client=client)
-    if route.provider in {"mgm_metar", "imd_olbs_metar"}:
+    if route.provider in {"mgm_metar", "imd_olbs_metar", "metaviatelecom_metar"}:
         body, received = _fetch_public_metar(route, client)
         return tuple(s for s in parse_station_payload(route, body, received_at=received)
                      if start <= s.observed_at <= min(end, received))
