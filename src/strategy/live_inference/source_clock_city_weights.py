@@ -325,16 +325,28 @@ def _configured_live_track_schemes(
 def affected_cities_for_source_updates(
     updated_sources: Sequence[str], *, path: str | Path | None = None
 ) -> tuple[str, ...]:
+    """Cities whose posterior can consume a run of any updated source.
+
+    A city consumes its scheme's sources, and every city also consumes the truly
+    global decorrelated models: the fusion selects them wherever a regional nest
+    does not cover the target (London at lead 2, beyond icon_d2/ukmo_uk_2km).
+    Routing only by scheme left London, whose scheme lists no global, without any
+    global capture, so its D+2 targets had no extra at all.
+    """
+    from src.forecast.model_selection import DECORR_GLOBALS  # noqa: PLC0415
+
     updated = {str(source).strip() for source in updated_sources if str(source).strip()}
     if not updated:
         return ()
     schemes = _configured_live_track_schemes(path=path)
+    global_update = bool(updated & set(DECORR_GLOBALS))
     return tuple(
         sorted(
             {
                 scheme.city
                 for scheme in schemes
-                if any(source in updated for source in scheme.final_sources)
+                if global_update
+                or any(source in updated for source in scheme.final_sources)
             }
         )
     )

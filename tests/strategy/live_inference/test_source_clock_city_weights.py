@@ -146,6 +146,28 @@ def test_affected_cities_follow_updated_sources(tmp_path: Path) -> None:
     assert affected_cities_for_source_updates(["kma_ldps"], path=path) == ("Seoul",)
 
 
+def test_global_model_update_reaches_cities_whose_scheme_lists_no_global(
+    tmp_path: Path,
+) -> None:
+    """London's scheme is icon_d2 + ukmo_uk_2km. Its D+2 target lies beyond both
+    nests, where the fusion selects icon_global/ukmo_global; routing a global run
+    only to cities whose scheme lists it left London 10-08 with zero extras
+    (FUSION_DECLINED:ZERO_MULTI_MODEL_EXTRAS) on 2026-10-06."""
+    path = tmp_path / "city_one_scheme_final.csv"
+    path.write_text(
+        "city,scheme_status,final_sources,final_weighted_sources,sample_n,walkforward_pass,one_scheme_status\n"
+        "London,SOURCE_SELECTOR_FIT,icon_d2+ukmo_uk_deterministic_2km,icon_d2:0.53+ukmo_uk_deterministic_2km:0.47,200,True,FINAL_ONE_SCHEME_PASS\n"
+        "Seoul,SOURCE_SELECTOR_FIT,ecmwf_ifs+kma_ldps,ecmwf_ifs:0.75+kma_ldps:0.25,200,True,FINAL_ONE_SCHEME_PASS\n",
+        encoding="utf-8",
+    )
+
+    assert affected_cities_for_source_updates(["icon_global"], path=path) == ("London", "Seoul")
+    assert affected_cities_for_source_updates(
+        ["ukmo_global_deterministic_10km"], path=path,
+    ) == ("London", "Seoul")
+    assert affected_cities_for_source_updates(["icon_d2"], path=path) == ("London",)
+
+
 def _write_frozen_csv(tmp_path: Path, *, city: str = "Seoul") -> Path:
     path = tmp_path / "city_one_scheme_grid_aware.csv"
     path.write_text(
