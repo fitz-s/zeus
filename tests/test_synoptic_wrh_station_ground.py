@@ -1,6 +1,6 @@
 # Created: 2026-10-01
-# Last audited: 2026-10-01
-# Lifecycle: created=2026-10-01; last_reviewed=2026-10-01; last_reused=2026-10-01
+# Last audited: 2026-10-06
+# Lifecycle: created=2026-10-01; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Synoptic WRH station ground is VERIFIED only with an agreeing independent NOAA site.
 # Reuse: pytest tests/test_synoptic_wrh_station_ground.py
 # Authority basis: operator mandate 2026-10-01 (no station-ground data gaps, guard unchanged);
@@ -65,10 +65,13 @@ def test_live_captured_documents_parse_and_bind_verified(city, station):
 
 
 @pytest.mark.parametrize("city", ("Qingdao", "Panama City"))
-def test_stale_or_unconfirmed_sites_stay_unproven(city):
+def test_stale_or_unconfirmed_sites_never_gain_point_ground(city):
+    # Their WRH record is only one end of a BOUNDED height hull
+    # (tests/test_om9_bounded_station_ground.py), never VERIFIED ground.
     station = config.cities_by_name[city].wu_station
     assert config.station_ground_source_artifact_ref(source_kind=KIND, station_id=station) is None
-    assert config.runtime_station_geometry_for_city(config.cities_by_name[city])["ground_status"] == "UNPROVEN"
+    geometry = config.runtime_station_geometry_for_city(config.cities_by_name[city])
+    assert geometry["ground_status"] != "VERIFIED" and geometry["ground_elevation_m"] is None
 
 
 def _mutate_primary(primary, mutation):
