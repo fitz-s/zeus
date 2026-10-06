@@ -18248,3 +18248,55 @@ surface freshness/planning checks returnedok/zeroissues. Full F-city public
 consumer positive remains unrun; C/F conversion is explicit and wrong-unit
 admission rejects, not a blanket physical-equivalence verdict. Required checks,
 c41/f4 source followups and current8069 normal rebase remain pending; no load.
+
+Final integrated inspectionbase6242c7ce1c77041522285fde08fcefad53aa3357 follows
+normal ordered source picks c41fc6a0125629dd4797d4f3ed44ae7a0f60c3a8 and
+f4d8018faed845fa607e2d4558549783a086d68a, then normal rebase onto freshly fetched
+origin/live8069ecb46f309a8078634a2d0557d360fc7f8633. A standalone f4 patch before
+c41 did not apply because of its declared prerequisite; both ordered picks
+succeeded. The only conflict was PLAN text, retaining both task and peer
+MPMG/ZSQD BOUNDED station facts. No peer source was overwritten. Mat a4e889,
+reader5bfeca, test6edd3a remain byte-identical to independently accepted8e166;
+policy527bfe differs solely in _anchor_station_ground_has_authority, AST-exact
+to8069. Every other policy function remains AST-exact to the task freeze.
+Native ecmwf5ef148 and hourlya6153a equal their approved final source bits.
+Independent final integration review reports0Critical/0Important, including
+registry field/leaf/category preservation. No long same-kernel test is repeated
+as a substitute for that precise unchanged-source proof.
+
+Final applicable data10 ran once on6242:386 passed,4.30s,no skips/errors/failures,
+/tmp/zeus-final-X-variant-8069-data10.xml SHA91a32410d6119f136295f750ac17c23349356acd1d0a57854cf6b494d3b8a3a0.
+Engine6 plus nine precise peer controls:102 passed,6 failed,4 skipped,38.82s,
+/tmp/zeus-final-X-variant-8069-engine6-peer.xml SHA3c8b0f0ef60033d2b4fe074d18e4426dcffa1a32b541fbf56526e4bd0e61ab7f.
+All nine new peer controls passed. The first engine invocation omitted the
+day0 filename prefixes, returnedrc4/no tests, and contributes no behavior proof.
+The six failures were rerun against actual8069 Git source bytes via a private
+MetaPathLoader (15 changed Python modules compiled/executed from original
+Git bytes; AST/linter source reads use those same bytes, no project restore):
+6 failed,30.45s,/tmp/zeus-final-X-variant-engine6-baseline8069.xml
+SHA36b32efc5f70bd66b33b7bba0b040b8e362acbef11d655509f258bab9efd1d98.
+Each exact node's message, trace and captured logs matches current, except
+source-line shifts: closed HKO observation DB, two fakeResponse.content
+omissions, legacyforce_exit argument, linter22 and three WAL wrappers. There
+are zero new required regressions, not an all-green test-repo verdict. Four
+skips remain skips. Changed-surface planning/freshness/map checks returnok with
+zero issues; unrelated registry drift remains separately recorded above.
+
+The final candidate is unlanded/unloaded until ROOT separately authorizes the
+normal fast-forward and registered loader. Source sidecars must warm the actual
+new revision through ordinary capture/seed/materialization; preSTOP current
+capital/held-book guards, exact-generation cleanup on unused refusal, and
+postSTOP recovery remain mandatory. Code proof is not current-native availability,
+global money readiness, realized exit fill, provider accuracy or market-speed
+proof. Published/initial-issued UNKNOWN remains UNKNOWN; legitimate possession
+is not erased. Model/sensor equivalence, first historical DailyExtract bodies,
+full worker-loop runtime, F-city full public positive and current HK native
+readiness retain the explicitly named gaps above. No manual fetch/reseed,
+production SQL, cycle, guard clear, restart, push or load occurred in this lane.
+
+After all dependent tests finished, the task-created ignored regular
+config/settings.json was confirmed nontracked and SHAe95eb2066414092e2b4416cd24b94a9a08ff050493df2ebff1d38a543d519a3b,
+then removed by apply_patch; it is recoverable from the tracked example, not
+the live configuration and not an agent-owned runtime config change. All123
+raw audit originals remain in place, untracked and unstaged. Fresh final
+fetch still reports origin/live8069 with candidate an ordinary descendant.
