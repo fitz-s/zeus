@@ -112,7 +112,7 @@ def test_upgrade_probability_reads_canonical_owner_with_legacy_shells(tmp_path, 
     scope = result.evidence["families"][0]
     expected = ("FINAL_DAILY_OBSERVATION_AUTHORITY" if case == "final" else
                 "PROBABILITY_UPGRADE_HELD_CONTRACT_NOT_BOUND" if case in {"wrong_metric", "legacy_only"} else
-                "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISSING")
+                "PROBABILITY_UPGRADE_READINESS_MISSING")
     assert scope.get("reason") == expected, result.evidence
     assert result.ok is (case == "final")
 
@@ -250,8 +250,9 @@ def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeyp
     assert any(item.get("current_input_proof", {}).get("basis") == "qualified_current_inputs" for item in proofs)
 
 
+@pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.usefixtures("_hko_source_surface")
-def test_upgrade_full_Y_public_local_day_rollover(tmp_path, monkeypatch):
+def test_upgrade_full_Y_public_local_day_rollover(tmp_path, monkeypatch, metric):
     """Stop the normal producer at its first full-Y public receipt, before JIT.
 
     The same real READY remains intrinsically readable over London midnight;
@@ -269,9 +270,11 @@ def test_upgrade_full_Y_public_local_day_rollover(tmp_path, monkeypatch):
     class FullYChecked(Exception):
         pass
 
+    inside_gate = False
     def check_full_Y(conn, **kwargs):
+        nonlocal inside_gate
         result = owning_reader(conn, **kwargs)
-        if not result.ok:
+        if inside_gate or not result.ok:
             return result
         assert result.bundle.provenance_json.get("day0_measurement_domain_shapes") is None
         city = config.runtime_cities_by_name()[kwargs["city"]]
@@ -301,13 +304,91 @@ def test_upgrade_full_Y_public_local_day_rollover(tmp_path, monkeypatch):
                 assert ok is expected, proof
                 if not expected:
                     assert proof["reason"] == "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"
+                class GateClock(datetime):
+                    @classmethod
+                    def now(cls, tz=None):
+                        return now.astimezone(tz or timezone.utc)
+                @contextlib.contextmanager
+                def connect():
+                    yield conn
+                condition = conn.execute(
+                    "SELECT condition_id FROM market_events WHERE city=? AND target_date=? "
+                    "AND temperature_metric=? LIMIT 1", (city.name, target, metric),
+                ).fetchone()[0]
+                monkeypatch.setattr(preflight, "datetime", GateClock)
+                monkeypatch.setattr(preflight, "_connect_probability_upgrade_ro", connect)
+                monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: [{
+                    "position_id": "normal-full-Y", "phase": "active", "city": city.name,
+                    "target_date": target, "temperature_metric": metric, "condition_id": condition,
+                }])
+                inside_gate = True
+                try:
+                    gate = preflight._probability_upgrade_qualification_check()
+                finally:
+                    inside_gate = False
+                assert gate.ok is expected, gate.evidence
+            # A real old-revision row cannot acquire future-day authority just
+            # because that date needs no Day0 event. Preserve public rejection.
+            row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+                               (result.bundle.posterior_id,)).fetchone()
+            legacy = json.loads(row[0])
+            legacy["bayes_precision_fusion"]["current_evidence_shape"]["semantics_revision"] = "ensemble_center_scenarios_v6"
+            conn.execute("PRAGMA query_only=OFF")
+            conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+                         (json.dumps(legacy), result.bundle.posterior_id))
+            conn.execute("PRAGMA query_only=ON")
+            now = midnight - timedelta(seconds=1)
+            rejected = owning_reader(conn, **{**kwargs, "decision_time": now})
+            assert not rejected.ok
+            gate = preflight._probability_upgrade_qualification_check()
+            assert not gate.ok and gate.evidence["families"][0]["reason"] == rejected.reason_code
         finally:
             conn.execute(f"PRAGMA query_only={int(previous_readonly)}")
         raise FullYChecked
 
     monkeypatch.setattr(reader, "read_replacement_forecast_bundle", check_full_Y)
     with pytest.raises(FullYChecked):
-        _normal_native_originals_public_case(tmp_path, monkeypatch, "high")
+        _normal_native_originals_public_case(tmp_path, monkeypatch, metric)
+
+
+@pytest.mark.parametrize("cut,expected", (
+    ("2026-10-03T22:59:59+00:00", "PROBABILITY_UPGRADE_READINESS_MISSING"),
+    ("2026-10-03T23:00:00+00:00", "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISSING"),
+    ("2026-10-04T23:00:00+00:00", "PROBABILITY_UPGRADE_READINESS_MISSING"),
+))
+def test_upgrade_diagnostics_freeze_local_midnight_cut(monkeypatch, cut, expected):
+    from src.state.db import init_schema_forecasts
+    from src.state.schema.opportunity_events_schema import ensure_table
+    at = datetime.fromisoformat(cut)
+    calls = []
+    class GateClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            calls.append(True)
+            return (at + timedelta(seconds=len(calls) - 1)).astimezone(tz or timezone.utc)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    ensure_table(conn)
+    holdings = []
+    for metric in ("high", "low"):
+        conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,condition_id) VALUES(?,?,?,?,?)",
+                     (metric, "London", "2026-10-04", metric, metric))
+        holdings.append({"position_id": metric, "phase": "active", "city": "London",
+                         "target_date": "2026-10-04", "temperature_metric": metric, "condition_id": metric})
+    @contextlib.contextmanager
+    def connect():
+        yield conn
+    monkeypatch.setattr(preflight, "datetime", GateClock)
+    monkeypatch.setattr(preflight, "_connect_probability_upgrade_ro", connect)
+    monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: holdings)
+    try:
+        result = preflight._probability_upgrade_qualification_check()
+        assert not result.ok and len(calls) == 1
+        assert [f["reason"] for f in result.evidence["families"]] == [expected, expected]
+        assert {f["checked_at"] for f in result.evidence["families"]} == {cut}
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
@@ -408,8 +489,8 @@ def test_upgrade_qualification_public_reader_controls(monkeypatch, metric, state
         first = preflight._probability_upgrade_qualification_check()
         assert first.ok is (state in {"remaining_X", "full_Y"})
         if state == "prior_complete":
-            assert first.evidence["families"][0]["prior_base_usable"] is True
-            assert first.evidence["families"][0]["reason"] == "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"
+            assert not prior_calls  # Future-day failure retains the public reason.
+            assert first.evidence["families"][0]["reason"] == "PROBABILITY_UPGRADE_READINESS_MISSING"
         if calls:
             assert calls[0]["authority_purpose"] is reader_mod.ReplacementForecastAuthorityPurpose.HELD_REDECISION
             if state != "prior_complete":

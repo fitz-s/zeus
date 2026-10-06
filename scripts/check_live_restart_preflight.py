@@ -5015,6 +5015,7 @@ def _probability_upgrade_qualification_check() -> CheckResult:
     )
     from src.data.replacement_forecast_readiness import latest_replacement_readiness
     from src.execution.day0_hard_fact_exit import _final_daily_observation_extreme
+    from zoneinfo import ZoneInfo
     from src.engine.monitor_refresh import (
         _pinned_carrier_provenance_matches_current_day0_event,
         _pinned_complete_bundle_has_valid_causal_evidence,
@@ -5037,12 +5038,12 @@ def _probability_upgrade_qualification_check() -> CheckResult:
     }
     try:
         scopes = held_scope()
+        now = datetime.now(timezone.utc)
         with _connect_probability_upgrade_ro() as conn:
             for (city_name, target_date, metric), holdings in sorted(scopes.items()):
                 scope = {"city": city_name, "target_date": target_date,
                          "metric": metric, "positions": sorted(holdings)}
                 evidence["families"].append(scope)
-                now = datetime.now(timezone.utc)
                 scope["checked_at"] = now.isoformat()
                 city = cities_by_name.get(city_name)
                 if city is None or not target_date or metric not in {"high", "low"}:
@@ -5081,7 +5082,9 @@ def _probability_upgrade_qualification_check() -> CheckResult:
                             )
                             scope["readiness_id"] = readiness.readiness_id
                             scope["reason"] = result.reason_code
-                        if result is None or not result.ok:
+                        if (result is None or not result.ok) and target_date == now.astimezone(
+                            ZoneInfo(city.timezone)
+                        ).date().isoformat():
                             # Normal HELD continuity is diagnostic rebuilding
                             # base evidence, not current-preparation authority.
                             # Only normal materialization/public READY above

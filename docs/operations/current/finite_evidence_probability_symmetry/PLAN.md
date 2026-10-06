@@ -19832,3 +19832,36 @@ The live 3c6 PRESTOP refusal still preserves old MAIN; successful source jobs,
 stored partial bodies and these private controls do not establish actual new
 51-member native role qualification or v7/v35 consumer readiness. Root must
 accept the final exact tip and runtime source-grade proof before a new restart.
+
+### Local-calendar upgrade diagnostics — BEFORE EDIT
+
+The a345 registered restart correctly refused at PRESTOP; four scope diagnoses
+at its 21:59Z cut replaced the real public NOT_LIVE_GRADE reason with missing
+Day0 event despite those targets being future local days. Independent RO
+replay confirmed a diagnostic defect, not a proven qualification false-block.
+ROOT authorizes only check_live_restart_preflight and its existing test:
+freeze one qualification cut, compare target date to the owning city's local
+date, and run event/prior diagnostics only on actual Day0. Future/past scopes
+retain the actual public rejection; canonical final-daily substitution and all
+source-grade/current-input gates stay unchanged. SCOPE is that family and cut;
+DRAIN remains normal source/materialization, RESET a new qualified public proof
+or actual local-day transition. H/L, frozen midnight cut, real future READY,
+legacy v6 rejection and actual Day0 event absence require explicit controls.
+No registered retry or final CLI rerun until the next bounded source batch is
+accepted; raw/config/refs and live code remain unchanged during this repair.
+
+### Native index receipt coexistence — BEFORE EDIT
+
+Native's two bounded RO cuts proved a real publisher conflict on 00Z: old and
+new index body SHA/ETag agree, but one filename's HTTP receipt contains different
+normal fetch clocks. Byte comparison therefore blocks legal missing member41
+publication despite its actual 167/K/instant/pf header validation. ROOT grants
+native only src/data/ecmwf_open_data.py and its existing collect-cycle test in
+the a345-based child, disjoint from q's loader diagnostic files. SCOPE is the
+exact original index/receipt/body/proof identity; DRAIN publishes immutable
+full-receipt-SHA coexistence and binds each proof's existing index_receipt_sha
+to its exact receipt. RESET is normal missing-part append and restart/reader
+validation without rewriting any old body, receipt, proof or first clock.
+No inventory deletion, synthetic clock, schema or qualification weakening.
+Require actual RED/GREEN, unchanged old tuples and mixed receipt replay controls.
+Final shared static/secret/changed checks wait for both bounded fixes to freeze.
