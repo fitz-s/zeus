@@ -345,6 +345,35 @@ def test_unknown_predicate_ordinary_report_note_setter_is_not_control():
     assert _alternate_control_violations("if opaque('diagnostic'):\n setattr(report,'note','enabled')\n") == []
 
 
+@pytest.mark.parametrize('alias', ['', ' as Contract'])
+def test_local_physical_import_alias_has_same_lexical_identity(alias):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    target = 'Contract' if alias else 'SettlementSemantics'
+    source = ("def calculate(flag):\n from src.contracts.settlement_semantics import SettlementSemantics"
+              + alias + "\n if flag:\n  semantics=" + target + "('forecast_preimage',precision=1)\n"
+              "calculate(opaque('diagnostic'))\n")
+    assert _alternate_control_violations(source) == []
+
+
+@pytest.mark.parametrize('alias', ['', ' as Contract'])
+def test_local_foreign_import_shadow_still_loses_physical_identity(alias):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    target = 'Contract' if alias else 'SettlementSemantics'
+    source = ("def calculate(flag):\n from src.contracts.settlement_semantics import SettlementSemantics"
+              + alias + "\n from plugin import SettlementSemantics" + alias
+              + "\n if flag:\n  semantics=" + target + "('forecast_preimage',precision=1)\n"
+              "calculate(opaque('diagnostic'))\n")
+    assert _alternate_control_violations(source)
+
+
+def test_local_json_import_alias_preserves_clean_field_projection():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = ("def calculate():\n import json as serializer\n"
+              " data=serializer.loads(serializer.dumps({'report':'diagnostic','number':2}))\n"
+              " return data['number']\nmode=calculate()\n")
+    assert _alternate_control_violations(source) == []
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",

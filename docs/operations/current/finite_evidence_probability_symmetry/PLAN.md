@@ -19338,3 +19338,27 @@ Two parking/proof-progress twins and adjacent canonical debt RESET passed3P
 2.36s, XML /tmp/zeus-reactor-8322-merged-controls.xml SHA256
 bdc14da4dd569c5270f27a27b7ea3ab68b5b8afca0db9286f00d9305b76d352b.
 This is narrow merged behavior, not full required union or production readiness.
+
+ROOT BEFOREEDIT local import alpha identity only: bind Import/ImportFrom alias
+targets and uses in the same lexical scope without changing dotted-import
+semantics. Preserve foreign import/rebind invalidation. Actual local physical
+constructor and alias controls must pass, foreign-shadow twins still reject;
+no state/status context exemptions or source/proof key changes. Prepare the
+remaining temperature/source qualification producer facts read-only for XY;
+await separate typed-context permission. Focused only, no second whole CLI.
+
+Local-import identity actual3F1.77s before fix (physical direct/alias and local
+JSON projection), XML /tmp/zeus-local-import-alpha-red.xml SHA256
+0d94eb9acd344711b324cfa3085b619c0bf7f850fa1ce5abe2702f39afd0db5e.
+Final179P9.68s,0F/E/S, XML /tmp/zeus-local-import-alpha-focused.xml SHA256
+2b9c5f09e4fae8518c840839e6785cd9c2bcc1c9369a1eb58bbfeeaa5794861b.
+Import aliases now carry their lexical declaration target; unaliased dotted
+imports retain Python's head binding rather than importing the leaf as alias.
+Physical contract/standard JSON/hash identities and their uses match; foreign
+imports invalidate trust in that scope. No old expectation changes, state
+context exemption, source/proof key or semantics revision mutation. No CLI.
+Remaining facts prepared read-only: native Day0CurrentTemperatureState is
+temperature value/observed clock/source evidence (hourly295/4880), carried by
+materializer1731/1748/1800/1979/2030, while capture_status8755–8763 declares
+the original current-source qualification consumed at public reader2359.
+These facts do not themselves authorize any new checker exemption.

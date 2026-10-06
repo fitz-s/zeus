@@ -339,21 +339,26 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     classes = {node.name for node in nodes if isinstance(node, ast.ClassDef)}
     class_defs = {node.name: node for node in nodes if isinstance(node, ast.ClassDef)}
-    physical_semantics = {alias.asname or alias.name for node in nodes if isinstance(node, ast.ImportFrom)
+    physical_semantics = {getattr(alias, '_binding_name', alias.asname or alias.name) for node in nodes if isinstance(node, ast.ImportFrom)
                           and node.module == 'src.contracts.settlement_semantics'
                           for alias in node.names if alias.name == 'SettlementSemantics'}
-    json_modules = {alias.asname or alias.name for node in nodes if isinstance(node, ast.Import)
+    json_modules = {getattr(alias, '_binding_name', alias.asname or alias.name) for node in nodes if isinstance(node, ast.Import)
                     for alias in node.names if alias.name == 'json'}
-    hash_modules = {alias.asname or alias.name for node in nodes if isinstance(node, ast.Import)
+    hash_modules = {getattr(alias, '_binding_name', alias.asname or alias.name) for node in nodes if isinstance(node, ast.Import)
                     for alias in node.names if alias.name == 'hashlib'}
     json_mutations = set()
     for node in nodes:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
+                imported = getattr(alias, '_binding_name', alias.asname or alias.name)
                 if not (isinstance(node, ast.ImportFrom)
                         and node.module == 'src.contracts.settlement_semantics'
                         and alias.name == 'SettlementSemantics'):
-                    physical_semantics.discard(alias.asname or alias.name)
+                    physical_semantics.discard(imported)
+                if not (isinstance(node, ast.Import) and alias.name == 'json'):
+                    json_modules.discard(imported)
+                if not (isinstance(node, ast.Import) and alias.name == 'hashlib'):
+                    hash_modules.discard(imported)
         targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(
             node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) else []
         for target in targets:
@@ -832,6 +837,24 @@ def _lexical_flow_tree(tree: ast.AST) -> ast.AST:
         def visit_Name(self, node):
             node._control_field = node.id
             node.id = self.bound(node.id)
+            return node
+
+        def visit_Import(self, node):
+            for alias in node.names:
+                original = alias.asname or alias.name.split('.')[0]
+                alias._binding_name = self.bound(original)
+                # `import a.b` binds a, unlike `import a.b as x`, which binds
+                # a.b. Keep that distinction while naming its lexical target.
+                if alias.asname is not None or '.' not in alias.name:
+                    alias.asname = alias._binding_name if alias._binding_name != original else alias.asname
+            return node
+
+        def visit_ImportFrom(self, node):
+            for alias in node.names:
+                if alias.name != '*':
+                    original = alias.asname or alias.name
+                    alias._binding_name = self.bound(original)
+                    alias.asname = alias._binding_name if alias._binding_name != original else alias.asname
             return node
 
         def visit_FunctionDef(self, node):
