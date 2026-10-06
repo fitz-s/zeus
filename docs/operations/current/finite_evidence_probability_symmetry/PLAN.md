@@ -18055,3 +18055,65 @@ The native owner is preparing its separately authorized bounded canonical-CAS
 retention/readback repair. That source slice, independent review and integrated
 affected proof must close before delivery. The private no-delete seam is not a
 production retention fix or a claim that current native inputs are available.
+
+### Forward-only HKO DailyExtract entity preservation — before edit
+
+ROOT authorizes only src/data/daily_obs_append.py and the existing
+tests/test_k2_live_ingestion_relationships.py, plus this PLAN evidence.
+The normal monthly fetch currently keeps parsed rows and their body hash but
+not the original HTTP entity; atom fetch_utc uses the earlier batch clock.
+Preserve actual response.content, SHA/byte count, HTTP start/receive clocks,
+safe headers and request identity in existing provenance JSON. Reuse the
+generic capture_entity helper through a lazy import (its module imports this
+appender); issued remains NULL. Inline monthly-body repetition across twins
+and the bounded recent-date catchup is an accepted storage tradeoff, recorded
+with byte count and expected month range. No new schema, files, HTTP calls,
+source role, q/precision/settlement transform or historical backfill is added.
+Old three-tuple prefetches have UNKNOWN entity evidence; existing-date early
+return and same-hash NOOP preserve historical rows and their first clocks.
+SCOPE one acquired monthly entity and its newly inserted HKO dates; DRAIN the
+existing five-minute missing-date poll; RESET a later successful acquisition,
+not invented bytes or an issued timestamp inferred from headers.
+Before source editing, add true fake-HTTP bytes -> normal appender -> canonical
+HIGH/LOW provenance controls, credential rejection, failed-fetch retry,
+one-fetch monthly sharing, legacy UNKNOWN and immutable existing-row controls.
+
+Current-contract evidence is separate from source quantization. Official
+Oct6 Gamma HQ contract was read at 2026-10-06T05:01:19.508998Z ->
+05:01:19.623750Z (59476 bytes, SHA256
+8a8ed3ec5a05c011740b43e853e36883e6678df01fb970c0be5c9513217653d6;
+https://gamma-api.polymarket.com/events/slug/lowest-temperature-in-hong-kong-on-october-6-2026).
+HQ request coordinates 22.3022/114.1742 are distinct from airport VHHH;
+the model grid is an approximation, not exact settlement-station equivalence.
+BUY certificate cf0701566e256179ec5862696d147498ad100d433658d7fbd1e31de351ed7f19
+does not retain its original market description; current text cannot replace it.
+Recent Oct4 canonical observation126268 reports 25.6C (fetched
+2026-10-05T02:34:53.522292Z; payload SHA256
+05c698ab1f35c9f077b3d9aeb19d3a497dd4022078ae6cb076bee6ad9d7faea5).
+Official Oct4 Gamma event1117405 at 2026-10-06T05:07:11.087131Z has YES25C
+and NO26C (58497 bytes, SHA256
+4fe5f7610cccf6263718a6efc3830e688fd84eaa48d2ec799b81ad2b0b19c6fd;
+https://gamma-api.polymarket.com/events/slug/lowest-temperature-in-hong-kong-on-october-4-2026).
+This supports integer oracle floor, not nearest integer or decimal oracle bins.
+One-decimal source reporting does not prove its physical quantizer or authorize
+a nearest-0.1 then floor offset. Current raw-model continuous proxy integration
+is a declared approximation, not exact sensor equivalence. Historical first
+DailyExtract entity/issued time and source quantization remain UNKNOWN; this
+forward-only repair cannot reconstruct them or establish all-city exactness.
+
+Frozen HKO slice proof: the original source fails both actual fake-HTTP normal
+appender/canonical controls (2 failed, 1.91s,
+/tmp/zeus-hko-daily-entity-red.xml): fetched_at equals batch time instead of
+response completion, and source_entity is absent. The repaired source passes
+all seven DailyExtract controls (7 passed, 2.24s,
+/tmp/zeus-hko-daily-entity-green.xml), including exact original bytes/hash/length,
+one monthly acquisition shared by HIGH/LOW and catchup dates, safe header and
+credential-body handling, normal failure/retry, old three-tuple UNKNOWN,
+existing-date early return and same-hash writer NOOP preserving old NULL entity
+and first clock. Six existing scheduler prefetch/legacy/lock/coverage/failure
+controls pass (6 passed, 1.89s, /tmp/zeus-hko-daily-scheduler-controls.xml).
+AST for both owned files, planning lock, freshness and diff checks pass.
+No live HTTP, source fetch, DB mutation, cycle, load or precision change ran.
+ROOT directs one applicable scoped data10 aggregate after native-CAS integration,
+not a repeated child batch; that final check and independent HKO review remain
+pending. Existing 123 raw files and example-config SHA e95 remain unchanged.
