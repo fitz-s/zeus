@@ -19935,3 +19935,18 @@ bytes/SHA/first clocks, widen catches, change endpoints or relax qualification.
 Require actual normal stage/capture/retained-reader RED/GREEN and duplicate
 header negative controls. No final CLI or loader retry before freeze/review;
 source progress and actual current posterior consumption remain separate.
+
+Header bb7b150b36820629145793b8c18354a0b55fa832 is integrated as
+a4eb1b0ed10eb91d686f4459b3cb8999e89687a1 and independently APPROVED 0C/I.
+Source d8adada9b563c822b2ce9b5eccb47ec991fbcfe699d7764a879217e175172e02
+and test9478400fa26a5f3bd200bc00f897b328e7e1951bf160a127c9abe0b447656fe8
+match the frozen child. The original mixed13P/3F inventory-stamp assertions
+remain recorded; corrected positives3P and stage1P yield17 unique cross-epoch
+controls, not17 same-tip passes. Inventory recorded_at revalidation is not a
+native public-role/PIT source clock. Only the retained reader AST changes;
+original HTTP206/range validation, saved bytes/proof/first clocks remain intact.
+This receipt freezes before one actual shared CLI, final HEAD ancestry secret,
+delta classifier/changed-surface checks and lower/duplicate/stage merged nodes.
+Unchanged earlier gate receipts retain their exact epoch and limited dependency
+scope; they do not establish new v7/v35 runtime consumption. No push or loader
+retry is authorized before ROOT accepts the precise checked tip.
