@@ -18999,3 +18999,29 @@ controls; this is NOT required CLI PASS. The three authorized checker files
 remain uncommitted pending a bounded projected-value analysis decision and
 independent review. Source/q/timing/loader files and123 raw originals remain
 unchanged. No push, live FF, load or runtime qualification is authorized.
+
+ROOT-approved disjoint BEFOREEDIT: held owns only
+tests/money_path/test_002_execution_lifecycle_replay.py,
+tests/money_path/test_edli_bankroll_warm_cycle.py,
+tests/money_path/test_edli_market_substrate_warm_cycle.py and
+tests/money_path/test_finding_b_free_cash_bound.py. Actual parent c2d run is
+230P/5F/maxfail5, not a baseline waiver. Reproduce on current baseline and
+repair only demonstrated stale fixture/API use after confirming production
+semantics; EXPIRED partial facts and true money-law failures cannot be made
+green by changing expected authority. Source, action and loader stay frozen.
+
+ROOT-approved secrets BEFOREEDIT: native owns only .gitleaksignore,
+docs/reference/security_false_positives.md and the existing companion field
+of that document in architecture/docs_registry.yaml. One redacted full-history
+scan returned1: seven candidate-ancestor findings are six fixed schema/index
+literal keys and one exact synthetic documentation/test fixture;876 other
+local-ref findings are not candidate additions and are neither cleared nor
+allowed. Scope exclusions to the seven immutable commit/path/rule/line
+fingerprints, never a path, KEY expression or credential class. DRAIN normal
+gitleaks excludes those proved non-secrets; RESET new commit/line/field or
+credential-like synthetic text in the same file still returns1. Native owns
+the isolated synthetic-repo controls and ordinary three-file commit; no secret
+content, credential rotation, live config change or whole-history rerun.
+Full-history proof SHA256
+f620e1734f6a3cbffbe797459cca8b914962a4d3767328f43ab1a47e89c40b1d
+is a failed gate until the narrowly reviewed correction is actually tested.
