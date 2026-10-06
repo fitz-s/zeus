@@ -1166,6 +1166,132 @@ class _RateLimitedSession(requests.Session):
         return response
 
 
+class _NativeDeadlineSession(requests.Session):
+    """Optional public-original transport with a cancellable total HTTP cut.
+
+    curl owns DNS/connect/headers/body under --max-time; the parent owns the
+    same absolute subprocess timeout and reaps it. This is not an idle socket
+    timeout or a daemon worker. No unsupported-tool requests fallback exists.
+    Only unverified in-flight scratch is disposable; committed native parts
+    remain in their original cache across timeout/503/partial normal polls.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._curl_checked = False
+
+    def get(self, url, **kwargs):
+        from urllib.parse import urlsplit
+        from requests.utils import select_proxy
+        from requests.structures import CaseInsensitiveDict
+
+        deadline = getattr(self, "_zeus_deadline", None)
+        if deadline is None:
+            raise ValueError("NATIVE_2T_HTTP_DEADLINE_REQUIRED")
+        _fetch_bucket.acquire(deadline=deadline)
+        if not self._curl_checked:
+            try:
+                checked = subprocess.run(["/usr/bin/curl", "-q", "--version"], capture_output=True,
+                    timeout=_remaining_step_timeout(deadline), check=False)
+            except subprocess.TimeoutExpired as exc:
+                raise requests.Timeout("STEP_DEADLINE_EXCEEDED") from exc
+            except OSError as exc:
+                raise ValueError("NATIVE_2T_BOUNDED_HTTP_UNAVAILABLE") from exc
+            version = re.match(rb"curl (\d+)\.(\d+)\.(\d+)", checked.stdout)
+            if (checked.returncode or version is None
+                    or tuple(int(n) for n in version.groups()) < (8, 4, 0)):
+                raise ValueError("NATIVE_2T_BOUNDED_HTTP_UNSUPPORTED")
+            self._curl_checked = True
+        parts = urlsplit(str(url))
+        if (parts.scheme not in {"http", "https"} or parts.username or parts.password
+                or parts.query or parts.fragment):
+            raise ValueError("NATIVE_2T_HTTP_ORIGIN_INVALID")
+        headers = CaseInsensitiveDict(kwargs.get("headers", {}))
+        maximum = _RANGE_RESUME_CHUNK_BYTES
+        if "Range" in headers:
+            match = re.fullmatch(r"bytes=(\d+)-(\d+)", headers["Range"])
+            if match is None or int(match[2]) < int(match[1]):
+                raise ValueError("NATIVE_2T_HTTP_RANGE_INVALID")
+            maximum = int(match[2]) - int(match[1]) + 1
+            if not 100 <= maximum <= 32 * 1024 * 1024:
+                raise ValueError("NATIVE_2T_HTTP_RANGE_INVALID")
+        if {name.lower() for name in headers} - {"range"}:
+            raise ValueError("NATIVE_2T_HTTP_HEADERS_UNSUPPORTED")
+        # Match requests' trust_env/explicit session proxy and verify routing;
+        # credentials stay in the child environment, never argv or error logs.
+        settings = self.merge_environment_settings(str(url), {}, True, kwargs.get("verify", True), None)
+        verify = settings["verify"]
+        if verify is False:
+            raise ValueError("NATIVE_2T_TLS_VERIFICATION_REQUIRED")
+        if settings["cert"] is not None or self.auth is not None or self.cookies:
+            raise ValueError("NATIVE_2T_HTTP_AUTH_UNSUPPORTED")
+        proxy = select_proxy(str(url), settings["proxies"])
+        child_env = {key: value for key, value in os.environ.items()
+            if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}}
+        if proxy:
+            child_env[parts.scheme + "_proxy"] = proxy
+        ca = verify if isinstance(verify, str) else requests.certs.where()
+        safe_headers = {"content-length", "content-range", "content-type", "content-encoding", "date",
+            "last-modified", "etag", "server", "cache-control", "age", "transfer-encoding"}
+        with tempfile.TemporaryDirectory(prefix="zeus-native-http-") as directory:
+            body_path, header_path = Path(directory) / "body", Path(directory) / "headers"
+            # No redirect, retry, decompression, curlrc, insecure TLS or second
+            # budget. libcurl >=8.4 also caps unknown-length/chunked bodies.
+            remaining = _remaining_step_timeout(deadline)
+            command = ["/usr/bin/curl", "-q", "--silent", "--proto", "=" + parts.scheme,
+                "--max-time", str(remaining), "--max-filesize", str(maximum),
+                "--header", "Accept-Encoding: identity", "--dump-header", str(header_path),
+                "--output", str(body_path), "--write-out", "%{http_code}",
+                "--capath" if Path(ca).is_dir() else "--cacert", str(ca)]
+            if "Range" in headers:
+                command.extend(["--header", "Range: " + headers["Range"]])
+            command.extend(["--url", str(url)])
+            try:
+                completed = subprocess.run(command, env=child_env, capture_output=True,
+                    timeout=_remaining_step_timeout(deadline), check=False)
+            except subprocess.TimeoutExpired as exc:
+                raise requests.Timeout("STEP_DEADLINE_EXCEEDED") from exc
+            except OSError as exc:
+                raise ValueError("NATIVE_2T_BOUNDED_HTTP_UNAVAILABLE") from exc
+            if completed.returncode == 28:
+                raise requests.Timeout("STEP_DEADLINE_EXCEEDED")
+            if completed.returncode:
+                # curl stderr can contain a proxy credential or private route.
+                raise requests.RequestException("NATIVE_2T_HTTP_TRANSFER_FAILED:" + str(completed.returncode))
+            _remaining_step_timeout(deadline)
+            if (not re.fullmatch(rb"\d{3}", completed.stdout) or not body_path.is_file()
+                    or body_path.stat().st_size > maximum or not header_path.is_file()
+                    or header_path.stat().st_size > 65536):
+                raise ValueError("NATIVE_2T_HTTP_ENVELOPE_INVALID")
+            blocks = [block for block in header_path.read_bytes().split(b"\r\n\r\n") if block]
+            # Proxy CONNECT headers and informational responses are not the
+            # origin entity. Bind the final status/header block only.
+            lines = blocks[-1].decode("latin1").split("\r\n") if blocks else []
+            status = re.fullmatch(r"HTTP/\S+ (\d{3})(?: .*)?", lines[0]) if lines else None
+            if status is None or int(status[1]) != int(completed.stdout):
+                raise ValueError("NATIVE_2T_HTTP_ENVELOPE_INVALID")
+            captured = CaseInsensitiveDict()
+            for line in lines[1:]:
+                name, sep, value = line.partition(":")
+                if not sep or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+                    raise ValueError("NATIVE_2T_HTTP_HEADERS_INVALID")
+                if name.lower() in safe_headers:
+                    if name in captured:
+                        raise ValueError("NATIVE_2T_HTTP_HEADER_DUPLICATE")
+                    captured[name] = value.strip()
+            if captured.get("Content-Encoding", "identity").lower() != "identity":
+                raise ValueError("NATIVE_2T_HTTP_ENCODING_UNSUPPORTED")
+            content = body_path.read_bytes()
+            if "Content-Length" in captured and captured["Content-Length"] != str(len(content)):
+                raise ValueError("NATIVE_2T_HTTP_LENGTH_INVALID")
+            response = requests.Response()
+            response.status_code, response.headers, response.url = int(status[1]), captured, str(url)
+            response._content, response._content_consumed = content, True
+            response._native_body_complete = True
+            _fetch_bucket.observe(response.status_code)
+            return response
+
+
 def _part_offset_length(part: Any) -> tuple[int, int]:
     """Return an ECMWF index part as ``(offset, length)``.
 
@@ -1557,6 +1683,7 @@ def _resolve_index_parts(
     *,
     deadline: float | None = None,
     original_indexes: list[dict] | None = None,
+    native_complete_body: bool = False,
 ) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
     """Resolve ECMWF ``.index`` parts without multiurl's 120-second retry loop."""
 
@@ -1581,14 +1708,22 @@ def _resolve_index_parts(
                 response.raise_for_status()
             parts: list[tuple[int, int]] = []
             if original_indexes is not None:
-                chunks, size = [], 0
-                for chunk in response.iter_content(chunk_size=65536):
+                if native_complete_body:
                     _remaining_step_timeout(deadline)
-                    size += len(chunk)
-                    if size > _RANGE_RESUME_CHUNK_BYTES:
+                    if getattr(response, "_native_body_complete", False) is not True:
+                        raise ValueError("NATIVE_2T_HTTP_BODY_NOT_BOUNDED")
+                    body = response.content
+                    if len(body) > _RANGE_RESUME_CHUNK_BYTES:
                         raise ValueError("NATIVE_2T_INDEX_BODY_OVERSIZED")
-                    chunks.append(chunk)
-                body = b"".join(chunks)
+                else:
+                    chunks, size = [], 0
+                    for chunk in response.iter_content(chunk_size=65536):
+                        _remaining_step_timeout(deadline)
+                        size += len(chunk)
+                        if size > _RANGE_RESUME_CHUNK_BYTES:
+                            raise ValueError("NATIVE_2T_INDEX_BODY_OVERSIZED")
+                        chunks.append(chunk)
+                    body = b"".join(chunks)
                 original_indexes.append({"source_url": str(url), "source_index_url": index_url,
                     "body": body, "fetch_started_at": started,
                     "source_fetched_at": datetime.now(timezone.utc).isoformat(),
@@ -1871,7 +2006,7 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
             return {**report, "observed_count": len(retained), "reason": str(exc)}
         from ecmwf.opendata import Client
         cache.mkdir(parents=True, exist_ok=True)
-        session = _RateLimitedSession()
+        session = _NativeDeadlineSession()
         session._zeus_deadline = cycle_deadline_monotonic
         failure = None
         try:
@@ -1889,7 +2024,7 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
                         step=[step], param=["2t"])
                     indexes = []
                     _resolve_index_parts(client, result, deadline=cycle_deadline_monotonic,
-                        original_indexes=indexes)
+                        original_indexes=indexes, native_complete_body=True)
                     if len(indexes) != 1:
                         raise ValueError("NATIVE_2T_INDEX_ENTITY_AMBIGUOUS")
                     index = indexes[0]
@@ -1919,14 +2054,10 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
                             verify=getattr(client, "verify", True))
                         try:
                             _validate_range_response(response, offset=offset, length=length)
-                            chunks, size = [], 0
-                            for chunk in response.iter_content(chunk_size=65536):
-                                _remaining_step_timeout(cycle_deadline_monotonic)
-                                size += len(chunk)
-                                if size > length:
-                                    raise ValueError("NATIVE_2T_RANGE_OVERSIZED")
-                                chunks.append(chunk)
-                            raw = b"".join(chunks)
+                            _remaining_step_timeout(cycle_deadline_monotonic)
+                            if getattr(response, "_native_body_complete", False) is not True:
+                                raise ValueError("NATIVE_2T_HTTP_BODY_NOT_BOUNDED")
+                            raw = response.content
                             if len(raw) != length:
                                 raise ValueError("NATIVE_2T_RANGE_TRUNCATED")
                             fetched = datetime.now(timezone.utc).isoformat()

@@ -358,6 +358,10 @@ def _native_temperature_transport_fixture(tmp_path, *, fault=None, land_mask=Fal
     class Response:
         def __init__(self, body, status, headers):
             self.body, self.status_code, self.headers = body, status, headers
+            self._native_body_complete = True  # Private HTTP is already in-memory, never a blocking stream.
+        @property
+        def content(self):
+            return self.body
         def raise_for_status(self):
             if self.status_code >= 400:
                 import requests
@@ -403,6 +407,7 @@ def _normal_native_http(tmp_path, monkeypatch, *, steps=(0, 3), fault=None, hour
             return SimpleNamespace(urls=[url], for_index={"param": ["2t"]}, target=kwargs["target"])
     monkeypatch.setattr(ecmwf.opendata, "Client", Client)
     monkeypatch.setattr(module, "_RateLimitedSession", lambda: session)
+    monkeypatch.setattr(module, "_NativeDeadlineSession", lambda: session)
     paths = module.OpenDataPaths(raw_root=tmp_path / "normal", asset_root=tmp_path,
         extract_script=Path("unused"), manifest_path=Path("unused"), origin="private-fixture")
     conn = sqlite3.connect(tmp_path / "normal-forecasts.db")
@@ -470,6 +475,224 @@ def test_normal_native_expired_queue_reads_only_fully_verified_cache(tmp_path, m
         assert damaged["status"] == "UNKNOWN", damaged
         assert s.calls == []
     finally:
+        s.conn.close()
+
+
+@pytest.fixture
+def native_deadline_http():
+    """Actual loopback only; no provider HTTP, production clock or credentials."""
+    stop = threading.Event()
+    state = SimpleNamespace(mode="valid", body=b"x" * 200, calls=0)
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def log_message(self, *args):
+            pass
+        def do_GET(self):
+            state.calls += 1
+            try:
+                if state.mode == "slow_headers":
+                    for char in b"HTTP/1.1 206 Partial Content\r\nContent-Length: 200\r\n\r\n":
+                        if stop.wait(.03):
+                            return
+                        self.wfile.write(bytes([char]))
+                    return
+                self.send_response(200 if state.mode == "ignored_range" else 206)
+                chunked = state.mode in {"unknown_size", "ignored_range"}
+                if chunked:
+                    self.send_header("Transfer-Encoding", "chunked")
+                else:
+                    self.send_header("Content-Length", str(len(state.body)))
+                requested = self.headers.get("Range", "bytes=0-199")[6:]
+                self.send_header("Content-Range", "bytes " + ("1-200" if state.mode == "wrong_range" else requested) + "/100000")
+                self.send_header("Content-Encoding", "gzip" if state.mode == "encoding" else "identity")
+                self.send_header("Set-Cookie", "private_fixture_secret=must_not_capture")
+                self.end_headers()
+                if chunked:
+                    for _ in range(32):
+                        self.wfile.write(b"100\r\n" + b"x" * 256 + b"\r\n")
+                    self.wfile.write(b"0\r\n\r\n")
+                elif state.mode == "trickle":
+                    for chunk in (state.body[:len(state.body) // 2], state.body[len(state.body) // 2:]):
+                        if stop.wait(.45):
+                            return
+                        self.wfile.write(chunk)
+                else:
+                    self.wfile.write(state.body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                self.close_connection = True
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state.url = f"http://127.0.0.1:{server.server_port}/original"
+    try:
+        yield state
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(2)
+
+
+@pytest.mark.parametrize("mode", ("slow_headers", "trickle", "unknown_size", "ignored_range", "wrong_range", "encoding", "valid"))
+def test_native_deadline_curl_actual_loopback_has_total_cut_and_body_cap(native_deadline_http, monkeypatch, mode):
+    import requests
+    from src.data import ecmwf_open_data as source
+    state = native_deadline_http
+    state.mode = mode
+    session = source._NativeDeadlineSession()
+    session.trust_env = False  # Private loopback, never a production-route change.
+    run = source.subprocess.run
+    output_sizes, commands = [], []
+    def checked_run(command, **kwargs):
+        commands.append(command)
+        result = run(command, **kwargs)
+        if "--output" in command:
+            output = Path(command[command.index("--output") + 1])
+            if output.exists():
+                output_sizes.append(output.stat().st_size)
+        return result
+    monkeypatch.setattr(source.subprocess, "run", checked_run)
+    started = time.monotonic()
+    session._zeus_deadline = started + .6
+    try:
+        if mode in {"slow_headers", "trickle"}:
+            with pytest.raises(requests.Timeout, match="STEP_DEADLINE_EXCEEDED"):
+                session.get(state.url, headers={"Range": "bytes=0-199"})
+            assert time.monotonic() - started < .8  # Includes bounded process-reap/CPU cleanup, not mathematical zero slack.
+        elif mode in {"unknown_size", "ignored_range"}:
+            with pytest.raises(requests.RequestException, match="TRANSFER_FAILED:63"):
+                session.get(state.url, headers={"Range": "bytes=0-199"})
+            assert output_sizes and max(output_sizes) <= 200
+        elif mode == "encoding":
+            with pytest.raises(ValueError, match="ENCODING_UNSUPPORTED"):
+                session.get(state.url, headers={"Range": "bytes=0-199"})
+        else:
+            response = session.get(state.url, headers={"Range": "bytes=0-199"})
+            if mode == "wrong_range":
+                with pytest.raises(requests.RequestException):
+                    source._validate_range_response(response, offset=0, length=200)
+            else:
+                source._validate_range_response(response, offset=0, length=200)
+                assert response.content == state.body and response._native_body_complete
+            assert "Set-Cookie" not in response.headers
+            response.close()
+        command = next(command for command in commands if "--output" in command)
+        assert command[1] == "-q" and "--location" not in command and "--insecure" not in command
+        assert "--cacert" in command and "Accept-Encoding: identity" in command
+    finally:
+        session.close()
+
+
+def test_native_deadline_shared_bucket_wait_expires_without_starting_http(native_deadline_http):
+    import requests
+    from src.data import ecmwf_open_data as source
+    bucket = source._fetch_bucket
+    with bucket._lock:
+        original = bucket._tokens, bucket._last_refill
+        bucket._tokens, bucket._last_refill = 0., time.monotonic()
+    session = source._NativeDeadlineSession()
+    started = time.monotonic()
+    session._zeus_deadline = started + .05
+    try:
+        with pytest.raises(requests.Timeout, match="STEP_DEADLINE_EXCEEDED"):
+            session.get(native_deadline_http.url, headers={"Range": "bytes=0-199"})
+        assert time.monotonic() - started < .2
+        assert not session._curl_checked and native_deadline_http.calls == 0
+    finally:
+        session.close()
+        with bucket._lock:
+            bucket._tokens, bucket._last_refill = original
+
+
+def test_native_deadline_actual_proxy_route_and_tls_are_preserved(native_deadline_http, monkeypatch):
+    from src.data import ecmwf_open_data as source
+    session = source._NativeDeadlineSession()
+    session.trust_env = False
+    session.proxies = {"http": native_deadline_http.url.replace("/original", "")}
+    session._zeus_deadline = time.monotonic() + 2.
+    run = source.subprocess.run
+    observed = []
+    def checked(command, **kwargs):
+        if "--url" in command:
+            observed.append((kwargs["env"].get("http_proxy"), command))
+        return run(command, **kwargs)
+    monkeypatch.setattr(source.subprocess, "run", checked)
+    try:
+        # This destination cannot resolve. Success proves the authorized local
+        # HTTP proxy handled it; the native transport did not silently bypass.
+        response = session.get("http://native-fixture.invalid/original", headers={"Range": "bytes=0-199"})
+        assert response.status_code == 206 and response.content == native_deadline_http.body
+        assert native_deadline_http.calls == 1
+        assert observed[0][0] == session.proxies["http"]
+        command = observed[0][1]
+        assert session.proxies["http"] not in command and "--insecure" not in command
+        assert "--cacert" in command and "--location" not in command
+        with pytest.raises(ValueError, match="TLS_VERIFICATION_REQUIRED"):
+            session.get(native_deadline_http.url, verify=False)
+        assert native_deadline_http.calls == 1
+        response.close()
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("failure", ("old_version", "missing"))
+def test_native_deadline_unsupported_tool_cannot_fall_back_to_unbounded_requests(tmp_path, monkeypatch, failure):
+    from src.data import ecmwf_open_data as source
+    NativeSession = source._NativeDeadlineSession
+    s = _normal_native_http(tmp_path, monkeypatch)
+    commands = []
+    def unavailable(command, **kwargs):
+        commands.append(command)
+        if failure == "missing":
+            raise FileNotFoundError("private missing-tool fixture")
+        return SimpleNamespace(returncode=0, stdout=b"curl 7.88.1", stderr=b"private stderr must not enter source reason")
+    monkeypatch.setattr(source, "_NativeDeadlineSession", NativeSession)
+    monkeypatch.setattr(source.subprocess, "run", unavailable)
+    try:
+        result = source.collect_native_temperature_source(**s.args)
+        assert result["status"] == "DEFERRED" and result["inventory_status"] == "UNKNOWN", result
+        assert "BOUNDED_HTTP_UN" in result["reason"] and "private stderr" not in result["reason"]
+        assert len(commands) == 1 and commands[0] == ["/usr/bin/curl", "-q", "--version"]
+        assert s.calls == []
+        assert s.conn.execute("SELECT COUNT(*) FROM source_run").fetchone()[0] == 0
+    finally:
+        s.conn.close()
+
+
+@pytest.mark.parametrize("mode", ("slow_headers", "trickle"))
+def test_normal_native_actual_total_http_failure_can_resume_next_poll(tmp_path, monkeypatch, native_deadline_http, mode):
+    from src.data import ecmwf_open_data as source
+    NativeSession = source._NativeDeadlineSession
+    s = _normal_native_http(tmp_path, monkeypatch)
+    state = native_deadline_http
+    state.mode = mode
+    original_get = s.session.get
+    bounded = NativeSession()
+    bounded.trust_env = False
+    injected = [False]
+    def get(url, **kwargs):
+        original = original_get(url, **kwargs)
+        if not injected[0] and "Range" in kwargs.get("headers", {}):
+            injected[0] = True
+            state.body = original.body
+            bounded._zeus_deadline = s.session._zeus_deadline
+            return bounded.get(state.url, **kwargs)
+        return original
+    s.session.get = get
+    started = time.monotonic()
+    try:
+        first = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": started + .6})
+        assert first["status"] == "DEFERRED" and first["observed_count"] == 0, first
+        assert time.monotonic() - started < .8
+        assert not list(s.paths.raw_root.rglob("step*-member*.grib2"))
+        s.session.get = original_get
+        complete = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": time.monotonic() + 30})
+        assert complete["status"] == "AVAILABLE" and complete["observed_count"] == 102, complete
+        assert complete["qualification_status"] == "UNKNOWN" and complete["source_issued_at"] is None
+    finally:
+        bounded.close()
         s.conn.close()
 
 
@@ -731,14 +954,14 @@ def test_normal_native_complete_target_subset_does_not_wait_for_other_append(tmp
         clock = [100.]
         monkeypatch.setattr(s.module.time, "monotonic", lambda: clock[0])
         get = s.session.get
+        spent = [False]
         def partial_get(url, **kwargs):
+            if spent[0] and url.endswith(".index"):
+                clock[0] += 1.
             response = get(url, **kwargs)
             if "Range" in kwargs.get("headers", {}):
-                chunks = response.iter_content
-                def finish(**options):
-                    yield from chunks(**options)
-                    clock[0] += 60.
-                response.iter_content = finish
+                spent[0] = True
+                clock[0] += 58.
             return response
         s.session.get = partial_get
         partial = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": 159.})

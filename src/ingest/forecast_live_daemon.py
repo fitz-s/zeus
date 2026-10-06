@@ -1760,7 +1760,7 @@ def _run_journaled_opendata_track(track: str) -> dict:
 
 
 def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only: bool = False) -> list[dict]:
-    """Active exact-run transport requirements, independently of q readiness."""
+    """Current roles first, then actual verified future full-Y market needs."""
     from src.data.ecmwf_open_data import _native_temperature_steps, TRACKS
     from src.data.forecast_target_contract import compute_target_local_day_window_utc, required_period_end_steps
     from src.state.source_run_repo import get_source_run
@@ -1770,7 +1770,8 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
     # Coverage supplies required transport steps, not readiness or shape
     # authority. Only actual active local-day markets enter this bounded plan.
     rows = conn.execute("""
-        SELECT coverage.*, source.source_cycle_time AS native_run_utc
+        SELECT coverage.*, source.source_cycle_time AS native_run_utc,
+               source.observed_steps_json AS native_source_observed_steps_json
           FROM source_run_coverage coverage JOIN source_run source
             ON source.source_run_id=coverage.source_run_id
          WHERE coverage.source_id='ecmwf_open_data'
@@ -1778,13 +1779,15 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
            AND source.status IN ('SUCCESS','PARTIAL')
            AND source.ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP')
            AND source.source_cycle_time<=?
-           AND coverage.target_window_start_utc<=? AND coverage.target_window_end_utc>?
+           AND coverage.target_window_end_utc>? AND coverage.expires_at>?
+           AND (coverage.target_window_start_utc<=? OR
+                (coverage.completeness_status='COMPLETE' AND coverage.readiness_status='LIVE_ELIGIBLE'))
            AND EXISTS (SELECT 1 FROM market_events market
              WHERE market.city=coverage.city AND market.target_date=coverage.target_local_date
                AND market.temperature_metric=coverage.temperature_metric
                AND market.token_id IS NOT NULL AND market.range_label IS NOT NULL)
          ORDER BY source.source_cycle_time DESC, coverage.city, coverage.temperature_metric
-    """, (now_utc.isoformat(), now_utc.isoformat(), now_utc.isoformat())).fetchall()
+    """, (now_utc.isoformat(), now_utc.isoformat(), now_utc.isoformat(), now_utc.isoformat())).fetchall()
     by_run = {}
     for row in rows:
         by_run.setdefault(row["native_run_utc"], []).append(row)
@@ -1813,8 +1816,13 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
                 return False
         return len(sources) == 2 if require_pair else bool(sources)
 
+    # Split turns, not identities: every city/metric in the same run and phase
+    # shares originals; a future append cannot block an already complete scope.
+    ordered = [(run_text, [row for row in run_rows
+        if (_parse_utc_timestamp(row["target_window_start_utc"]) > now_utc) == future], future)
+        for future in (False, True) for run_text, run_rows in by_run.items()]
     claimed, plans = set(), []
-    for run_text, coverage_rows in by_run.items():
+    for run_text, coverage_rows, future in ordered:
         run = _parse_utc_timestamp(run_text)
         if run is None:
             continue
@@ -1844,7 +1852,7 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
             try:
                 window = compute_target_local_day_window_utc(city_timezone=row["city_timezone"],
                     target_local_date=datetime.fromisoformat(row["target_local_date"]).date())
-                if (not window.start_utc <= now_utc < window.end_utc
+                if (not now_utc < window.end_utc
                         or row["target_window_start_utc"] != window.start_utc.isoformat()
                         or row["target_window_end_utc"] != window.end_utc.isoformat()):
                     continue
@@ -1857,11 +1865,17 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
                 ends = json.loads(row["expected_steps_json"])
                 if ends != list(required_period_end_steps(source_cycle_time=run,
                         target_window_start_utc=window.start_utc, target_window_end_utc=window.end_utc,
-                        period_hours=3)):
+                        period_hours=3)) or not set(ends).issubset(json.loads(row["native_source_observed_steps_json"])):
                     continue
-                endpoints = _native_temperature_steps(run, ends)
-                first = endpoints[0] - (3 if endpoints[0] <= 144 else 6)
-                knots = _native_temperature_steps(run, [first, *endpoints])
+                start_hours = (max(window.start_utc, run) - run).total_seconds() / 3600
+                first = int(start_hours // (3 if start_hours <= 144 else 6)) * (3 if start_hours <= 144 else 6)
+                last = ends[-1] if ends[-1] <= 144 else ((ends[-1] + 5) // 6) * 6
+                # H/L period-end plans do not turn post-144h native six-hour
+                # instants into three-hour observations. Only necessary native
+                # brackets are selected; the advertised 06/18 control horizon
+                # is validated by the source, never extended past step90.
+                knots = _native_temperature_steps(run, [step for step in range(first, last + 1)
+                    if step % (3 if step <= 144 else 6) == 0])
                 # A late run may inventory its future only; no prefix observation
                 # or full-Y qualification is manufactured by truncating daystart.
                 if (run + timedelta(hours=knots[0]) > max(window.start_utc, run)
@@ -1874,7 +1888,7 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
         if not wanted:
             continue
         claimed.update(targets)
-        plans.append({"run": run, "steps": sorted(wanted), "targets": sorted(targets),
+        plans.append({"run": run, "steps": sorted(wanted), "targets": sorted(targets), "future": future,
             "priority": lambda run=run, sources=dict(sources): mandatory_complete(run, sources)})
     return plans
 
@@ -1883,16 +1897,18 @@ def _drain_native_temperature_source(conn, *, now_utc: datetime, deadline_monoto
     """Read or drain exact active originals without refreshing this poll's cut."""
     from src.data.ecmwf_open_data import collect_native_temperature_source
 
-    results = []
+    results, future_results = [], []
     for plan in _native_temperature_transport_plans(conn, now_utc=now_utc):
         result = collect_native_temperature_source(conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
             cycle_deadline_monotonic=deadline_monotonic,
             _priority=plan["priority"])
-        results.append({**result, "transport_run_utc": plan["run"].isoformat()})
+        (future_results if plan["future"] else results).append({**result, "transport_run_utc": plan["run"].isoformat()})
     if len(results) == 1:
-        return results[0]
+        return {**results[0], "future_runs": future_results}
     if results:
-        return {"status": "DRAINED", "qualification_status": "UNKNOWN", "runs": results}
+        return {"status": "DRAINED", "qualification_status": "UNKNOWN", "runs": results, "future_runs": future_results}
+    if future_results:
+        return {"status": "DRAINED", "qualification_status": "UNKNOWN", "future_runs": future_results}
     return {"status": "DEFERRED", "qualification_status": "UNKNOWN",
         "reason": "NATIVE_2T_TARGET_OR_MANDATORY_PLAN_UNKNOWN"}
 

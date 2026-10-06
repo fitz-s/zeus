@@ -26,9 +26,12 @@ def normal_native_poll(tmp_path, monkeypatch, request):
     from src.state.source_run_coverage_repo import write_source_run_coverage
     from tests.test_ecmwf_open_data_collect_cycle import _normal_native_http
 
-    hour = getattr(request, "param", 0)
+    options = getattr(request, "param", 0)
+    hour = options.get("hour", 0) if isinstance(options, dict) else options
+    future_supply = isinstance(options, dict) and options.get("future", False)
     wanted = tuple(range(0, 25 - hour, 3))
-    s = _normal_native_http(tmp_path, monkeypatch, steps=wanted, hour=hour)
+    supplied = tuple(range(0, 49 - hour, 3)) if future_supply else wanted
+    s = _normal_native_http(tmp_path, monkeypatch, steps=supplied, hour=hour)
     now = s.run + timedelta(hours=1)
     identities = {}
     for track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
@@ -41,7 +44,7 @@ def normal_native_poll(tmp_path, monkeypatch, request):
         write_source_run(s.conn, source_run_id=run_id, source_id="ecmwf_open_data",
             track=track + "_full_horizon", release_calendar_key=identity["release_calendar_key"],
             source_cycle_time=s.run, status="SUCCESS", completeness_status="COMPLETE",
-            expected_steps_json=list(wanted[1:]), observed_steps_json=list(wanted[1:]),
+            expected_steps_json=list(supplied[1:]), observed_steps_json=list(supplied[1:]),
             fetch_started_at=now, fetch_finished_at=now, data_version=identity["data_version"])
         daemon._write_job_run(s.conn, identity=identity, status="SUCCESS", now_utc=now,
             result={"status": "ok", "source_run_id": run_id, "snapshots_inserted": 1})
@@ -56,8 +59,8 @@ def normal_native_poll(tmp_path, monkeypatch, request):
                 data_version=identity["data_version"], expected_members=51, observed_members=51,
                 expected_steps_json=expected, observed_steps_json=expected,
                 target_window_start_utc=start, target_window_end_utc=start + timedelta(days=1),
-                completeness_status="PARTIAL" if metric == "low" else "COMPLETE",
-                readiness_status="BLOCKED" if metric == "low" else "LIVE_ELIGIBLE",
+                completeness_status="PARTIAL" if metric == "low" and not (future and future_supply) else "COMPLETE",
+                readiness_status="BLOCKED" if metric == "low" and not (future and future_supply) else "LIVE_ELIGIBLE",
                 reason_code="PRIVATE_INTERVAL_CENSORED_Y" if metric == "low" else None,
                 computed_at=now, expires_at=start + timedelta(days=1))
             s.conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) "
@@ -78,6 +81,95 @@ def normal_native_poll(tmp_path, monkeypatch, request):
     monkeypatch.setattr(source, "_resolve_opendata_paths", lambda: s.paths)
     yield SimpleNamespace(**vars(s), daemon=daemon, identities=identities, now=now)
     s.conn.close()
+
+
+@pytest.mark.parametrize("normal_native_poll", ({"hour": 0, "future": True},
+    {"hour": 6, "future": True}, {"hour": 18, "future": True}), indirect=True, ids=("00", "06", "18"))
+def test_normal_native_real_future_market_does_not_remain_without_y_points(normal_native_poll):
+    s = normal_native_poll
+    result = s.daemon._run_journaled_opendata_track_if_due("mx2t6_high")
+    active = result["native_temperature_source"]
+    manifest = json.loads(Path(active["manifest_path"]).read_bytes())
+    wanted = tuple(range(0, 49 - s.run.hour, 3))
+    assert manifest["product_steps"] == list(wanted)
+    assert len(manifest["messages"]) == 51 * len(wanted)
+    assert s.conn.execute("SELECT COUNT(*) FROM ensemble_snapshots").fetchone()[0] == 0
+    assert active["qualification_status"] == "UNKNOWN"
+    assert active["future_runs"][0]["required_steps"] == list(range(24 - s.run.hour, 49 - s.run.hour, 3))
+    assert active["future_runs"][0]["status"] == "AVAILABLE"
+    calls = [call for call in s.calls if "Range" in call[1].get("headers", {})]
+    assert len(calls) == 51 * len(wanted)  # Shared boundary and city/metric requests are not downloaded twice.
+
+
+@pytest.mark.parametrize("normal_native_poll", ({"hour": 0, "future": True},), indirect=True)
+def test_normal_native_future_append_partial_keeps_active_subset_and_resumes_originals(normal_native_poll, monkeypatch):
+    s = normal_native_poll
+    clock = [100.]
+    monkeypatch.setattr(s.daemon.time, "monotonic", lambda: clock[0])
+    get = s.session.get
+    captured, spent = [False], [False]
+    def partial_get(url, **kwargs):
+        if captured[0] and not spent[0] and url.endswith(".index"):
+            spent[0] = True
+            clock[0] += 1.
+        response = get(url, **kwargs)
+        if not captured[0] and "-27h-" in url and "Range" in kwargs.get("headers", {}):
+            captured[0] = True
+            clock[0] += 58.
+        return response
+    s.session.get = partial_get
+    first = s.daemon._run_journaled_opendata_track_if_due("mx2t6_high")["native_temperature_source"]
+    assert first["status"] == "AVAILABLE" and first["future_runs"][0]["status"] == "INCOMPLETE", first
+    assert first["future_runs"][0]["observed_count"] == 52
+    manifest = Path(first["manifest_path"])
+    originals = json.loads(manifest.read_bytes())["messages"]
+    row = s.conn.execute("SELECT * FROM source_run WHERE track='2t_instant_native_knots'").fetchone()
+    assert row["status"] == "PARTIAL" and row["source_available_at"] is None
+    current = s.module.collect_native_temperature_source(conn=s.conn, run_utc=s.run,
+        required_steps=list(range(0, 25, 3)), cycle_deadline_monotonic=159., _priority=lambda: True, _paths=s.paths)
+    assert current["status"] == "AVAILABLE" and current["observed_count"] == 459
+    s.session.get = get
+    clock[0] = 200.
+    second = s.daemon._run_journaled_opendata_track_if_due("mn2t6_low")["native_temperature_source"]
+    assert second["status"] == second["future_runs"][0]["status"] == "AVAILABLE", second
+    after = {(m["member"], m["step_hours"]): m for m in json.loads(manifest.read_bytes())["messages"]}
+    assert all(after[(m["member"], m["step_hours"])] == m for m in originals)
+    assert len(after) == 867
+    assert s.conn.execute("SELECT status FROM source_run WHERE track='2t_instant_native_knots'").fetchone()[0] == "SUCCESS"
+    assert second["qualification_status"] == "UNKNOWN"
+
+
+@pytest.mark.parametrize("timezone_name,day_offset,expected_knots", (
+    ("Asia/Kolkata", 1, tuple(range(18, 46, 3))),
+    ("UTC", 6, (144, 150, 156, 162, 168)),
+    ("UTC", 10, ()),
+))
+def test_normal_native_future_plan_uses_exact_timezone_end_and_native_horizon(normal_native_poll, timezone_name, day_offset, expected_knots):
+    from src.data.forecast_target_contract import compute_target_local_day_window_utc, required_period_end_steps
+    s = normal_native_poll
+    target_day = s.run.date() + timedelta(days=day_offset)
+    window = compute_target_local_day_window_utc(city_timezone=timezone_name, target_local_date=target_day)
+    ends = list(required_period_end_steps(source_cycle_time=s.run,
+        target_window_start_utc=window.start_utc, target_window_end_utc=window.end_utc, period_hours=3))
+    s.conn.execute("DELETE FROM market_events")
+    s.conn.execute("DELETE FROM source_run_coverage WHERE temperature_metric='low' OR target_local_date!=?", (s.run.date().isoformat(),))
+    s.conn.execute("UPDATE source_run_coverage SET target_local_date=?,city_timezone=?,target_window_start_utc=?, "
+        "target_window_end_utc=?,expected_steps_json=?,observed_steps_json=?,expires_at=?",
+        (target_day.isoformat(), timezone_name, window.start_utc.isoformat(), window.end_utc.isoformat(),
+         json.dumps(ends), json.dumps(ends), window.end_utc.isoformat()))
+    s.conn.execute("UPDATE source_run SET expected_steps_json=?,observed_steps_json=?",
+        (json.dumps(ends), json.dumps(ends)))
+    s.conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) VALUES(?,?,?,?,?,?)",
+        ("private-native-future-geometry", "London", target_day.isoformat(), "high", "private-token", "point"))
+    s.conn.commit()
+    plans = s.daemon._native_temperature_transport_plans(s.conn, now_utc=s.now)
+    assert [plan["steps"] for plan in plans] == ([list(expected_knots)] if expected_knots else [])
+    if plans:
+        assert plans[0]["future"] and plans[0]["targets"] == [("London", target_day.isoformat(), "high", "full_Y")]
+        assert s.run + timedelta(hours=expected_knots[0]) <= window.start_utc
+        assert s.run + timedelta(hours=expected_knots[-1]) >= window.end_utc
+    assert s.daemon._native_temperature_transport_plans(s.conn, now_utc=window.end_utc) == []
+    assert s.calls == []  # Geometry evidence is not transport or source qualification.
 
 
 @pytest.mark.parametrize("normal_native_poll", (0, 6), indirect=True)
@@ -245,10 +337,13 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
     monkeypatch.setattr(daemon, "_held_revision_migration_identity", lambda *args, **kwargs: None)
     monkeypatch.setattr(daemon, "_committed_held_opendata_wake", lambda *args, **kwargs: None)
     monkeypatch.setattr(source, "_resolve_opendata_paths", lambda: s.paths)
-    clock, expired = [100.], [False]
+    clock, expired, spent = [100.], [False], [False]
     monkeypatch.setattr(daemon.time, "monotonic", lambda: clock[0])
     get = s.session.get
     def private_get(url, **kwargs):
+        if expired[0] and turn != "503" and not spent[0] and url.endswith(".index"):
+            spent[0] = True
+            clock[0] += 1.
         response = get(url, **kwargs)
         if turn == "503" and not expired[0]:
             expired[0] = True
@@ -256,11 +351,7 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
             return response
         if "Range" in kwargs.get("headers", {}) and not expired[0]:
             expired[0] = True
-            chunks = response.iter_content
-            def finish_part(**options):
-                yield from chunks(**options)
-                clock[0] += 60.
-            response.iter_content = finish_part
+            clock[0] += 58.  # Complete original before the cut; next index spends its remaining second.
         return response
     s.session.get = private_get
     runner = daemon.run_opendata_track
