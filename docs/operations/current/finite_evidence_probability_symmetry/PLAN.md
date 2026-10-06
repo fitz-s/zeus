@@ -18300,3 +18300,55 @@ then removed by apply_patch; it is recoverable from the tracked example, not
 the live configuration and not an agent-owned runtime config change. All123
 raw audit originals remain in place, untracked and unstaged. Fresh final
 fetch still reports origin/live8069 with candidate an ordinary descendant.
+
+### BEFOREEDIT: real coordinate-bound native dispatcher identity
+
+ROOT accepted77ac21e29edbea90660ef50bc69b1fbbc5f77cf9, which fast-forward landed
+and was normally loaded by the registered restart (actualrc0). New MAIN46871
+wrote77ac at2026-10-06T07:23:58.454768Z; INGEST35680 and FORECAST35714 boot77ac.
+The preSTOP repair handoff had15 held/zero nonterminal commands/full recent
+held books. Poststart reported6 fresh/15 open,8 probability-degraded and1
+quote-only; EDLI916102 hadscope191. The shared guard recovery reported
+restart_guard_not_selected; the actual read-only selected-guard accessor
+subsequently returnedNone. Loader success is not new-revision consumption.
+HK latest752689H/752691L computed07:18 are immutable preBOOT v6 certificates,
+and new held events correctly reject readiness_NOT_LIVE_GRADE rather than
+restamp them. A bounded source_run recent-row sample shows00H/L NOT_RELEASED
+and prior12/18H/L SUCCESS51, but no new native role row in that bounded tail.
+
+PostBOOT RO diagnosed a persistent producer seam, independently confirmed by
+the source owner: src/ingest/forecast_live_daemon.py mandatory_complete compares
+dataset_id to bare TRACKS[track].data_version; its sibling-source query uses the
+same bare base. The actual normal collector assigns coordinate_bound_data_version
+before canonical source_run writes. Exact live PK reads for valid12Z H/L show
+SUCCESS/complete steps and matching SUCCESS job journals, but dataset_id is
+base__coordsha_1932d03ce9a52198743d46cb073221776bb35ac6a8d95627142db248fdb4e54f,
+so both bare-base predicates are false. No next cadence can admit those real
+coordinate-bound rows under the unchanged predicate. Legacy private dispatcher
+fixtures wrote bare dataset IDs and did not disprove this real producer seam.
+
+ROOT approves the smallest repair solely in src/ingest/forecast_live_daemon.py
+(mandatory_complete and sibling-source selection) and the existing
+tests/test_forecast_live_daemon.py. Native executor owns those two paths;
+q integrator does not edit them. Use the owning exact coordinate-bound version
+with the actual current manifest identity, never startswith/base fallback or
+weakened existing status/steps/job-clock/PIT/source/coordinate qualification. True RED
+must normal-collect original fields into real coordinate-bound source_run/job
+records and pass them to the actual H/L dispatcher; wrong/old coordinates,
+raw-missing PARTIAL, RUNNING/FAILED and causal-clock controls retain refusal.
+Raw-step-complete interval-censored PARTIAL remains eligible for the existing
+independent-X transport path; this repair changes only two dataset comparisons.
+The journaled normal callback attempts native drainage after its mandatory
+result, including NOT_RELEASED, so the lawful older-role path remains reachable.
+Native executor starts from origin127c15b88456e0275887f814af6a3a0610c678fe;
+its queue-only markerless-performance peer delta has no daemon/test overlap.
+Integrator will normally rebase onto that current origin and recheck the
+affected queue markerless/current-identity RESET controls before landing.
+SCOPE is each native
+transport run/target/city/metric; DRAIN is the existing normal scheduler;
+RESET is the exact lawful source+coordinate identity, not newest replica time.
+The correction is not yet loaded or consumption-verified. No manual source
+HTTP, seed/wake, SQL update, guard reset or extra restart is authorized here.
+The path src/data/ecmwf_source_daemon.py was a dispatch typo, does not exist,
+and must not be created. External NOT_RELEASED/HTTP failures remain separate
+availability constraints after this identity repair.
