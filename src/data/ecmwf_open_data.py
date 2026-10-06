@@ -169,7 +169,7 @@ def _native_index_receipt_path(index: Path, receipt_sha: str) -> Path:
     a normal poll. RESET: strict digest readback; legacy is permitted only when
     no digest generation exists and its bytes match the exact original digest.
     """
-    if not re.fullmatch(r"[0-9a-f]{64}", receipt_sha):
+    if type(receipt_sha) is not str or not re.fullmatch(r"[0-9a-f]{64}", receipt_sha):
         raise ValueError("NATIVE_2T_ORIGINAL_INDEX_RECEIPT_INVALID")
     generation = index.with_name(f"{index.stem}.http-{receipt_sha}.json")
     receipt = generation if _path_present(generation) else index.with_suffix(".http.json")

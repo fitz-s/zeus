@@ -1338,6 +1338,37 @@ def test_normal_native_retained_tamper_never_remints(tmp_path, monkeypatch, faul
         s.conn.close()
 
 
+@pytest.mark.parametrize("malformed", (None, True, 3, [], {}), ids=("null", "bool", "int", "list", "dict"))
+def test_normal_native_malformed_receipt_hash_is_scoped_unknown_and_resets(tmp_path, monkeypatch, malformed):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    try:
+        first = s.module.collect_native_temperature_source(**s.args)
+        assert first["status"] == "AVAILABLE", first
+        manifest = Path(first["manifest_path"])
+        saved = json.loads(manifest.read_bytes())["messages"][0]
+        proof_path = Path(saved["path"]).with_suffix(".grib2.proof.json")
+        original = proof_path.read_bytes()
+        before = tuple(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (first["source_run_id"],)).fetchone())
+        proof = json.loads(original); proof["index_receipt_sha256"] = malformed
+        proof_path.write_text(json.dumps(proof))
+        s.calls.clear()
+        refused = s.module.collect_native_temperature_source(**s.args)
+        assert refused["status"] == "UNKNOWN" and refused["reason"] == "NATIVE_2T_ORIGINAL_INDEX_RECEIPT_INVALID", refused
+        assert s.calls == [] and refused["qualification_status"] == "UNKNOWN"
+        inputs_dir = tmp_path / "malformed-readback"; inputs_dir.mkdir()
+        inputs = _native_temperature_knots_fixture(inputs_dir, steps=(0, 3))
+        scope_args = (s.conn, SimpleNamespace(source_run_id=first["source_run_id"]), manifest, inputs)
+        scope = _native_source_scope(*scope_args)
+        assert scope.status == "UNKNOWN" and scope.available_at is None, scope
+        assert tuple(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (first["source_run_id"],)).fetchone()) == before
+        proof_path.write_bytes(original)
+        assert _native_source_scope(*scope_args).status == "AVAILABLE"
+        assert s.module.collect_native_temperature_source(**s.args)["status"] == "AVAILABLE" and s.calls == []
+        assert proof_path.read_bytes() == original
+    finally:
+        s.conn.close()
+
+
 def test_normal_native_six_hour_knots_are_not_hourly_or_prior_observations(tmp_path, monkeypatch):
     s = _normal_native_http(tmp_path, monkeypatch, steps=(144, 150))
     try:
