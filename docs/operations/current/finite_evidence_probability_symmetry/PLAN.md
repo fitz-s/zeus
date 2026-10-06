@@ -18824,3 +18824,84 @@ semantics and its declared executable antibodies. The hosted manual
 live-release-gate cannot prove local loaded/runtime qualification. These gates
 and the separately owned new preSTOP source-grade proof remain OPEN; earlier
 large-suite evidence is not relabelled as current5dc recovery proof.
+
+2026-10-06 CI type-boundary BEFOREEDIT, ROOT-approved exactly three paths:
+scripts/ci/semantic_diff_classifier.py; architecture/money_path_objects.yaml;
+tests/test_money_path_semantic_ci.py. On5dc->f1f, the actual required classifier
+exits2 for21 tokens:20 source/retention diagnostic reasons and one explicit
+ingest_mode ARCHIVE_BACKFILL. The old scanner uses money-word substrings in
+every quoted literal, so ACK inside BACKFILL is counted as money lifecycle.
+This is not permission to register21 lifecycle states or waive the required
+gate. Add exact owner/token/AST-use source-protocol declarations and a separate
+classification category. Any state/status/Enum/SQL-CHECK/action use of the same
+literal, missing structural evidence, wrong owner or undeclared mode remains
+unregistered/fail-closed. Source reasons do not become runtime modes, authority,
+clock or new actor. SCOPE only the declared native source protocol usages;
+DRAIN CI reclassification after the typed source/registry match; RESET exact
+structural proof, not UNKNOWN suffix suppression. Antibodies cover the original
+21 failures, legitimate reason/mode, mixed reason+state, wrong owner, Enum/CHECK,
+BUY/SELL and unknown mode. Existing money-path state detection is preserved.
+The source public H/L closure now passes1P103.533/1P103.501 with0E/F/skip;
+independent f1f restore/UTC review APPROVE0C/I, not loader or live qualification.
+
+2026-10-06 remaining rollback repairs BEFOREEDIT, ROOT-authorized disjoint
+ownership: native child alone restores five production paths and four existing
+tests from approved custody/HKO fixes, on f1f with peer/current math preserved.
+Actual paths (not nonexistent ingest aliases): src/data/wu_hourly_client.py;
+src/data/ogimet_hourly_client.py; src/data/observation_instants_writer.py;
+scripts/obs_live_tick.py; src/data/daily_obs_append.py. Existing tests are
+tests/test_hourly_clients_parse.py; tests/test_obs_v2_writer.py;
+tests/test_observation_instants_v2_freshness.py;
+tests/test_k2_live_ingestion_relationships.py. Approved references are
+ad5cb9aab2056eab934f8fad65ad94dc84a4ffe9 (generic custody) and
+d488d326d53ee6141db433ae9e61c88efd5e5afc (HKO future daily entity); use their
+necessary a577 behavior, not full historical branch merges. Preserve each
+body/first receipt, credential stripping, finite CAS/clock and old-NULL/hash
+NOOP contracts. Do not synthesize historical bodies or source-issued clocks.
+Forward normal real-HTTP-content/canonical-row antibodies close these defects;
+existing old parsed settlement observations are not retrospectively repaired.
+No parent edits to those nine child paths. HKO cumulative original/provisional
+prefix is REFUTED as a rollback casualty:790 did not change its owning producer,
+reader or request bridge. Native paired-body CAS/GC is already restored in740,
+not an unresolved side gap; live qualification is still a separate OPEN proof.
+
+Parent alone additionally restores the approved33-line durable monitor timing
+slice in src/engine/cycle_runtime.py and existing
+tests/test_live_safety_invariants.py, from a577 necessary delta. This records
+primary belief seconds/deadline scope/stage on canonical MONITOR_REFRESHED,
+not an economic or exit authority; no timeout extension, new actor, changed
+action/quote/budget law or main/reactor_wake overwrite. Run the minimal actual
+persisted-field controls; previous whole q/source suites do not need repetition
+for unchanged bytes. Every known producer issue must have fix/refute disposition
+before final delivery, and source/loader/CI/runtime remain separate verdicts.
+
+2026-10-06 CI/timing recovery evidence, source epoch f1f091dd:
+The final typed-protocol classifier runs the actual5dc->f1f diff with rc0,
+21 source-protocol values and no unregistered objects. Its17 self-defense tests
+pass4.75s, XML /tmp/zeus-native-protocol-classifier-final3.xml SHA256
+4883af0c8d0a05532b3bc4ec466a7007c9672addb2922af01d06d13a36e44dc3.
+The last structural correction distinguishes an ingest-mode comparison used
+as a qualification-status predicate from actually writing/comparing a money
+state. Direct command_state comparison and mixed action/status/Enum/CHECK,
+wrong-owner and unknown-mode usages still fail closed. No source or lifecycle
+grammar was changed by this CI correction.
+Schema fingerprint and test-quality metadata checks pass. The required
+single-live checker does NOT pass: exact current5dc source-object replay finds
+56 baseline findings and56 candidate findings, added/removed sets both empty.
+Earlier53 was an imprecise count, not a clean result or waiver. Required
+release and routed relationship execution remains a separate open verdict.
+The restored timing source adds exactly33 lines and both timing paths are
+byte-identical to approved a577. Actual persisted-field/deadline-isolation
+controls pass12 in4.65s, XML /tmp/zeus-restored-monitor-timing.xml SHA256
+7d79d43b313d6a246c6c66c2fc9289a7cdc223949e8c48b384f005ec8c36d4d4.
+AST4/YAML1, scoped planning/map/freshness and whitespace checks pass. These
+are diagnostic receipts, not new exit/action authority or a live-load verdict.
+
+Loader prior-carrier qualification remains open until its public HELD path
+uses the actual causal canonical DAY0_EXTREME_UPDATED event and the owning
+monitor provenance/bundle overlay predicates. Raw-HWM consumed-proof validity
+alone is not proof of current-provider/spot redecision: normal monitoring
+subsequently prepares the current family, while a prior immutable carrier may
+only be a valid base across an incomplete successor wave. Same-clock prefix
+corrections cannot pass as monotone advances; no fabricated event or None
+consumability can substitute for the canonical event/rebuild relationship.

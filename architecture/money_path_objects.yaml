@@ -1206,6 +1206,68 @@ state_machines:
     invariant_tests:
       - tests/test_run_mode_failure_surfaces.py
 
+source_protocol_objects:
+  native_temperature_diagnostic_reason:
+    owner: src/data/ecmwf_open_data.py
+    kind: source_diagnostic_reason
+    description: >
+      Scoped original-body, physical qualification and retention refusal reasons,
+      not lifecycle states, observation authority or source clocks. Only these
+      declared structural reason uses may be classified outside money states.
+    values:
+      - NATIVE_2T_CAPTURE_UNKNOWN
+      - NATIVE_2T_GRID_OR_PROCESS_UNKNOWN
+      - NATIVE_2T_QUALIFIED_PREFIX_OR_BRACKET_UNKNOWN
+      - ROLE_RETENTION_REFERENCE_SCOPE_UNKNOWN
+      - ROLE_RETENTION_NATIVE_CANDIDATES_UNKNOWN
+      - ROLE_RETENTION_NATIVE_FRONTIER_UNKNOWN
+      - ROLE_RETENTION_POSTERIOR_REFERENCE_UNKNOWN
+      - ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN
+      - ROLE_RETENTION_UNFINISHED_REFERENCE_UNKNOWN
+      - ROLE_RETENTION_COMMAND_CERTIFICATE_UNKNOWN
+      - ROLE_RETENTION_COMMAND_REFERENCE_UNKNOWN
+      - ROLE_RETENTION_COMMAND_AUTHORITY_UNKNOWN
+      - ROLE_RETENTION_RAW_DIRECTORY_UNKNOWN
+      - ROLE_RETENTION_SNAPSHOT_REFERENCE_UNKNOWN
+      - ROLE_RETENTION_CAPTURE_REFERENCE_UNKNOWN
+      - ROLE_RETENTION_CANONICAL_REFERENCE_UNKNOWN
+      - ROLE_RETENTION_REFERENCE_REVALIDATION_UNKNOWN
+      - ROLE_ORIGINAL_GC_FILE_UNKNOWN
+      - NATIVE_2T_PRIORITY_UNKNOWN
+    uses:
+      dictionary_fields: [reason]
+      exception_calls: [ValueError]
+      append_receivers: [errors, reference_errors]
+      keyword_fields: [role_reference_errors]
+      positional_arguments: {NativeTemperatureSource: 4}
+      membership_bindings: [global_unknown]
+    invariant_tests:
+      - tests/test_ecmwf_open_data_collect_cycle.py
+      - tests/test_money_path_semantic_ci.py
+  native_scheduler_diagnostic_reason:
+    owner: src/ingest/forecast_live_daemon.py
+    kind: source_diagnostic_reason
+    values: [NATIVE_2T_TARGET_OR_MANDATORY_PLAN_UNKNOWN]
+    uses:
+      dictionary_fields: [reason]
+    invariant_tests:
+      - tests/test_forecast_live_daemon.py
+      - tests/test_money_path_semantic_ci.py
+  native_temperature_ingest_mode:
+    owner: src/data/ecmwf_open_data.py
+    kind: source_ingest_mode
+    description: >
+      Original source provenance role, not a trading runtime or action state.
+      ARCHIVE_BACKFILL never qualifies as SCHEDULED_LIVE consumer possession.
+    values: [ARCHIVE_BACKFILL, SCHEDULED_LIVE]
+    uses:
+      parameter_fields: [ingest_mode]
+      dictionary_get_fields: [ingest_mode]
+      membership_bindings: [ingest_mode, mode]
+    invariant_tests:
+      - tests/test_ecmwf_open_data_collect_cycle.py
+      - tests/test_money_path_semantic_ci.py
+
 schema_objects:
   authority_fabricating_defaults:
     - VERIFIED

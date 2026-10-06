@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Created: 2026-05-21
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-10-06
 # Authority basis: AGENTS.md money-path semantic CI directive; architecture/money_path_objects.yaml
 """Classify git diffs by money-path semantic object changes.
 
@@ -13,6 +13,7 @@ the invariant coverage gate.
 from __future__ import annotations
 
 import argparse
+import ast
 import fnmatch
 import json
 import os
@@ -27,6 +28,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 RISK_ORDER = {"P3": 0, "P2": 1, "P1": 2, "P0": 3}
+_STATE_MARKERS = ("REDEEM", "SUBMIT", "ACK", "FILLED", "REVIEW", "UNKNOWN", "REJECTED", "PARTIAL", "INTENT")
 
 STATE_RE = re.compile(r"['\"]([A-Z][A-Z0-9_]{3,})['\"]")
 ENUM_MEMBER_RE = re.compile(r"^\+\s+([A-Z][A-Z0-9_]{3,})\s*=")
@@ -58,6 +60,7 @@ class Classification:
     new_db_columns: list[str] = field(default_factory=list)
     new_states: list[str] = field(default_factory=list)
     new_error_codes: list[str] = field(default_factory=list)
+    new_source_protocol_values: list[str] = field(default_factory=list)
     new_strategy_keys: list[str] = field(default_factory=list)
     new_external_calls: list[str] = field(default_factory=list)
     new_side_effects: list[str] = field(default_factory=list)
@@ -88,6 +91,7 @@ class Classification:
             "new_db_columns": self.new_db_columns,
             "new_states": self.new_states,
             "new_error_codes": self.new_error_codes,
+            "new_source_protocol_values": self.new_source_protocol_values,
             "new_strategy_keys": self.new_strategy_keys,
             "new_external_calls": self.new_external_calls,
             "new_side_effects": self.new_side_effects,
@@ -160,6 +164,116 @@ def all_registered_states(objects: dict[str, Any]) -> set[str]:
     return states
 
 
+def _money_literal_use(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> bool:
+    """A source declaration never exempts a literal used as money state/action."""
+    child = node
+    money = {"state", "status", "phase", "action", "side", "direction", "intent"}
+    def money_field(value: object) -> bool:
+        return isinstance(value, str) and bool(set(re.split(r"[^a-z]+", value.lower())) & money)
+    while child in parents:
+        parent = parents[child]
+        if isinstance(parent, ast.ClassDef) and any(
+            ast.unparse(base).split(".")[-1] in {"Enum", "StrEnum", "IntEnum"} for base in parent.bases
+        ):
+            return True
+        if isinstance(parent, ast.Compare):
+            # A protocol used to choose a status is not itself that status.
+            # Direct state/status comparisons still constitute money use.
+            return any(
+                not isinstance(value, ast.Constant)
+                and money_field(ast.unparse(value))
+                for value in [parent.left, *parent.comparators]
+            )
+        if isinstance(parent, ast.Dict):
+            if any(value is child and isinstance(key, ast.Constant) and money_field(key.value)
+                   for key, value in zip(parent.keys, parent.values)):
+                return True
+        if isinstance(parent, ast.keyword) and money_field(parent.arg):
+            return True
+        if isinstance(parent, (ast.Assign, ast.AnnAssign)):
+            targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+            if any(set(re.split(r"[^a-z]+", ast.unparse(target).lower())) & money for target in targets):
+                return True
+        child = parent
+    return False
+
+
+def _declared_protocol_use(node: ast.Constant, parents: dict[ast.AST, ast.AST], uses: dict[str, Any]) -> bool:
+    child: ast.AST = node
+    while child in parents:
+        parent = parents[child]
+        if isinstance(parent, ast.Dict):
+            if any(value is child and isinstance(key, ast.Constant)
+                   and key.value in uses.get("dictionary_fields", ()) for key, value in zip(parent.keys, parent.values)):
+                return True
+        if isinstance(parent, ast.keyword) and parent.arg in uses.get("keyword_fields", ()):
+            return True
+        if isinstance(parent, ast.Call):
+            name = ast.unparse(parent.func)
+            if name in uses.get("exception_calls", ()) and node is child:
+                return True
+            if (isinstance(parent.func, ast.Attribute) and parent.func.attr == "append"
+                    and ast.unparse(parent.func.value) in uses.get("append_receivers", ()) and node is child):
+                return True
+            index = uses.get("positional_arguments", {}).get(name)
+            if isinstance(index, int) and len(parent.args) > index and parent.args[index] is child:
+                return True
+            if (isinstance(parent.func, ast.Attribute) and parent.func.attr == "get" and len(parent.args) == 2
+                    and parent.args[1] is child and isinstance(parent.args[0], ast.Constant)
+                    and parent.args[0].value in uses.get("dictionary_get_fields", ())):
+                return True
+        if isinstance(parent, ast.arguments):
+            positional = parent.posonlyargs + parent.args
+            defaults = list(zip(positional[len(positional) - len(parent.defaults):], parent.defaults))
+            defaults += list(zip(parent.kwonlyargs, parent.kw_defaults))
+            if any(default is child and arg.arg in uses.get("parameter_fields", ()) for arg, default in defaults):
+                return True
+        if isinstance(parent, (ast.Assign, ast.AnnAssign)) and isinstance(child, (ast.Set, ast.Tuple, ast.List)):
+            targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+            if all(isinstance(target, ast.Name) and target.id in uses.get("membership_bindings", ()) for target in targets):
+                return True
+        if isinstance(parent, ast.Compare):
+            if any(isinstance(value, ast.Name) and value.id in uses.get("membership_bindings", ())
+                   for value in [parent.left, *parent.comparators]):
+                return True
+        child = parent
+    return False
+
+
+def _source_protocol_values(path: str, source: str, objects: dict[str, Any]) -> dict[str, tuple[str, bool]]:
+    """Exact owner/token plus every literal's structural use; unknown is refusal."""
+    declarations = [spec for spec in (objects.get("source_protocol_objects") or {}).values()
+                    if spec.get("owner") == path]
+    if not declarations:
+        return {}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    constants = [node for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+    out: dict[str, tuple[str, bool]] = {}
+    for spec in declarations:
+        values = set(spec.get("values", ()))
+        if spec.get("kind") == "source_ingest_mode":
+            # An unregistered protocol mode also fails, even without ACK/UNKNOWN
+            # in its spelling. Only declared ingest_mode structural uses count.
+            values.update(node.value for node in constants if _declared_protocol_use(node, parents, spec.get("uses", {})))
+        for value in values:
+            occurrences = [node for node in constants if node.value == value]
+            if occurrences:
+                if (spec.get("kind") == "source_ingest_mode" and value in spec.get("values", ())
+                        and not any(marker in value for marker in _STATE_MARKERS)
+                        and not any(_money_literal_use(node, parents) for node in occurrences)):
+                    # An already-declared neutral protocol value needs no money
+                    # exemption. A money use still takes the strict path below.
+                    continue
+                out[value] = (str(spec["kind"]), value in spec.get("values", ()) and all(
+                    not _money_literal_use(node, parents)
+                    and _declared_protocol_use(node, parents, spec.get("uses", {})) for node in occurrences))
+    return out
+
+
 def registered_economic_fields(objects: dict[str, Any]) -> set[str]:
     fields: set[str] = set()
     for group in (objects.get("economic_objects") or {}).values():
@@ -191,7 +305,8 @@ def token_list(values: Iterable[str]) -> str:
     return " ".join(safe)
 
 
-def classify(diff: str, files: list[str], objects: dict[str, Any], mapping: dict[str, Any]) -> Classification:
+def classify(diff: str, files: list[str], objects: dict[str, Any], mapping: dict[str, Any],
+             *, sources: dict[str, str] | None = None) -> Classification:
     result = Classification(changed_files=files)
     add_segment_routes(result, files, mapping)
     registered_states = all_registered_states(objects)
@@ -199,6 +314,12 @@ def classify(diff: str, files: list[str], objects: dict[str, Any], mapping: dict
     authority_defaults = set((objects.get("schema_objects") or {}).get("authority_fabricating_defaults") or [])
     side_effects = objects.get("side_effect_calls") or {}
     source_specs = objects.get("external_truth_sources") or {}
+    if sources is None:
+        # Synthetic diff-file callers must provide enough source structure to
+        # prove the use, never borrow an unchanged owner's real AST as evidence.
+        sources = {path: "\n".join(line[1:] for item_path, line in added_lines(diff) if item_path == path)
+                   for path in files}
+    protocols = {path: _source_protocol_values(path, source, objects) for path, source in sources.items()}
 
     for path, line in added_lines(diff):
         if not semantic_scan_enabled(path):
@@ -242,21 +363,20 @@ def classify(diff: str, files: list[str], objects: dict[str, Any], mapping: dict
         for check in CHECK_IN_RE.finditer(body):
             raw_values = [v.strip().strip("'\"") for v in check.group("values").split(",")]
             state_candidates.update(v for v in raw_values if re.fullmatch(r"[A-Z][A-Z0-9_]{3,}", v))
-        state_prefixes = (
-            "REDEEM",
-            "SUBMIT",
-            "ACK",
-            "FILLED",
-            "REVIEW",
-            "UNKNOWN",
-            "REJECTED",
-            "PARTIAL",
-            "INTENT",
-        )
         for state in sorted(state_candidates):
             if state in error_codes:
                 continue
-            if any(prefix in state for prefix in state_prefixes):
+            protocol = protocols.get(path, {}).get(state)
+            if protocol is not None:
+                kind, proven = protocol
+                if proven:
+                    result.add_many("new_source_protocol_values", [f"{path}:{kind}:{state}"])
+                    result.add_many("required_invariants", ["MP-EXT-001", "MP-EXT-002"])
+                    result.bump("P1")
+                    continue
+                result.add_many("unregistered_objects", [f"protocol-use:{path}:{state}"])
+                result.bump("P0")
+            if any(prefix in state for prefix in _STATE_MARKERS):
                 result.add_many("new_states", [state])
                 result.bump("P0")
                 if state not in registered_states:
@@ -351,7 +471,12 @@ def main(argv: list[str] | None = None) -> int:
     mapping = load_yaml(args.mapping)
     diff = diff_text(args.base, args.head, args.diff_file)
     files = changed_files(args.base, args.head, diff)
-    result = classify(diff, files, objects, mapping)
+    sources = None
+    if args.head and not args.diff_file:
+        added_paths = {path for path, _ in added_lines(diff)}
+        sources = {path: run_git(["show", f"{args.head}:{path}"]) for path in files
+                   if path in added_paths and semantic_scan_enabled(path) and path.endswith(".py")}
+    result = classify(diff, files, objects, mapping, sources=sources)
     data = result.to_dict()
     print(json.dumps(data, indent=2, sort_keys=True))
     if args.json_output:
