@@ -17583,3 +17583,379 @@ identical against an untouched tree; only the whole-registry audit hash differs,
 for any registry edit. Read-only dry run (run 2026-10-05T12Z, target 2026-10-06):
 Qingdao high/low and Panama City high guard PASS, worst |grid-h| 17.5 m / 36.5 m.
 Tests: tests/test_om9_bounded_station_ground.py.
+Actual authorized source-only delivery 2026-10-06T00:01Z: FF push origin
+HEAD:live returned0, origin/live7f67ffa5502daf3954848ba6ebcc55fcaf7f3d9c
+ancestor verified. Live index.lock was freshly ABSENT, with no lock change.
+Only normal live checkout merge --ff-only advanced e7→7f; its15 unrelated
+untracked artifact groups were preserved. No live edit/commit/switch or raw
+upload, and the old named28a branch was not rewritten.
+
+Standalone registered running preflight #1 actualrc1/okfalse, generated
+2026-10-06T00:03:00.553967Z. Known monitor blocker1db5354f-637 had exact monitor
+00:02:48.809667/age11.5s with exit_decision_unavailable. The first full-check
+stdout was tool-truncated and not durably retained; it is not an exhaustive
+blocker disposition. Forecast old-code parity was a failed check, not inferred
+to be restart-blocking: its owning health check explicitly is entry-only.
+No loader was invoked or restart guard armed in response.
+
+Single actual state read00:04:39.645030Z: loaded MAIN still e7bfbef27, stamp
+2026-10-05T23:51:23.524342Z, not live checkout7f. MAIN28566/INGEST25481/
+FORECAST25503 all cwd /Users/leofitz/zeus; MAIN WORLD/FORECAST/TRADE FDs,
+ingest WORLD/FORECAST and forecast FORECAST FD observed. Main heartbeat
+00:04:34.124462, forecast00:04:19.799378 with fixed e7 boot; ingest also e7.
+Config remains file-only SHA d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae;
+actual selected restart-guard getter returned null at this cut. These are not
+a new7f actor load or in-process config-object proof. Normal HK Oct6 HIGH750039
+computed00:00:42 uses source-witness row9951328/native23:50/body45685bf4...941f,
+QUALIFIED reported-only/provisional/absorbingfalse and sharedV3; LOW also carried
+its own reported-only witness (row9951327/native23:40/bodyce9c6733...9c0a).
+The output repeated base64 and was truncated; no full-body replay or LOW q-ID
+claim is made here. These pre-new-load receipts do not prove normal native hook.
+
+ROOT accepted genuine monitor RESET as the basis for one changed-state running
+preflight #2, not unchanged-state retry. Actualrc1/okfalse generated
+2026-10-06T00:09:48.522940Z, raw stdout SHA
+d2903f81c273f2ae7a63ce07bf744939fe30e63cb136a7978b04db00ac2a1894.
+Complete parsed blocker list: substrate-observer, price-channel-ingest and
+post-trade-capital fresh heartbeat fixed e7 differs from checkout7f; plus monitor
+cadence16 open/14fresh, d00e1c60-29b day0_window at00:08:51.993124/age56.4s
+and1db5354f-637 active at00:09:41.881874/age6.5s both exit_decision_unavailable.
+Entry-only failures: forecast_sidecar_health and live_input_posterior_cycle_alignment.
+All other restart checks were individually PASS; no unknown additional blocker
+is added to this parsed list. Compressed original stdout suffix was also tool-
+truncated, so its SHA is not a claim of durable complete raw-report retention.
+
+Protocol source disposition: preflight compares fixed heartbeat code to current
+checkout and has no expected-live-sha override. Registered restart live-trading
+expands required sidecars, arms its own generation, proves capital handoff,
+refreshes prerequisite identities, then runs warm preflight and exact preSTOP
+handoff. Old sidecar parity before that registered source-first phase is normal,
+not authority to fake SHA or manually restart services. The monitor refusals
+are independent real current blockers. Loader remains zero attempts; no guard
+clear, venue action, SQL mutation, forced wake/cycle or new source audit request.
+ROOT's narrow held diagnostic owns the recurrent typed-deadline reason; MAIN
+keeps deployment stopped pending its disposition and fresh authorization.
+Source code landed but native runtime/physical qualification/qmath/profit have
+not passed. Exact123 raw/recovery refs remain protected and no cleanup occurs.
+
+Registered source-first delivery, checked=2026-W41; basis=actual CLI and canonical
+readback below; until=recheck-on-use. ROOT subsequently authorized one complete
+registered `deploy_live.py restart live-trading` attempt, rather than pretending
+the old sidecars passed new-checkout parity. Actual CLI rc0 (session59927): own
+guard expected7f67ffa5502daf3954848ba6ebcc55fcaf7f3d9c, issued
+2026-10-06T00:14:47.243697Z. Prerequisite sidecars were refreshed first; warm
+preflight deferred only recoverable monitor cadence, and exact preSTOP capital
+handoff passed16 open/nonterminal0/full held book before MAIN STOP. New MAIN
+boot and post-start cadence fresh16/open16/probability-degraded0 passed.
+Auction914222 had2 candidates/1scope-family, not an all-universe authority proof.
+CLI also reported worktree_freshness_observation=mismatch and
+restart_guard_not_selected; neither is silently relabeled a stronger proof.
+
+Fresh00:20Z readback: live/loaded7f67, loaded stamp00:16:49.188030Z;
+MAIN39980, INGEST21939, FORECAST22418 all cwd /Users/leofitz/zeus. MAIN canonical
+WORLD/FORECAST/TRADE and INGEST WORLD/FORECAST FDs observed. FORECAST had no DB
+FD at this instantaneous sample (not a failed canonical-path test or invented
+FD PASS); canonical FORECAST query independently returned current normal jobs.
+Three fresh heartbeats matched new boot; actual selected guard getter null.
+Config proof remains file-only SHA d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae,
+not in-process config-object readback. No second loader or manual guard action.
+
+Normal poststamp HK Oct6 H750200/L750193 computed00:19:06 consumed canonical
+WORLD9951384. Original1526-byte entity base64/rawtext/SHA replay passed with
+SHA038f6726315139f3a84840c020de2c758db5569b9a032f43fdc44147aedfeee9;
+native08:10/UTC00:10, H25.1/L23.3, acquisition00:18:00.580877→00:18:00.776817
+<=write00:18:01.192785<=each decision. Regular original replay and actual q top
+plus causal witnesses agree: HIGH f34917f90116a9ddbdd19fb4deb591a07ccc5a5e93c1f1d7b04f1fdfda00f85f;
+LOW1c99e1f2b85cbd3a48944585c6f1f9c367004adf1e1e8b7c74dfe36dc57fabd4.
+Both HKO_REPORTED_PRODUCT_ONLY/provisional/absorbingfalse; issue, precision and
+settlement-equivalence remain UNKNOWN/UNPROVEN. This proves report-only bridge
+propagation, not new q mathematics or realized profit.
+
+Native normal DRAIN disposition00:21Z: safe-poll scheduler executed normally
+00:15:59 through00:20:59, but native track still0 canonical rows. Same selected
+Oct5 18Z mandatory HIGH job RUNNING from00:21:00.085241 and LOW FAILED with
+CYCLE_DEADLINE_EXCEEDED at00:20:02.136092. Their current source rows have0members/
+0count, HTTP503/NOT_RELEASED and deadline reasons. Thus mandatory_complete is
+false; source hook must defer native transport (owning code reason
+NATIVE_2T_MANDATORY_PRIORITY), not fabricate COMPLETE. The dispatcher discards
+non-failed completed ancillary reports, so this code-derived reason is not
+claimed to be a durably observed native receipt. No native first-poststamp body,
+SCHEDULED_LIVE source run or physical eligibility has yet been proven. Normal
+poll is its DRAIN/RESET; no forcewake, HTTP audit or retry was performed.
+Previous raw/ref protections remain unchanged; parent is unfinished.
+
+Single continuation baseline2026-10-06T00:26Z, checked=2026-W41;
+basis=local Git/loaded-state/heartbeat/canonical read-only rows and per-blob
+raw verification; until=recheck-on-use. Unique physical tasktree remains
+source-drain-resume/zeus, code-only branch fix/native-source-codeonly-20261005.
+Task HEAD, fresh remote live, live checkout and actual loaded SHA all7f67;
+loaded stamp00:16:49.188030Z remains valid, three same actor heartbeats fresh.
+Remote code-only named branch is absent (only live was pushed); old named28a
+and local raw-bearing recovery refs remain separate and unchanged. Native
+canonical count remains0. Current Oct5 18Z H/L jobs both naturally RUNNING
+from00:26:00; last00:25 source attempts FAILED with0members/count and exact
+deadline/HTTP503/NOT_RELEASED reasons. These current attempts replace the
+previous00:21 snapshot, not a native physical/scope/first-clock qualification.
+All123 needed raw files physically match recovery0df Git blobs, no symlink,
+57,227,944bytes, original repo-path aggregate148d15a84e80aa50c445ea70b81fa93d995694b3e068d6be1de0d83a79055350.
+No raw upload/cleanup, reload, forced poll or new HTTP audit. Native owner owns
+the source/test diagnosis and next bounded plan; MAIN owns PLAN/registries only.
+
+### Atomic native physical-source and dual-domain consumer closure (plan only)
+
+Status: source physical closure authorized to native_normal_producer; ROOT has
+approved the concrete X/Y point model, conservative-band contract, five-source
+consumer implementation (including event_reactor_adapter), and corresponding
+authority text. Actual activation still awaits full atomic source/consumer
+freeze, independent review and current normal required-availability proof.
+MAIN owns only this PLAN, existing authority/registries and integration. No
+math-law edit, new q revision, source activation, network audit or loader is
+authorized by this plan record itself. Existing source-only loaded7f and the
+report-only HKO witness are not proof that either statistical domain is closed.
+
+Physical contracts to bind before consumption:
+
+- Native temperature is original GRIB2 instantaneous 2m temperature (167/K,
+  raw discipline/category/parameter, level and stepType verified), 51 exact
+  control/perturbed identities from one original run/grid/product. Native 3h
+  knots, and actual 6h dissemination where applicable, are samples, not an
+  hourly body or mx2t6/mn2t6 interval extreme. Interpolation, if selected, is an
+  explicit model bound into identity; missing left/right support is UNKNOWN.
+  The next-local-midnight knot supports interpolation only, never adds a
+  next-day point to the half-open target domain. Member horizon is the actual
+  control/perturbed product intersection, not a presumed common model horizon.
+- Existing mx2t6/mn2t6 remain native interval maxima/minima with their interval
+  boundary/coverage proof. They may prove the separately typed full-day Y
+  carrier, never substitute interval extrema for instantaneous X knots.
+- Actual raw Section3/grid, selected cell/coordinate manifest, land mask172 and
+  geopotential129 original entity/index/range/body hashes, same-run role and
+  model/process proof must survive producer, manifest and read-only dependency
+  readback. Phi is grid surface geopotential, not sensor height or an invented
+  station correction. Unknown physical role blocks qualification, not raw
+  inventory persistence; no blanket numeric phi gate or fitted correction.
+- Source initialization/reference, native valid time, publisher issuance and
+  first possession are distinct. Unknown publisher issuance does not itself
+  erase proven decision-time possession; it also cannot be manufactured from
+  initialization, server Date, mtime or writer time. Complete scope PIT is the
+  maximum original first possession of every consumed temperature and physical
+  proof dependency, <=decision. Same identity re-fetch never renews that clock;
+  missing/tampered canonical manifest refuses re-minting before HTTP or writes.
+
+Dual-domain construction to propose atomically:
+
+1. X is the unresolved target-local-day path extreme. Its temporal start is
+   the last qualified coverage ledger clock, retaining unpublished/unobserved
+   [coverage_end,decision) risk; an instantaneous current sensor reading does
+   not prove cumulative coverage. Unknown prefix requires the unresolved
+   local-midnight domain or typed UNKNOWN, not cropping it to run init/decision.
+   Providers and all ENS paths condition on the same current-state observation
+   and evaluate this same latent X, before any max/min boundary pushforward.
+2. Compute W_X population member spread, D_X absolute provider/ENS-center
+   displacement and B_X simultaneous provider-component spread on that same
+   conditioned X. The component mixture already contains B_X squared; its
+   shared within-component error is only W_X squared + D_X squared. ROOT
+   explicitly rejects retaining an instrument/latency/constant/fitted floor:
+   unproven sensor precision or latency-to-temperature error cannot add sigma.
+   A proven measurement quantization belongs to its separately typed source/
+   settlement likelihood, not a relabeled additive forecast width. Do not
+   subtract a provider spread from old
+   full-day sigma, clamp paths before estimating width, or clamp again later.
+   Preserve original source-clock Y posterior/width; no historical/fitted floor,
+   affine shift, market anchor, provider-width borrowing or empty fallback.
+3. Y is a separately typed final daily extreme, with its own full-day source
+   and simultaneous width/cohort evidence. A final-daily station component in
+   typed V3 keeps Y width, while a remaining-path component keeps X width;
+   never apply one shared X/Y sigma. Physical representatives are equally
+   weighted within the appropriate cohort and a regional path supersedes its
+   own global family. A singleton X physical cohort does not manufacture B_X
+   or waive the >=2-provider whole-proposal/source-clock contract (§1d).
+4. HKO cumulative CSV remains HKO_REPORTED_PRODUCT_ONLY, 1-minute-mean
+   since-midnight extrema, PROVISIONAL with explicit incomplete flag and
+   settlement_equivalence UNPROVEN/absorbing_authority false. Its source-reported
+   coverage and scalar values are evidence, not irreversible final-settlement
+   support. Scenario/frontier likelihood remains typed to its own source and
+   statistic; no provisional max/min is silently converted to an absorbing
+   boundary. Official deterministic daily products lacking native future
+   quantity/issuance/precision proof stay raw/nonquantitative for X.
+5. The shared builder must reach materialization, regular ENTRY, held redecision,
+   event rebuild and immutable JIT submit replay with exact X/Y domains, widths,
+   source/provider/member/grid/run/possession dependencies, selected observation
+   state and current semantics. No unused private kernel constitutes repair.
+   Semantic changes require actual new content identity and normal seed/covered
+   revision RESET, never restamping an old q. Do not switch a global reader to
+   an empty revised carrier: migration preserves legal serving belief under
+   its original identity until scoped re-materialization is available; any
+   revised statistical action requires the new law and exact JIT reproduction.
+   Missing inputs preserve DATA_DEGRADED monitoring, not liquidation or a second
+   live probability regime. Exact migration disposition is a ROOT acceptance
+   prerequisite, not assumed permission to serve an old revised-action q.
+
+Approved authority delta (applied only as activation-gated law; owning document
+docs/authority/replacement_final_form_2026_06_09.md):
+
+- §1e lines447–457: retain the actual reverted-deploy record, replace its
+  prescriptive Open-Meteo metadata-bracket-only recovery sentence with the
+  approved physical product contract (native instantaneous alternative only
+  when original quantity/run/grid/PIT evidence closes); no rewrite of history.
+- §1e lines469–534 and565–580: replace HIGH-only conditional decomposition and
+  "LOW retains existing" wording with both metrics' same-latent-X-before-bound
+  decomposition and separate Y ownership above, subject to approval of the
+  actual interval-aware integration for both metrics (not automatic identical
+  HIGH/LOW computation). Remove all-day-minus-between, pre-clamp/post-clamp and
+  old instrument/latency-floor authority; settlement preimage/rounding law is
+  unchanged. A conservative variance endpoint is not posterior mean q, q_ucb,
+  or expected log wealth; straddling ambiguity needs explicit distribution and
+  genuine point/confidence integration before this law can be applied.
+- §1e lines536–555: explicitly serialize separate typed V3 X/Y widths and
+  equal-weight physical component cohorts; provisional source scenario/frontier
+  law is not absorbing final-sensor authority. Any alteration to existing
+  boundary-survival likelihood itself requires a separately named ROOT decision.
+- §1e lines592–608: make [last qualified coverage, localdayend) unknown-past
+  inclusion and the non-coverage role of instantaneous current state explicit;
+  unify conditioning clocks across actual consumption twins.
+- §1e current joint-revision paragraphs441–445/558–563/580: reconcile the
+  contradictory historical v26 versus current v34/v33 descriptions only when
+  final implementation constants and atomic reader/seed/JIT migration are
+  frozen. No guessed next v-number or prefix relabel; §1d full-day >=2-provider
+  law, current-evidence formula and settlement integration remain unchanged.
+
+Governance routing: existing source_rationale rows for ecmwf_open_data,
+day0_hourly_vectors, replacement_forecast_materializer/bundle_reader and actual
+event/DTO seams; existing script_manifest extract_open_ens_localday row;
+existing test_topology rows for collect-cycle, ingest-GRIB-context, pricing,
+materializer, bundle-reader and approved actual consumer tests. Authority stays
+in its existing AGENTS/docs_registry row. No new report/module/registry file,
+schema or artifact root. Exact consumer path ownership is pending the
+current_probability_drain_audit proposal; MAIN will register only ROOT-approved
+paths and changed required-test deltas, not sweep unrelated registry drift.
+
+Approved consumer implementation: day0_hourly_vectors
+role shape/dual-width builder, replacement_forecast_materializer normal selector/
+serialization, replacement_forecast_bundle_reader PIT/replay, events/day0_authority
+joint-semrev; corresponding existing pricing/materializer/bundle/authority tests.
+Exact event_reactor_adapter is the approved fifth source to carry both widths
+through actual action/JIT replay. Contained intervals use each member's original
+mx/mn extreme; straddling intervals use its actual 2t piecewise-linear forecast
+point within original interval bounds. Role point sigma squared equals
+mean(member_point-role_provider_mu)^2, with B endogenous to equal centers.
+Both role intervals retain lower mean distance-squared and upper mean farthest-
+endpoint-squared. Conservative Gaussian-mass bounds include interior stationary
+values; Y truncation uses Nmin/Dmax,Nmax/Dmin (Dmin0 gives[0,1]), explicitly an
+envelope, not exact optimum or mean q/EV. H/L max/min retain native conversion
+and settlement preimages; q/draw/replay share the same point world. No floor.
+Final semantics constants/held migration remain pending owner freeze; no early
+revision activation. Existing event-authority test is actually
+tests/events/test_redemption_forecast_day0_authority.py, not a new guessed file.
+Received native approved scope: ecmwf_open_data typed readback/immutable existing
+LSM proof, extract_open_ens_localday pure original static validator, existing
+collect test. No new fetch/daemon/static physics claim. New consumer dependency
+binding may prove original audit-origin raw PIT without rewriting old role/clock;
+global issued/available and sensor/datum/precision remain UNKNOWN.
+
+Test setup (MAIN sole owner): absent parent config/settings.json was created
+with apply_patch from tracked settings.example, bytewise cmp passed, regular
+non-symlink/gitignored SHA e95eb2066414092e2b4416cd24b94a9a08ff050493df2ebff1d38a543d519a3b.
+No live config or DB link/copy. Native, probability and held-test owners were
+notified; MAIN will exact-hash remove only this fixture after all users finish.
+
+Open independent source blocker: normal LSM immutable-clock repair identified
+an orphan mandatory-freeze case; native owner is repairing it. This is BLOCKED
+pending actual recovery antibody and independent closure, not source atomic
+APPROVE or available physical shape. No additional live/sample/HTTP action.
+Held deadline lane changed only its existing stale test expectation, not runtime
+capacity: initial1P1F→approved corrected3P3.35s, retaining attempted refresh
+timestamp but no fabricated completed decision and preserving later-position
+evaluation/events. MAIN updated only its lifecycle/topology metadata toOct6;
+no comment-only behavior retest, no exit-performance claim. Fixture remains for
+native/q/reviewer users; held lane has released it.
+
+Separate bounded monitor timing evidence repair, ROOT approved: held owner
+alone owns src/engine/cycle_runtime.py and the same existing
+tests/test_live_safety_invariants.py. monitor_refresh already measured primary
+belief perf_counter duration; cycle consumed summary then removed the position
+attribute, while a deadline refusal could not emit a claimed artifact, losing
+that attempt's timing. Retain attempt-local measurements and add optional
+monitor_attempt_timing to the existing canonical event payload, with measured
+primary_belief_seconds/deadline_scope/stage and only genuinely measured total/
+nonbelief residual. Reject NaN/nonfinite/negative timing, omit unknown fields,
+never fabricate zero/quote latency or cross-contaminate two positions/attempts.
+Failure/normal canonical payload and adversarial timing antibodies must show
+true RED→GREEN; no timeout/action/probability law/schema change or claim that
+execution capacity, performance root cause or realized exit profit is repaired.
+Its setup-fixture use remains active together with native/q/reviewers; MAIN
+will record exact related source/test registry changes after that owner freezes.
+
+INV-47 SCOPE: exact source product/run/grid and consumed city/localdate/metric
+X/Y dependency identity, not global city count or always-newest proof equality.
+DRAIN: mandatory H/L first, optional native same-budget normal polls/checkpoints;
+qualified source changes enter the existing scoped seed/materialization/event
+loop with legal held monitoring retained. RESET: original missing dependency
+restoration/normal new complete raw or new qualified scope permits readback;
+actual revised q plus reproduced ENTRY/held/JIT clears its own revision debt.
+Another family's missing body, inventory-only AVAILABLE or source-issued NULL
+cannot authorize or globally revoke this family.
+
+Atomic acceptance/load gate: verified original quantity/control/member/run/grid/
+LSM/phi and immutable PIT positive/hostile private producer→canonical→reader
+proof; same-run cache-loss/remint guards and recovery/append tests; HIGH/LOW,
+X/Y independent moments and right-support/unknown-past/provisional twin tests;
+actual full consumer and JIT replay tests with tamper/revision-only covered
+RESET and no new regression. The123 old raw originals are read-only partial
+evidence, not a complete current required scope. Before q landing/loading,
+current normal required availability must be proven for the scopes being
+enabled, with preserved legal held belief and final named source/consumer
+reviews. No additional audit HTTP, canonical SQL write, wake/reseed, guard
+clear or restart is authorized here. Source/test owners freeze before MAIN
+integration; source-atomic ROOT acceptance precedes any new q delivery.
+
+### Atomic consumer checkpoint — final private-clock corrections
+
+The owning normal materializer fixture now covers revision-only drainage with
+the same source run/body and original first-possession clocks: a prior-revision
+normal INSERT is rejected by current coverage, then the next normal calculation
+cut produces a distinct current certificate and readiness binding. Two fixture
+corrections are not production defects: the independent mode=ro/query_only
+coverage connection uses the same private SQL wall clock as the rest of the
+causal fixture, and the next calculation cut advances one second rather than
+creating two revisions at an identical computed_at. The HWM exact-provenance
+lookup intentionally rejects a non-unique computed_at. Canonical readiness has
+scope_key UNIQUE and already upserts the new posterior; no queue source change
+is required or authorized.
+
+Private clock seams are limited to native datetime, typed-ingest _now_utc_iso,
+canonical INSERT strftime, official-ground archive datetime, public bundle
+reader datetime, and the independent read-only coverage SQL strftime. No stored
+source-issued/fetched/first-possession/recorded clock or expiry is edited. The
+same H/L node exercises actual original capture, typed canonical ingestion,
+normal materialization, persisted ENTRY/held readers, current-body redecision,
+paired-original loss and restoration, and primary JIT probability rebinding.
+
+The pre-integration candidate must still be saved excluding the 123 raw
+originals and ignored settings, rebased onto d724 run-identity semantics, and
+integrate the whole approved native f99a374b6..f372 source span, custody ad5cb9,
+metadata a104, and the accepted attempt timing implementation. A single combined
+candidate then reruns affected consumers with private transport interception
+covering the new native deadline/curl facade. Private synthetic GRIB positives
+are not current HK custody, runtime readiness, market-speed or realized-profit
+proof. No candidate has been pushed or loaded by this slice.
+
+Named final coverage finding (independent actual canonical reproduction): the
+native factory replayer validates the original role subset but does not validate
+provider family/center augmentation. A tampered duplicate-family X role was
+rejected by the public carrier reader while the normal seed coverage predicate
+still returned covered. Approved ownership remains cycle_policy, not queue:
+current-v35 coverage reuses the existing pure reader carrier integrator/identity
+check, and its SQL X-only twin requires an array of unique nonempty families and
+matching center count. Historical V3 eligibility is unchanged. H/L private
+canonical duplicate-family and changed-center negatives must reject both public
+replay and covered, with original provenance restoration permitting normal
+RESET; no original body/clock or certificate identity is restamped.
+
+The LOW public consumer also exposed an obsolete metadata dependency: a legal
+paired-original straddling role was already admitted by materializer/reader,
+but legacy daily-snapshot boundary ambiguity removed its unit metadata at the
+adapter. Only complete current-v35 roles route through existing direct-contract
+metric/unit/precision and owning current-role q metadata. Actual remaining-member
+reconstruction still replays originals and current source state. Old/missing
+roles retain the daily snapshot refusal; current public payload C/F and metric
+negative controls reject. The legacy REJECTED row is not rewritten VERIFIED.

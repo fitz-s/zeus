@@ -1058,6 +1058,460 @@ def _install_live_fusion(
     monkeypatch.setattr(materializer_mod, "_replacement_bayes_precision_fusion_override", lambda *args, **kwargs: override)
 
 
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkeypatch, metric):
+    """Actual native capture/extract/collector and public shape admission."""
+    import eccodes as ec
+    import numpy as np
+    from types import SimpleNamespace
+    from tests.test_ecmwf_open_data_collect_cycle import _normal_native_http, _native_temperature_knots_fixture, _physical_static_originals
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+    from scripts import extract_open_ens_localday as decoder
+    from src.config import runtime_coordinate_manifest_json, runtime_cities_by_name
+    from src.data import ecmwf_open_data as native
+    from src.data.replacement_forecast_source_run_identity import coordinate_bound_data_version
+
+    s = _normal_native_http(tmp_path, monkeypatch, steps=tuple(range(0, 37, 3)), hour=12)
+    from src.state.db import init_schema_world_only
+    init_schema_world_only(s.conn)
+    fixture_clock = [s.run + timedelta(hours=10)]
+    class ClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+    class NativeClock(datetime, metaclass=ClockType):
+        @classmethod
+        def now(cls, tz=None):
+            return fixture_clock[0].astimezone(tz or UTC)
+    monkeypatch.setattr(native, "datetime", NativeClock)
+    monkeypatch.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: fixture_clock[0].isoformat())
+    builtin = sqlite3.connect(":memory:")
+    s.conn.create_function("strftime", 2, lambda fmt, value:
+        fixture_clock[0].isoformat(timespec="milliseconds")
+        if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now")
+        else builtin.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
+    try:
+        assert native.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": None})["status"] == "AVAILABLE"
+        paths = native._resolve_opendata_paths(source_root=s.paths.raw_root, environ={})
+        monkeypatch.setattr(native, "_resolve_opendata_paths", lambda **kwargs: paths)
+        manifest_json = runtime_coordinate_manifest_json()
+        manifest_sha = hashlib.sha256(manifest_json.encode()).hexdigest()
+        manifest = tmp_path / "coordinate-manifest.json"
+        manifest.write_text(manifest_json)
+        static_dir = tmp_path / "static"
+        static_dir.mkdir()
+        static = _native_temperature_knots_fixture(static_dir, steps=(0, 3), hour=12)
+        for native_metric, track_name in (("high", "mx2t6_high"), ("low", "mn2t6_low")):
+            folder = tmp_path / track_name
+            folder.mkdir()
+            raw, _, _, _ = _tiny_native_grib(folder, track_name, issue=s.run, horizon=36)
+            track = decoder.TRACKS[track_name]
+            target = native._download_output_path(run_date=s.run.date(), run_hour=12,
+                param=track.open_data_param, raw_root=paths.raw_root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            bodies = []
+            with raw.open("rb") as stream:
+                while (gid := ec.codes_grib_new_from_file(stream)) is not None:
+                    try:
+                        ec.codes_set(gid, "generatingProcessIdentifier", 161)
+                        if native_metric == "low":
+                            ec.codes_set_values(gid, ec.codes_get_values(gid) - .75)
+                        bodies.append(ec.codes_get_message(gid))
+                    finally:
+                        ec.codes_release(gid)
+            target.write_bytes(b"".join(bodies))
+            mask, phi = _physical_static_originals(static, directory=target.parent, track=track_name)
+            extracted = decoder.extract_open_ens_localday(grib_path=target,
+                track_name=track_name, manifest_path=manifest, cities_filter={"London"},
+                output_root=paths.raw_root / "raw/coordinate_manifests" / manifest_sha,
+                mask_grib_path=mask, mask_proof_path=mask.with_suffix(".proof.json"),
+                surface_geopotential_grib_path=phi, surface_geopotential_proof_path=phi.with_suffix(".proof.json"))
+            assert extracted["written"] >= 1, extracted
+            sample = json.loads(Path(extracted["sample_outputs"][0]).read_text())
+            collected = native.collect_open_ens_cycle(track=track_name, skip_download=True,
+                skip_extract=True, conn=s.conn, now_utc=s.run + timedelta(hours=10), _paths=paths,
+                grid_surface_source_evidence=sample["grid_surface_evidence"])
+            assert collected["status"] == "ok", collected
+        city = runtime_cities_by_name()["London"]
+        fixture_clock[0] = s.run + timedelta(hours=10, seconds=1)
+        cut = fixture_clock[0]
+        request = SimpleNamespace(city=city.name, city_timezone=city.timezone,
+            target_date=date(2026, 10, 4), source_cycle_time=s.run + timedelta(hours=6),
+            computed_at=cut, baseline_data_version=coordinate_bound_data_version(
+                native.TRACKS["mx2t6_high" if metric == "high" else "mn2t6_low"]["data_version"], manifest_sha))
+        selected = materializer_mod.read_current_evidence_snapshot_identity(s.conn, request, metric=metric)
+        assert selected is not None
+        shape = materializer_mod._read_current_evidence_shape(s.conn, request, metric=metric,
+            provider_values_c={"ecmwf_ifs": 10., "icon_global": 12.},
+            provider_weights={"ecmwf_ifs": .5, "icon_global": .5}, center_c=11.,
+            provider_cycles=dict.fromkeys(("ecmwf_ifs", "icon_global"), request.source_cycle_time.isoformat()))
+        assert shape is not None
+        assert shape.snapshot_id == selected.snapshot_id
+        assert shape.native_point_model["native_snapshot_id"] == selected.snapshot_id
+        assert len(shape.members_c) == 51
+        assert shape.shape_lag_hours == 0.  # Y has its own legal frontier.
+        # Extend the exact canonical native source into the ordinary public
+        # materializer; all physical/clock/anchor guards remain production code.
+        from src.data import station_ground_evidence as ground
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+        from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+        from src.strategy.live_inference.source_clock_city_weights import CityOneScheme
+        from src.data import openmeteo_model_surface as surfaces
+        monkeypatch.setattr(ground, "datetime", NativeClock)
+        forecast_db = Path(s.conn.execute("PRAGMA database_list").fetchone()[2])
+        s.conn.commit()
+        archived = ground.archive_station_ground_evidence(forecast_db, [city.name])
+        assert archived["status"] == "GROUND_SOURCE_ARCHIVED", archived
+        cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon, target_elevation_m=32.)
+        raw = json.dumps({"latitude": cell["selected_grid_lat"], "longitude": cell["selected_grid_lon"],
+            "elevation": 32., "timezone": city.timezone, "utc_offset_seconds": 3600,
+            "hourly": {"time": [f"2026-10-04T{hour:02d}:00" for hour in range(24)],
+                       "temperature_2m": [12. if hour == 12 else 10. for hour in range(24)]},
+            "hourly_units": {"temperature_2m": "°C"},
+            "_zeus_current_target_scope": {"city": city.name, "target_date": "2026-10-04", "metric": metric}},
+            sort_keys=True).encode()
+        anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(raw), city_timezone=city.timezone,
+            target_local_date=request.target_date, source_cycle_time=request.source_cycle_time)
+        baseline = s.conn.execute("SELECT source_run_id,source_available_at FROM ensemble_snapshots WHERE snapshot_id=?",
+            (selected.snapshot_id,)).fetchone()
+        from src.data.replacement_forecast_materialization_seed_builder import market_bins_for_replacement_seed, _market_bins_to_celsius
+        from src.data.replacement_forecast_materialization_request_builder import _bins_to_temperature_bins
+        from src.contracts.settlement_semantics import SettlementSemantics
+        for index, (label, lower, upper) in enumerate((("10°C or below", None, 10.), ("11°C", 11., 11.), ("12°C or higher", 12., None))):
+            s.conn.execute("""INSERT INTO market_events(market_slug,city,target_date,temperature_metric,
+                condition_id,token_id,range_label,range_low,range_high,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""", (f"private-london-{metric}-{index}", city.name, "2026-10-04", metric,
+                "0x" + f"{index + 101:064x}", f"private-london-yes-{index}", label, lower, upper, cut.isoformat()))
+        public_bins = _bins_to_temperature_bins(_market_bins_to_celsius(
+            market_bins_for_replacement_seed(s.conn, city=city.name, target_date="2026-10-04", temperature_metric=metric),
+            settlement_unit=city.settlement_unit, rounding_rule=SettlementSemantics.for_city(city).rounding_rule))
+        full_request = ReplacementForecastMaterializeRequest(city=city.name, city_id=city.name,
+            city_timezone=city.timezone, target_date=request.target_date, temperature_metric=metric,
+            baseline_source_run_id=baseline[0], baseline_data_version=request.baseline_data_version,
+            baseline_source_available_at=baseline[1], openmeteo_anchor=anchor,
+            openmeteo_source_run_id="private-owned-anchor", openmeteo_source_available_at=fixture_clock[0] - timedelta(minutes=1),
+            bins=public_bins,
+            source_cycle_time=request.source_cycle_time, computed_at=cut,
+            expires_at=cut + timedelta(hours=1), openmeteo_raw_payload_bytes=raw)
+        full_request = _hko_request_with_owned_anchor(s.conn, full_request)
+        selected_cells = {}
+        for model in ("icon_global", "ukmo_global_deterministic_10km"):
+            profile = surfaces._profile(model)
+            selected_cells[model] = tuple(float(np.float32(np.float32(profile[origin]) +
+                np.float32(np.float32(round((coordinate - profile[origin]) / profile[step])) * profile[step])))
+                for coordinate, origin, step in ((city.lat, "lat_min", "dy"), (city.lon, "lon_min", "dx")))
+        _hko_current_provider_inputs(full_request, {"icon_global": 10., "ukmo_global_deterministic_10km": 12.},
+            conn=s.conn, selected_cells=selected_cells)
+        scheme = CityOneScheme(city=city.name, scheme_status="ACTIVE",
+            final_sources=tuple(selected_cells), weights=dict.fromkeys(selected_cells, .5),
+            sample_n=30, walkforward_pass=True, one_scheme_status="GRID_CAP10_LIVE_READY")
+        monkeypatch.setattr(materializer_mod, "_resolve_source_clock_scheme", lambda *args: scheme)
+        from src.data.replacement_forecast_live_materialization_queue import _seed_already_covered as owning_seed_covered
+        from contextlib import closing
+        def _seed_already_covered(*, forecast_db, seed):
+            # The queue owns an independent RO connection. Give its SQL wall
+            # clock the same private causal cut as capture/insert/public reader;
+            # do not edit expiry or stored source clocks to create a positive.
+            with closing(sqlite3.connect(f"file:{forecast_db}?mode=ro", uri=True)) as coverage_conn:
+                coverage_conn.row_factory = sqlite3.Row
+                coverage_conn.create_function("strftime", 2, lambda fmt, value:
+                    fixture_clock[0].strftime(fmt) if value == "now"
+                    else builtin.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
+                return owning_seed_covered(forecast_db=forecast_db, seed=seed, forecast_conn=coverage_conn)
+        seed = {"city": city.name, "target_date": "2026-10-04", "temperature_metric": metric,
+            "baseline_source_run_id": full_request.baseline_source_run_id,
+            "openmeteo_source_run_id": full_request.openmeteo_source_run_id,
+            "computed_at": fixture_clock[0].isoformat()}
+        # Controlled prior-revision construction before the transition. This
+        # is not an UPDATE/restamp and does not claim to replay the old math.
+        from src.data import replacement_forecast_cycle_policy as cycle_policy
+        with monkeypatch.context() as prior_revision:
+            prior_revision.setattr(materializer_mod, "CURRENT_EVIDENCE_SEMANTICS_REVISION", "ensemble_center_scenarios_v6")
+            prior_revision.setattr(cycle_policy, "CURRENT_EVIDENCE_SEMANTICS_REVISION", "ensemble_center_scenarios_v6")
+            prior_revision.setattr(cycle_policy, "LIVE_CURRENT_EVIDENCE_SEMANTICS_REVISIONS", frozenset({"ensemble_center_scenarios_v6"}))
+            old_ready = materialize_replacement_forecast_live(s.conn, full_request)
+        assert old_ready.ok, old_ready.reason_codes
+        s.conn.commit()
+        assert not _seed_already_covered(forecast_db=forecast_db, seed=seed)
+        # A subsequent normal decision has its own calculation cut, without
+        # renewing any source/body clock. Two revisions at the identical cut
+        # are intentionally ambiguous to the owning provenance lookup.
+        fixture_clock[0] += timedelta(seconds=1)
+        cut = fixture_clock[0]
+        full_request = replace(full_request, computed_at=cut)
+        seed["computed_at"] = cut.isoformat()
+        full = materialize_replacement_forecast_live(s.conn, full_request)
+        assert full.ok, full.reason_codes
+        s.conn.commit()
+        assert _seed_already_covered(forecast_db=forecast_db, seed=seed)
+        assert full.posterior_id != old_ready.posterior_id
+        old_still = json.loads(s.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+            (old_ready.posterior_id,)).fetchone()[0])
+        assert old_still["bayes_precision_fusion"]["current_evidence_shape"]["semantics_revision"] == "ensemble_center_scenarios_v6"
+        persisted = json.loads(s.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+            (full.posterior_id,)).fetchone()[0])
+        assert persisted["bayes_precision_fusion"]["current_evidence_shape"]["native_point_model"]["native_snapshot_id"] == selected.snapshot_id
+        from src.data.replacement_forecast_bundle_reader import read_replacement_forecast_bundle, ReplacementForecastAuthorityPurpose
+        from src.data import replacement_forecast_bundle_reader as bundle_reader
+        monkeypatch.setattr(bundle_reader, "datetime", NativeClock)
+        from src.data.replacement_forecast_readiness import ReplacementForecastReadinessDecision
+        cert = s.conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?", (full.readiness_id,)).fetchone()
+        posterior = s.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (full.posterior_id,)).fetchone()
+        readiness = ReplacementForecastReadinessDecision(readiness_id=cert["readiness_id"], status=cert["status"],
+            reason_codes=tuple(json.loads(cert["reason_codes_json"])), dependency_json=json.loads(cert["dependency_json"]),
+            provenance_json=json.loads(cert["provenance_json"]), expires_at=datetime.fromisoformat(cert["expires_at"]))
+        for purpose in ReplacementForecastAuthorityPurpose:
+            served = read_replacement_forecast_bundle(s.conn, baseline_bundle=_BaselineBundle(_Evidence(baseline[0])),
+                readiness=readiness, city=city.name, target_date=request.target_date,
+                temperature_metric=metric, decision_time=cut, current_bin_topology_hash=posterior["bin_topology_hash"],
+                enforce_raw_input_hwm=True, authority_purpose=purpose)
+            assert served.ok, served.reason_code
+            assert served.bundle.posterior_id == full.posterior_id
+        # Same canonical originals, now Day0 with actual typed station prints
+        # and parsed provider vectors. A spot is not a complete prefix.
+        from src.data.day0_hourly_vectors import day0_hourly_models_for_city, parse_openmeteo_hourly_payload, persist_day0_hourly_vectors
+        from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+        from src.state.schema.observation_prints_schema import ensure_table, append_print
+        ensure_table(s.conn)
+        fixture_clock[0] = s.run + timedelta(hours=13)
+        current_at = fixture_clock[0] - timedelta(minutes=10)
+        station = city.wu_station
+        for index in range(17):
+            at = current_at - timedelta(minutes=(16 - index) * 10)
+            report = f"METAR {station} {at:%d%H%M}Z 01008KT 9999 11/05 Q1014 RMK T01100050"
+            for channel, delay in (("aviationweather_metar", 10), (f"ogimet_metar_{station.lower()}", 20)):
+                append_print(s.conn, city=city.name, station_id=station, source_channel=channel,
+                    publish_ts_utc=at.isoformat(), value_native=11., unit="C",
+                    fetched_at_utc=(at + timedelta(seconds=delay)).isoformat(), raw_report=report)
+        for index, model in enumerate(day0_hourly_models_for_city(city)):
+            captured = fixture_clock[0] - timedelta(minutes=1)
+            payload = {"hourly": {"time": [f"2026-10-04T{hour:02d}:00" for hour in range(24)] + ["2026-10-05T00:00"],
+                "temperature_2m": [10. + index * .5] * 25}}
+            api = OPENMETEO_MODEL_IDS.get(model, model)
+            request_hash = hashlib.sha256(json.dumps({"model": api, "body": payload}).encode()).hexdigest()
+            endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
+            meta = {"provider": "openmeteo", "model": model, "model_api_id": api,
+                "endpoint": endpoint, "endpoint_mode": "single_runs", "source_run_authority": "run_pinned_single_runs",
+                "provider_run_id": f"openmeteo:{api}:{full_request.source_cycle_time.isoformat()}",
+                "provider_source_cycle_time_utc": full_request.source_cycle_time.isoformat(),
+                "provider_source_available_at_utc": (full_request.source_cycle_time + timedelta(minutes=1)).isoformat(),
+                "provider_source_modified_at_utc": (full_request.source_cycle_time + timedelta(minutes=1)).isoformat(),
+                "fetch_started_at": captured.isoformat(), "fetch_finished_at": captured.isoformat(),
+                "request_hash": request_hash, "source_run_id": f"day0_hourly:{request_hash}",
+                "request_params_json": json.dumps({"metadata_model": api}),
+                "original_body_sha256": hashlib.sha256(json.dumps(payload).encode()).hexdigest()}
+            vectors = parse_openmeteo_hourly_payload(json.loads(json.dumps(payload)), city=city,
+                models=[model], captured_at=captured.isoformat(), source_run_meta_json=json.dumps(meta))
+            assert persist_day0_hourly_vectors(vectors, target_date="2026-10-04", request_hash=request_hash,
+                endpoint=endpoint, now=fixture_clock[0], conn=s.conn) == 1
+        day0_request = replace(full_request, computed_at=fixture_clock[0], expires_at=fixture_clock[0] + timedelta(hours=1),
+            day0_observed_extreme_c=11., day0_observed_extreme_source="aviationweather_metar",
+            day0_observed_extreme_observation_time=current_at, day0_observed_extreme_sample_count=17,
+            day0_observed_extreme_unit="C")
+        day0 = materialize_replacement_forecast_live(s.conn, day0_request)
+        assert day0.ok, day0.reason_codes
+        s.conn.commit()
+        day0_provenance = json.loads(s.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+            (day0.posterior_id,)).fetchone()[0])
+        assert day0_provenance["day0_measurement_domain_shapes"]["prefix_information_kind"] == "UNKNOWN"
+        assert "X" in day0_provenance["day0_measurement_domain_shapes"]
+        day0_cert = s.conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?", (day0.readiness_id,)).fetchone()
+        day0_posterior = s.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?", (day0.posterior_id,)).fetchone()
+        day0_readiness = ReplacementForecastReadinessDecision(readiness_id=day0_cert["readiness_id"], status=day0_cert["status"],
+            reason_codes=tuple(json.loads(day0_cert["reason_codes_json"])), dependency_json=json.loads(day0_cert["dependency_json"]),
+            provenance_json=json.loads(day0_cert["provenance_json"]), expires_at=datetime.fromisoformat(day0_cert["expires_at"]))
+        for purpose in ReplacementForecastAuthorityPurpose:
+            served = read_replacement_forecast_bundle(s.conn, baseline_bundle=_BaselineBundle(_Evidence(baseline[0])),
+                readiness=day0_readiness, city=city.name, target_date=request.target_date,
+                temperature_metric=metric, decision_time=fixture_clock[0], current_bin_topology_hash=day0_posterior["bin_topology_hash"],
+                enforce_raw_input_hwm=True, authority_purpose=purpose)
+            assert served.ok, served.reason_code
+            assert served.bundle.posterior_id == day0.posterior_id
+        # The decision-time projection uses the same public bundle and actual
+        # canonical station facts. No physical admission or role is mocked.
+        from copy import deepcopy
+        from src.engine import event_reactor_adapter as era
+        from src.events.opportunity_event import make_opportunity_event
+        from src.events.day0_authority import DAY0_LIVE_AUTHORITY_MATCHES
+        from src.types.market import Bin
+        conditioning = era._day0_replacement_conditioning(served.bundle,
+            provisional=bool(day0_provenance.get("day0_provisional_observation", {}).get("active")),
+            metric=metric, unit="C", decision_time=fixture_clock[0], entry_authority=True)
+        family = SimpleNamespace(city=city.name, target_date="2026-10-04", metric=metric,
+            candidates=[SimpleNamespace(bin=Bin(b.lower_c, b.upper_c, "C", b.bin_id)) for b in full_request.bins])
+        event = make_opportunity_event(event_type="DAY0_EXTREME_UPDATED", entity_key=f"{city.name}|2026-10-04|{metric}|{station}",
+            source="private-canonical-projection", observed_at=current_at.isoformat(), available_at=fixture_clock[0].isoformat(),
+            received_at=fixture_clock[0].isoformat(), payload={**DAY0_LIVE_AUTHORITY_MATCHES}, causal_snapshot_id="private-canonical-projection")
+        projected = era._global_day0_execution_payload(event, family=family,
+            resolution=SimpleNamespace(measurement_unit="C", station_id=station), conditioning=conditioning,
+            observation_conn=s.conn, decision_time=fixture_clock[0], posterior_id=day0.posterior_id)
+        projected["metric"] = family.metric
+        original = deepcopy(projected)
+        for entry in (True, False):
+            replayed = deepcopy(projected)
+            if not entry:
+                replayed["_edli_day0_redecision_authority_scope"] = "held_exposure_current_bundle_day0_only_v1"
+            members = era._day0_remaining_day_members(payload=replayed, family=family, unit="C",
+                decision_time=fixture_clock[0], world_conn=s.conn, forecast_conn=s.conn, entry_authority=entry)
+            assert members is not None, replayed.get("_edli_day0_remaining_unavailable_reason")
+            assert replayed["_edli_day0_measurement_domain_shapes"]["X"]["provider_current_state"]["value_native"] == 11.
+        assert projected == original
+        def verify_current_submit_rebind():
+            from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+            fresh_fact = _latest_authorized_day0_fact(s.conn, city=city.name, target_date="2026-10-04",
+                temperature_metric=metric, decision_time=fixture_clock[0], require_settlement_channel=False)
+            assert fresh_fact is not None
+            latest_request = replace(fresh_request,
+                day0_observed_extreme_c=float(fresh_fact["observed_extreme_native"]),
+                day0_observed_extreme_source=fresh_fact["observation_source"],
+                day0_observed_extreme_observation_time=fresh_fact["observation_time"],
+                day0_observed_extreme_sample_count=int(fresh_fact["sample_count"]))
+            latest = materialize_replacement_forecast_live(s.conn, latest_request)
+            assert latest.ok, latest.reason_codes
+            s.conn.commit()
+            seed = {"city": city.name, "target_date": "2026-10-04", "temperature_metric": metric,
+                "baseline_source_run_id": latest_request.baseline_source_run_id,
+                "openmeteo_source_run_id": latest_request.openmeteo_source_run_id,
+                "computed_at": fixture_clock[0].isoformat()}
+            assert _seed_already_covered(forecast_db=forecast_db, seed=seed)
+            # Adversarial private canonical mutation: native originals alone
+            # must not mark a malformed provider role permanently covered.
+            from src.data.replacement_forecast_bundle_reader import _day0_carrier_identity_reason
+            original_provenance = s.conn.execute(
+                "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?", (latest.posterior_id,)).fetchone()[0]
+            for damage in ("duplicate_family", "changed_centers"):
+                invalid_provenance = json.loads(original_provenance)
+                invalid_role = invalid_provenance["day0_measurement_domain_shapes"]["X"]
+                if damage == "duplicate_family":
+                    invalid_role["provider_families"] = [invalid_role["provider_families"][0]] * len(invalid_role["provider_families"])
+                else:
+                    invalid_role["provider_centers_native"] = [value + .5 for value in invalid_role["provider_centers_native"]]
+                assert _day0_carrier_identity_reason(invalid_provenance) is not None
+                try:
+                    s.conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+                        (json.dumps(invalid_provenance), latest.posterior_id))
+                    s.conn.commit()
+                    assert not _seed_already_covered(forecast_db=forecast_db, seed=seed)
+                finally:
+                    s.conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+                        (original_provenance, latest.posterior_id))
+                    s.conn.commit()
+                assert _seed_already_covered(forecast_db=forecast_db, seed=seed)
+            counterpart_track = decoder.TRACKS["mn2t6_low" if metric == "high" else "mx2t6_high"]
+            counterpart = native._download_output_path(run_date=s.run.date(), run_hour=12,
+                param=counterpart_track.open_data_param, raw_root=paths.raw_root)
+            unavailable = counterpart.with_name(counterpart.name + ".private-unavailable")
+            counterpart.rename(unavailable)
+            try:
+                assert not _seed_already_covered(forecast_db=forecast_db, seed=seed)
+                missing = materialize_replacement_forecast_live(s.conn, latest_request)
+                assert missing.status == "BLOCKED", missing.reason_codes
+            finally:
+                unavailable.rename(counterpart)
+            assert _seed_already_covered(forecast_db=forecast_db, seed=seed)
+            current_projection = era._global_day0_execution_payload(event, family=family,
+                resolution=SimpleNamespace(measurement_unit="C", station_id=station), conditioning=None,
+                observation_conn=s.conn, decision_time=fixture_clock[0], posterior_id=latest.posterior_id)
+            current_projection.update(city=city.name, target_date="2026-10-04", metric=metric)
+            current_event = make_opportunity_event(event_type="DAY0_EXTREME_UPDATED", entity_key=f"{city.name}|2026-10-04|{metric}|{station}",
+                source="private-canonical-projection", observed_at=fresh_fact["observation_time"], available_at=fixture_clock[0].isoformat(),
+                received_at=fixture_clock[0].isoformat(), payload=current_projection, causal_snapshot_id="private-canonical-new-projection")
+            prepared = []
+            qualified_projection = {}
+            for use in (era._CurrentProbabilityUse.ENTRY, era._CurrentProbabilityUse.HELD_MONITOR):
+                prepared.append(era._prepare_current_global_probability_family(current_event, forecast_conn=s.conn,
+                    topology_conn=s.conn, observation_conn=s.conn, decision_time=fixture_clock[0], max_age=timedelta(seconds=30),
+                    allow_provisional_day0_replacement=True, probability_use=use, raw_input_hwm_conn=s.conn,
+                    day0_payload_out=qualified_projection))
+            qualified_projection = {**current_projection, **qualified_projection}
+            assert era._day0_uses_native_role_contract_metadata(qualified_projection)
+            contract_family = SimpleNamespace(**family.__dict__, bins=[candidate.bin for candidate in family.candidates])
+            for key, wrong in (("settlement_unit", "F"), ("metric", "low" if metric == "high" else "high")):
+                invalid_contract = deepcopy(qualified_projection)
+                invalid_contract[key] = wrong
+                with pytest.raises(ValueError, match="DAY0_REMAINING_DIRECT_CONTRACT_IDENTITY_MISMATCH"):
+                    era._day0_remaining_global_probability_components(current_event,
+                        forecast_conn=s.conn, calibration_conn=s.conn, family=contract_family,
+                        payload=invalid_contract, decision_time=fixture_clock[0], entry_authority=True)
+            if metric == "low":
+                # The real LOW aggregate is boundary-ambiguous at London's
+                # midnight. Only the current, original-bound role may replace
+                # its metadata; an old/missing role still cannot use it.
+                for old_role in (None, "prior-revision"):
+                    legacy = deepcopy(qualified_projection)
+                    if old_role is None:
+                        legacy.pop("_edli_day0_measurement_domain_shapes")
+                    else:
+                        legacy["_edli_day0_measurement_domain_shapes"]["semantics_revision"] = old_role
+                    with pytest.raises(ValueError, match="Day0 base forecast snapshot missing"):
+                        era._day0_remaining_global_probability_components(current_event,
+                            forecast_conn=s.conn, calibration_conn=s.conn, family=contract_family,
+                            payload=legacy, decision_time=fixture_clock[0], entry_authority=True)
+            np.testing.assert_array_equal(prepared[0].probability_witness.yes_point_q, prepared[1].probability_witness.yes_point_q)
+            assert era._global_probability_action_content_mismatches(prepared[0].probability_witness,
+                prepared[1].probability_witness) == ()
+            from tests.integration import test_w3_solve_seam_g3 as normal
+            witness = prepared[1].probability_witness
+            binding = witness.bindings[1]
+            curve = normal.ExecutableSellCurve(token_id=binding.yes_token_id, side="YES",
+                snapshot_id="private-role-sell-book", book_hash="private-role-sell-hash",
+                levels=(normal.BookLevel(price=normal.Decimal(".50"), size=normal.Decimal("1")),),
+                fee_model=normal.FeeModel(fee_rate=normal.Decimal("0")), min_tick=normal.Decimal(".01"),
+                min_order_size=normal.Decimal("1"), quote_ttl=timedelta(seconds=30))
+            candidate = normal.GlobalSingleOrderSellCandidate(candidate_id="private-role-stat-sell",
+                family_key=witness.family_key, bin_id=binding.bin_id, condition_id=binding.condition_id,
+                side="YES", token_id=binding.yes_token_id, position_id="private-role-held", held_shares=normal.Decimal("1"),
+                probability_witness_identity=witness.witness_identity, book_snapshot_id=curve.snapshot_id,
+                book_captured_at_utc=fixture_clock[0], execution_curve_identity=normal.executable_curve_identity(curve),
+                ledger_snapshot_id="private-role-ledger", executable_sell_curve=curve,
+                resolution_identity=witness.resolution_identity, neg_risk=False,
+                **normal._explicit_sell_maker_terms(curve, capacity=normal.Decimal("1")))
+            rebound, _ = era._current_global_actuation_prepared_family(current_event,
+                global_actuation=SimpleNamespace(probability_witness=witness, decision=SimpleNamespace(candidate=candidate)),
+                forecast_conn=s.conn, topology_conn=s.conn, observation_conn=s.conn, decision_time=fixture_clock[0])
+            assert rebound.probability_witness is witness
+        # A newer retained station body, not an unbound numeric mutation,
+        # changes the current-path state while original ENS custody stays fixed.
+        fixture_clock[0] += timedelta(minutes=2)
+        new_at = fixture_clock[0] - timedelta(seconds=30)
+        for channel, delay in (("aviationweather_metar", 10), (f"ogimet_metar_{station.lower()}", 20)):
+            append_print(s.conn, city=city.name, station_id=station, source_channel=channel,
+                publish_ts_utc=new_at.isoformat(), value_native=11.5, unit="C",
+                fetched_at_utc=(new_at + timedelta(seconds=delay)).isoformat(),
+                raw_report=f"METAR {station} {new_at:%d%H%M}Z 01008KT 9999 12/05 Q1014 RMK T01150050")
+        s.conn.commit()
+        fresh_request = replace(day0_request, computed_at=fixture_clock[0])
+        current_members, _, _ = materializer_mod._day0_noaa_future_vector_members(s.conn, fresh_request, metric=metric)
+        for entry in (True, False):
+            updated = deepcopy(projected)
+            if not entry:
+                updated["_edli_day0_redecision_authority_scope"] = "held_exposure_current_bundle_day0_only_v1"
+            era._rebuild_decision_time_day0_carrier(payload=updated, family=family, unit="C",
+                decision_time=fixture_clock[0], future_extremes_c=current_members,
+                authority_kind="entry_current_remaining_path" if entry else "held_current_remaining_path",
+                entry_authority=entry, forecast_conn=s.conn, world_conn=s.conn)
+            new_role = updated["_edli_day0_measurement_domain_shapes"]["X"]
+            old_role = projected["_edli_day0_measurement_domain_shapes"]["X"]
+            assert new_role["provider_current_state"]["value_native"] == 11.5
+            assert new_role["provider_current_state"]["input_ref"] != old_role["provider_current_state"]["input_ref"]
+            assert new_role["native_snapshot_id"] == old_role["native_snapshot_id"]
+            assert new_role["member_points_native"] == old_role["member_points_native"]
+            assert updated["_edli_day0_remaining_content_identity"] != projected["_edli_day0_remaining_content_identity"]
+            forged = deepcopy(projected)
+            if not entry:
+                forged["_edli_day0_redecision_authority_scope"] = "held_exposure_current_bundle_day0_only_v1"
+            with pytest.raises(ValueError, match="DAY0_DOMAIN_PROVIDER_REBUILD_MISMATCH"):
+                era._rebuild_decision_time_day0_carrier(payload=forged, family=family, unit="C",
+                    decision_time=fixture_clock[0], future_extremes_c=[value + .5 for value in current_members],
+                    authority_kind="entry_current_remaining_path" if entry else "held_current_remaining_path",
+                    entry_authority=entry, forecast_conn=s.conn, world_conn=s.conn)
+        assert projected == original
+        verify_current_submit_rebind()
+    finally:
+        s.conn.close()
+        builtin.close()
+
+
 def _fixture_native_shape_identity(conn, request, monkeypatch, *, members_c):
     """TEST_ONLY controlled extracted windows, ordinary native authority writer.
 
@@ -5954,6 +6408,69 @@ def test_noaa_preliminary_fahrenheit_carrier_materializes_native_v2_q(
         "day0_remaining_carrier_content_identity"
     ]
     assert revised_q != q
+
+
+@pytest.mark.parametrize("metric,boundary", [("high", -5.0), ("low", 5.0)])
+def test_fast_residual_transport_cannot_drop_role_identification_confidence(metric, boundary):
+    from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
+    from src.contracts.settlement_semantics import SettlementSemantics
+    role = {"role": "remaining_X", "provider_centers_native": [-1.0, 1.0],
+            "provider_families": ["dwd", "ncep"], "member_points_native": [0.0] * 51,
+            "member_interval_bounds_native": [[0.0, 20.0]] * 51}
+    shapes = {"schema": "day0_measurement_domain_shapes_v1", "unit": "C", "X": role}
+    carrier = build_day0_remaining_probability_carrier(future_extremes_c=[-1.0, 1.0],
+        boundary_scenarios=((None, 1.0),), metric=metric, path_error_sigma_c=0.0,
+        instrument_sigma_c=0.0, bin_bounds_c=[(None, -1), (0, 0), (1, None)],
+        n_point=10, n_samples=500, identity_inputs={"unit": "C", "domain_role_shapes": shapes},
+        settlement_semantics=SettlementSemantics("private", "C", 1.0, "wmo_half_up", "UNKNOWN"))
+    bins = [SimpleNamespace(bin_id="cold", lower_c=None, upper_c=-1.0),
+            SimpleNamespace(bin_id="middle", lower_c=0.0, upper_c=0.0),
+            SimpleNamespace(bin_id="warm", lower_c=1.0, upper_c=None)]
+    likelihood = SimpleNamespace(residual_weights_c=((0.0, 1.0),), unknown_weight=0.0,
+        settlement_extreme_c=None, identity_hash="a" * 64, as_payload=lambda: {})
+    point, lower, upper, samples, receipt = materializer_mod._apply_fast_residual_likelihood_to_probability_carrier(
+        q={b.bin_id: carrier["q"][i] for i, b in enumerate(bins)},
+        q_samples_by_bin={b.bin_id: [row[i] for row in carrier["samples"]] for i, b in enumerate(bins)},
+        bins=bins, metric=metric, observed_extreme_c=boundary, half_step=0.5,
+        rounding_rule="wmo_half_up", likelihood=likelihood,
+        identification_bounds=carrier["identification_bounds"])
+    assert point["middle"] == 0.0
+    assert max(samples["middle"]) == 0.0  # point model, not sup-width sampling
+    assert upper["middle"] >= carrier["identification_bounds"]["upper"][1] > 0.24
+    assert receipt["identification_bounds"]["upper"][1] == pytest.approx(upper["middle"])
+    assert all(sum(row) == pytest.approx(1.0) for row in zip(*samples.values()))
+
+
+@pytest.mark.parametrize("sigma", [0.0, 1.0])
+def test_current_evidence_tail_preserves_dict_contract_with_zero_or_positive_sigma(sigma):
+    bins = [SimpleNamespace(bin_id="cold", lower_c=None, upper_c=0.0),
+            SimpleNamespace(bin_id="warm", lower_c=1.0, upper_c=None)]
+    result = materializer_mod._current_evidence_tail_ucb_floors(
+        mu_star=0.5, predictive_sigma_c=sigma, members_c=[0.5] * 51,
+        bins=bins, half_step=0.5, rounding_rule="wmo_half_up")
+    assert isinstance(result, dict)
+    assert set(result) == {"cold", "warm"}
+    assert all(math.isfinite(value) and 0.0 <= value <= 1.0 for value in result.values())
+
+
+@pytest.mark.parametrize("rounding, expected", [("wmo_half_up", "warm"), ("oracle_truncate", "cold")])
+def test_current_point_zero_width_uses_declared_settlement_atom(rounding, expected):
+    bins = [SimpleNamespace(bin_id="cold", lower_c=None, upper_c=0.0),
+            SimpleNamespace(bin_id="warm", lower_c=1.0, upper_c=None)]
+    q, capped, uniform = materializer_mod._build_scaled_normal_uniform_q(
+        mu=0.5, sigma_pred=0.0, k=1.0, uniform_w=0.0, floor_steps=0.0,
+        bins=bins, half_step=0.5, rounding_rule=rounding,
+        day0_obs_extreme_c=None, settlement_step_c=1.0,
+        settlement_sigma_floor_c=None, city_unit="C")
+    assert q == {name: float(name == expected) for name in ("cold", "warm")}
+    assert capped == [] and uniform is False
+
+    lower, upper, samples = materializer_mod._build_fused_q_bounds(
+        mu_star=0.5, center_sigma_c=0.0, predictive_sigma_c=0.0,
+        bins=bins, half_step=0.5, rounding_rule=rounding, q_point=q,
+        n_draws=10, return_samples=True)
+    assert lower == upper == q
+    assert samples == {name: [value] * 10 for name, value in q.items()}
 
 
 @pytest.mark.usefixtures("_historical_shanghai_component_surface")

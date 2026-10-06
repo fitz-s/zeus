@@ -2696,6 +2696,259 @@ def test_v3_conditions_final_center_without_boundary_atom(
     assert sample_mean == pytest.approx(expected, abs=0.03)
 
 
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_measurement_domain_point_uses_independent_X_Y_widths(metric):
+    """Same scalar centers cannot license one width for two physical domains."""
+    from math import erf, sqrt
+
+    shapes = {
+        "schema": "day0_measurement_domain_shapes_v1", "unit": "C",
+        "X": {"role": "remaining_X", "provider_centers_native": [-2.0, 2.0],
+              "provider_families": ["dwd", "ncep"], "member_points_native": [1.0] * 51,
+              "member_interval_bounds_native": [[0.5, 1.5]] * 51},
+        "Y": {"role": "full_Y", "provider_centers_native": [6.0],
+              "provider_families": ["hko"], "member_points_native": [8.0] * 51,
+              "member_interval_bounds_native": [[7.5, 8.5]] * 51},
+    }
+    bounds = [(None, -1), (0, 0), (1, None)]
+    carrier = build_day0_remaining_probability_carrier(
+        future_extremes_c=[-2.0, 2.0], final_extreme_centers_c=[6.0],
+        boundary_scenarios=((None, 1.0),), metric=metric,
+        path_error_sigma_c=1.0, instrument_sigma_c=0.0,
+        bin_bounds_c=bounds, n_point=10, n_samples=500,
+        identity_inputs={"city": "Tel Aviv", "unit": "C", "domain_role_shapes": shapes},
+        settlement_semantics=_settlement_semantics("Tel Aviv"),
+    )
+    def cdf(x, mu, sigma):
+        return 0.5 * (1.0 + erf((x - mu) / (sigma * sqrt(2.0))))
+    expected = sum(cdf(0.5, mu, sigma) - cdf(-0.5, mu, sigma)
+                   for mu, sigma in [(-2.0, 1.0), (2.0, 1.0), (6.0, 2.0)]) / 3.0
+    assert carrier["q"][1] == pytest.approx(expected, abs=2e-12)
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_measurement_domain_X_only_and_shared_family_do_not_invent_a_width_floor(metric):
+    role = {"role": "remaining_X", "provider_centers_native": [0.0, 1.0],
+            "provider_families": ["dwd", "ncep"], "member_points_native": [0.5] * 51,
+            "member_interval_bounds_native": [[0.5, 0.5]] * 51}
+    shapes = {"schema": "day0_measurement_domain_shapes_v1", "unit": "C", "X": role}
+    kwargs = dict(future_extremes_c=[0.0, 1.0], boundary_scenarios=((None, 1.0),),
+                  metric=metric, path_error_sigma_c=9.0, instrument_sigma_c=9.0,
+                  bin_bounds_c=[(None, 0), (1, None)], n_point=10, n_samples=500,
+                  identity_inputs={"city": "Tel Aviv", "unit": "C", "domain_role_shapes": shapes},
+                  settlement_semantics=_settlement_semantics("Tel Aviv"))
+    carrier = build_day0_remaining_probability_carrier(**kwargs)
+    assert carrier["q"] == [0.5, 0.5]
+    assert np.asarray(carrier["samples"]) == pytest.approx(np.full((500, 2), 0.5))
+    assert carrier["identification_bounds"]["lower"] == [0.5, 0.5]
+    shapes["Y"] = {**role, "role": "full_Y", "provider_centers_native": [0.5],
+                   "provider_families": ["dwd"]}
+    shared = build_day0_remaining_probability_carrier(**kwargs, final_extreme_centers_c=[0.5])
+    assert shared["q"] == pytest.approx([1.0 / 3.0, 2.0 / 3.0])
+
+
+@pytest.mark.parametrize("sign", [1.0, -1.0])
+def test_role_interval_confidence_contains_interior_and_zero_positive_limit(sign):
+    from src.data.day0_hourly_vectors import _day0_normal_sigma_envelope
+    lo, hi = sorted((sign * 1.0, sign * 2.0))
+    lower, upper = _day0_normal_sigma_envelope(0.0, lo, hi, (0.2, 10.0))
+    assert upper > 0.16  # endpoints alone both below .04
+    assert lower >= 0.0
+    assert _day0_normal_sigma_envelope(1.5, 0.5, 1.5, (0.0, 10.0)) == pytest.approx((0.0, 0.5))
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("physical_boundary_case", [False, True])
+def test_native_role_normal_originals_to_public_carrier(tmp_path, monkeypatch, metric, physical_boundary_case):
+    """Real synthetic GRIB + normal private capture, not provider verification."""
+    import json
+    from datetime import datetime, timedelta, timezone
+    from types import SimpleNamespace
+    from tests.test_ecmwf_open_data_collect_cycle import (
+        _normal_native_http, _native_temperature_knots_fixture, _physical_static_originals,
+    )
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+    from src.data.day0_hourly_vectors import read_native_measurement_role
+    from scripts import extract_open_ens_localday as decoder
+    import eccodes as ec
+
+    steps = tuple(range(0, 28, 3))
+    s = _normal_native_http(tmp_path, monkeypatch, steps=steps)
+    if physical_boundary_case:
+        original_get = s.session.get
+        def get(url, **kwargs):
+            response = original_get(url, **kwargs)
+            if not url.endswith(".index"):
+                gid = ec.codes_new_from_message(response.body)
+                try:
+                    step = int(ec.codes_get(gid, "endStep"))
+                    value_c = 20. if step == 27 else 10.
+                    if metric == "low":
+                        value_c = 30. - value_c
+                    values = ec.codes_get_values(gid)
+                    values[2] = round(value_c + 273.15)
+                    ec.codes_set_values(gid, values)
+                    body = ec.codes_get_message(gid)
+                    assert len(body) == len(response.body)
+                    response.body = body
+                finally:
+                    ec.codes_release(gid)
+            return response
+        monkeypatch.setattr(s.session, "get", get)
+    try:
+        captured = s.module.collect_native_temperature_source(**s.args)
+        assert captured["source_run_id"]
+        static = tmp_path / "static"
+        static.mkdir()
+        inputs = _native_temperature_knots_fixture(static, steps=(0, 3))
+        directory = s.module._download_output_path(run_date=s.run.date(), run_hour=0,
+            param="2t", raw_root=s.paths.raw_root).parent
+        city = SimpleNamespace(name="London", timezone="Atlantic/Cape_Verde", lat=51.6, lon=0.1, settlement_unit="C")
+        explicit = [{"city": city.name, "lat": city.lat, "lon": city.lon, "unit": "C"}]
+        clock = datetime.now(timezone.utc).isoformat()
+        for native_metric, track_name in (("high", "mx2t6_high"), ("low", "mn2t6_low")):
+            mask, phi = _physical_static_originals(inputs, directory=directory, track=track_name)
+            original_dir = tmp_path / track_name
+            original_dir.mkdir()
+            raw, _, _, _ = _tiny_native_grib(original_dir, track_name, issue=s.run, horizon=27)
+            track = decoder.TRACKS[track_name]
+            target = s.module._download_output_path(run_date=s.run.date(), run_hour=0,
+                param=track.open_data_param, raw_root=s.paths.raw_root)
+            bodies = []
+            with raw.open("rb") as stream:
+                while (gid := ec.codes_grib_new_from_file(stream)) is not None:
+                    try:
+                        ec.codes_set(gid, "generatingProcessIdentifier", 161)
+                        if native_metric == "low":
+                            ec.codes_set_values(gid, ec.codes_get_values(gid) - 0.75)
+                        if physical_boundary_case:
+                            end = int(ec.codes_get(gid, "endStep"))
+                            value_c = 20. if end == 27 and native_metric == "high" else 10.
+                            if metric == "low":
+                                value_c = 30. - (10. if native_metric == "high" else value_c)
+                                if end == 27:
+                                    value_c = 20. if native_metric == "high" else 10.
+                            values = ec.codes_get_values(gid)
+                            values[2] = round(value_c + 273.15)
+                            ec.codes_set_values(gid, values)
+                        bodies.append(ec.codes_get_message(gid))
+                    finally:
+                        ec.codes_release(gid)
+            target.write_bytes(b"".join(bodies))
+            scan = decoder._scan_grib_with_city_values(target, track, explicit,
+                mask=decoder._read_land_mask(mask, mask.with_suffix(".proof.json")))
+            selected = scan["selected_cities"][city.name]
+            capture = {"capture_status": "OBSERVED", "selected_point": {
+                "flat_index": selected["selected_flat_index"], "lat": selected["selected_lat"], "lon": selected["selected_lon"]},
+                "messages": [v["native_capture"] for v in scan["entries"].values()]}
+            s.conn.execute("""INSERT INTO ensemble_snapshots(city,target_date,temperature_metric,
+                physical_quantity,observation_field,available_at,fetch_time,lead_hours,members_json,
+                model_version,dataset_id,source_cycle_time,source_available_at,recorded_at,provenance_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (city.name, s.run.date().isoformat(), native_metric,
+                track.physical_quantity, "high_temp" if native_metric == "high" else "low_temp", clock, clock, 0, "[]", "private", track.data_version,
+                s.run.isoformat(), clock, clock, json.dumps({"native_capture_receipt": capture})))
+        s.conn.commit()
+        args = dict(conn=s.conn, city=city, target_date=s.run.date().isoformat(), metric=metric,
+            decision_time=datetime.now(timezone.utc), _paths=s.paths)
+        x = read_native_measurement_role(**args, role="remaining_X", scope_start=s.run + timedelta(hours=2))
+        y = read_native_measurement_role(**args, role="full_Y", scope_start=s.run + timedelta(hours=1))
+        assert x["ENS_current_state_transform"] == "NONE_RAW_NATIVE_ROLE"
+        assert x["native_scope"]["source_issued_at"] is None
+        assert x["physical_dependency_available_at"]
+        assert x["paired_interval_originals"]
+        if physical_boundary_case:
+            # Local end 25 lies inside native 24..27. PL at 25 is not
+            # an observed extremum: native max/min 20/10 retain both bounds.
+            assert x["member_interval_bounds_native"] == pytest.approx(np.tile([9.85, 19.85], (51, 1)))
+            assert x["member_points_native"] == pytest.approx([(40./3 if metric == "high" else 50./3) - .15] * 51, abs=2e-5)
+        for shape in (x, y):
+            assert len(shape["member_points_native"]) == 51
+            assert all(lo <= p <= hi for p, (lo, hi) in zip(shape["member_points_native"], shape["member_interval_bounds_native"]))
+        from src.data import replacement_forecast_materializer as materializer
+        center = 10.0 if metric == "high" else 20.0
+        native_y = {**y, "member_points_c": y["member_points_native"]}
+        global_shape = materializer._interval_censored_evidence_shape(
+            member_bounds_c=y["member_interval_bounds_native"], native_point_model=native_y,
+            center_c=center, snapshot_id=y["native_snapshot_id"], source_cycle_time=s.run.isoformat(),
+            source_available_at=clock, provider_values_c={"ecmwf_ifs": center - 1, "icon_global": center + 1},
+            provider_weights={"ecmwf_ifs": 0.5, "icon_global": 0.5},
+            provider_cycles={"ecmwf_ifs": s.run.isoformat(), "icon_global": s.run.isoformat()})
+        expected_variance = np.mean((np.asarray(y["member_points_native"]) - center) ** 2) + 1.0
+        assert global_shape.predictive_sigma_c ** 2 == pytest.approx(expected_variance)
+        assert global_shape.predictive_sigma_interval_c[1] > global_shape.predictive_sigma_c
+        assert global_shape.members_c == tuple(y["member_points_native"])
+        assert global_shape.native_point_model["native_scope"]["source_issued_at"] is None
+        old_y_id = y["native_snapshot_id"]
+        columns = [row[1] for row in s.conn.execute("PRAGMA table_info(ensemble_snapshots)") if row[1] != "snapshot_id"]
+        projection = ["'{}'" if name == "provenance_json" else name for name in columns]
+        s.conn.execute(f"INSERT INTO ensemble_snapshots({','.join(columns)}) SELECT {','.join(projection)} FROM ensemble_snapshots WHERE snapshot_id=?", (old_y_id,))
+        pinned_y = read_native_measurement_role(**args, role="full_Y", scope_start=s.run + timedelta(hours=1), snapshot_id=old_y_id)
+        assert pinned_y == y  # a later partial row is not a new full-Y frontier
+        x.update(provider_centers_native=[10.0, 15.0], provider_families=["dwd", "ncep"])
+        y.update(provider_centers_native=[12.0], provider_families=["dwd"])
+        shapes = {"schema": "day0_measurement_domain_shapes_v1", "unit": "C", "X": x, "Y": y}
+        carrier = build_day0_remaining_probability_carrier(future_extremes_c=[10.0, 15.0],
+            final_extreme_centers_c=[12.0], boundary_scenarios=((None, 1.0),), metric=metric,
+            path_error_sigma_c=0.0, instrument_sigma_c=0.0, bin_bounds_c=[(None, 11), (12, None)],
+            n_point=10, n_samples=500, identity_inputs={"city": "London", "unit": "C", "domain_role_shapes": shapes},
+            settlement_semantics=_settlement_semantics("London"))
+        replay = json.loads(json.dumps(shapes))
+        again = build_day0_remaining_probability_carrier(future_extremes_c=[10.0, 15.0],
+            final_extreme_centers_c=[12.0], boundary_scenarios=((None, 1.0),), metric=metric,
+            path_error_sigma_c=0.0, instrument_sigma_c=0.0, bin_bounds_c=[(None, 11), (12, None)],
+            n_point=10, n_samples=500, identity_inputs={"city": "London", "unit": "C", "domain_role_shapes": replay},
+            settlement_semantics=_settlement_semantics("London"))
+        assert carrier == again
+        from src.data.replacement_forecast_bundle_reader import _day0_measurement_domain_carrier_reason
+        carrier["measurement_domain_shapes"] = shapes
+        serialized = json.loads(json.dumps({
+            **materializer._day0_measurement_domain_carrier_provenance(carrier),
+            "day0_remaining_carrier_content_identity": carrier["content_identity"],
+            "day0_remaining_carrier_q": carrier["q"],
+            "day0_remaining_carrier_probability_samples": carrier["samples"],
+            "day0_remaining_carrier_sample_count": carrier["sample_count"],
+            "day0_remaining_carrier_operator": carrier["operator"],
+            "day0_remaining_carrier_future_extremes_c": [10., 15.],
+            "day0_remaining_carrier_final_extremes_c": [12.],
+            "day0_remaining_carrier_path_error_sigma_c": 0.,
+            "bin_topology": [{"bin_id": "cool", "lower_c": None, "upper_c": 11},
+                             {"bin_id": "warm", "lower_c": 12, "upper_c": None}],
+        }))
+        assert _day0_measurement_domain_carrier_reason(serialized) is None
+        serialized["day0_measurement_domain_identification_bounds"]["upper"][0] = 0.
+        assert _day0_measurement_domain_carrier_reason(serialized) == "REPLACEMENT_DAY0_DOMAIN_CONFIDENCE_IDENTITY_MISMATCH"
+        s.conn.execute("UPDATE ensemble_snapshots SET provenance_json='{}'")
+        with pytest.raises(ValueError, match="MEASUREMENT_ROLE_NATIVE_POINT_UNAVAILABLE"):
+            read_native_measurement_role(**args, role="full_Y", scope_start=s.run + timedelta(hours=1))
+    finally:
+        s.conn.close()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_complete_prefix_cannot_be_priced_as_a_coarsened_Y_truncation(metric):
+    x = {"role": "remaining_X", "provider_centers_native": [26., 26.],
+         "provider_families": ["dwd", "ncep"], "member_points_native": [26.] * 51,
+         "member_interval_bounds_native": [[26., 26.]] * 51}
+    y = {"role": "full_Y", "provider_centers_native": [23.3],
+         "provider_families": ["dwd"], "member_points_native": [22.3] * 25 + [24.3] * 26,
+         "member_interval_bounds_native": [[22.3, 22.3]] * 25 + [[24.3, 24.3]] * 26,
+         "prefix_information_kind": "COMPLETE_SAME_QUANTITY_PREFIX",
+         "conditioning_likelihood_scope": "Y_PREFIX_LIKELIHOOD_UNIDENTIFIED"}
+    kwargs = dict(future_extremes_c=[26., 26.], final_extreme_centers_c=[23.3],
+        boundary_scenarios=((23.3, 1.),), metric=metric, path_error_sigma_c=0.,
+        instrument_sigma_c=0., bin_bounds_c=[(None, 23), (24, None)], n_point=10, n_samples=500,
+        identity_inputs={"city": "Tel Aviv", "unit": "C", "domain_role_shapes": {
+            "schema": "day0_measurement_domain_shapes_v1", "unit": "C", "X": x, "Y": y}},
+        settlement_semantics=_settlement_semantics("Tel Aviv"))
+    with pytest.raises(ValueError, match="Y_PREFIX_LIKELIHOOD_UNIDENTIFIED"):
+        build_day0_remaining_probability_carrier(**kwargs)
+    y.update(prefix_information_kind="REPORTED_PRODUCT_PROXY",
+             conditioning_likelihood_scope="COARSENED_BOUND_ONLY")
+    coarse = build_day0_remaining_probability_carrier(**kwargs)
+    assert sum(coarse["q"]) == pytest.approx(1.)
+    assert coarse["measurement_domain_replay_inputs"]["identity_inputs"]["city"] == "Tel Aviv"
+
+
 def test_v3_none_boundary_keeps_final_center_untruncated_and_is_deterministic():
     kwargs = dict(
         future_extremes_c=[0.0],
