@@ -137,6 +137,41 @@
 
 ---
 
+## [REVIEW-SAFE: HISTORICAL_SCHEMA_FINGERPRINTS] — Immutable schema and example findings
+
+**Operator ruling 2026-10-06**: suppress only the seven exact historical
+`generic-api-key` fingerprints in `.gitleaksignore`. Do not exempt either
+source file, markdown files, field-name suffixes, or later assignments.
+
+**Why cleared**: six findings are fixed ASCII identifiers used exclusively as
+payload/provenance/monitor dictionary field names, not authentication values.
+Their lengths are 24–38 characters. The seventh is a documented synthetic
+12-hex token example, identical to the constant in the same commit's
+`tests/test_k1_slice_d.py:122`. No credential validation is needed or performed.
+
+| Commit | Historical path and line | Verified use |
+| --- | --- | --- |
+| `5af16f2644ac0258874be71eb0d7462383d29e02` | `src/engine/event_reactor_adapter.py:45207` | 26-character mixture payload field; dictionary assignment/pop |
+| `19aea4f50d1fa4a3357227d4043fe41cb04272c0` | `src/data/replacement_forecast_bundle_reader.py:102` | 31-character provenance operator field; membership/get |
+| `78f263b9b4da62abd0d8513adb9ba81929fa516c` | `src/engine/event_reactor_adapter.py:22351` | 34-character observation-count field; integer payload |
+| `d3a49f9f6b1f136720be897bd0eca0b7a46fb65a` | `src/engine/event_reactor_adapter.py:22282` | 25-character held-probability field; float payload |
+| `d3a49f9f6b1f136720be897bd0eca0b7a46fb65a` | `src/engine/event_reactor_adapter.py:22283` | 24-character probability-basis field; string payload |
+| `c9db62697dcb4a717f04a891fcca4b0698328e73` | `src/engine/event_reactor_adapter.py:3712` | 38-character monitor field; integer-type check |
+| `144bf4d4096a7e9de88d4e4c854769f8eda62429` | `SECURITY-FALSE-POSITIVES.md:46` | Synthetic token example; same-commit test constant |
+
+**Exclusion boundary (INV-47)**:
+
+- SCOPE: exact immutable commit, path, rule, and line—not a value or path regex.
+- DRAIN: the existing full-history scanner skips only these verified findings.
+- RESET: a new commit, different line, or new field has a different fingerprint
+  and is scanned normally. A credential-like synthetic replacement under the
+  same binding, other fields, and a new markdown example must still be detected.
+
+**Durable references**: `.gitleaksignore` contains the seven exact fingerprints;
+`.gitleaks.toml` and the required secrets-scan workflow are unchanged.
+
+---
+
 ## How to add a new entry
 
 When the operator clears another false-positive:

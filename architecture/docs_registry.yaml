@@ -753,7 +753,7 @@ entries:
   doc_class: reference
   default_read: false
   direct_reference_allowed: true
-  current_role: gitleaks secret-scan false-positive ruling registry, companion to .gitleaks.toml; formerly root SECURITY-FALSE-POSITIVES.md
+  current_role: gitleaks secret-scan false-positive ruling registry, companion to .gitleaks.toml and exact historical .gitleaksignore fingerprints; formerly root SECURITY-FALSE-POSITIVES.md
   canonical_replaced_by: []
   next_action: keep
   lifecycle_state: durable

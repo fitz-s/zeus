@@ -1,0 +1,11 @@
+# Exact historical false positives; rationale: docs/reference/security_false_positives.md
+# SCOPE: only these immutable commit/path/rule/line fingerprints.
+# DRAIN: normal full-history scans omit these verified schema/example findings.
+# RESET: every new commit, line, or field remains subject to the normal scanner.
+5af16f2644ac0258874be71eb0d7462383d29e02:src/engine/event_reactor_adapter.py:generic-api-key:45207
+19aea4f50d1fa4a3357227d4043fe41cb04272c0:src/data/replacement_forecast_bundle_reader.py:generic-api-key:102
+78f263b9b4da62abd0d8513adb9ba81929fa516c:src/engine/event_reactor_adapter.py:generic-api-key:22351
+d3a49f9f6b1f136720be897bd0eca0b7a46fb65a:src/engine/event_reactor_adapter.py:generic-api-key:22282
+d3a49f9f6b1f136720be897bd0eca0b7a46fb65a:src/engine/event_reactor_adapter.py:generic-api-key:22283
+c9db62697dcb4a717f04a891fcca4b0698328e73:src/engine/event_reactor_adapter.py:generic-api-key:3712
+144bf4d4096a7e9de88d4e4c854769f8eda62429:SECURITY-FALSE-POSITIVES.md:generic-api-key:46
