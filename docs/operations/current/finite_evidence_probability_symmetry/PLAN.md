@@ -19199,3 +19199,29 @@ passed255 unique tests,0 failures/errors/skips,54.25s (two NumPy warnings).
 Original XML /tmp/zeus-restored-parent-money-final.xml records this actual run,
 not a reuse of the child255 proof. No source/math/risk law was changed to pass.
 The static single-live required gate remains the blocker; no release/load claim.
+
+ROOT-approved BEFOREEDIT, rollback8e28d0d: independently reproduced standard
+JSON -> encode -> SHA256 -> hexdigest dependency loss only. Owner checker and
+existing single-live tests, plus this receipt; no source/q/registry edits.
+Recognize only trusted standard JSON string, unshadowed builtin encoding and
+unmutated imported hashlib.sha256/hash-state hexdigest. Preserve diagnostic
+and unknown dependencies as scalar digest evidence; never clear taint because
+the result is a primitive. Custom hooks/rebinding/dynamic objects stay UNKNOWN.
+SCOPE these three operators; DRAIN focused tests only, no whole CLI; RESET the
+three previously leaking mode/predicate/keyword-mutation controls reject while
+metadata hash plus separately selected clean numeric fields remain legal.
+Actual upstream wildcard provenance is unresolved; this does not close213
+findings or the required gate. Preserve peer/source/loader/cash255/raw/config.
+
+Independent digest-loss checkpoint: original three mode/predicate/keyword
+mutation antibodies really failed3F1.84s, /tmp/zeus-json-digest-red.xml SHA256
+9c065f8388e400b681f6507ca79fcc22f9c44c6d0f27423c7ce6d0e0de55e198.
+Final same-source focused file134P4.245s,0F/E/S, XML
+/tmp/zeus-json-digest-focused-final.xml SHA256
+92f681b0670674512876566d5c63e415c8f54c5487320a11447fb57ebfeba4ef.
+This includes13 new exact hash-chain/metadata and rebound/custom/dynamic/alias
+controls plus the existing121; an earlier133P precedes the added indirect
+encoder receiver control and is not the final epoch. SHA256 output is scalar
+dependency-bearing evidence, not a reason to erase diagnostic/unknown paths.
+AST parse and diff-check pass. No whole CLI was run; its prior213 remain OPEN.
+No source/q/loader/registry behavior changed and no live action occurred.

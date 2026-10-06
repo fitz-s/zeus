@@ -15,6 +15,66 @@ from scripts.check_single_live_semantics import violations
 from src.config import entry_forecast_config
 
 
+_JSON_DIGEST_SOURCE = """import json
+import hashlib
+def _json(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), default=str)
+def _json_hash(value):
+    return hashlib.sha256(_json(value).encode('utf-8')).hexdigest()
+metadata = {'report': 'diagnostic', 'mu': 20.0}
+digest = _json_hash(metadata)
+"""
+
+
+@pytest.mark.parametrize("sink", [
+    "mode = digest\n",
+    "if digest:\n    lane = 'live'\n",
+    "def mutate(p, value):\n    p['value'] = value\nbag = {}\n"
+    "mutate(p=bag, value=digest)\nruntime = bag['value']\n",
+])
+def test_json_digest_preserves_control_dependencies(sink):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(_JSON_DIGEST_SOURCE + sink)
+
+
+def test_json_digest_metadata_does_not_taint_clean_sibling_field():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = _JSON_DIGEST_SOURCE + "payload = {'shape_hash': digest, 'mu': metadata['mu']}\n"
+    assert _alternate_control_violations(source) == []
+
+
+@pytest.mark.parametrize("alteration", [
+    "hashlib.sha256 = custom\n",
+    "hashlib = custom\n",
+    "str = custom\n",
+    "json = custom\n",
+])
+def test_json_digest_rebound_operators_remain_unknown(alteration):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = _JSON_DIGEST_SOURCE.replace("metadata =", alteration + "metadata =")
+    assert _alternate_control_violations(source + "mode = digest\n")
+
+
+@pytest.mark.parametrize("expression", [
+    "json.dumps(metadata, default=evil)",
+    "json.dumps(opaque('diagnostic'), default=str)",
+    "json.dumps(metadata).encode(encoding)",
+    "custom_hasher(json.dumps(metadata).encode('utf-8')).hexdigest()",
+])
+def test_json_digest_unknown_inputs_and_effects_are_not_cleared(expression):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = "import json\nimport hashlib\nmetadata = {'report': 'diagnostic'}\n"
+    source += "digest = " + expression + "\nmode = digest\n"
+    assert _alternate_control_violations(source)
+
+
+def test_json_digest_indirect_encoding_does_not_drop_receiver_dependency():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = "import json\nmetadata = {'report': 'diagnostic'}\n"
+    source += "encoder = json.dumps(metadata).encode\nmode = encoder('utf-8')\n"
+    assert _alternate_control_violations(source)
+
+
 def _reviewed_counterfactual_fixture(tmp_path, monkeypatch, source):
     from scripts import check_single_live_semantics as gate
     path = tmp_path / "src/engine/global_batch_runtime.py"

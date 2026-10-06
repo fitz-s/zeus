@@ -340,6 +340,8 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     classes = {node.name for node in nodes if isinstance(node, ast.ClassDef)}
     json_modules = {alias.asname or alias.name for node in nodes if isinstance(node, ast.Import)
                     for alias in node.names if alias.name == 'json'}
+    hash_modules = {alias.asname or alias.name for node in nodes if isinstance(node, ast.Import)
+                    for alias in node.names if alias.name == 'hashlib'}
     json_mutations = set()
     for node in nodes:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(
@@ -350,13 +352,18 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 base = base.value
             if isinstance(base, ast.Name):
                 json_modules.discard(base.id)
+                hash_modules.discard(base.id)
                 json_mutations.add(base.id)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             json_modules.discard(node.name)
+            hash_modules.discard(node.name)
         if (isinstance(node, ast.Call) and _call_name(node.func) == 'setattr'
                 and node.args and isinstance(node.args[0], ast.Name)):
             json_mutations.add(node.args[0].id)
+            hash_modules.discard(node.args[0].id)
     encoded_json = '__encoded_json_value__'
+    encoded_bytes = '__encoded_json_bytes__'
+    hash_state = '__stdlib_sha256_state__'
     formatted_object = '__nonprimitive_formatted_value__'
     rebound_str = any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == 'str'
@@ -419,6 +426,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             if name:
                 (writes if path else assignments).setdefault(root(name), []).append((path, value))
     json_modules = {root(name) for name in json_modules} - {root(name) for name in json_mutations}
+    hash_modules = {root(name) for name in hash_modules} - {root(name) for name in json_mutations}
 
     def join(values):
         return set().union(*values) if values else set()
@@ -474,7 +482,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             key = node.slice.value if isinstance(node.slice, ast.Constant) else '*'
             result = project(value(node.value, bindings), key, node)
         elif isinstance(node, ast.Attribute):
-            result = project(value(node.value, bindings), node.attr, node)
+            receiver = value(node.value, bindings)
+            result = ({('*',)} if receiver else set()) if node.attr in {
+                'encode', 'sha256', 'hexdigest'} else project(receiver, node.attr, node)
         elif isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)) and len(node.generators) == 1:
             generator = node.generators[0]
             iterable = value(generator.iter, bindings)
@@ -565,6 +575,31 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 elif node.func.attr == 'loads' and all(path and path[0] == encoded_json for path in paths):
                     result = {path[1:] for path in paths}
                 elif paths:
+                    # Standard dumps still returns str, but unknown fields or
+                    # formatting effects retain their unknown dependency.
+                    result = {(encoded_json, '*')} if node.func.attr == 'dumps' else {('*',)}
+                    opaque_calls.add(node)
+            elif (isinstance(node.func, ast.Attribute) and node.func.attr == 'encode'
+                  and not rebound_str and not node.keywords and len(node.args) <= 1
+                  and all(isinstance(arg, ast.Constant) and isinstance(arg.value, str) for arg in node.args)
+                  and (receiver := value(node.func.value, bindings))
+                  and all(path and path[0] == encoded_json for path in receiver)):
+                result = {(encoded_bytes,) + path[1:] for path in receiver}
+            elif (isinstance(node.func, ast.Attribute) and node.func.attr == 'sha256'
+                  and isinstance(node.func.value, ast.Name) and root(node.func.value.id) in hash_modules
+                  and len(arguments) == 1 and not node.keywords and arguments[0]
+                  and all(path and path[0] == encoded_bytes for path in arguments[0])):
+                result = {(hash_state,) + path[1:] for path in arguments[0]}
+            elif (isinstance(node.func, ast.Attribute) and node.func.attr == 'hexdigest'
+                  and not node.args and not node.keywords
+                  and (receiver := value(node.func.value, bindings))
+                  and all(path and path[0] == hash_state for path in receiver)):
+                # A digest is scalar, not a container with the input's keys.
+                # Both known alternate metadata and unknown input survive.
+                result = {('*',)} if any('*' in path for path in receiver) else {()}
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in {'encode', 'sha256', 'hexdigest'}:
+                inputs = join([*arguments, *keywords.values(), value(node.func.value, bindings)])
+                if inputs:
                     result = {('*',)}
                     opaque_calls.add(node)
             elif isinstance(node.func, ast.Attribute) and node.func.attr == 'get':
