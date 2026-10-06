@@ -1,5 +1,5 @@
 # Created: 2026-05-21
-# Last reused/audited: 2026-05-21
+# Last reused/audited: 2026-10-06
 # Authority basis: architecture/money_path_ci.yaml MP-ORD-001/MP-ORD-004; src/execution/order_truth_reducer.py
 """Money-path model tests for monotonic venue order truth."""
 
@@ -11,6 +11,7 @@ from src.execution.order_truth_reducer import (
     PARTIAL_WITH_REMAINDER,
     TERMINAL_FILLED,
     TERMINAL_NO_FILL,
+    TERMINAL_PARTIAL,
     UNKNOWN_SIDE_EFFECT,
     VenueOrderTruthReducer,
 )
@@ -55,10 +56,20 @@ def test_positive_trade_fact_creates_partial_exposure_once() -> None:
         command_size="5",
     )
 
-    assert reduced.state == "PARTIALLY_MATCHED"
-    assert reduced.proof_class == PARTIAL_WITH_REMAINDER
+    # A later fill repairs exposure, never resurrects an expired remainder.
+    assert reduced.state == "EXPIRED"
+    assert reduced.proof_class == TERMINAL_PARTIAL
     assert reduced.matched_size == Decimal("2")
-    assert reduced.remaining_size == Decimal("3")
+    assert reduced.remaining_size == Decimal("0")
+    assert reduced.source_state == "EXPIRED"
+    open_remainder = VenueOrderTruthReducer.reduce(
+        order_facts=[{"state": "LIVE", "remaining_size": "3", "matched_size": "0"}],
+        trade_filled_size="2", command_size="5", open_order_present=True,
+    )
+    assert open_remainder.state == "PARTIALLY_MATCHED"
+    assert open_remainder.proof_class == PARTIAL_WITH_REMAINDER
+    assert open_remainder.matched_size == Decimal("2")
+    assert open_remainder.remaining_size == Decimal("3")
 
 
 def test_absent_open_order_without_fact_is_unknown_side_effect() -> None:

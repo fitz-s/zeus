@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-08-11
+# Last reused/audited: 2026-10-06
 # Authority basis: src/runtime/bankroll_provider.py (cached() RESILIENT bound, KILLER 1
 #   2026-05-31: default 1800s, supersedes the prior 300s fail-closed window that blanked
 #   last-good across transient wallet-RPC blip clusters) + src/main.py:_edli_event_reactor_cycle
@@ -1175,26 +1175,42 @@ def test_warm_cycle_failsoft_on_missing_collateral_snapshot(monkeypatch):
 
 
 def test_missing_current_collateral_revokes_prior_execution_authority():
+    from src.control.heartbeat_supervisor import HeartbeatHealth
     from src.risk_allocator import (
         RiskAllocator,
         assert_global_submit_allows,
         configure_global_allocator,
         snapshot_global_auction_capital_authority,
     )
-    from src.risk_allocator.governor import AllocationDenied
+    from src.risk_allocator.governor import AllocationDenied, GovernorState
 
     try:
         _set_cache(value_usd=199.40, fetched_age_seconds=300.0)
         configure_global_ledger(None)
-        configure_global_allocator(RiskAllocator(), None)
+        configure_global_allocator(
+            RiskAllocator(), GovernorState(0.0, HeartbeatHealth.HEALTHY, False, 0, 0),
+        )
         snapshot_global_auction_capital_authority()
+        assert_global_submit_allows(reduce_only=True)
 
         main_module._edli_bankroll_warm_cycle()
 
         with pytest.raises(AllocationDenied):
             snapshot_global_auction_capital_authority()
-        with pytest.raises(AllocationDenied):
+        with pytest.raises(AllocationDenied) as entry:
+            assert_global_submit_allows(reduce_only=False)
+        assert entry.value.decision.reason == "allocator_not_configured"
+        reduction = assert_global_submit_allows(reduce_only=True)
+        assert reduction.allowed is True
+        assert reduction.reason == "reduce_only_exempt_allocator_not_configured"
+        # That cold-singleton exemption is not a kill-switch waiver.
+        configure_global_allocator(
+            RiskAllocator(),
+            GovernorState(0.0, HeartbeatHealth.HEALTHY, False, 0, 0, kill_switch_armed=True),
+        )
+        with pytest.raises(AllocationDenied) as kill:
             assert_global_submit_allows(reduce_only=True)
+        assert kill.value.decision.reason == "kill_switch_armed"
     finally:
         configure_global_allocator(None, None)
         bankroll_provider.reset_cache_for_tests()
