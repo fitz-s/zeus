@@ -19777,3 +19777,37 @@ paths/read-only lifecycle and real normal-producer public H/L positives must
 be checked. Preserve PRESTOP refusal, CAS release and old MAIN monitoring
 controls. A reviewed new tip needs fresh relevant gate/secret proof and ROOT
 authorization before another FF landing or registered restart.
+
+### Upgrade test fixture and independent source-debt scheduling — BEFORE EDIT
+
+The first full ops check returned 277P/1F: the unchanged recovery-order test
+omitted immutable loaded identity and changed its simulated HEAD mid-restart,
+so the real PRESTOP revision gate correctly refused. ROOT authorizes only that
+function in tests/test_ops_scripts_smoke.py as the third loader-repair path:
+use a private loaded-identity file and stable exact HEAD, not a mocked
+qualification success. Retain the original failed XML and verify the named
+recovery-order, revision, PRESTOP refusal and exact-generation CAS controls.
+
+Independently, normal source diagnostics at 21:35Z proved that paired-original
+restoration consumed the shared 59s cut before native capture on a current
+SUCCESS source run. ROOT assigns native sole ownership of
+src/ingest/forecast_live_daemon.py and tests/test_forecast_live_daemon.py in its
+child tree. SCOPE is exact current run and native/paired source debt; DRAIN is
+normal cadence with durable stable-job/meta phase alternation, one bounded
+phase per turn on the original absolute cut and shared rate limit. RESET is
+native capture and paired restoration progressing across turns/restarts while
+original clocks, source qualification, body/PIT/static/51 gates stay unchanged.
+FAILED/PARTIAL mandatory attempts keep their existing bounded-turn priority.
+No manual source request, seed, wake or restart is authorized by this section.
+
+Loader-owner repair proof: private three-owner DDL reproduced HIGH/LOW
+`temperature_metric` failures (2F, XML645c4530...), then the real normal
+native producer/public gate passed HIGH/LOW on the explicit read-only roots
+(2P53.47s, XML7e9fa3d7...). The final frozen control bytes passed 46P3.22s,
+including canonical/legacy/metric/final-daily cases, connection lifetime,
+recovery order, immutable revision and exact-generation PRESTOP CAS refusal.
+Original full ops 277P/1F XMLba22669d... remains retained; the 46 controls are
+not a rerun or PASS claim for that whole module. Only the connector and upgrade
+function changed in production; other script AST and the shared trade scope
+remain exact3c6. Independent review, new static-input proof and the separate
+source-debt slice remain prerequisites before a new exact-tip landing/load.

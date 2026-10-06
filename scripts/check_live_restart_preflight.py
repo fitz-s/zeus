@@ -242,6 +242,20 @@ def _connect_live_ro():
     )
 
 
+@contextmanager
+def _connect_probability_upgrade_ro():
+    """Keep probability reads on their canonical FORECAST owner, not legacy shells."""
+    conn = sqlite3.connect(f"{FORECAST_DB.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        conn.execute("ATTACH DATABASE ? AS world", (f"{WORLD_DB.resolve().as_uri()}?mode=ro",))
+        conn.execute("PRAGMA query_only = ON")
+        yield conn
+    finally:
+        conn.close()
+
+
 def _git_head() -> str:
     try:
         return subprocess.check_output(
@@ -5023,7 +5037,7 @@ def _probability_upgrade_qualification_check() -> CheckResult:
     }
     try:
         scopes = held_scope()
-        with _connect_live_ro() as conn:
+        with _connect_probability_upgrade_ro() as conn:
             for (city_name, target_date, metric), holdings in sorted(scopes.items()):
                 scope = {"city": city_name, "target_date": target_date,
                          "metric": metric, "positions": sorted(holdings)}
@@ -5036,7 +5050,7 @@ def _probability_upgrade_qualification_check() -> CheckResult:
                 else:
                     conditions = {
                         str(row[0]) for row in conn.execute(
-                            "SELECT condition_id FROM market_events "
+                            "SELECT condition_id FROM main.market_events "
                             "WHERE city=? AND target_date=? AND temperature_metric=?",
                             (city_name, target_date, metric),
                         )

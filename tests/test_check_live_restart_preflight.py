@@ -59,6 +59,98 @@ def _persist_upgrade_control_event(conn, *, metric, payload_changes=None):
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("case", ("canonical", "wrong_metric", "legacy_only", "final", "unverified"))
+def test_upgrade_probability_reads_canonical_owner_with_legacy_shells(tmp_path, monkeypatch, metric, case):
+    """Real bootstrap DDL and attached legacy shells, not qualified-q mocks."""
+    from src.state.db import init_schema_forecasts
+    from src.state.schema.opportunity_events_schema import ensure_table
+
+    trade_path, world_path, forecast_path = (tmp_path / name for name in ("trade.db", "world.db", "forecast.db"))
+    trade = sqlite3.connect(trade_path)
+    trade.execute("CREATE TABLE readiness_state(marker TEXT)")
+    trade.execute("INSERT INTO readiness_state VALUES('TRADE_GHOST')")
+    trade.commit()
+    trade.close()
+    world = sqlite3.connect(world_path)
+    # Actual WORLD legacy market_events DDL: the canonical metric column is absent.
+    world.execute("""CREATE TABLE market_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, market_slug TEXT NOT NULL,
+        city TEXT NOT NULL, target_date TEXT NOT NULL, condition_id TEXT,
+        token_id TEXT, range_label TEXT, range_low REAL, range_high REAL,
+        outcome TEXT, created_at TEXT, UNIQUE(market_slug, condition_id))""")
+    world.execute("CREATE TABLE readiness_state(marker TEXT)")
+    ensure_table(world)
+    city = "Hong Kong" if case in {"final", "unverified"} else "London"
+    target = "2026-10-01" if case in {"final", "unverified"} else (
+        datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
+    world.execute("INSERT INTO market_events(market_slug,city,target_date,condition_id) VALUES(?,?,?,?)",
+                  ("legacy", city, target, "condition"))
+    world.commit()
+    world.close()
+    forecast = sqlite3.connect(forecast_path)
+    init_schema_forecasts(forecast)
+    if case != "legacy_only":
+        selected_metric = ("low" if metric == "high" else "high") if case == "wrong_metric" else metric
+        forecast.execute("""INSERT INTO market_events
+            (market_slug,city,target_date,temperature_metric,condition_id)
+            VALUES(?,?,?,?,?)""", ("canonical", city, target, selected_metric, "condition"))
+    if case in {"final", "unverified"}:
+        forecast.execute("""INSERT INTO observations
+            (city,target_date,source,station_id,authority,unit,high_temp,low_temp,fetched_at)
+            VALUES(?,?,?,?,?,?,?,?,?)""", (city, target, "hko_daily_api", "HKO",
+            "VERIFIED" if case == "final" else "UNVERIFIED", "C", 30.1, 22.3,
+            "2026-10-02T02:00:00+00:00"))
+    forecast.commit()
+    forecast.close()
+    monkeypatch.setattr(preflight, "TRADE_DB", trade_path)
+    monkeypatch.setattr(preflight, "WORLD_DB", world_path)
+    monkeypatch.setattr(preflight, "FORECAST_DB", forecast_path)
+    row = {"position_id": "held", "phase": "active", "city": city,
+           "target_date": target, "temperature_metric": metric, "condition_id": "condition"}
+    monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: [row])
+    result = preflight._probability_upgrade_qualification_check()
+    scope = result.evidence["families"][0]
+    expected = ("FINAL_DAILY_OBSERVATION_AUTHORITY" if case == "final" else
+                "PROBABILITY_UPGRADE_HELD_CONTRACT_NOT_BOUND" if case in {"wrong_metric", "legacy_only"} else
+                "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISSING")
+    assert scope.get("reason") == expected, result.evidence
+    assert result.ok is (case == "final")
+
+
+def test_upgrade_probability_connection_keeps_exact_read_only_roots_and_lifetime(tmp_path, monkeypatch):
+    paths = {name: tmp_path / f"{name}.db" for name in ("trade", "world", "forecast")}
+    trade = _init_trade_db(paths["trade"])
+    trade.execute("""INSERT INTO position_current
+        (position_id,phase,city,target_date,temperature_metric,shares,chain_shares)
+        VALUES('trade-held','active','London','2026-10-07','low',1,1)""")
+    trade.commit()
+    trade.close()
+    for name in ("world", "forecast"):
+        with sqlite3.connect(paths[name]) as conn:
+            conn.execute("CREATE TABLE owner_marker(value TEXT)")
+            conn.execute("INSERT INTO owner_marker VALUES(?)", (name,))
+    monkeypatch.setattr(preflight, "TRADE_DB", paths["trade"])
+    monkeypatch.setattr(preflight, "WORLD_DB", paths["world"])
+    monkeypatch.setattr(preflight, "FORECAST_DB", paths["forecast"])
+    assert [row["position_id"] for row in preflight._open_positions()] == ["trade-held"]
+    with preflight._connect_probability_upgrade_ro() as conn:
+        roots = {row[1]: Path(row[2]) for row in conn.execute("PRAGMA database_list")}
+        assert roots == {"main": paths["forecast"], "world": paths["world"]}
+        assert conn.execute("PRAGMA query_only").fetchone()[0] == 1
+        assert conn.execute("SELECT value FROM main.owner_marker").fetchone()[0] == "forecast"
+        for schema in ("main", "world"):
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                conn.execute(f"INSERT INTO {schema}.owner_marker VALUES('forbidden')")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
+    with pytest.raises(RuntimeError, match="private failure"):
+        with preflight._connect_probability_upgrade_ro() as failed:
+            raise RuntimeError("private failure")
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        failed.execute("SELECT 1")
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeypatch, metric):
     """Actual normal capture -> canonical materialization -> RO public gate.
@@ -77,6 +169,14 @@ def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeyp
     proofs = []
     pending_event = []
     inside_gate = False
+    world_path = private_state / "canonical-world.db"
+    with sqlite3.connect(world_path) as world:
+        from src.state.schema.opportunity_events_schema import ensure_table
+        from src.state.schema.observation_prints_schema import ensure_table as ensure_prints
+        ensure_table(world)
+        ensure_prints(world)
+        world.execute("CREATE TABLE market_events(city,target_date,condition_id)")
+        world.execute("CREATE TABLE readiness_state(marker TEXT)")
 
     def prepare(event, **kwargs):
         # Persist the exact event emitted by the existing normal producer
@@ -88,6 +188,11 @@ def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeyp
             :event_id,:event_type,:entity_key,:source,:observed_at,:available_at,
             :received_at,:causal_snapshot_id,:payload_hash,:idempotency_key,
             :priority,:expires_at,:payload_json,:schema_version,:created_at)""", asdict(event))
+        with sqlite3.connect(world_path) as world:
+            world.execute("""INSERT OR IGNORE INTO opportunity_events VALUES (
+                :event_id,:event_type,:entity_key,:source,:observed_at,:available_at,
+                :received_at,:causal_snapshot_id,:payload_hash,:idempotency_key,
+                :priority,:expires_at,:payload_json,:schema_version,:created_at)""", asdict(event))
         return owning_prepare(event, **kwargs)
 
     def public_reader(conn, **kwargs):
@@ -111,15 +216,18 @@ def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeyp
                 "target_date": str(kwargs["target_date"]), "temperature_metric": metric,
                 "condition_id": condition}
 
-        @contextlib.contextmanager
-        def connect():
-            yield conn
-
+        # Route the producer's exact WORLD-class prints to the private WORLD
+        # owner without renewing any source/publication/fetch clock or body.
+        with sqlite3.connect(world_path) as world:
+            for print_row in conn.execute("SELECT * FROM observation_prints"):
+                values = dict(print_row)
+                columns = ",".join(values)
+                world.execute(f"INSERT OR IGNORE INTO observation_prints ({columns}) VALUES "
+                              f"({','.join('?' for _ in values)})", tuple(values.values()))
         monkeypatch.setattr(preflight, "datetime", GateClock)
         monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: [held])
-        monkeypatch.setattr(preflight, "_connect_live_ro", connect)
-        previous_readonly = conn.execute("PRAGMA query_only").fetchone()[0]
-        conn.execute("PRAGMA query_only=ON")
+        monkeypatch.setattr(preflight, "FORECAST_DB", Path(conn.execute("PRAGMA database_list").fetchone()[2]))
+        monkeypatch.setattr(preflight, "WORLD_DB", world_path)
         inside_gate = True
         try:
             proof = preflight._probability_upgrade_qualification_check()
@@ -132,7 +240,6 @@ def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeyp
             proofs.append(proof.evidence["families"][0])
         finally:
             inside_gate = False
-            conn.execute(f"PRAGMA query_only={int(previous_readonly)}")
         return result
 
     monkeypatch.setattr(reader_mod, "read_replacement_forecast_bundle", public_reader)
@@ -264,7 +371,7 @@ def test_upgrade_qualification_public_reader_controls(monkeypatch, metric, state
     def connect():
         yield conn
 
-    monkeypatch.setattr(preflight, "_connect_live_ro", connect)
+    monkeypatch.setattr(preflight, "_connect_probability_upgrade_ro", connect)
     monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: [row])
     monkeypatch.setattr(hard_fact, "_final_daily_observation_extreme", lambda **_kw: None)
     # This case isolates public-selector control, not the causal codec itself.
@@ -331,7 +438,7 @@ def test_upgrade_qualification_final_daily_is_canonical_not_monitor_label(monkey
     def connect():
         yield conn
 
-    monkeypatch.setattr(preflight, "_connect_live_ro", connect)
+    monkeypatch.setattr(preflight, "_connect_probability_upgrade_ro", connect)
     monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: [row])
     monkeypatch.setattr(readiness_mod, "latest_replacement_readiness", lambda *_a, **_kw: None)
     monkeypatch.setattr(reader_mod, "read_prior_complete_replacement_forecast_bundle",
@@ -364,7 +471,7 @@ def test_upgrade_qualification_rechecks_scope_and_contract_binding(monkeypatch):
     def connect():
         yield conn
 
-    monkeypatch.setattr(preflight, "_connect_live_ro", connect)
+    monkeypatch.setattr(preflight, "_connect_probability_upgrade_ro", connect)
     monkeypatch.setattr(hard_fact, "_final_daily_observation_extreme", lambda **_kw: None)
     scopes = iter(([row], [row, {**row, "position_id": "new-fill"}]))
     monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: next(scopes))

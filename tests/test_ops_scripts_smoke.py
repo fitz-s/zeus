@@ -8312,20 +8312,26 @@ def test_deploy_live_post_start_edli_queue_wait_skips_future_retry_floor(
     assert "no claimable reactor work" in detail
 
 
-def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, capsys):
+def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, capsys, tmp_path):
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []
     pause_expected_shas = []
-    live_head = {"sha": "c" * 40}
+    live_head = "c" * 40
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "loaded_sha.json").write_text(json.dumps({
+        "loaded_sha": live_head,
+        "generated_at": "2026-10-06T21:18:00+00:00",
+    }))
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
 
     def _head_sha(short=True):
-        captured = live_head["sha"]
-        live_head["sha"] = "f" * 40
-        return captured
+        return live_head
 
     monkeypatch.setattr(dl, "head_sha", _head_sha)
+    monkeypatch.setattr(dl, "_current_prerequisite_code_identity_labels", lambda *_args, **_kwargs: set())
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
@@ -8353,7 +8359,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     def _pause(labels, **kwargs):
         calls.append(("pause_entries", tuple(labels)))
         pause_expected_shas.append(kwargs["expected_sha"])
-        assert live_head["sha"] == "f" * 40
+        assert live_head == "c" * 40
         return True, "live restart entry pause guard armed"
 
     def _launch(label):
