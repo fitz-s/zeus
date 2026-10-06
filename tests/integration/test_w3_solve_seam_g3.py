@@ -50589,9 +50589,9 @@ def _normal_native_original_cassette(cycle, *, city_name="Hong Kong", max_step=3
                                     temperature_offset_c=0.):
     """Only immutable synthetic ecCodes bytes/indexes; never q, READY or a DB."""
     assert math.isfinite(temperature_offset_c)
-    key = (cycle, city_name, max_step, temperature_offset_c)
-    if key in _HKO_NATIVE_ORIGINAL_CASSETTES:
-        return _HKO_NATIVE_ORIGINAL_CASSETTES[key]
+    cassette_key = (cycle, city_name, max_step, temperature_offset_c)
+    if cassette_key in _HKO_NATIVE_ORIGINAL_CASSETTES:
+        return _HKO_NATIVE_ORIGINAL_CASSETTES[cassette_key]
     import eccodes as ec
     from types import MappingProxyType
     from scripts import extract_open_ens_localday as decoder
@@ -50669,8 +50669,40 @@ def _normal_native_original_cassette(cycle, *, city_name="Hong Kong", max_step=3
                     paired["high" if name == "mx2t3" else "low"].append(body)
     packet = (MappingProxyType(sources), MappingProxyType(indexes),
               MappingProxyType({key: b"".join(bodies) for key, bodies in paired.items()}))
-    _HKO_NATIVE_ORIGINAL_CASSETTES[key] = packet
+    _HKO_NATIVE_ORIGINAL_CASSETTES[cassette_key] = packet
     return packet
+
+
+def test_native_original_cassette_reuses_only_exact_immutable_inputs(monkeypatch):
+    import eccodes as ec
+    import sys
+    cache = {}
+    monkeypatch.setattr(sys.modules[__name__],"_HKO_NATIVE_ORIGINAL_CASSETTES",cache)
+    cycle = _dt.datetime(2026,10,1,tzinfo=_dt.timezone.utc)
+    calls = []
+    original = ec.codes_grib_new_from_samples
+    def encode(sample):
+        calls.append(sample)
+        return original(sample)
+    monkeypatch.setattr(ec,"codes_grib_new_from_samples",encode)
+    packet = _normal_native_original_cassette(cycle,city_name="Chicago",max_step=3)
+    before = tuple({key:hashlib.sha256(body).hexdigest() for key,body in part.items()} for part in packet)
+    first_count = len(calls)
+    assert first_count > 0 and set(cache) == {(cycle,"Chicago",3,0.)}
+    assert packet[2]["high"] != packet[2]["low"]  # Separate physical quantities in one packet.
+    assert _normal_native_original_cassette(cycle,city_name="Chicago",max_step=3) is packet
+    assert len(calls) == first_count
+    assert tuple({key:hashlib.sha256(body).hexdigest() for key,body in part.items()} for part in packet) == before
+    with pytest.raises(TypeError):
+        packet[0]["mutable"] = b"not an original"
+    for changed in (dict(cycle=cycle+_dt.timedelta(hours=6),city_name="Chicago",max_step=3),
+                    dict(cycle=cycle,city_name="Hong Kong",max_step=3),
+                    dict(cycle=cycle,city_name="Chicago",max_step=6),
+                    dict(cycle=cycle,city_name="Chicago",max_step=3,temperature_offset_c=.1)):
+        count = len(calls)
+        other = _normal_native_original_cassette(**changed)
+        assert other is not packet and len(calls) > count
+        assert other[0] != packet[0]
 
 
 def _capture_normal_native_originals(tmp_path, monkeypatch, conn, cycle, issued, city, *,
