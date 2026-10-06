@@ -19559,7 +19559,8 @@ separate fixture tests and only supplies the shared normal-original helper.
 ### Full-Y Fahrenheit original replay equivalence — BEFORE EDIT
 
 ROOT authorized the native leaf's isolated child to change only the two
-C-to-F conversions in src/data/day0_hourly_vectors.py and the two F-to-C
+read_native_measurement_role conversion sites in src/data/day0_hourly_vectors.py
+(native intervals and knots, via existing decoder.kelvin_to_native) and the two F-to-C
 conversions in src/data/replacement_forecast_materializer.py, with its
 existing tests/integration/test_w3_solve_seam_g3.py
 fixture/antibody. q retains tests/test_replacement_forecast_materializer.py
@@ -19568,7 +19569,8 @@ originals, 51 members and strict PIT pass the owning reader, but equivalent
 Fahrenheit conversion paths differ by machine ULPs and the strict tuple gate
 returns CURRENT_SHAPE_ENS_UNAVAILABLE. Independent review refuted a fixed-ULP
 comparison near zero Fahrenheit because of cancellation. Unify these paths
-with the existing canonical conversion expressions/functions and retain
+with the existing canonical conversion expressions/functions (materializer
+uses the snapshot's multiplication by 5/9, not division by 1.8) and retain
 strict equality; no approximate comparison or ULP allowance. Exact original
 body/index/SHA, member/grid/run/role,
 clock/PIT and current source admission remain mandatory; no tolerance for
