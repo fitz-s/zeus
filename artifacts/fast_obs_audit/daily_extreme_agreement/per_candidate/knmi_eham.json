@@ -1,0 +1,7410 @@
+{
+ "daily": {
+  "2026-04-03": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 12,
+   "max_raw": 11.8,
+   "min_contract": 2,
+   "min_raw": 2.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 9.5,
+     "Tn14": 6.9,
+     "Tx12": 11.8,
+     "Tx24": 11.8
+    },
+    "noon": {
+     "Tn12": 2.1,
+     "Tn14": 2.1,
+     "Tx12": 10.4,
+     "Tx24": 10.4
+    }
+   }
+  },
+  "2026-04-04": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 15.3,
+   "min_contract": 8,
+   "min_raw": 7.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.1,
+     "Tn14": 10.9,
+     "Tx12": 15.3,
+     "Tx24": 15.3
+    },
+    "noon": {
+     "Tn12": 7.9,
+     "Tn14": 7.9,
+     "Tx12": 12.9,
+     "Tx24": 12.9
+    }
+   }
+  },
+  "2026-04-05": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 14.8,
+   "min_contract": 6,
+   "min_raw": 6.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 6.4,
+     "Tn14": 6.4,
+     "Tx12": 12.8,
+     "Tx24": 14.8
+    },
+    "noon": {
+     "Tn12": 10.7,
+     "Tn14": 10.7,
+     "Tx12": 14.8,
+     "Tx24": 15.3
+    }
+   }
+  },
+  "2026-04-06": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 13,
+   "max_raw": 12.9,
+   "min_contract": 3,
+   "min_raw": 2.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 6.0,
+     "Tn14": 6.0,
+     "Tx12": 12.9,
+     "Tx24": 12.9
+    },
+    "noon": {
+     "Tn12": 2.8,
+     "Tn14": 2.8,
+     "Tx12": 11.1,
+     "Tx24": 12.8
+    }
+   }
+  },
+  "2026-04-07": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 16,
+   "max_raw": 16.0,
+   "min_contract": 4,
+   "min_raw": 3.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 8.4,
+     "Tn14": 8.4,
+     "Tx12": 16.0,
+     "Tx24": 16.0
+    },
+    "noon": {
+     "Tn12": 3.6,
+     "Tn14": 3.6,
+     "Tx12": 12.7,
+     "Tx24": 12.9
+    }
+   }
+  },
+  "2026-04-08": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.6,
+   "min_contract": 6,
+   "min_raw": 5.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.9,
+     "Tn14": 11.5,
+     "Tx12": 20.6,
+     "Tx24": 20.6
+    },
+    "noon": {
+     "Tn12": 5.9,
+     "Tn14": 5.9,
+     "Tx12": 15.7,
+     "Tx24": 16.0
+    }
+   }
+  },
+  "2026-04-09": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 21.0,
+   "min_contract": 8,
+   "min_raw": 7.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 10.0,
+     "Tn14": 10.0,
+     "Tx12": 21.0,
+     "Tx24": 21.0
+    },
+    "noon": {
+     "Tn12": 7.6,
+     "Tn14": 7.6,
+     "Tx12": 16.1,
+     "Tx24": 20.6
+    }
+   }
+  },
+  "2026-04-10": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 12,
+   "max_raw": 11.7,
+   "min_contract": 6,
+   "min_raw": 5.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 5.9,
+     "Tn14": 5.9,
+     "Tx12": 11.7,
+     "Tx24": 11.7
+    },
+    "noon": {
+     "Tn12": 7.1,
+     "Tn14": 7.1,
+     "Tx12": 10.2,
+     "Tx24": 21.0
+    }
+   }
+  },
+  "2026-04-11": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 17,
+   "max_raw": 17.1,
+   "min_contract": 7,
+   "min_raw": 6.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 7.7,
+     "Tn14": 7.7,
+     "Tx12": 17.1,
+     "Tx24": 17.1
+    },
+    "noon": {
+     "Tn12": 6.5,
+     "Tn14": 5.9,
+     "Tx12": 13.8,
+     "Tx24": 13.8
+    }
+   }
+  },
+  "2026-04-12": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 14.7,
+   "min_contract": 5,
+   "min_raw": 4.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 6.3,
+     "Tn14": 6.3,
+     "Tx12": 14.7,
+     "Tx24": 14.7
+    },
+    "noon": {
+     "Tn12": 4.9,
+     "Tn14": 4.9,
+     "Tx12": 12.5,
+     "Tx24": 17.1
+    }
+   }
+  },
+  "2026-04-13": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 14,
+   "max_raw": 13.9,
+   "min_contract": 4,
+   "min_raw": 4.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 7.2,
+     "Tn14": 7.2,
+     "Tx12": 13.9,
+     "Tx24": 13.9
+    },
+    "noon": {
+     "Tn12": 4.2,
+     "Tn14": 4.2,
+     "Tx12": 12.1,
+     "Tx24": 14.7
+    }
+   }
+  },
+  "2026-04-14": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 15.0,
+   "min_contract": 4,
+   "min_raw": 3.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 7.5,
+     "Tn14": 7.5,
+     "Tx12": 15.0,
+     "Tx24": 15.0
+    },
+    "noon": {
+     "Tn12": 3.7,
+     "Tn14": 3.7,
+     "Tx12": 13.4,
+     "Tx24": 13.9
+    }
+   }
+  },
+  "2026-04-15": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 19.0,
+   "min_contract": 6,
+   "min_raw": 6.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.1,
+     "Tn14": 12.1,
+     "Tx12": 19.0,
+     "Tx24": 19.0
+    },
+    "noon": {
+     "Tn12": 6.0,
+     "Tn14": 6.0,
+     "Tx12": 15.4,
+     "Tx24": 15.4
+    }
+   }
+  },
+  "2026-04-16": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 17,
+   "max_raw": 16.5,
+   "min_contract": 8,
+   "min_raw": 7.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 9.3,
+     "Tn14": 9.3,
+     "Tx12": 16.5,
+     "Tx24": 16.5
+    },
+    "noon": {
+     "Tn12": 7.7,
+     "Tn14": 7.7,
+     "Tx12": 15.5,
+     "Tx24": 19.0
+    }
+   }
+  },
+  "2026-04-17": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 18.8,
+   "min_contract": 7,
+   "min_raw": 7.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.6,
+     "Tn14": 11.6,
+     "Tx12": 18.8,
+     "Tx24": 18.8
+    },
+    "noon": {
+     "Tn12": 7.2,
+     "Tn14": 7.2,
+     "Tx12": 17.4,
+     "Tx24": 17.4
+    }
+   }
+  },
+  "2026-04-18": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 14.6,
+   "min_contract": 6,
+   "min_raw": 6.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 6.4,
+     "Tn14": 6.4,
+     "Tx12": 14.5,
+     "Tx24": 14.6
+    },
+    "noon": {
+     "Tn12": 8.1,
+     "Tn14": 8.1,
+     "Tx12": 14.6,
+     "Tx24": 18.8
+    }
+   }
+  },
+  "2026-04-19": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 14,
+   "max_raw": 13.6,
+   "min_contract": 5,
+   "min_raw": 5.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 7.8,
+     "Tn14": 7.8,
+     "Tx12": 13.6,
+     "Tx24": 13.6
+    },
+    "noon": {
+     "Tn12": 5.2,
+     "Tn14": 5.2,
+     "Tx12": 12.9,
+     "Tx24": 14.5
+    }
+   }
+  },
+  "2026-04-20": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 13,
+   "max_raw": 12.6,
+   "min_contract": 2,
+   "min_raw": 2.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 7.5,
+     "Tn14": 7.2,
+     "Tx12": 12.6,
+     "Tx24": 12.6
+    },
+    "noon": {
+     "Tn12": 2.4,
+     "Tn14": 2.4,
+     "Tx12": 10.1,
+     "Tx24": 13.6
+    }
+   }
+  },
+  "2026-04-21": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 14,
+   "max_raw": 13.8,
+   "min_contract": 5,
+   "min_raw": 5.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 8.8,
+     "Tn14": 7.8,
+     "Tx12": 13.8,
+     "Tx24": 13.8
+    },
+    "noon": {
+     "Tn12": 5.4,
+     "Tn14": 5.4,
+     "Tx12": 9.9,
+     "Tx24": 12.6
+    }
+   }
+  },
+  "2026-04-22": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 16,
+   "max_raw": 16.0,
+   "min_contract": 5,
+   "min_raw": 4.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 8.9,
+     "Tn14": 8.9,
+     "Tx12": 16.0,
+     "Tx24": 16.0
+    },
+    "noon": {
+     "Tn12": 4.6,
+     "Tn14": 4.6,
+     "Tx12": 13.6,
+     "Tx24": 13.8
+    }
+   }
+  },
+  "2026-04-23": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 16,
+   "max_raw": 16.1,
+   "min_contract": 6,
+   "min_raw": 6.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 6.9,
+     "Tn14": 6.9,
+     "Tx12": 16.1,
+     "Tx24": 16.1
+    },
+    "noon": {
+     "Tn12": 6.0,
+     "Tn14": 6.0,
+     "Tx12": 11.4,
+     "Tx24": 16.0
+    }
+   }
+  },
+  "2026-04-24": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 14.9,
+   "min_contract": 4,
+   "min_raw": 3.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 5.2,
+     "Tn14": 5.2,
+     "Tx12": 14.9,
+     "Tx24": 14.9
+    },
+    "noon": {
+     "Tn12": 3.6,
+     "Tn14": 3.6,
+     "Tx12": 12.3,
+     "Tx24": 16.1
+    }
+   }
+  },
+  "2026-04-25": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 15.3,
+   "min_contract": 5,
+   "min_raw": 4.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 7.6,
+     "Tn14": 7.6,
+     "Tx12": 15.3,
+     "Tx24": 15.3
+    },
+    "noon": {
+     "Tn12": 4.6,
+     "Tn14": 4.6,
+     "Tx12": 12.7,
+     "Tx24": 14.9
+    }
+   }
+  },
+  "2026-04-26": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 14,
+   "max_raw": 14.4,
+   "min_contract": 5,
+   "min_raw": 4.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 7.8,
+     "Tn14": 7.8,
+     "Tx12": 14.4,
+     "Tx24": 14.4
+    },
+    "noon": {
+     "Tn12": 4.8,
+     "Tn14": 4.8,
+     "Tx12": 11.8,
+     "Tx24": 15.3
+    }
+   }
+  },
+  "2026-04-27": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 14,
+   "max_raw": 14.4,
+   "min_contract": 5,
+   "min_raw": 4.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 9.8,
+     "Tn14": 9.8,
+     "Tx12": 14.4,
+     "Tx24": 14.4
+    },
+    "noon": {
+     "Tn12": 4.6,
+     "Tn14": 4.6,
+     "Tx12": 12.5,
+     "Tx24": 14.4
+    }
+   }
+  },
+  "2026-04-28": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 18,
+   "max_raw": 17.7,
+   "min_contract": 8,
+   "min_raw": 8.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.5,
+     "Tn14": 11.5,
+     "Tx12": 17.7,
+     "Tx24": 17.7
+    },
+    "noon": {
+     "Tn12": 8.1,
+     "Tn14": 8.1,
+     "Tx12": 14.1,
+     "Tx24": 14.4
+    }
+   }
+  },
+  "2026-04-29": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 18,
+   "max_raw": 18.1,
+   "min_contract": 8,
+   "min_raw": 7.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.4,
+     "Tn14": 11.8,
+     "Tx12": 18.1,
+     "Tx24": 18.1
+    },
+    "noon": {
+     "Tn12": 7.9,
+     "Tn14": 7.9,
+     "Tx12": 15.1,
+     "Tx24": 17.7
+    }
+   }
+  },
+  "2026-04-30": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.5,
+   "min_contract": 8,
+   "min_raw": 8.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.1,
+     "Tn14": 12.9,
+     "Tx12": 20.5,
+     "Tx24": 20.5
+    },
+    "noon": {
+     "Tn12": 8.4,
+     "Tn14": 8.4,
+     "Tx12": 16.2,
+     "Tx24": 18.1
+    }
+   }
+  },
+  "2026-05-01": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 23.4,
+   "min_contract": 9,
+   "min_raw": 8.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.8,
+     "Tn14": 12.8,
+     "Tx12": 23.4,
+     "Tx24": 23.4
+    },
+    "noon": {
+     "Tn12": 8.7,
+     "Tn14": 8.7,
+     "Tx12": 19.4,
+     "Tx24": 20.5
+    }
+   }
+  },
+  "2026-05-02": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.6,
+   "min_contract": 9,
+   "min_raw": 8.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.1,
+     "Tn14": 13.1,
+     "Tx12": 20.6,
+     "Tx24": 20.6
+    },
+    "noon": {
+     "Tn12": 8.9,
+     "Tn14": 8.9,
+     "Tx12": 19.3,
+     "Tx24": 23.4
+    }
+   }
+  },
+  "2026-05-03": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 17,
+   "max_raw": 17.3,
+   "min_contract": 13,
+   "min_raw": 12.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.1,
+     "Tn14": 14.1,
+     "Tx12": 17.3,
+     "Tx24": 17.3
+    },
+    "noon": {
+     "Tn12": 12.9,
+     "Tn14": 12.9,
+     "Tx12": 16.9,
+     "Tx24": 20.6
+    }
+   }
+  },
+  "2026-05-04": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 18.8,
+   "min_contract": 12,
+   "min_raw": 11.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.8,
+     "Tn14": 11.8,
+     "Tx12": 18.8,
+     "Tx24": 18.8
+    },
+    "noon": {
+     "Tn12": 11.7,
+     "Tn14": 11.7,
+     "Tx12": 16.6,
+     "Tx24": 17.3
+    }
+   }
+  },
+  "2026-05-05": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 14.6,
+   "min_contract": 10,
+   "min_raw": 9.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 9.5,
+     "Tn14": 9.5,
+     "Tx12": 14.6,
+     "Tx24": 14.6
+    },
+    "noon": {
+     "Tn12": 10.0,
+     "Tn14": 10.0,
+     "Tx12": 13.5,
+     "Tx24": 18.8
+    }
+   }
+  },
+  "2026-05-06": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 15.2,
+   "min_contract": 9,
+   "min_raw": 9.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 9.0,
+     "Tn14": 9.0,
+     "Tx12": 15.2,
+     "Tx24": 15.2
+    },
+    "noon": {
+     "Tn12": 9.2,
+     "Tn14": 9.2,
+     "Tx12": 13.7,
+     "Tx24": 14.6
+    }
+   }
+  },
+  "2026-05-07": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 17,
+   "max_raw": 16.5,
+   "min_contract": 4,
+   "min_raw": 4.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.7,
+     "Tn14": 11.7,
+     "Tx12": 16.5,
+     "Tx24": 16.5
+    },
+    "noon": {
+     "Tn12": 4.3,
+     "Tn14": 4.3,
+     "Tx12": 14.5,
+     "Tx24": 15.2
+    }
+   }
+  },
+  "2026-05-08": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 17,
+   "max_raw": 17.4,
+   "min_contract": 10,
+   "min_raw": 9.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.9,
+     "Tn14": 11.7,
+     "Tx12": 17.4,
+     "Tx24": 17.4
+    },
+    "noon": {
+     "Tn12": 9.7,
+     "Tn14": 9.7,
+     "Tx12": 15.0,
+     "Tx24": 16.5
+    }
+   }
+  },
+  "2026-05-09": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 18,
+   "max_raw": 17.9,
+   "min_contract": 8,
+   "min_raw": 8.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.0,
+     "Tn14": 12.0,
+     "Tx12": 17.9,
+     "Tx24": 17.9
+    },
+    "noon": {
+     "Tn12": 8.2,
+     "Tn14": 8.2,
+     "Tx12": 16.7,
+     "Tx24": 17.4
+    }
+   }
+  },
+  "2026-05-10": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 16,
+   "max_raw": 15.9,
+   "min_contract": 9,
+   "min_raw": 8.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 8.5,
+     "Tn14": 8.5,
+     "Tx12": 15.9,
+     "Tx24": 15.9
+    },
+    "noon": {
+     "Tn12": 8.9,
+     "Tn14": 8.9,
+     "Tx12": 15.2,
+     "Tx24": 17.9
+    }
+   }
+  },
+  "2026-05-11": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 12,
+   "max_raw": 11.9,
+   "min_contract": 5,
+   "min_raw": 4.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 4.8,
+     "Tn14": 4.8,
+     "Tx12": 11.9,
+     "Tx24": 11.9
+    },
+    "noon": {
+     "Tn12": 5.3,
+     "Tn14": 5.3,
+     "Tx12": 10.8,
+     "Tx24": 15.9
+    }
+   }
+  },
+  "2026-05-12": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 13,
+   "max_raw": 13.1,
+   "min_contract": 5,
+   "min_raw": 5.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 8.5,
+     "Tn14": 8.0,
+     "Tx12": 13.1,
+     "Tx24": 13.1
+    },
+    "noon": {
+     "Tn12": 5.2,
+     "Tn14": 4.8,
+     "Tx12": 11.0,
+     "Tx24": 11.9
+    }
+   }
+  },
+  "2026-05-13": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 14,
+   "max_raw": 13.5,
+   "min_contract": 5,
+   "min_raw": 5.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 6.7,
+     "Tn14": 6.7,
+     "Tx12": 13.5,
+     "Tx24": 13.5
+    },
+    "noon": {
+     "Tn12": 5.3,
+     "Tn14": 5.3,
+     "Tx12": 12.4,
+     "Tx24": 13.1
+    }
+   }
+  },
+  "2026-05-14": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 13,
+   "max_raw": 13.4,
+   "min_contract": 5,
+   "min_raw": 5.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 5.7,
+     "Tn14": 5.7,
+     "Tx12": 13.4,
+     "Tx24": 13.4
+    },
+    "noon": {
+     "Tn12": 5.3,
+     "Tn14": 5.3,
+     "Tx12": 11.3,
+     "Tx24": 13.5
+    }
+   }
+  },
+  "2026-05-15": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 12,
+   "max_raw": 11.8,
+   "min_contract": 4,
+   "min_raw": 4.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 5.3,
+     "Tn14": 5.3,
+     "Tx12": 11.8,
+     "Tx24": 11.8
+    },
+    "noon": {
+     "Tn12": 4.3,
+     "Tn14": 4.3,
+     "Tx12": 11.8,
+     "Tx24": 13.4
+    }
+   }
+  },
+  "2026-05-16": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 13,
+   "max_raw": 13.1,
+   "min_contract": 3,
+   "min_raw": 3.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 5.9,
+     "Tn14": 5.9,
+     "Tx12": 13.1,
+     "Tx24": 13.1
+    },
+    "noon": {
+     "Tn12": 3.4,
+     "Tn14": 3.4,
+     "Tx12": 12.8,
+     "Tx24": 12.8
+    }
+   }
+  },
+  "2026-05-17": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 15,
+   "max_raw": 14.6,
+   "min_contract": 8,
+   "min_raw": 7.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 8.6,
+     "Tn14": 8.6,
+     "Tx12": 14.6,
+     "Tx24": 14.6
+    },
+    "noon": {
+     "Tn12": 7.9,
+     "Tn14": 5.9,
+     "Tx12": 13.3,
+     "Tx24": 13.3
+    }
+   }
+  },
+  "2026-05-18": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 16,
+   "max_raw": 15.9,
+   "min_contract": 7,
+   "min_raw": 7.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 7.3,
+     "Tn14": 7.3,
+     "Tx12": 15.9,
+     "Tx24": 15.9
+    },
+    "noon": {
+     "Tn12": 9.7,
+     "Tn14": 9.7,
+     "Tx12": 15.1,
+     "Tx24": 15.1
+    }
+   }
+  },
+  "2026-05-19": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 17,
+   "max_raw": 17.2,
+   "min_contract": 7,
+   "min_raw": 6.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.1,
+     "Tn14": 12.8,
+     "Tx12": 17.2,
+     "Tx24": 17.2
+    },
+    "noon": {
+     "Tn12": 6.8,
+     "Tn14": 6.8,
+     "Tx12": 15.9,
+     "Tx24": 15.9
+    }
+   }
+  },
+  "2026-05-20": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 18,
+   "max_raw": 18.0,
+   "min_contract": 12,
+   "min_raw": 12.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.3,
+     "Tn14": 14.3,
+     "Tx12": 18.0,
+     "Tx24": 18.0
+    },
+    "noon": {
+     "Tn12": 12.4,
+     "Tn14": 12.4,
+     "Tx12": 16.6,
+     "Tx24": 17.2
+    }
+   }
+  },
+  "2026-05-21": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 19.3,
+   "min_contract": 12,
+   "min_raw": 12.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.5,
+     "Tn14": 12.5,
+     "Tx12": 19.3,
+     "Tx24": 19.3
+    },
+    "noon": {
+     "Tn12": 12.1,
+     "Tn14": 12.1,
+     "Tx12": 17.8,
+     "Tx24": 18.0
+    }
+   }
+  },
+  "2026-05-22": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 25.1,
+   "min_contract": 11,
+   "min_raw": 10.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.7,
+     "Tn14": 15.7,
+     "Tx12": 25.1,
+     "Tx24": 25.1
+    },
+    "noon": {
+     "Tn12": 10.9,
+     "Tn14": 10.9,
+     "Tx12": 22.6,
+     "Tx24": 22.6
+    }
+   }
+  },
+  "2026-05-23": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 28,
+   "max_raw": 28.3,
+   "min_contract": 15,
+   "min_raw": 14.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.0,
+     "Tn14": 15.0,
+     "Tx12": 28.3,
+     "Tx24": 28.3
+    },
+    "noon": {
+     "Tn12": 14.8,
+     "Tn14": 14.8,
+     "Tx12": 26.1,
+     "Tx24": 26.1
+    }
+   }
+  },
+  "2026-05-24": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 24.5,
+   "min_contract": 13,
+   "min_raw": 12.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.2,
+     "Tn14": 15.2,
+     "Tx12": 24.5,
+     "Tx24": 24.5
+    },
+    "noon": {
+     "Tn12": 12.5,
+     "Tn14": 12.5,
+     "Tx12": 21.9,
+     "Tx24": 28.3
+    }
+   }
+  },
+  "2026-05-25": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 28,
+   "max_raw": 27.5,
+   "min_contract": 12,
+   "min_raw": 12.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 17.9,
+     "Tn14": 17.9,
+     "Tx12": 27.5,
+     "Tx24": 27.5
+    },
+    "noon": {
+     "Tn12": 12.1,
+     "Tn14": 12.1,
+     "Tx12": 26.1,
+     "Tx24": 26.1
+    }
+   }
+  },
+  "2026-05-26": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 30,
+   "max_raw": 30.1,
+   "min_contract": 15,
+   "min_raw": 15.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.2,
+     "Tn14": 19.2,
+     "Tx12": 30.1,
+     "Tx24": 30.1
+    },
+    "noon": {
+     "Tn12": 15.0,
+     "Tn14": 15.0,
+     "Tx12": 27.6,
+     "Tx24": 27.6
+    }
+   }
+  },
+  "2026-05-27": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 21.2,
+   "min_contract": 15,
+   "min_raw": 14.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.7,
+     "Tn14": 14.7,
+     "Tx12": 21.2,
+     "Tx24": 21.2
+    },
+    "noon": {
+     "Tn12": 15.7,
+     "Tn14": 15.7,
+     "Tx12": 19.5,
+     "Tx24": 30.1
+    }
+   }
+  },
+  "2026-05-28": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 24.7,
+   "min_contract": 10,
+   "min_raw": 10.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.0,
+     "Tn14": 16.6,
+     "Tx12": 24.7,
+     "Tx24": 24.7
+    },
+    "noon": {
+     "Tn12": 10.4,
+     "Tn14": 10.4,
+     "Tx12": 19.8,
+     "Tx24": 21.2
+    }
+   }
+  },
+  "2026-05-29": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 28,
+   "max_raw": 28.3,
+   "min_contract": 15,
+   "min_raw": 14.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.5,
+     "Tn14": 14.5,
+     "Tx12": 28.3,
+     "Tx24": 28.3
+    },
+    "noon": {
+     "Tn12": 18.0,
+     "Tn14": 18.0,
+     "Tx12": 26.8,
+     "Tx24": 26.8
+    }
+   }
+  },
+  "2026-05-30": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 24.8,
+   "min_contract": 11,
+   "min_raw": 10.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 17.8,
+     "Tn14": 17.8,
+     "Tx12": 24.8,
+     "Tx24": 24.8
+    },
+    "noon": {
+     "Tn12": 10.5,
+     "Tn14": 10.5,
+     "Tx12": 22.7,
+     "Tx24": 28.3
+    }
+   }
+  },
+  "2026-05-31": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 23.3,
+   "min_contract": 14,
+   "min_raw": 13.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.9,
+     "Tn14": 13.9,
+     "Tx12": 23.3,
+     "Tx24": 23.3
+    },
+    "noon": {
+     "Tn12": 16.2,
+     "Tn14": 16.2,
+     "Tx12": 23.3,
+     "Tx24": 24.8
+    }
+   }
+  },
+  "2026-06-01": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 22.6,
+   "min_contract": 13,
+   "min_raw": 13.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.9,
+     "Tn14": 15.9,
+     "Tx12": 22.6,
+     "Tx24": 22.6
+    },
+    "noon": {
+     "Tn12": 13.2,
+     "Tn14": 13.2,
+     "Tx12": 21.4,
+     "Tx24": 23.3
+    }
+   }
+  },
+  "2026-06-02": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.3,
+   "min_contract": 15,
+   "min_raw": 15.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.0,
+     "Tn14": 15.0,
+     "Tx12": 20.3,
+     "Tx24": 20.3
+    },
+    "noon": {
+     "Tn12": 15.4,
+     "Tn14": 15.4,
+     "Tx12": 19.1,
+     "Tx24": 22.6
+    }
+   }
+  },
+  "2026-06-03": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.3,
+   "min_contract": 14,
+   "min_raw": 13.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.9,
+     "Tn14": 14.9,
+     "Tx12": 20.3,
+     "Tx24": 20.3
+    },
+    "noon": {
+     "Tn12": 13.8,
+     "Tn14": 13.8,
+     "Tx12": 19.1,
+     "Tx24": 20.3
+    }
+   }
+  },
+  "2026-06-04": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 19.8,
+   "min_contract": 14,
+   "min_raw": 14.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.7,
+     "Tn14": 14.7,
+     "Tx12": 19.8,
+     "Tx24": 19.8
+    },
+    "noon": {
+     "Tn12": 14.1,
+     "Tn14": 14.1,
+     "Tx12": 18.0,
+     "Tx24": 20.3
+    }
+   }
+  },
+  "2026-06-05": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 19.9,
+   "min_contract": 15,
+   "min_raw": 14.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.6,
+     "Tn14": 14.6,
+     "Tx12": 19.9,
+     "Tx24": 19.9
+    },
+    "noon": {
+     "Tn12": 14.6,
+     "Tn14": 14.6,
+     "Tx12": 18.4,
+     "Tx24": 19.8
+    }
+   }
+  },
+  "2026-06-06": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.0,
+   "min_contract": 12,
+   "min_raw": 11.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.8,
+     "Tn14": 13.8,
+     "Tx12": 20.0,
+     "Tx24": 20.0
+    },
+    "noon": {
+     "Tn12": 11.9,
+     "Tn14": 11.9,
+     "Tx12": 19.6,
+     "Tx24": 19.9
+    }
+   }
+  },
+  "2026-06-07": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 19.6,
+   "min_contract": 13,
+   "min_raw": 13.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.3,
+     "Tn14": 13.3,
+     "Tx12": 19.6,
+     "Tx24": 19.6
+    },
+    "noon": {
+     "Tn12": 13.1,
+     "Tn14": 13.1,
+     "Tx12": 16.1,
+     "Tx24": 20.0
+    }
+   }
+  },
+  "2026-06-08": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 21.8,
+   "min_contract": 13,
+   "min_raw": 12.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.4,
+     "Tn14": 13.4,
+     "Tx12": 21.8,
+     "Tx24": 21.8
+    },
+    "noon": {
+     "Tn12": 12.5,
+     "Tn14": 12.5,
+     "Tx12": 18.9,
+     "Tx24": 19.6
+    }
+   }
+  },
+  "2026-06-09": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 18.5,
+   "min_contract": 10,
+   "min_raw": 10.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 10.8,
+     "Tn14": 10.8,
+     "Tx12": 18.5,
+     "Tx24": 18.5
+    },
+    "noon": {
+     "Tn12": 10.0,
+     "Tn14": 10.0,
+     "Tx12": 16.9,
+     "Tx24": 21.8
+    }
+   }
+  },
+  "2026-06-10": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 18,
+   "max_raw": 18.0,
+   "min_contract": 10,
+   "min_raw": 9.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.8,
+     "Tn14": 11.8,
+     "Tx12": 18.0,
+     "Tx24": 18.0
+    },
+    "noon": {
+     "Tn12": 9.7,
+     "Tn14": 9.7,
+     "Tx12": 17.0,
+     "Tx24": 18.5
+    }
+   }
+  },
+  "2026-06-11": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 18,
+   "max_raw": 17.8,
+   "min_contract": 8,
+   "min_raw": 8.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.8,
+     "Tn14": 11.8,
+     "Tx12": 17.6,
+     "Tx24": 17.8
+    },
+    "noon": {
+     "Tn12": 8.1,
+     "Tn14": 8.1,
+     "Tx12": 17.8,
+     "Tx24": 18.0
+    }
+   }
+  },
+  "2026-06-12": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.3,
+   "min_contract": 13,
+   "min_raw": 12.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.2,
+     "Tn14": 16.2,
+     "Tx12": 20.3,
+     "Tx24": 20.3
+    },
+    "noon": {
+     "Tn12": 12.5,
+     "Tn14": 11.8,
+     "Tx12": 18.8,
+     "Tx24": 18.8
+    }
+   }
+  },
+  "2026-06-13": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 18,
+   "max_raw": 17.8,
+   "min_contract": 14,
+   "min_raw": 14.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.6,
+     "Tn14": 14.6,
+     "Tx12": 17.8,
+     "Tx24": 17.8
+    },
+    "noon": {
+     "Tn12": 14.3,
+     "Tn14": 14.3,
+     "Tx12": 17.8,
+     "Tx24": 20.3
+    }
+   }
+  },
+  "2026-06-14": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 18,
+   "max_raw": 17.8,
+   "min_contract": 13,
+   "min_raw": 13.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.2,
+     "Tn14": 13.2,
+     "Tx12": 17.8,
+     "Tx24": 17.8
+    },
+    "noon": {
+     "Tn12": 13.4,
+     "Tn14": 13.4,
+     "Tx12": 16.9,
+     "Tx24": 17.8
+    }
+   }
+  },
+  "2026-06-15": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 19.0,
+   "min_contract": 13,
+   "min_raw": 12.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.8,
+     "Tn14": 12.8,
+     "Tx12": 19.0,
+     "Tx24": 19.0
+    },
+    "noon": {
+     "Tn12": 12.5,
+     "Tn14": 12.5,
+     "Tx12": 15.0,
+     "Tx24": 17.8
+    }
+   }
+  },
+  "2026-06-16": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 22.9,
+   "min_contract": 12,
+   "min_raw": 12.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.4,
+     "Tn14": 15.4,
+     "Tx12": 22.9,
+     "Tx24": 22.9
+    },
+    "noon": {
+     "Tn12": 12.2,
+     "Tn14": 12.2,
+     "Tx12": 19.6,
+     "Tx24": 19.6
+    }
+   }
+  },
+  "2026-06-17": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 24,
+   "max_raw": 24.1,
+   "min_contract": 14,
+   "min_raw": 14.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.8,
+     "Tn14": 18.6,
+     "Tx12": 24.1,
+     "Tx24": 24.1
+    },
+    "noon": {
+     "Tn12": 14.4,
+     "Tn14": 14.4,
+     "Tx12": 21.4,
+     "Tx24": 22.9
+    }
+   }
+  },
+  "2026-06-18": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 28,
+   "max_raw": 27.8,
+   "min_contract": 16,
+   "min_raw": 15.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 20.4,
+     "Tn14": 20.4,
+     "Tx12": 27.8,
+     "Tx24": 27.8
+    },
+    "noon": {
+     "Tn12": 15.6,
+     "Tn14": 15.6,
+     "Tx12": 24.1,
+     "Tx24": 24.1
+    }
+   }
+  },
+  "2026-06-19": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 33,
+   "max_raw": 33.3,
+   "min_contract": 18,
+   "min_raw": 18.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 20.2,
+     "Tn14": 20.2,
+     "Tx12": 33.3,
+     "Tx24": 33.3
+    },
+    "noon": {
+     "Tn12": 18.3,
+     "Tn14": 18.3,
+     "Tx12": 28.4,
+     "Tx24": 28.4
+    }
+   }
+  },
+  "2026-06-20": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 26,
+   "max_raw": 25.6,
+   "min_contract": 19,
+   "min_raw": 18.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.9,
+     "Tn14": 18.9,
+     "Tx12": 25.6,
+     "Tx24": 25.6
+    },
+    "noon": {
+     "Tn12": 19.7,
+     "Tn14": 19.7,
+     "Tx12": 25.3,
+     "Tx24": 33.3
+    }
+   }
+  },
+  "2026-06-21": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 27,
+   "max_raw": 26.8,
+   "min_contract": 19,
+   "min_raw": 18.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 20.0,
+     "Tn14": 20.0,
+     "Tx12": 26.8,
+     "Tx24": 26.8
+    },
+    "noon": {
+     "Tn12": 18.9,
+     "Tn14": 18.9,
+     "Tx12": 24.2,
+     "Tx24": 25.6
+    }
+   }
+  },
+  "2026-06-22": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 25.1,
+   "min_contract": 17,
+   "min_raw": 17.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.7,
+     "Tn14": 18.7,
+     "Tx12": 25.1,
+     "Tx24": 25.1
+    },
+    "noon": {
+     "Tn12": 17.1,
+     "Tn14": 17.1,
+     "Tx12": 22.8,
+     "Tx24": 26.8
+    }
+   }
+  },
+  "2026-06-23": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 28,
+   "max_raw": 28.3,
+   "min_contract": 16,
+   "min_raw": 16.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 21.0,
+     "Tn14": 20.5,
+     "Tx12": 28.3,
+     "Tx24": 28.3
+    },
+    "noon": {
+     "Tn12": 16.4,
+     "Tn14": 16.4,
+     "Tx12": 24.0,
+     "Tx24": 25.1
+    }
+   }
+  },
+  "2026-06-24": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 35,
+   "max_raw": 34.5,
+   "min_contract": 21,
+   "min_raw": 20.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 24.2,
+     "Tn14": 24.2,
+     "Tx12": 34.5,
+     "Tx24": 34.5
+    },
+    "noon": {
+     "Tn12": 20.6,
+     "Tn14": 20.6,
+     "Tx12": 30.3,
+     "Tx24": 30.3
+    }
+   }
+  },
+  "2026-06-25": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 29,
+   "max_raw": 29.0,
+   "min_contract": 21,
+   "min_raw": 20.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 23.4,
+     "Tn14": 23.4,
+     "Tx12": 29.0,
+     "Tx24": 29.0
+    },
+    "noon": {
+     "Tn12": 20.8,
+     "Tn14": 20.8,
+     "Tx12": 26.7,
+     "Tx24": 34.5
+    }
+   }
+  },
+  "2026-06-26": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 36,
+   "max_raw": 36.1,
+   "min_contract": 22,
+   "min_raw": 21.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 23.4,
+     "Tn14": 23.4,
+     "Tx12": 36.1,
+     "Tx24": 36.1
+    },
+    "noon": {
+     "Tn12": 21.6,
+     "Tn14": 21.6,
+     "Tx12": 31.9,
+     "Tx24": 31.9
+    }
+   }
+  },
+  "2026-06-27": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 28,
+   "max_raw": 28.2,
+   "min_contract": 20,
+   "min_raw": 20.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 20.0,
+     "Tn14": 20.0,
+     "Tx12": 27.9,
+     "Tx24": 28.2
+    },
+    "noon": {
+     "Tn12": 20.0,
+     "Tn14": 20.0,
+     "Tx12": 28.2,
+     "Tx24": 36.1
+    }
+   }
+  },
+  "2026-06-28": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 26,
+   "max_raw": 26.4,
+   "min_contract": 19,
+   "min_raw": 19.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.2,
+     "Tn14": 19.2,
+     "Tx12": 26.0,
+     "Tx24": 26.4
+    },
+    "noon": {
+     "Tn12": 19.3,
+     "Tn14": 19.3,
+     "Tx12": 26.4,
+     "Tx24": 27.9
+    }
+   }
+  },
+  "2026-06-29": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 23.1,
+   "min_contract": 15,
+   "min_raw": 15.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.1,
+     "Tn14": 15.1,
+     "Tx12": 23.1,
+     "Tx24": 23.1
+    },
+    "noon": {
+     "Tn12": 16.7,
+     "Tn14": 16.7,
+     "Tx12": 22.8,
+     "Tx24": 26.0
+    }
+   }
+  },
+  "2026-06-30": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 21.8,
+   "min_contract": 13,
+   "min_raw": 12.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.8,
+     "Tn14": 15.8,
+     "Tx12": 21.8,
+     "Tx24": 21.8
+    },
+    "noon": {
+     "Tn12": 12.7,
+     "Tn14": 12.7,
+     "Tx12": 20.7,
+     "Tx24": 23.1
+    }
+   }
+  },
+  "2026-07-01": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 24,
+   "max_raw": 23.5,
+   "min_contract": 13,
+   "min_raw": 13.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.8,
+     "Tn14": 16.8,
+     "Tx12": 23.5,
+     "Tx24": 23.5
+    },
+    "noon": {
+     "Tn12": 13.0,
+     "Tn14": 13.0,
+     "Tx12": 22.4,
+     "Tx24": 22.4
+    }
+   }
+  },
+  "2026-07-02": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.8,
+   "min_contract": 14,
+   "min_raw": 14.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.2,
+     "Tn14": 14.2,
+     "Tx12": 20.8,
+     "Tx24": 20.8
+    },
+    "noon": {
+     "Tn12": 16.5,
+     "Tn14": 16.5,
+     "Tx12": 19.6,
+     "Tx24": 23.5
+    }
+   }
+  },
+  "2026-07-03": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.0,
+   "min_contract": 13,
+   "min_raw": 12.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.2,
+     "Tn14": 14.2,
+     "Tx12": 20.0,
+     "Tx24": 20.0
+    },
+    "noon": {
+     "Tn12": 12.8,
+     "Tn14": 12.8,
+     "Tx12": 19.4,
+     "Tx24": 20.8
+    }
+   }
+  },
+  "2026-07-04": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 23.0,
+   "min_contract": 14,
+   "min_raw": 14.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.7,
+     "Tn14": 18.7,
+     "Tx12": 23.0,
+     "Tx24": 23.0
+    },
+    "noon": {
+     "Tn12": 14.2,
+     "Tn14": 14.2,
+     "Tx12": 21.7,
+     "Tx24": 21.7
+    }
+   }
+  },
+  "2026-07-05": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.9,
+   "min_contract": 17,
+   "min_raw": 17.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 17.1,
+     "Tn14": 17.1,
+     "Tx12": 20.9,
+     "Tx24": 20.9
+    },
+    "noon": {
+     "Tn12": 17.4,
+     "Tn14": 17.4,
+     "Tx12": 20.2,
+     "Tx24": 23.0
+    }
+   }
+  },
+  "2026-07-06": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 26,
+   "max_raw": 26.1,
+   "min_contract": 17,
+   "min_raw": 17.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.5,
+     "Tn14": 18.5,
+     "Tx12": 26.1,
+     "Tx24": 26.1
+    },
+    "noon": {
+     "Tn12": 17.2,
+     "Tn14": 17.1,
+     "Tx12": 23.6,
+     "Tx24": 23.6
+    }
+   }
+  },
+  "2026-07-07": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 23.2,
+   "min_contract": 17,
+   "min_raw": 16.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 17.4,
+     "Tn14": 17.4,
+     "Tx12": 23.2,
+     "Tx24": 23.2
+    },
+    "noon": {
+     "Tn12": 16.6,
+     "Tn14": 16.6,
+     "Tx12": 23.0,
+     "Tx24": 26.1
+    }
+   }
+  },
+  "2026-07-08": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 22.4,
+   "min_contract": 16,
+   "min_raw": 16.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.2,
+     "Tn14": 16.2,
+     "Tx12": 22.4,
+     "Tx24": 22.4
+    },
+    "noon": {
+     "Tn12": 17.8,
+     "Tn14": 17.4,
+     "Tx12": 19.5,
+     "Tx24": 23.2
+    }
+   }
+  },
+  "2026-07-09": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 24,
+   "max_raw": 24.3,
+   "min_contract": 14,
+   "min_raw": 13.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.3,
+     "Tn14": 18.3,
+     "Tx12": 24.3,
+     "Tx24": 24.3
+    },
+    "noon": {
+     "Tn12": 13.8,
+     "Tn14": 13.8,
+     "Tx12": 22.6,
+     "Tx24": 22.6
+    }
+   }
+  },
+  "2026-07-10": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 26,
+   "max_raw": 26.4,
+   "min_contract": 16,
+   "min_raw": 15.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.7,
+     "Tn14": 19.7,
+     "Tx12": 26.4,
+     "Tx24": 26.4
+    },
+    "noon": {
+     "Tn12": 15.5,
+     "Tn14": 15.5,
+     "Tx12": 22.8,
+     "Tx24": 24.3
+    }
+   }
+  },
+  "2026-07-11": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 25.3,
+   "min_contract": 17,
+   "min_raw": 17.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.5,
+     "Tn14": 19.4,
+     "Tx12": 25.3,
+     "Tx24": 25.3
+    },
+    "noon": {
+     "Tn12": 17.4,
+     "Tn14": 17.4,
+     "Tx12": 21.6,
+     "Tx24": 26.4
+    }
+   }
+  },
+  "2026-07-12": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 26,
+   "max_raw": 25.9,
+   "min_contract": 16,
+   "min_raw": 16.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.4,
+     "Tn14": 16.4,
+     "Tx12": 25.9,
+     "Tx24": 25.9
+    },
+    "noon": {
+     "Tn12": 17.3,
+     "Tn14": 17.3,
+     "Tx12": 24.6,
+     "Tx24": 25.3
+    }
+   }
+  },
+  "2026-07-13": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 25.0,
+   "min_contract": 15,
+   "min_raw": 14.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.1,
+     "Tn14": 18.6,
+     "Tx12": 25.0,
+     "Tx24": 25.0
+    },
+    "noon": {
+     "Tn12": 14.6,
+     "Tn14": 14.6,
+     "Tx12": 21.8,
+     "Tx24": 25.9
+    }
+   }
+  },
+  "2026-07-14": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 29,
+   "max_raw": 28.5,
+   "min_contract": 19,
+   "min_raw": 18.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 20.8,
+     "Tn14": 20.8,
+     "Tx12": 28.5,
+     "Tx24": 28.5
+    },
+    "noon": {
+     "Tn12": 18.7,
+     "Tn14": 18.7,
+     "Tx12": 25.0,
+     "Tx24": 25.0
+    }
+   }
+  },
+  "2026-07-15": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 28,
+   "max_raw": 27.5,
+   "min_contract": 19,
+   "min_raw": 18.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 20.8,
+     "Tn14": 20.8,
+     "Tx12": 27.5,
+     "Tx24": 27.5
+    },
+    "noon": {
+     "Tn12": 18.8,
+     "Tn14": 18.8,
+     "Tx12": 25.2,
+     "Tx24": 28.5
+    }
+   }
+  },
+  "2026-07-16": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 24.7,
+   "min_contract": 18,
+   "min_raw": 18.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.3,
+     "Tn14": 18.3,
+     "Tx12": 24.7,
+     "Tx24": 24.7
+    },
+    "noon": {
+     "Tn12": 18.5,
+     "Tn14": 18.5,
+     "Tx12": 22.9,
+     "Tx24": 27.5
+    }
+   }
+  },
+  "2026-07-17": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 22.9,
+   "min_contract": 15,
+   "min_raw": 15.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.2,
+     "Tn14": 16.2,
+     "Tx12": 22.9,
+     "Tx24": 22.9
+    },
+    "noon": {
+     "Tn12": 15.0,
+     "Tn14": 15.0,
+     "Tx12": 21.2,
+     "Tx24": 24.7
+    }
+   }
+  },
+  "2026-07-18": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.1,
+   "min_contract": 14,
+   "min_raw": 13.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.7,
+     "Tn14": 13.7,
+     "Tx12": 20.1,
+     "Tx24": 20.1
+    },
+    "noon": {
+     "Tn12": 16.6,
+     "Tn14": 16.2,
+     "Tx12": 19.1,
+     "Tx24": 22.9
+    }
+   }
+  },
+  "2026-07-19": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.6,
+   "min_contract": 13,
+   "min_raw": 12.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.4,
+     "Tn14": 15.4,
+     "Tx12": 20.6,
+     "Tx24": 20.6
+    },
+    "noon": {
+     "Tn12": 12.5,
+     "Tn14": 12.5,
+     "Tx12": 19.6,
+     "Tx24": 20.1
+    }
+   }
+  },
+  "2026-07-20": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.8,
+   "min_contract": 14,
+   "min_raw": 13.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.5,
+     "Tn14": 13.5,
+     "Tx12": 20.8,
+     "Tx24": 20.8
+    },
+    "noon": {
+     "Tn12": 14.3,
+     "Tn14": 14.3,
+     "Tx12": 20.3,
+     "Tx24": 20.6
+    }
+   }
+  },
+  "2026-07-21": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 22.1,
+   "min_contract": 11,
+   "min_raw": 10.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.5,
+     "Tn14": 16.5,
+     "Tx12": 22.1,
+     "Tx24": 22.1
+    },
+    "noon": {
+     "Tn12": 10.6,
+     "Tn14": 10.6,
+     "Tx12": 18.7,
+     "Tx24": 20.8
+    }
+   }
+  },
+  "2026-07-22": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 21.2,
+   "min_contract": 15,
+   "min_raw": 14.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.3,
+     "Tn14": 15.3,
+     "Tx12": 21.2,
+     "Tx24": 21.2
+    },
+    "noon": {
+     "Tn12": 14.6,
+     "Tn14": 14.6,
+     "Tx12": 18.5,
+     "Tx24": 22.1
+    }
+   }
+  },
+  "2026-07-23": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.7,
+   "min_contract": 14,
+   "min_raw": 13.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.1,
+     "Tn14": 15.1,
+     "Tx12": 20.7,
+     "Tx24": 20.7
+    },
+    "noon": {
+     "Tn12": 13.8,
+     "Tn14": 13.8,
+     "Tx12": 20.1,
+     "Tx24": 21.2
+    }
+   }
+  },
+  "2026-07-24": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 24,
+   "max_raw": 24.3,
+   "min_contract": 16,
+   "min_raw": 15.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.7,
+     "Tn14": 16.7,
+     "Tx12": 24.3,
+     "Tx24": 24.3
+    },
+    "noon": {
+     "Tn12": 15.8,
+     "Tn14": 15.1,
+     "Tx12": 20.2,
+     "Tx24": 20.7
+    }
+   }
+  },
+  "2026-07-25": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 25.1,
+   "min_contract": 14,
+   "min_raw": 14.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.0,
+     "Tn14": 18.0,
+     "Tx12": 25.1,
+     "Tx24": 25.1
+    },
+    "noon": {
+     "Tn12": 14.0,
+     "Tn14": 14.0,
+     "Tx12": 24.0,
+     "Tx24": 24.3
+    }
+   }
+  },
+  "2026-07-26": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 21.9,
+   "min_contract": 18,
+   "min_raw": 17.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.1,
+     "Tn14": 18.0,
+     "Tx12": 21.9,
+     "Tx24": 21.9
+    },
+    "noon": {
+     "Tn12": 17.6,
+     "Tn14": 17.6,
+     "Tx12": 20.8,
+     "Tx24": 25.1
+    }
+   }
+  },
+  "2026-07-27": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 21.7,
+   "min_contract": 15,
+   "min_raw": 15.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.0,
+     "Tn14": 15.0,
+     "Tx12": 21.7,
+     "Tx24": 21.7
+    },
+    "noon": {
+     "Tn12": 16.0,
+     "Tn14": 16.0,
+     "Tx12": 21.1,
+     "Tx24": 21.9
+    }
+   }
+  },
+  "2026-07-28": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 28,
+   "max_raw": 27.5,
+   "min_contract": 14,
+   "min_raw": 13.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.9,
+     "Tn14": 19.9,
+     "Tx12": 27.5,
+     "Tx24": 27.5
+    },
+    "noon": {
+     "Tn12": 13.7,
+     "Tn14": 13.7,
+     "Tx12": 25.0,
+     "Tx24": 25.0
+    }
+   }
+  },
+  "2026-07-29": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 32,
+   "max_raw": 32.4,
+   "min_contract": 18,
+   "min_raw": 17.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 22.8,
+     "Tn14": 22.8,
+     "Tx12": 32.4,
+     "Tx24": 32.4
+    },
+    "noon": {
+     "Tn12": 17.9,
+     "Tn14": 17.9,
+     "Tx12": 29.6,
+     "Tx24": 29.6
+    }
+   }
+  },
+  "2026-07-30": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 26,
+   "max_raw": 26.1,
+   "min_contract": 19,
+   "min_raw": 18.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.9,
+     "Tn14": 18.9,
+     "Tx12": 26.1,
+     "Tx24": 26.1
+    },
+    "noon": {
+     "Tn12": 18.7,
+     "Tn14": 18.7,
+     "Tx12": 26.0,
+     "Tx24": 32.4
+    }
+   }
+  },
+  "2026-07-31": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 24.6,
+   "min_contract": 16,
+   "min_raw": 15.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.7,
+     "Tn14": 15.7,
+     "Tx12": 24.6,
+     "Tx24": 24.6
+    },
+    "noon": {
+     "Tn12": 17.3,
+     "Tn14": 17.3,
+     "Tx12": 21.8,
+     "Tx24": 26.1
+    }
+   }
+  },
+  "2026-08-01": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 24,
+   "max_raw": 24.4,
+   "min_contract": 12,
+   "min_raw": 12.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.7,
+     "Tn14": 16.7,
+     "Tx12": 24.4,
+     "Tx24": 24.4
+    },
+    "noon": {
+     "Tn12": 12.2,
+     "Tn14": 12.2,
+     "Tx12": 22.5,
+     "Tx24": 24.6
+    }
+   }
+  },
+  "2026-08-02": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 26,
+   "max_raw": 26.2,
+   "min_contract": 15,
+   "min_raw": 14.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 21.1,
+     "Tn14": 21.1,
+     "Tx12": 26.2,
+     "Tx24": 26.2
+    },
+    "noon": {
+     "Tn12": 14.5,
+     "Tn14": 14.5,
+     "Tx12": 24.5,
+     "Tx24": 24.5
+    }
+   }
+  },
+  "2026-08-03": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 32,
+   "max_raw": 31.7,
+   "min_contract": 18,
+   "min_raw": 18.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.6,
+     "Tn14": 19.6,
+     "Tx12": 31.7,
+     "Tx24": 31.7
+    },
+    "noon": {
+     "Tn12": 18.0,
+     "Tn14": 18.0,
+     "Tx12": 26.6,
+     "Tx24": 26.6
+    }
+   }
+  },
+  "2026-08-04": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 34,
+   "max_raw": 33.5,
+   "min_contract": 18,
+   "min_raw": 18.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 21.8,
+     "Tn14": 21.8,
+     "Tx12": 33.5,
+     "Tx24": 33.5
+    },
+    "noon": {
+     "Tn12": 18.3,
+     "Tn14": 18.3,
+     "Tx12": 29.3,
+     "Tx24": 31.7
+    }
+   }
+  },
+  "2026-08-05": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 26,
+   "max_raw": 25.7,
+   "min_contract": 20,
+   "min_raw": 19.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.6,
+     "Tn14": 19.6,
+     "Tx12": 25.7,
+     "Tx24": 25.7
+    },
+    "noon": {
+     "Tn12": 20.5,
+     "Tn14": 20.5,
+     "Tx12": 24.0,
+     "Tx24": 33.5
+    }
+   }
+  },
+  "2026-08-06": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 22.0,
+   "min_contract": 16,
+   "min_raw": 15.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.9,
+     "Tn14": 15.9,
+     "Tx12": 21.8,
+     "Tx24": 22.0
+    },
+    "noon": {
+     "Tn12": 15.7,
+     "Tn14": 15.7,
+     "Tx12": 22.0,
+     "Tx24": 25.7
+    }
+   }
+  },
+  "2026-08-07": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 22.2,
+   "min_contract": 14,
+   "min_raw": 14.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.0,
+     "Tn14": 14.0,
+     "Tx12": 22.2,
+     "Tx24": 22.2
+    },
+    "noon": {
+     "Tn12": 14.3,
+     "Tn14": 14.3,
+     "Tx12": 20.6,
+     "Tx24": 21.8
+    }
+   }
+  },
+  "2026-08-08": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 25.2,
+   "min_contract": 10,
+   "min_raw": 10.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 17.8,
+     "Tn14": 17.8,
+     "Tx12": 25.2,
+     "Tx24": 25.2
+    },
+    "noon": {
+     "Tn12": 10.4,
+     "Tn14": 10.4,
+     "Tx12": 22.1,
+     "Tx24": 22.2
+    }
+   }
+  },
+  "2026-08-09": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 30,
+   "max_raw": 29.6,
+   "min_contract": 14,
+   "min_raw": 13.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 21.7,
+     "Tn14": 21.7,
+     "Tx12": 29.6,
+     "Tx24": 29.6
+    },
+    "noon": {
+     "Tn12": 13.6,
+     "Tn14": 13.6,
+     "Tx12": 27.3,
+     "Tx24": 27.3
+    }
+   }
+  },
+  "2026-08-10": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 24,
+   "max_raw": 23.7,
+   "min_contract": 16,
+   "min_raw": 15.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.9,
+     "Tn14": 15.9,
+     "Tx12": 23.6,
+     "Tx24": 23.7
+    },
+    "noon": {
+     "Tn12": 17.1,
+     "Tn14": 17.1,
+     "Tx12": 23.7,
+     "Tx24": 29.6
+    }
+   }
+  },
+  "2026-08-11": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 22.5,
+   "min_contract": 11,
+   "min_raw": 11.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.2,
+     "Tn14": 16.2,
+     "Tx12": 22.5,
+     "Tx24": 22.5
+    },
+    "noon": {
+     "Tn12": 11.3,
+     "Tn14": 11.3,
+     "Tx12": 20.3,
+     "Tx24": 23.6
+    }
+   }
+  },
+  "2026-08-12": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 28,
+   "max_raw": 28.4,
+   "min_contract": 13,
+   "min_raw": 12.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.3,
+     "Tn14": 18.9,
+     "Tx12": 28.4,
+     "Tx24": 28.4
+    },
+    "noon": {
+     "Tn12": 12.8,
+     "Tn14": 12.8,
+     "Tx12": 23.3,
+     "Tx24": 23.3
+    }
+   }
+  },
+  "2026-08-13": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 33,
+   "max_raw": 32.7,
+   "min_contract": 15,
+   "min_raw": 15.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.4,
+     "Tn14": 19.4,
+     "Tx12": 32.7,
+     "Tx24": 32.7
+    },
+    "noon": {
+     "Tn12": 15.4,
+     "Tn14": 15.4,
+     "Tx12": 28.3,
+     "Tx24": 28.4
+    }
+   }
+  },
+  "2026-08-14": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 34,
+   "max_raw": 34.3,
+   "min_contract": 17,
+   "min_raw": 17.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 20.1,
+     "Tn14": 20.1,
+     "Tx12": 34.3,
+     "Tx24": 34.3
+    },
+    "noon": {
+     "Tn12": 17.1,
+     "Tn14": 17.1,
+     "Tx12": 32.2,
+     "Tx24": 32.7
+    }
+   }
+  },
+  "2026-08-15": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 24,
+   "max_raw": 23.5,
+   "min_contract": 19,
+   "min_raw": 18.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.6,
+     "Tn14": 18.6,
+     "Tx12": 23.5,
+     "Tx24": 23.5
+    },
+    "noon": {
+     "Tn12": 18.8,
+     "Tn14": 18.8,
+     "Tx12": 23.3,
+     "Tx24": 34.3
+    }
+   }
+  },
+  "2026-08-16": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 24,
+   "max_raw": 23.9,
+   "min_contract": 16,
+   "min_raw": 15.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.8,
+     "Tn14": 15.8,
+     "Tx12": 23.9,
+     "Tx24": 23.9
+    },
+    "noon": {
+     "Tn12": 15.7,
+     "Tn14": 15.7,
+     "Tx12": 23.0,
+     "Tx24": 23.5
+    }
+   }
+  },
+  "2026-08-17": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 21.4,
+   "min_contract": 14,
+   "min_raw": 14.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.8,
+     "Tn14": 15.8,
+     "Tx12": 21.4,
+     "Tx24": 21.4
+    },
+    "noon": {
+     "Tn12": 14.3,
+     "Tn14": 14.3,
+     "Tx12": 19.7,
+     "Tx24": 23.9
+    }
+   }
+  },
+  "2026-08-18": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 21.5,
+   "min_contract": 15,
+   "min_raw": 15.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.0,
+     "Tn14": 16.0,
+     "Tx12": 21.5,
+     "Tx24": 21.5
+    },
+    "noon": {
+     "Tn12": 15.3,
+     "Tn14": 15.3,
+     "Tx12": 19.8,
+     "Tx24": 21.4
+    }
+   }
+  },
+  "2026-08-19": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 21.5,
+   "min_contract": 15,
+   "min_raw": 14.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.6,
+     "Tn14": 14.6,
+     "Tx12": 21.5,
+     "Tx24": 21.5
+    },
+    "noon": {
+     "Tn12": 15.9,
+     "Tn14": 15.9,
+     "Tx12": 18.5,
+     "Tx24": 21.5
+    }
+   }
+  },
+  "2026-08-20": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 22.3,
+   "min_contract": 14,
+   "min_raw": 14.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.0,
+     "Tn14": 14.0,
+     "Tx12": 22.3,
+     "Tx24": 22.3
+    },
+    "noon": {
+     "Tn12": 14.3,
+     "Tn14": 14.3,
+     "Tx12": 21.2,
+     "Tx24": 21.5
+    }
+   }
+  },
+  "2026-08-21": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.4,
+   "min_contract": 12,
+   "min_raw": 12.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.0,
+     "Tn14": 14.0,
+     "Tx12": 20.4,
+     "Tx24": 20.4
+    },
+    "noon": {
+     "Tn12": 12.4,
+     "Tn14": 12.4,
+     "Tx12": 19.8,
+     "Tx24": 22.3
+    }
+   }
+  },
+  "2026-08-22": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.3,
+   "min_contract": 13,
+   "min_raw": 13.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.6,
+     "Tn14": 13.6,
+     "Tx12": 20.3,
+     "Tx24": 20.3
+    },
+    "noon": {
+     "Tn12": 13.0,
+     "Tn14": 13.0,
+     "Tx12": 18.9,
+     "Tx24": 20.4
+    }
+   }
+  },
+  "2026-08-23": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.6,
+   "min_contract": 11,
+   "min_raw": 11.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.8,
+     "Tn14": 12.8,
+     "Tx12": 20.6,
+     "Tx24": 20.6
+    },
+    "noon": {
+     "Tn12": 11.3,
+     "Tn14": 11.3,
+     "Tx12": 20.3,
+     "Tx24": 20.3
+    }
+   }
+  },
+  "2026-08-24": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 21.6,
+   "min_contract": 9,
+   "min_raw": 9.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.5,
+     "Tn14": 15.5,
+     "Tx12": 21.6,
+     "Tx24": 21.6
+    },
+    "noon": {
+     "Tn12": 9.3,
+     "Tn14": 9.3,
+     "Tx12": 19.5,
+     "Tx24": 20.6
+    }
+   }
+  },
+  "2026-08-25": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 25.2,
+   "min_contract": 13,
+   "min_raw": 13.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.8,
+     "Tn14": 16.8,
+     "Tx12": 25.2,
+     "Tx24": 25.2
+    },
+    "noon": {
+     "Tn12": 13.2,
+     "Tn14": 13.2,
+     "Tx12": 20.4,
+     "Tx24": 21.6
+    }
+   }
+  },
+  "2026-08-26": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 26,
+   "max_raw": 25.7,
+   "min_contract": 13,
+   "min_raw": 12.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.8,
+     "Tn14": 18.8,
+     "Tx12": 25.7,
+     "Tx24": 25.7
+    },
+    "noon": {
+     "Tn12": 12.7,
+     "Tn14": 12.7,
+     "Tx12": 23.4,
+     "Tx24": 25.2
+    }
+   }
+  },
+  "2026-08-27": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 27,
+   "max_raw": 27.4,
+   "min_contract": 16,
+   "min_raw": 15.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.9,
+     "Tn14": 19.5,
+     "Tx12": 27.4,
+     "Tx24": 27.4
+    },
+    "noon": {
+     "Tn12": 15.7,
+     "Tn14": 15.7,
+     "Tx12": 22.5,
+     "Tx24": 25.7
+    }
+   }
+  },
+  "2026-08-28": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 23.0,
+   "min_contract": 14,
+   "min_raw": 14.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.3,
+     "Tn14": 14.3,
+     "Tx12": 23.0,
+     "Tx24": 23.0
+    },
+    "noon": {
+     "Tn12": 18.0,
+     "Tn14": 18.0,
+     "Tx12": 20.6,
+     "Tx24": 27.4
+    }
+   }
+  },
+  "2026-08-29": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 23.3,
+   "min_contract": 16,
+   "min_raw": 16.3,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 17.9,
+     "Tn14": 17.4,
+     "Tx12": 23.3,
+     "Tx24": 23.3
+    },
+    "noon": {
+     "Tn12": 16.3,
+     "Tn14": 16.3,
+     "Tx12": 21.4,
+     "Tx24": 23.0
+    }
+   }
+  },
+  "2026-08-30": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 21.3,
+   "min_contract": 17,
+   "min_raw": 16.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.9,
+     "Tn14": 16.9,
+     "Tx12": 21.3,
+     "Tx24": 21.3
+    },
+    "noon": {
+     "Tn12": 17.9,
+     "Tn14": 17.9,
+     "Tx12": 19.8,
+     "Tx24": 23.3
+    }
+   }
+  },
+  "2026-08-31": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.9,
+   "min_contract": 15,
+   "min_raw": 14.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.5,
+     "Tn14": 14.5,
+     "Tx12": 20.9,
+     "Tx24": 20.9
+    },
+    "noon": {
+     "Tn12": 14.5,
+     "Tn14": 14.5,
+     "Tx12": 19.4,
+     "Tx24": 21.3
+    }
+   }
+  },
+  "2026-09-01": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.7,
+   "min_contract": 14,
+   "min_raw": 14.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.9,
+     "Tn14": 14.9,
+     "Tx12": 20.7,
+     "Tx24": 20.7
+    },
+    "noon": {
+     "Tn12": 14.1,
+     "Tn14": 14.1,
+     "Tx12": 20.1,
+     "Tx24": 20.9
+    }
+   }
+  },
+  "2026-09-02": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 22.4,
+   "min_contract": 14,
+   "min_raw": 14.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 17.3,
+     "Tn14": 17.3,
+     "Tx12": 22.4,
+     "Tx24": 22.4
+    },
+    "noon": {
+     "Tn12": 14.0,
+     "Tn14": 14.0,
+     "Tx12": 20.7,
+     "Tx24": 20.7
+    }
+   }
+  },
+  "2026-09-03": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 23.0,
+   "min_contract": 17,
+   "min_raw": 17.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 20.1,
+     "Tn14": 19.6,
+     "Tx12": 23.0,
+     "Tx24": 23.0
+    },
+    "noon": {
+     "Tn12": 17.4,
+     "Tn14": 17.4,
+     "Tx12": 21.9,
+     "Tx24": 22.4
+    }
+   }
+  },
+  "2026-09-04": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 22.2,
+   "min_contract": 16,
+   "min_raw": 16.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.4,
+     "Tn14": 16.2,
+     "Tx12": 19.9,
+     "Tx24": 22.2
+    },
+    "noon": {
+     "Tn12": 16.2,
+     "Tn14": 16.2,
+     "Tx12": 22.2,
+     "Tx24": 23.0
+    }
+   }
+  },
+  "2026-09-05": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.4,
+   "min_contract": 12,
+   "min_raw": 12.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.0,
+     "Tn14": 12.0,
+     "Tx12": 20.4,
+     "Tx24": 20.4
+    },
+    "noon": {
+     "Tn12": 15.2,
+     "Tn14": 15.2,
+     "Tx12": 19.4,
+     "Tx24": 19.9
+    }
+   }
+  },
+  "2026-09-06": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 22.7,
+   "min_contract": 11,
+   "min_raw": 10.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.7,
+     "Tn14": 16.7,
+     "Tx12": 22.7,
+     "Tx24": 22.7
+    },
+    "noon": {
+     "Tn12": 10.7,
+     "Tn14": 10.7,
+     "Tx12": 19.9,
+     "Tx24": 20.4
+    }
+   }
+  },
+  "2026-09-07": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 27,
+   "max_raw": 26.5,
+   "min_contract": 16,
+   "min_raw": 15.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.1,
+     "Tn14": 19.1,
+     "Tx12": 26.5,
+     "Tx24": 26.5
+    },
+    "noon": {
+     "Tn12": 15.6,
+     "Tn14": 15.6,
+     "Tx12": 24.6,
+     "Tx24": 24.6
+    }
+   }
+  },
+  "2026-09-08": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 19.3,
+   "min_contract": 13,
+   "min_raw": 13.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.0,
+     "Tn14": 13.0,
+     "Tx12": 16.6,
+     "Tx24": 19.3
+    },
+    "noon": {
+     "Tn12": 15.5,
+     "Tn14": 15.5,
+     "Tx12": 19.3,
+     "Tx24": 26.5
+    }
+   }
+  },
+  "2026-09-09": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 19.0,
+   "min_contract": 11,
+   "min_raw": 11.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.1,
+     "Tn14": 11.1,
+     "Tx12": 19.0,
+     "Tx24": 19.0
+    },
+    "noon": {
+     "Tn12": 13.0,
+     "Tn14": 13.0,
+     "Tx12": 16.7,
+     "Tx24": 16.7
+    }
+   }
+  },
+  "2026-09-10": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.4,
+   "min_contract": 9,
+   "min_raw": 8.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.8,
+     "Tn14": 14.8,
+     "Tx12": 20.4,
+     "Tx24": 20.4
+    },
+    "noon": {
+     "Tn12": 8.6,
+     "Tn14": 8.6,
+     "Tx12": 16.3,
+     "Tx24": 19.0
+    }
+   }
+  },
+  "2026-09-11": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.9,
+   "min_contract": 14,
+   "min_raw": 13.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.4,
+     "Tn14": 14.4,
+     "Tx12": 20.9,
+     "Tx24": 20.9
+    },
+    "noon": {
+     "Tn12": 13.9,
+     "Tn14": 13.9,
+     "Tx12": 16.1,
+     "Tx24": 20.4
+    }
+   }
+  },
+  "2026-09-12": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 22.5,
+   "min_contract": 11,
+   "min_raw": 10.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 17.3,
+     "Tn14": 17.1,
+     "Tx12": 22.5,
+     "Tx24": 22.5
+    },
+    "noon": {
+     "Tn12": 10.9,
+     "Tn14": 10.9,
+     "Tx12": 21.1,
+     "Tx24": 21.1
+    }
+   }
+  },
+  "2026-09-13": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 21.8,
+   "min_contract": 14,
+   "min_raw": 14.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.4,
+     "Tn14": 14.4,
+     "Tx12": 21.8,
+     "Tx24": 21.8
+    },
+    "noon": {
+     "Tn12": 18.0,
+     "Tn14": 17.3,
+     "Tx12": 19.5,
+     "Tx24": 22.5
+    }
+   }
+  },
+  "2026-09-14": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 22.9,
+   "min_contract": 12,
+   "min_raw": 11.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.6,
+     "Tn14": 16.8,
+     "Tx12": 22.9,
+     "Tx24": 22.9
+    },
+    "noon": {
+     "Tn12": 11.8,
+     "Tn14": 11.8,
+     "Tx12": 20.1,
+     "Tx24": 21.8
+    }
+   }
+  },
+  "2026-09-15": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 25.0,
+   "min_contract": 16,
+   "min_raw": 16.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.1,
+     "Tn14": 16.1,
+     "Tx12": 25.0,
+     "Tx24": 25.0
+    },
+    "noon": {
+     "Tn12": 17.6,
+     "Tn14": 17.6,
+     "Tx12": 23.7,
+     "Tx24": 23.7
+    }
+   }
+  },
+  "2026-09-16": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 19.1,
+   "min_contract": 13,
+   "min_raw": 12.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.5,
+     "Tn14": 12.5,
+     "Tx12": 19.1,
+     "Tx24": 19.1
+    },
+    "noon": {
+     "Tn12": 13.0,
+     "Tn14": 13.0,
+     "Tx12": 18.6,
+     "Tx24": 25.0
+    }
+   }
+  },
+  "2026-09-17": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 17,
+   "max_raw": 17.3,
+   "min_contract": 13,
+   "min_raw": 12.5,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.3,
+     "Tn14": 13.3,
+     "Tx12": 16.9,
+     "Tx24": 17.3
+    },
+    "noon": {
+     "Tn12": 12.5,
+     "Tn14": 12.5,
+     "Tx12": 17.3,
+     "Tx24": 19.1
+    }
+   }
+  },
+  "2026-09-18": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 18.8,
+   "min_contract": 12,
+   "min_raw": 12.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.9,
+     "Tn14": 15.3,
+     "Tx12": 18.8,
+     "Tx24": 18.8
+    },
+    "noon": {
+     "Tn12": 12.2,
+     "Tn14": 12.2,
+     "Tx12": 18.1,
+     "Tx24": 18.1
+    }
+   }
+  },
+  "2026-09-19": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.5,
+   "min_contract": 17,
+   "min_raw": 16.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 17.9,
+     "Tn14": 17.2,
+     "Tx12": 20.5,
+     "Tx24": 20.5
+    },
+    "noon": {
+     "Tn12": 16.7,
+     "Tn14": 16.7,
+     "Tx12": 18.9,
+     "Tx24": 18.9
+    }
+   }
+  },
+  "2026-09-20": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 19.4,
+   "min_contract": 12,
+   "min_raw": 11.8,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.8,
+     "Tn14": 11.8,
+     "Tx12": 19.1,
+     "Tx24": 19.4
+    },
+    "noon": {
+     "Tn12": 17.0,
+     "Tn14": 17.0,
+     "Tx12": 19.4,
+     "Tx24": 20.5
+    }
+   }
+  },
+  "2026-09-21": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 19.5,
+   "min_contract": 11,
+   "min_raw": 11.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.2,
+     "Tn14": 12.2,
+     "Tx12": 19.5,
+     "Tx24": 19.5
+    },
+    "noon": {
+     "Tn12": 11.0,
+     "Tn14": 11.0,
+     "Tx12": 18.8,
+     "Tx24": 19.1
+    }
+   }
+  },
+  "2026-09-22": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 19.2,
+   "min_contract": 11,
+   "min_raw": 11.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.2,
+     "Tn14": 16.2,
+     "Tx12": 19.2,
+     "Tx24": 19.2
+    },
+    "noon": {
+     "Tn12": 11.0,
+     "Tn14": 11.0,
+     "Tx12": 17.9,
+     "Tx24": 19.5
+    }
+   }
+  },
+  "2026-09-23": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.7,
+   "min_contract": 14,
+   "min_raw": 14.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.4,
+     "Tn14": 14.4,
+     "Tx12": 20.7,
+     "Tx24": 20.7
+    },
+    "noon": {
+     "Tn12": 15.7,
+     "Tn14": 15.7,
+     "Tx12": 19.0,
+     "Tx24": 19.2
+    }
+   }
+  },
+  "2026-09-24": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 19,
+   "max_raw": 18.5,
+   "min_contract": 10,
+   "min_raw": 10.1,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 10.6,
+     "Tn14": 10.6,
+     "Tx12": 18.5,
+     "Tx24": 18.5
+    },
+    "noon": {
+     "Tn12": 10.1,
+     "Tn14": 10.1,
+     "Tx12": 17.3,
+     "Tx24": 20.7
+    }
+   }
+  },
+  "2026-09-25": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 22,
+   "max_raw": 21.7,
+   "min_contract": 9,
+   "min_raw": 9.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.5,
+     "Tn14": 13.3,
+     "Tx12": 21.7,
+     "Tx24": 21.7
+    },
+    "noon": {
+     "Tn12": 9.0,
+     "Tn14": 9.0,
+     "Tx12": 17.9,
+     "Tx24": 18.5
+    }
+   }
+  },
+  "2026-09-26": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.0,
+   "min_contract": 13,
+   "min_raw": 12.6,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.0,
+     "Tn14": 13.0,
+     "Tx12": 20.0,
+     "Tx24": 20.0
+    },
+    "noon": {
+     "Tn12": 12.6,
+     "Tn14": 12.6,
+     "Tx12": 18.4,
+     "Tx24": 21.7
+    }
+   }
+  },
+  "2026-09-27": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.9,
+   "min_contract": 12,
+   "min_raw": 12.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 15.9,
+     "Tn14": 13.8,
+     "Tx12": 20.9,
+     "Tx24": 20.9
+    },
+    "noon": {
+     "Tn12": 12.2,
+     "Tn14": 12.2,
+     "Tx12": 17.1,
+     "Tx24": 20.0
+    }
+   }
+  },
+  "2026-09-28": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 21.4,
+   "min_contract": 16,
+   "min_raw": 15.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 16.6,
+     "Tn14": 16.6,
+     "Tx12": 21.4,
+     "Tx24": 21.4
+    },
+    "noon": {
+     "Tn12": 15.7,
+     "Tn14": 15.7,
+     "Tx12": 21.0,
+     "Tx24": 21.0
+    }
+   }
+  },
+  "2026-09-29": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 25,
+   "max_raw": 25.2,
+   "min_contract": 16,
+   "min_raw": 15.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 18.9,
+     "Tn14": 16.9,
+     "Tx12": 25.2,
+     "Tx24": 25.2
+    },
+    "noon": {
+     "Tn12": 15.9,
+     "Tn14": 15.9,
+     "Tx12": 20.3,
+     "Tx24": 21.4
+    }
+   }
+  },
+  "2026-09-30": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 23,
+   "max_raw": 23.4,
+   "min_contract": 17,
+   "min_raw": 17.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 19.1,
+     "Tn14": 19.1,
+     "Tx12": 23.4,
+     "Tx24": 23.4
+    },
+    "noon": {
+     "Tn12": 17.2,
+     "Tn14": 17.2,
+     "Tx12": 22.5,
+     "Tx24": 25.2
+    }
+   }
+  },
+  "2026-10-01": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 21.1,
+   "min_contract": 13,
+   "min_raw": 12.7,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 12.7,
+     "Tn14": 12.7,
+     "Tx12": 21.1,
+     "Tx24": 21.1
+    },
+    "noon": {
+     "Tn12": 17.1,
+     "Tn14": 17.1,
+     "Tx12": 20.2,
+     "Tx24": 23.4
+    }
+   }
+  },
+  "2026-10-02": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.5,
+   "min_contract": 11,
+   "min_raw": 10.9,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.4,
+     "Tn14": 11.4,
+     "Tx12": 20.5,
+     "Tx24": 20.5
+    },
+    "noon": {
+     "Tn12": 10.9,
+     "Tn14": 10.9,
+     "Tx12": 17.9,
+     "Tx24": 21.1
+    }
+   }
+  },
+  "2026-10-03": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 20.1,
+   "min_contract": 9,
+   "min_raw": 9.2,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 13.0,
+     "Tn14": 13.0,
+     "Tx12": 20.1,
+     "Tx24": 20.1
+    },
+    "noon": {
+     "Tn12": 9.2,
+     "Tn14": 9.2,
+     "Tx12": 17.9,
+     "Tx24": 20.5
+    }
+   }
+  },
+  "2026-10-04": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 20,
+   "max_raw": 19.9,
+   "min_contract": 10,
+   "min_raw": 10.0,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 11.5,
+     "Tn14": 11.5,
+     "Tx12": 19.9,
+     "Tx24": 19.9
+    },
+    "noon": {
+     "Tn12": 10.0,
+     "Tn14": 10.0,
+     "Tx12": 16.7,
+     "Tx24": 20.1
+    }
+   }
+  },
+  "2026-10-05": {
+   "coverage": 1.0,
+   "expected": 2,
+   "max_contract": 21,
+   "max_raw": 20.9,
+   "min_contract": 10,
+   "min_raw": 10.4,
+   "n": 2,
+   "tx24_matches": true,
+   "win": {
+    "end": {
+     "Tn12": 14.0,
+     "Tn14": 14.0,
+     "Tx12": 20.9,
+     "Tx24": 20.9
+    },
+    "noon": {
+     "Tn12": 10.4,
+     "Tn14": 10.4,
+     "Tx12": 19.1,
+     "Tx24": 19.9
+    }
+   }
+  }
+ },
+ "high": {
+  "agg": {
+   "dangerous": 73,
+   "dangerous_name": "over",
+   "diff_hist": {
+    "0": 103,
+    "1": 73
+   },
+   "dropped_coverage": 0,
+   "eq": 103,
+   "metric": "high",
+   "n_days": 176,
+   "opposite": 0,
+   "opposite_name": "under"
+  },
+  "rows": [
+   {
+    "cand_contract": 12,
+    "cand_raw": 11.8,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-03",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 12,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 15.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-04",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 14.8,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-05",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 12.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-06",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 16.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-07",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-08",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 21.0,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-09",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 12,
+    "cand_raw": 11.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-10",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 12,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-11",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 14.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-12",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 13.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-13",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 15.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-14",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.0,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-15",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 16.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-16",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 18.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-17",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 14.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-18",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 13.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-19",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 12.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-20",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 12,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 13.8,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-21",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 16.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-22",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 16.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-23",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 14.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-24",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 15.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-25",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 14.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-26",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 14.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-27",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 17.7,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-28",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 18.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-04-29",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-04-30",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-01",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-05-02",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-03",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 18.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-05-04",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 14.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-05-05",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 15.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-06",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 16.5,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-07",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-08",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 17.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-09",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 15.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-10",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 13.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-05-13",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 13.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-14",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 12,
+    "cand_raw": 11.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-05-15",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 11,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 13.1,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-05-16",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 12,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 14.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-05-17",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 15.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-18",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-19",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 18.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-20",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-21",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-22",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 28,
+    "cand_raw": 28.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-23",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 28,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 24.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-05-24",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 24,
+    "used": true
+   },
+   {
+    "cand_contract": 28,
+    "cand_raw": 27.5,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-25",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 28,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 21.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-27",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 24.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-28",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 24.8,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-30",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-05-31",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 22.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-01",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.3,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-02",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-03",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 19.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-04",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 19.9,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-05",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-06",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 19.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-07",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-08",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 18.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-09",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 18.0,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-10",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-12",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 17.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-13",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 17.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-14",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.0,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-15",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 22.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-16",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 24.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-17",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 24,
+    "used": true
+   },
+   {
+    "cand_contract": 28,
+    "cand_raw": 27.8,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-18",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 28,
+    "used": true
+   },
+   {
+    "cand_contract": 33,
+    "cand_raw": 33.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-19",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 33,
+    "used": true
+   },
+   {
+    "cand_contract": 26,
+    "cand_raw": 25.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-20",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 27,
+    "cand_raw": 26.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-21",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 26,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-22",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 28,
+    "cand_raw": 28.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-23",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 28,
+    "used": true
+   },
+   {
+    "cand_contract": 35,
+    "cand_raw": 34.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-24",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 34,
+    "used": true
+   },
+   {
+    "cand_contract": 29,
+    "cand_raw": 29.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-25",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 29,
+    "used": true
+   },
+   {
+    "cand_contract": 36,
+    "cand_raw": 36.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-26",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 36,
+    "used": true
+   },
+   {
+    "cand_contract": 28,
+    "cand_raw": 28.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-27",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 28,
+    "used": true
+   },
+   {
+    "cand_contract": 26,
+    "cand_raw": 26.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-28",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 26,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.1,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-06-29",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.8,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-06-30",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 23.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-01",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-03",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-04",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.9,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-05",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 26,
+    "cand_raw": 26.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-06",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 26,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-07",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 22.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-08",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 24.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-09",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 24,
+    "used": true
+   },
+   {
+    "cand_contract": 26,
+    "cand_raw": 26.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-10",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 26,
+    "used": true
+   },
+   {
+    "cand_contract": 26,
+    "cand_raw": 25.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-12",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 26,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-13",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 29,
+    "cand_raw": 28.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-14",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 28,
+    "used": true
+   },
+   {
+    "cand_contract": 28,
+    "cand_raw": 27.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-15",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 27,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 24.7,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-16",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 24,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 22.9,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-17",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.1,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-18",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-19",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-20",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 24.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-24",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 24,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-25",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-26",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.7,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-27",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 28,
+    "cand_raw": 27.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-28",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 27,
+    "used": true
+   },
+   {
+    "cand_contract": 32,
+    "cand_raw": 32.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-29",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 32,
+    "used": true
+   },
+   {
+    "cand_contract": 26,
+    "cand_raw": 26.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-07-30",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 26,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 24.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-07-31",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 24,
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 24.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-01",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 24,
+    "used": true
+   },
+   {
+    "cand_contract": 26,
+    "cand_raw": 26.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-02",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 26,
+    "used": true
+   },
+   {
+    "cand_contract": 32,
+    "cand_raw": 31.7,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-03",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 31,
+    "used": true
+   },
+   {
+    "cand_contract": 34,
+    "cand_raw": 33.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-04",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 33,
+    "used": true
+   },
+   {
+    "cand_contract": 26,
+    "cand_raw": 25.7,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-05",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 22.0,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-06",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 22.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-07",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-08",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 30,
+    "cand_raw": 29.6,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-09",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 30,
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 23.7,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-10",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 22.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-11",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 28,
+    "cand_raw": 28.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-12",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 28,
+    "used": true
+   },
+   {
+    "cand_contract": 33,
+    "cand_raw": 32.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-13",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 33,
+    "used": true
+   },
+   {
+    "cand_contract": 34,
+    "cand_raw": 34.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-14",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 34,
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 23.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-15",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 23.9,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-16",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 21.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-17",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-18",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-19",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 22.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-20",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-21",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-22",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-23",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.6,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-24",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-25",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 26,
+    "cand_raw": 25.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-26",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 26,
+    "used": true
+   },
+   {
+    "cand_contract": 27,
+    "cand_raw": 27.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-27",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 27,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-28",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.3,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-29",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 21.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-30",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.9,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-31",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.7,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-01",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 22.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-02",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.0,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-03",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 22.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-04",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-05",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 22.7,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-06",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 27,
+    "cand_raw": 26.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-07",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 26,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-08",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.0,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-09",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-10",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-11",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 22.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-12",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-13",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 22.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-14",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-15",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-16",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-17",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 18.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-18",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-19",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-20",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 19.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-21",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-22",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.7,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-23",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 18.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-24",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-25",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-26",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-27",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 21.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-28",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-29",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.4,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-30",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 21.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 21,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.5,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-10-02",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 20.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 19.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 20.9,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-10-05",
+    "diff": 1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 20,
+    "used": true
+   }
+  ]
+ },
+ "low": {
+  "agg": {
+   "dangerous": 17,
+   "dangerous_name": "under",
+   "diff_hist": {
+    "-1": 16,
+    "-2": 1,
+    "0": 29
+   },
+   "dropped_coverage": 0,
+   "eq": 29,
+   "metric": "low",
+   "n_days": 46,
+   "opposite": 0,
+   "opposite_name": "over"
+  },
+  "rows": [
+   {
+    "cand_contract": 12,
+    "cand_raw": 12.4,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-21",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 13.0,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-22",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 11,
+    "cand_raw": 11.3,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-23",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 12,
+    "used": true
+   },
+   {
+    "cand_contract": 9,
+    "cand_raw": 9.3,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-24",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 10,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 13.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-25",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 12.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-26",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 15.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-27",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 14.3,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-28",
+    "diff": -2,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 16.3,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-08-29",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 16.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-30",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 14.5,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-08-31",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 14.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-01",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 14.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-02",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.4,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-03",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 16.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-04",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 12,
+    "cand_raw": 12.0,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-05",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 11,
+    "cand_raw": 10.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-06",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 11,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 15.6,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-07",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 13.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-08",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 11,
+    "cand_raw": 11.1,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-09",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 12,
+    "used": true
+   },
+   {
+    "cand_contract": 9,
+    "cand_raw": 8.6,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-10",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 9,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 13.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-11",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 11,
+    "cand_raw": 10.9,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-12",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 12,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 14.4,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-13",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 12,
+    "cand_raw": 11.8,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-14",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 16.1,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-15",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 12.5,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-16",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 12.5,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-17",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 12,
+    "cand_raw": 12.2,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-18",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 16.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-19",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 12,
+    "cand_raw": 11.8,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-20",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 12,
+    "used": true
+   },
+   {
+    "cand_contract": 11,
+    "cand_raw": 11.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-21",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 11,
+    "used": true
+   },
+   {
+    "cand_contract": 11,
+    "cand_raw": 11.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-22",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 11,
+    "used": true
+   },
+   {
+    "cand_contract": 14,
+    "cand_raw": 14.4,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-23",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 15,
+    "used": true
+   },
+   {
+    "cand_contract": 10,
+    "cand_raw": 10.1,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-09-24",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 11,
+    "used": true
+   },
+   {
+    "cand_contract": 9,
+    "cand_raw": 9.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-25",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 9,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 12.6,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-26",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 12,
+    "cand_raw": 12.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-27",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 12,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 15.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-28",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 15.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-29",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-09-30",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 13,
+    "cand_raw": 12.7,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 13,
+    "used": true
+   },
+   {
+    "cand_contract": 11,
+    "cand_raw": 10.9,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 11,
+    "used": true
+   },
+   {
+    "cand_contract": 9,
+    "cand_raw": 9.2,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-10-03",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 10,
+    "used": true
+   },
+   {
+    "cand_contract": 10,
+    "cand_raw": 10.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 10,
+    "used": true
+   },
+   {
+    "cand_contract": 10,
+    "cand_raw": 10.4,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-10-05",
+    "diff": -1,
+    "expected": 2,
+    "n": 2,
+    "note": null,
+    "settled": 11,
+    "used": true
+   }
+  ]
+ },
+ "meta": {
+  "api_calls": 372,
+  "caveat": "true station extreme (sub-10-min sampling); live ta adapter sample-extreme not measured",
+  "city": "Amsterdam",
+  "coverage_rule": "all four 12h-window values present",
+  "errors": [],
+  "first_day": "2026-04-03",
+  "last_day": "2026-10-05",
+  "provider": "KNMI Data Platform 10-minute-in-situ-meteorological-observations v1.0 (rolling Tx12/Tn12 windows)",
+  "ratelimit_limit": 1000,
+  "rounding": "floor(v+0.5) via round_wmo_half_up_value",
+  "source_channel": "knmi_station_temperature (no live WORLD prints exist)",
+  "station": "06240 Schiphol",
+  "tx24_consistency": [
+   186,
+   186
+  ],
+  "tz": "Europe/Amsterdam"
+ }
+}

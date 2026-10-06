@@ -1,0 +1,260 @@
+{
+ "daily": {
+  "2026-09-30": {
+   "coverage": 1.2917,
+   "expected": 24,
+   "max_contract": 24,
+   "max_raw": 24.0,
+   "min_contract": 14,
+   "min_raw": 14.0,
+   "n": 31
+  },
+  "2026-10-01": {
+   "coverage": 1.5,
+   "expected": 24,
+   "max_contract": 23,
+   "max_raw": 23.0,
+   "min_contract": 17,
+   "min_raw": 17.0,
+   "n": 36
+  },
+  "2026-10-02": {
+   "coverage": 1.2083,
+   "expected": 24,
+   "max_contract": 19,
+   "max_raw": 19.0,
+   "min_contract": 11,
+   "min_raw": 11.0,
+   "n": 29
+  },
+  "2026-10-03": {
+   "coverage": 1.0,
+   "expected": 24,
+   "max_contract": 16,
+   "max_raw": 16.0,
+   "min_contract": 8,
+   "min_raw": 8.0,
+   "n": 24
+  },
+  "2026-10-04": {
+   "coverage": 1.0417,
+   "expected": 24,
+   "max_contract": 22,
+   "max_raw": 22.0,
+   "min_contract": 8,
+   "min_raw": 8.0,
+   "n": 25
+  },
+  "2026-10-05": {
+   "coverage": 1.0,
+   "expected": 24,
+   "max_contract": 15,
+   "max_raw": 15.0,
+   "min_contract": 7,
+   "min_raw": 7.0,
+   "n": 24
+  }
+ },
+ "high": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "over",
+   "diff_hist": {
+    "0": 6
+   },
+   "dropped_coverage": 0,
+   "eq": 6,
+   "metric": "high",
+   "n_days": 6,
+   "opposite": 0,
+   "opposite_name": "under"
+  },
+  "rows": [
+   {
+    "cand_contract": 24,
+    "cand_raw": 24.0,
+    "coverage": 1.2917,
+    "dangerous": false,
+    "date": "2026-09-30",
+    "diff": 0,
+    "expected": 24,
+    "n": 31,
+    "note": null,
+    "settled": 24,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.0,
+    "coverage": 1.5,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 24,
+    "n": 36,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.0,
+    "coverage": 1.2083,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 24,
+    "n": 29,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 16,
+    "cand_raw": 16.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 24,
+    "n": 24,
+    "note": null,
+    "settled": 16,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 22.0,
+    "coverage": 1.0417,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 24,
+    "n": 25,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 15,
+    "cand_raw": 15.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 24,
+    "n": 24,
+    "note": null,
+    "settled": 15,
+    "used": true
+   }
+  ]
+ },
+ "low": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "under",
+   "diff_hist": {
+    "0": 6
+   },
+   "dropped_coverage": 0,
+   "eq": 6,
+   "metric": "low",
+   "n_days": 6,
+   "opposite": 0,
+   "opposite_name": "over"
+  },
+  "rows": [
+   {
+    "cand_contract": 14,
+    "cand_raw": 14.0,
+    "coverage": 1.2917,
+    "dangerous": false,
+    "date": "2026-09-30",
+    "diff": 0,
+    "expected": 24,
+    "n": 31,
+    "note": null,
+    "settled": 14,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.0,
+    "coverage": 1.5,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 24,
+    "n": 36,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 11,
+    "cand_raw": 11.0,
+    "coverage": 1.2083,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 24,
+    "n": 29,
+    "note": null,
+    "settled": 11,
+    "used": true
+   },
+   {
+    "cand_contract": 8,
+    "cand_raw": 8.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 24,
+    "n": 24,
+    "note": null,
+    "settled": 8,
+    "used": true
+   },
+   {
+    "cand_contract": 8,
+    "cand_raw": 8.0,
+    "coverage": 1.0417,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 24,
+    "n": 25,
+    "note": null,
+    "settled": 8,
+    "used": true
+   },
+   {
+    "cand_contract": 7,
+    "cand_raw": 7.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 24,
+    "n": 24,
+    "note": null,
+    "settled": 7,
+    "used": true
+   }
+  ]
+ },
+ "meta": {
+  "cadence_s": 3600,
+  "channel": "aviationweather_metar",
+  "city": "Toronto",
+  "coverage_min": 0.8,
+  "first_day": "2026-09-30",
+  "last_day": "2026-10-05",
+  "note": "METAR integer deg C, instant from DDHHMMZ group",
+  "rounding": "floor(v+0.5)",
+  "station": "CYYZ",
+  "tz": "America/Toronto"
+ }
+}

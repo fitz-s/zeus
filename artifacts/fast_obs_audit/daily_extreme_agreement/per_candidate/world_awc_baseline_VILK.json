@@ -1,0 +1,225 @@
+{
+ "daily": {
+  "2026-10-01": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 32,
+   "max_raw": 32.0,
+   "min_contract": 23,
+   "min_raw": 23.0,
+   "n": 48
+  },
+  "2026-10-02": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 33,
+   "max_raw": 33.0,
+   "min_contract": 23,
+   "min_raw": 23.0,
+   "n": 48
+  },
+  "2026-10-03": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 33,
+   "max_raw": 33.0,
+   "min_contract": 25,
+   "min_raw": 25.0,
+   "n": 48
+  },
+  "2026-10-04": {
+   "coverage": 0.9792,
+   "expected": 48,
+   "max_contract": 33,
+   "max_raw": 33.0,
+   "min_contract": 24,
+   "min_raw": 24.0,
+   "n": 47
+  },
+  "2026-10-05": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 34,
+   "max_raw": 34.0,
+   "min_contract": 25,
+   "min_raw": 25.0,
+   "n": 48
+  }
+ },
+ "high": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "over",
+   "diff_hist": {
+    "0": 5
+   },
+   "dropped_coverage": 0,
+   "eq": 5,
+   "metric": "high",
+   "n_days": 5,
+   "opposite": 0,
+   "opposite_name": "under"
+  },
+  "rows": [
+   {
+    "cand_contract": 32,
+    "cand_raw": 32.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 32,
+    "used": true
+   },
+   {
+    "cand_contract": 33,
+    "cand_raw": 33.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 33,
+    "used": true
+   },
+   {
+    "cand_contract": 33,
+    "cand_raw": 33.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 33,
+    "used": true
+   },
+   {
+    "cand_contract": 33,
+    "cand_raw": 33.0,
+    "coverage": 0.9792,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 48,
+    "n": 47,
+    "note": null,
+    "settled": 33,
+    "used": true
+   },
+   {
+    "cand_contract": 34,
+    "cand_raw": 34.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 34,
+    "used": true
+   }
+  ]
+ },
+ "low": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "under",
+   "diff_hist": {
+    "0": 5
+   },
+   "dropped_coverage": 0,
+   "eq": 5,
+   "metric": "low",
+   "n_days": 5,
+   "opposite": 0,
+   "opposite_name": "over"
+  },
+  "rows": [
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 23,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 25,
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 24.0,
+    "coverage": 0.9792,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 48,
+    "n": 47,
+    "note": null,
+    "settled": 24,
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 25,
+    "used": true
+   }
+  ]
+ },
+ "meta": {
+  "cadence_s": 1800,
+  "channel": "aviationweather_metar",
+  "city": "Lucknow",
+  "coverage_min": 0.8,
+  "first_day": "2026-10-01",
+  "last_day": "2026-10-05",
+  "note": "METAR integer deg C, instant from DDHHMMZ group",
+  "rounding": "floor(v+0.5)",
+  "station": "VILK",
+  "tz": "Asia/Kolkata"
+ }
+}

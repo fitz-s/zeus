@@ -1,0 +1,286 @@
+{
+ "daily": {
+  "2026-10-01": {
+   "coverage": 0.5,
+   "expected": 48,
+   "max_contract": 32,
+   "max_raw": 32.0,
+   "min_contract": 26,
+   "min_raw": 26.0,
+   "n": 24
+  },
+  "2026-10-02": {
+   "coverage": 0.9792,
+   "expected": 48,
+   "max_contract": 33,
+   "max_raw": 33.0,
+   "min_contract": 23,
+   "min_raw": 23.0,
+   "n": 47
+  },
+  "2026-10-03": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 33,
+   "max_raw": 33.0,
+   "min_contract": 25,
+   "min_raw": 25.0,
+   "n": 48
+  },
+  "2026-10-04": {
+   "coverage": 0.9792,
+   "expected": 48,
+   "max_contract": 33,
+   "max_raw": 33.0,
+   "min_contract": 24,
+   "min_raw": 24.0,
+   "n": 47
+  },
+  "2026-10-05": {
+   "coverage": 0.875,
+   "expected": 48,
+   "max_contract": 34,
+   "max_raw": 34.0,
+   "min_contract": 25,
+   "min_raw": 25.0,
+   "n": 42
+  }
+ },
+ "high": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "over",
+   "diff_hist": {
+    "0": 4
+   },
+   "dropped_coverage": 1,
+   "eq": 4,
+   "first_live_day": "2026-10-01",
+   "metric": "high",
+   "n_days": 4,
+   "opposite": 0,
+   "opposite_name": "under",
+   "reveal_lead_min_all": {
+    "earlier": 1,
+    "later": 3,
+    "n": 4,
+    "p10": -2.1,
+    "p50": -1.8,
+    "p90": -1.7,
+    "tie": 0
+   },
+   "reveal_lead_min_nobackfill": {
+    "earlier": 1,
+    "later": 3,
+    "n": 4,
+    "p10": -19.7,
+    "p50": -1.8,
+    "p90": -1.7,
+    "tie": 0
+   }
+  },
+  "rows": [
+   {
+    "cand_contract": null,
+    "cand_raw": 32.0,
+    "coverage": 0.5,
+    "date": "2026-10-01",
+    "expected": 48,
+    "n": 24,
+    "note": "dropped_coverage",
+    "settled": 32,
+    "used": false
+   },
+   {
+    "cand_contract": 33,
+    "cand_raw": 33.0,
+    "coverage": 0.9792,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 48,
+    "lead_min": -1.8,
+    "n": 47,
+    "note": null,
+    "settled": 33,
+    "t_awc": "2026-10-02T07:32:43.537256+00:00",
+    "t_cand": "2026-10-02T07:34:31.256235+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 33,
+    "cand_raw": 33.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 48,
+    "lead_min": 1.2,
+    "n": 48,
+    "note": null,
+    "settled": 33,
+    "t_awc": "2026-10-03T06:32:28.470798+00:00",
+    "t_cand": "2026-10-03T06:31:19.012113+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 33,
+    "cand_raw": 33.0,
+    "coverage": 0.9792,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 48,
+    "lead_min": -1.7,
+    "n": 47,
+    "note": null,
+    "settled": 33,
+    "t_awc": "2026-10-04T07:02:22.794282+00:00",
+    "t_cand": "2026-10-04T07:04:07.703676+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 34,
+    "cand_raw": 34.0,
+    "coverage": 0.875,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 48,
+    "lead_min": -2.1,
+    "n": 42,
+    "note": null,
+    "settled": 34,
+    "t_awc": "2026-10-05T08:46:13.911862+00:00",
+    "t_cand": "2026-10-05T08:48:18.942377+00:00",
+    "used": true
+   }
+  ]
+ },
+ "low": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "under",
+   "diff_hist": {
+    "0": 4
+   },
+   "dropped_coverage": 1,
+   "eq": 4,
+   "first_live_day": "2026-10-01",
+   "metric": "low",
+   "n_days": 4,
+   "opposite": 0,
+   "opposite_name": "over",
+   "reveal_lead_min_all": {
+    "earlier": 4,
+    "later": 0,
+    "n": 4,
+    "p10": 0.3,
+    "p50": 1.8,
+    "p90": 1.9,
+    "tie": 0
+   },
+   "reveal_lead_min_nobackfill": {
+    "earlier": 4,
+    "later": 0,
+    "n": 4,
+    "p10": 0.3,
+    "p50": 1.8,
+    "p90": 1.9,
+    "tie": 0
+   }
+  },
+  "rows": [
+   {
+    "cand_contract": null,
+    "cand_raw": 26.0,
+    "coverage": 0.5,
+    "date": "2026-10-01",
+    "expected": 48,
+    "n": 24,
+    "note": "dropped_coverage",
+    "settled": 23,
+    "used": false
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.0,
+    "coverage": 0.9792,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 48,
+    "lead_min": 0.3,
+    "n": 47,
+    "note": null,
+    "settled": 23,
+    "t_awc": "2026-10-02T00:36:22.339794+00:00",
+    "t_cand": "2026-10-02T00:36:06.995475+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 48,
+    "lead_min": 1.6,
+    "n": 48,
+    "note": null,
+    "settled": 25,
+    "t_awc": "2026-10-02T22:34:17.639191+00:00",
+    "t_cand": "2026-10-02T22:32:40.015732+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 24.0,
+    "coverage": 0.9792,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 48,
+    "lead_min": 2.5,
+    "n": 47,
+    "note": null,
+    "settled": 24,
+    "t_awc": "2026-10-04T00:34:29.934288+00:00",
+    "t_cand": "2026-10-04T00:32:00.958488+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 25,
+    "cand_raw": 25.0,
+    "coverage": 0.875,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 48,
+    "lead_min": 1.9,
+    "n": 42,
+    "note": null,
+    "settled": 25,
+    "t_awc": "2026-10-04T23:04:33.703668+00:00",
+    "t_cand": "2026-10-04T23:02:38.243717+00:00",
+    "used": true
+   }
+  ]
+ },
+ "meta": {
+  "backfill_cut_min_awc": 299.7,
+  "backfill_cut_min_candidate": 17.0,
+  "cadence_s": 1800,
+  "channel": "imd_olbs_metar_temperature",
+  "city": "Lucknow",
+  "coverage_min": 0.8,
+  "first_live_day": "2026-10-01",
+  "last_day": "2026-10-05",
+  "n_prints": 247,
+  "rounding": "floor(v+0.5)",
+  "source": "WORLD.observation_prints (mode=ro)",
+  "station": "VILK",
+  "tz": "Asia/Kolkata"
+ }
+}

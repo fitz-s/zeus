@@ -1,0 +1,225 @@
+{
+ "daily": {
+  "2026-10-01": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 17,
+   "max_raw": 17.0,
+   "min_contract": 10,
+   "min_raw": 10.0,
+   "n": 48
+  },
+  "2026-10-02": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 18,
+   "max_raw": 18.0,
+   "min_contract": 6,
+   "min_raw": 6.0,
+   "n": 48
+  },
+  "2026-10-03": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 17,
+   "max_raw": 17.0,
+   "min_contract": 6,
+   "min_raw": 6.0,
+   "n": 48
+  },
+  "2026-10-04": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 19,
+   "max_raw": 19.0,
+   "min_contract": 4,
+   "min_raw": 4.0,
+   "n": 48
+  },
+  "2026-10-05": {
+   "coverage": 1.0,
+   "expected": 48,
+   "max_contract": 22,
+   "max_raw": 22.0,
+   "min_contract": 4,
+   "min_raw": 4.0,
+   "n": 48
+  }
+ },
+ "high": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "over",
+   "diff_hist": {
+    "0": 5
+   },
+   "dropped_coverage": 0,
+   "eq": 5,
+   "metric": "high",
+   "n_days": 5,
+   "opposite": 0,
+   "opposite_name": "under"
+  },
+  "rows": [
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 18.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 18,
+    "used": true
+   },
+   {
+    "cand_contract": 17,
+    "cand_raw": 17.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 17,
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 22.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 22,
+    "used": true
+   }
+  ]
+ },
+ "low": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "under",
+   "diff_hist": {
+    "0": 5
+   },
+   "dropped_coverage": 0,
+   "eq": 5,
+   "metric": "low",
+   "n_days": 5,
+   "opposite": 0,
+   "opposite_name": "over"
+  },
+  "rows": [
+   {
+    "cand_contract": 10,
+    "cand_raw": 10.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 10,
+    "used": true
+   },
+   {
+    "cand_contract": 6,
+    "cand_raw": 6.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 6,
+    "used": true
+   },
+   {
+    "cand_contract": 6,
+    "cand_raw": 6.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 6,
+    "used": true
+   },
+   {
+    "cand_contract": 4,
+    "cand_raw": 4.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 4,
+    "used": true
+   },
+   {
+    "cand_contract": 4,
+    "cand_raw": 4.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 48,
+    "n": 48,
+    "note": null,
+    "settled": 4,
+    "used": true
+   }
+  ]
+ },
+ "meta": {
+  "cadence_s": 1800,
+  "channel": "aviationweather_metar",
+  "city": "Ankara",
+  "coverage_min": 0.8,
+  "first_day": "2026-10-01",
+  "last_day": "2026-10-05",
+  "note": "METAR integer deg C, instant from DDHHMMZ group",
+  "rounding": "floor(v+0.5)",
+  "station": "LTAC",
+  "tz": "Europe/Istanbul"
+ }
+}

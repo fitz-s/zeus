@@ -1,0 +1,60 @@
+{
+ "daily": {},
+ "high": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "over",
+   "diff_hist": {},
+   "dropped_coverage": 0,
+   "eq": 0,
+   "first_live_day": "2026-10-06",
+   "metric": "high",
+   "n_days": 0,
+   "opposite": 0,
+   "opposite_name": "under",
+   "reveal_lead_min_all": {
+    "n": 0
+   },
+   "reveal_lead_min_nobackfill": {
+    "n": 0
+   }
+  },
+  "rows": []
+ },
+ "low": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "under",
+   "diff_hist": {},
+   "dropped_coverage": 0,
+   "eq": 0,
+   "first_live_day": "2026-10-06",
+   "metric": "low",
+   "n_days": 0,
+   "opposite": 0,
+   "opposite_name": "over",
+   "reveal_lead_min_all": {
+    "n": 0
+   },
+   "reveal_lead_min_nobackfill": {
+    "n": 0
+   }
+  },
+  "rows": []
+ },
+ "meta": {
+  "backfill_cut_min_awc": 345.5,
+  "backfill_cut_min_candidate": 15.0,
+  "cadence_s": 1800,
+  "channel": "metaviatelecom_metar_temperature",
+  "city": "Moscow",
+  "coverage_min": 0.8,
+  "first_live_day": "2026-10-06",
+  "last_day": "2026-10-05",
+  "n_prints": 3,
+  "rounding": "floor(v+0.5)",
+  "source": "WORLD.observation_prints (mode=ro)",
+  "station": "UUWW",
+  "tz": "Europe/Moscow"
+ }
+}

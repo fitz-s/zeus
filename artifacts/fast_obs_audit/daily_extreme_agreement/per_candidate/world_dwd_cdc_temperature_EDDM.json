@@ -1,0 +1,322 @@
+{
+ "daily": {
+  "2026-09-30": {
+   "coverage": 0.0139,
+   "expected": 144,
+   "max_contract": 10,
+   "max_raw": 9.5,
+   "min_contract": 9,
+   "min_raw": 9.4,
+   "n": 2
+  },
+  "2026-10-01": {
+   "coverage": 1.0,
+   "expected": 144,
+   "max_contract": 24,
+   "max_raw": 23.8,
+   "min_contract": 5,
+   "min_raw": 5.2,
+   "n": 144
+  },
+  "2026-10-02": {
+   "coverage": 1.0,
+   "expected": 144,
+   "max_contract": 19,
+   "max_raw": 18.5,
+   "min_contract": 10,
+   "min_raw": 10.2,
+   "n": 144
+  },
+  "2026-10-03": {
+   "coverage": 1.0,
+   "expected": 144,
+   "max_contract": 20,
+   "max_raw": 19.6,
+   "min_contract": 9,
+   "min_raw": 8.5,
+   "n": 144
+  },
+  "2026-10-04": {
+   "coverage": 1.0,
+   "expected": 144,
+   "max_contract": 21,
+   "max_raw": 21.3,
+   "min_contract": 6,
+   "min_raw": 6.0,
+   "n": 144
+  },
+  "2026-10-05": {
+   "coverage": 0.8889,
+   "expected": 144,
+   "max_contract": 21,
+   "max_raw": 21.4,
+   "min_contract": 8,
+   "min_raw": 8.2,
+   "n": 128
+  }
+ },
+ "high": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "over",
+   "diff_hist": {
+    "-1": 2,
+    "0": 3
+   },
+   "dropped_coverage": 1,
+   "eq": 3,
+   "first_live_day": "2026-09-30",
+   "metric": "high",
+   "n_days": 5,
+   "opposite": 2,
+   "opposite_name": "under",
+   "reveal_lead_min_all": {
+    "earlier": 0,
+    "later": 3,
+    "n": 3,
+    "p10": -86.5,
+    "p50": -85.2,
+    "p90": -85.2,
+    "tie": 0
+   },
+   "reveal_lead_min_nobackfill": {
+    "earlier": 0,
+    "later": 3,
+    "n": 3,
+    "p10": -86.5,
+    "p50": -85.2,
+    "p90": -85.2,
+    "tie": 0
+   }
+  },
+  "rows": [
+   {
+    "cand_contract": null,
+    "cand_raw": 9.5,
+    "coverage": 0.0139,
+    "date": "2026-09-30",
+    "expected": 144,
+    "n": 2,
+    "note": "dropped_coverage",
+    "settled": 25,
+    "used": false
+   },
+   {
+    "cand_contract": 24,
+    "cand_raw": 23.8,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": -54.8,
+    "n": 144,
+    "note": null,
+    "settled": 24,
+    "t_awc": "2026-10-01T12:55:41.939895+00:00",
+    "t_cand": "2026-10-01T13:50:27.735661+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 18.5,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": -86.5,
+    "n": 144,
+    "note": null,
+    "settled": 19,
+    "t_awc": "2026-10-02T12:23:35.172334+00:00",
+    "t_cand": "2026-10-02T13:50:07.296893+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 20,
+    "cand_raw": 19.6,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": -85.2,
+    "n": 144,
+    "note": null,
+    "settled": 20,
+    "t_awc": "2026-10-03T11:55:06.102692+00:00",
+    "t_cand": "2026-10-03T13:20:19.071581+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 21.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": -1,
+    "expected": 144,
+    "n": 144,
+    "note": null,
+    "settled": 22,
+    "used": true
+   },
+   {
+    "cand_contract": 21,
+    "cand_raw": 21.4,
+    "coverage": 0.8889,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": -1,
+    "expected": 144,
+    "n": 128,
+    "note": null,
+    "settled": 22,
+    "used": true
+   }
+  ]
+ },
+ "low": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "under",
+   "diff_hist": {
+    "0": 5
+   },
+   "dropped_coverage": 1,
+   "eq": 5,
+   "first_live_day": "2026-09-30",
+   "metric": "low",
+   "n_days": 5,
+   "opposite": 0,
+   "opposite_name": "over",
+   "reveal_lead_min_all": {
+    "earlier": 1,
+    "later": 4,
+    "n": 5,
+    "p10": -27.4,
+    "p50": -27.2,
+    "p90": -27.1,
+    "tie": 0
+   },
+   "reveal_lead_min_nobackfill": {
+    "earlier": 1,
+    "later": 4,
+    "n": 5,
+    "p10": -27.4,
+    "p50": -27.2,
+    "p90": -27.1,
+    "tie": 0
+   }
+  },
+  "rows": [
+   {
+    "cand_contract": null,
+    "cand_raw": 9.4,
+    "coverage": 0.0139,
+    "date": "2026-09-30",
+    "expected": 144,
+    "n": 2,
+    "note": "dropped_coverage",
+    "settled": 4,
+    "used": false
+   },
+   {
+    "cand_contract": 5,
+    "cand_raw": 5.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-01",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": -27.1,
+    "n": 144,
+    "note": null,
+    "settled": 5,
+    "t_awc": "2026-10-01T03:53:44.271241+00:00",
+    "t_cand": "2026-10-01T04:20:52.915876+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 10,
+    "cand_raw": 10.2,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": -27.3,
+    "n": 144,
+    "note": null,
+    "settled": 10,
+    "t_awc": "2026-10-02T20:23:30.741812+00:00",
+    "t_cand": "2026-10-02T20:50:46.109553+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 9,
+    "cand_raw": 8.5,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": -27.2,
+    "n": 144,
+    "note": null,
+    "settled": 9,
+    "t_awc": "2026-10-03T19:53:40.098684+00:00",
+    "t_cand": "2026-10-03T20:20:52.671448+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 6,
+    "cand_raw": 6.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": 90.1,
+    "n": 144,
+    "note": null,
+    "settled": 6,
+    "t_awc": "2026-10-04T03:53:24.433827+00:00",
+    "t_cand": "2026-10-04T02:23:21.347760+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 8,
+    "cand_raw": 8.2,
+    "coverage": 0.8889,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": -27.4,
+    "n": 128,
+    "note": null,
+    "settled": 8,
+    "t_awc": "2026-10-05T21:23:28.914560+00:00",
+    "t_cand": "2026-10-05T21:50:50.617675+00:00",
+    "used": true
+   }
+  ]
+ },
+ "meta": {
+  "backfill_cut_min_awc": 217.8,
+  "backfill_cut_min_candidate": 153.0,
+  "cadence_s": 600,
+  "channel": "dwd_cdc_temperature",
+  "city": "Munich",
+  "coverage_min": 0.8,
+  "first_live_day": "2026-09-30",
+  "last_day": "2026-10-05",
+  "n_prints": 799,
+  "rounding": "floor(v+0.5)",
+  "source": "WORLD.observation_prints (mode=ro)",
+  "station": "EDDM",
+  "tz": "Europe/Berlin"
+ }
+}

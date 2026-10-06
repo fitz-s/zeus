@@ -1,0 +1,284 @@
+{
+ "daily": {
+  "2026-10-01": {
+   "coverage": 0.7222,
+   "expected": 144,
+   "max_contract": 27,
+   "max_raw": 27.2,
+   "min_contract": 20,
+   "min_raw": 19.7,
+   "n": 104
+  },
+  "2026-10-02": {
+   "coverage": 0.9931,
+   "expected": 144,
+   "max_contract": 23,
+   "max_raw": 23.0,
+   "min_contract": 19,
+   "min_raw": 19.0,
+   "n": 143
+  },
+  "2026-10-03": {
+   "coverage": 1.0,
+   "expected": 144,
+   "max_contract": 22,
+   "max_raw": 22.0,
+   "min_contract": 19,
+   "min_raw": 19.3,
+   "n": 144
+  },
+  "2026-10-04": {
+   "coverage": 1.0,
+   "expected": 144,
+   "max_contract": 22,
+   "max_raw": 21.8,
+   "min_contract": 18,
+   "min_raw": 18.4,
+   "n": 144
+  },
+  "2026-10-05": {
+   "coverage": 0.9444,
+   "expected": 144,
+   "max_contract": 22,
+   "max_raw": 21.7,
+   "min_contract": 18,
+   "min_raw": 18.1,
+   "n": 136
+  }
+ },
+ "high": {
+  "agg": {
+   "dangerous": 0,
+   "dangerous_name": "over",
+   "diff_hist": {
+    "0": 4
+   },
+   "dropped_coverage": 1,
+   "eq": 4,
+   "first_live_day": "2026-10-01",
+   "metric": "high",
+   "n_days": 4,
+   "opposite": 0,
+   "opposite_name": "under",
+   "reveal_lead_min_all": {
+    "earlier": 2,
+    "later": 2,
+    "n": 4,
+    "p10": -2.4,
+    "p50": 0.6,
+    "p90": 1.5,
+    "tie": 0
+   },
+   "reveal_lead_min_nobackfill": {
+    "earlier": 2,
+    "later": 2,
+    "n": 4,
+    "p10": -2.4,
+    "p50": 0.6,
+    "p90": 1.5,
+    "tie": 0
+   }
+  },
+  "rows": [
+   {
+    "cand_contract": null,
+    "cand_raw": 27.2,
+    "coverage": 0.7222,
+    "date": "2026-10-01",
+    "expected": 144,
+    "n": 104,
+    "note": "dropped_coverage",
+    "settled": 27,
+    "used": false
+   },
+   {
+    "cand_contract": 23,
+    "cand_raw": 23.0,
+    "coverage": 0.9931,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": -0.3,
+    "n": 143,
+    "note": null,
+    "settled": 23,
+    "t_awc": "2026-10-01T15:06:10.023282+00:00",
+    "t_cand": "2026-10-01T15:06:26.809672+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 22.0,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": 69.5,
+    "n": 144,
+    "note": null,
+    "settled": 22,
+    "t_awc": "2026-10-03T03:06:30.994463+00:00",
+    "t_cand": "2026-10-03T01:57:01.714397+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.8,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-04",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": 1.5,
+    "n": 144,
+    "note": null,
+    "settled": 22,
+    "t_awc": "2026-10-04T01:38:48.484414+00:00",
+    "t_cand": "2026-10-04T01:37:17.314400+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 22,
+    "cand_raw": 21.7,
+    "coverage": 0.9444,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": -2.4,
+    "n": 136,
+    "note": null,
+    "settled": 22,
+    "t_awc": "2026-10-05T08:46:13.911862+00:00",
+    "t_cand": "2026-10-05T08:48:39.723704+00:00",
+    "used": true
+   }
+  ]
+ },
+ "low": {
+  "agg": {
+   "dangerous": 1,
+   "dangerous_name": "under",
+   "diff_hist": {
+    "-1": 1,
+    "0": 3
+   },
+   "dropped_coverage": 1,
+   "eq": 3,
+   "first_live_day": "2026-10-01",
+   "metric": "low",
+   "n_days": 4,
+   "opposite": 0,
+   "opposite_name": "over",
+   "reveal_lead_min_all": {
+    "earlier": 3,
+    "later": 0,
+    "n": 3,
+    "p10": 1.7,
+    "p50": 1.8,
+    "p90": 1.8,
+    "tie": 0
+   },
+   "reveal_lead_min_nobackfill": {
+    "earlier": 3,
+    "later": 0,
+    "n": 3,
+    "p10": 1.7,
+    "p50": 1.8,
+    "p90": 1.8,
+    "tie": 0
+   }
+  },
+  "rows": [
+   {
+    "cand_contract": null,
+    "cand_raw": 19.7,
+    "coverage": 0.7222,
+    "date": "2026-10-01",
+    "expected": 144,
+    "n": 104,
+    "note": "dropped_coverage",
+    "settled": 18,
+    "used": false
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.0,
+    "coverage": 0.9931,
+    "dangerous": false,
+    "date": "2026-10-02",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": 1.7,
+    "n": 143,
+    "note": null,
+    "settled": 19,
+    "t_awc": "2026-10-02T03:38:26.203360+00:00",
+    "t_cand": "2026-10-02T03:36:46.769295+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 19,
+    "cand_raw": 19.3,
+    "coverage": 1.0,
+    "dangerous": false,
+    "date": "2026-10-03",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": 47.6,
+    "n": 144,
+    "note": null,
+    "settled": 19,
+    "t_awc": "2026-10-02T23:05:54.803643+00:00",
+    "t_cand": "2026-10-02T22:18:18.021389+00:00",
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 18.4,
+    "coverage": 1.0,
+    "dangerous": true,
+    "date": "2026-10-04",
+    "diff": -1,
+    "expected": 144,
+    "n": 144,
+    "note": null,
+    "settled": 19,
+    "used": true
+   },
+   {
+    "cand_contract": 18,
+    "cand_raw": 18.1,
+    "coverage": 0.9444,
+    "dangerous": false,
+    "date": "2026-10-05",
+    "diff": 0,
+    "expected": 144,
+    "lead_min": 1.8,
+    "n": 136,
+    "note": null,
+    "settled": 18,
+    "t_awc": "2026-10-05T01:38:38.847071+00:00",
+    "t_cand": "2026-10-05T01:36:49.836774+00:00",
+    "used": true
+   }
+  ]
+ },
+ "meta": {
+  "backfill_cut_min_awc": 320.9,
+  "backfill_cut_min_candidate": 26.1,
+  "cadence_s": 600,
+  "channel": "jma_amedas_temperature",
+  "city": "Tokyo",
+  "coverage_min": 0.8,
+  "first_live_day": "2026-10-01",
+  "last_day": "2026-10-05",
+  "n_prints": 808,
+  "rounding": "floor(v+0.5)",
+  "source": "WORLD.observation_prints (mode=ro)",
+  "station": "RJTT",
+  "tz": "Asia/Tokyo"
+ }
+}

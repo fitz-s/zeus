@@ -1,0 +1,62 @@
+{
+ "fmi_efhk": {
+  "n_pairs": 3229,
+  "exact_contract_equal": 0.8947,
+  "cand_minus_metar_contract": {
+   "minus1": 156,
+   "zero": 2889,
+   "plus1": 184,
+   "other": 0
+  },
+  "mean_raw_offset": -0.036,
+  "median_raw_offset": 0.0
+ },
+ "dwd_eddm": {
+  "n_pairs": 3795,
+  "exact_contract_equal": 0.7773,
+  "cand_minus_metar_contract": {
+   "minus1": 711,
+   "zero": 2950,
+   "plus1": 132,
+   "other": 2
+  },
+  "mean_raw_offset": -0.201,
+  "median_raw_offset": -0.2
+ },
+ "imgw_epwa": {
+  "n_pairs": 1500,
+  "exact_contract_equal": 0.5973,
+  "cand_minus_metar_contract": {
+   "minus1": 163,
+   "zero": 896,
+   "plus1": 358,
+   "other": 83
+  },
+  "mean_raw_offset": 0.116,
+  "median_raw_offset": 0.1
+ },
+ "nea_s24_wsss": {
+  "n_pairs": 3686,
+  "exact_contract_equal": 0.7504,
+  "cand_minus_metar_contract": {
+   "minus1": 409,
+   "zero": 2766,
+   "plus1": 487,
+   "other": 24
+  },
+  "mean_raw_offset": -0.014,
+  "median_raw_offset": 0.0
+ },
+ "eccc_cyyz_hourly": {
+  "n_pairs": 1918,
+  "exact_contract_equal": 1.0,
+  "cand_minus_metar_contract": {
+   "minus1": 0,
+   "zero": 1918,
+   "plus1": 0,
+   "other": 0
+  },
+  "mean_raw_offset": -0.051,
+  "median_raw_offset": -0.1
+ }
+}
