@@ -19985,3 +19985,18 @@ the final PLAN before one final CLI/HEAD ancestry secret and narrow impacted
 checks. No source GET, seed/wake, push or loader retry is authorized by this
 implementation scope; raw123, private e95 config, peer work and quarantined
 stale-index-lock evidence remain preserved.
+
+Unreleased-current slice240c2e22ea3c1031b20b3aefd9846f3244cb7de5 is integrated
+as c19f9d31ce8cfd663c8b3288e519c97c513b600e and independently APPROVED 0C/I.
+Daemon f78c50cb87d162c18fa0937b03c38b72bf5c19634b5d7fed4d29648fa59a9c59
+and test36b9069209d53ae1508c8378f5f87a3e593338c277fc5fd2773f08f723baefef
+match the child; outside the three scheduling seams the daemon AST is exact2041.
+Four author XMLs establish28 unique passing controls across epochs, not one
+same-tip whole matrix. The original mixed17P/2F remains preserved; the revised
+published H/L controls close the fixture mismatch using owning track geometry,
+not relaxed source validation. This receipt freezes before the final actual
+CLI, HEAD ancestry secret, delta/changed-surface gates and two merged normal
+H/L prior-scope controls. Earlier unaffected checks retain their original
+epoch and scoped dependency basis; they do not establish live source-role or
+new MAIN/public v7/v35 readiness. Landing and registered restart still require
+ROOT acceptance of the exact checked tip.
