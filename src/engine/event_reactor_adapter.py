@@ -221,6 +221,14 @@ def _capture_held_point_kernel(inputs, carrier, *, projection=None) -> None:
             carrier_to_witness=list(projection) if projection is not None else list(range(len(carrier["q"]))),
             n_point=inputs["n_point"], n_samples=inputs["n_samples"],
         )
+        domain = (inputs.get("identity_inputs") or {}).get("domain_role_shapes")
+        if domain is not None:
+            from src.engine import tier0_auction_corpus as corpus
+            projection = corpus._point_role_projection(domain)
+            kernel.update(domain_role_shapes=projection,
+                domain_role_content_sha256=hashlib.sha256(json.dumps(domain,
+                    sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
+                domain_role_projection_sha256=hashlib.sha256(corpus._canonical(projection)).hexdigest())
         raw = json.dumps(kernel, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         if len(raw) > 16*1024:
             capture["unavailable"] = b"POINT_KERNEL_SIZE_LIMIT"
