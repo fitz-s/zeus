@@ -1899,20 +1899,24 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
             continue
         claimed.update(targets)
         plans.append({"run": run, "steps": sorted(wanted), "targets": sorted(targets), "future": future,
+            "sources": dict(sources),
             "priority": lambda run=run, sources=dict(sources): mandatory_complete(run, sources)})
     return plans
 
 
 def _drain_native_temperature_source(conn, *, now_utc: datetime, deadline_monotonic: float) -> dict:
     """Read or drain exact active originals without refreshing this poll's cut."""
-    from src.data.ecmwf_open_data import collect_native_temperature_source
+    from src.data.ecmwf_open_data import collect_native_temperature_source, restore_paired_role_originals
 
     results, future_results = [], []
     for plan in _native_temperature_transport_plans(conn, now_utc=now_utc):
+        paired = restore_paired_role_originals(conn, plan=plan, decision_at=now_utc,
+            deadline_monotonic=deadline_monotonic)
         result = collect_native_temperature_source(conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
             cycle_deadline_monotonic=deadline_monotonic,
             _priority=plan["priority"])
-        (future_results if plan["future"] else results).append({**result, "transport_run_utc": plan["run"].isoformat()})
+        (future_results if plan["future"] else results).append({**result, "paired_originals": paired,
+            "transport_run_utc": plan["run"].isoformat()})
     if len(results) == 1:
         return {**results[0], "future_runs": future_results}
     if results:
@@ -1935,7 +1939,7 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     no manifest-newest equality, in-memory turn latch or mandatory-status rewrite.
     A crash after native RUNNING still gives the next tick back to mandatory.
     """
-    from src.data.ecmwf_open_data import collect_native_temperature_source
+    from src.data.ecmwf_open_data import collect_native_temperature_source, restore_paired_role_originals
     from src.data.release_calendar import FetchDecision
     from src.state.job_run_repo import write_job_run
 
@@ -1984,7 +1988,9 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
         # read. It cannot issue HTTP or turn nonempty bytes into qualification.
         cached = collect_native_temperature_source(conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
             cycle_deadline_monotonic=time.monotonic(), _priority=plan["priority"])
-        if cached["status"] == "AVAILABLE":
+        paired_cache = restore_paired_role_originals(conn, plan=plan, decision_at=now_utc,
+            deadline_monotonic=time.monotonic())
+        if cached["status"] == "AVAILABLE" and paired_cache["status"] == "AVAILABLE":
             continue
         journal = dict(job_run_id=job_name + ":" + scope_hash, job_name=job_name, plane="forecast",
             scheduled_for=plan["run"], source_id="ecmwf_open_data", track="2t_instant_native_knots",
@@ -1994,8 +2000,11 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
         write_job_run(conn, **journal, status="RUNNING", meta_json=meta)
         conn.commit()  # FORECAST owner; native inventory owns its own transaction.
         try:
+            paired = restore_paired_role_originals(conn, plan=plan, decision_at=now_utc,
+                deadline_monotonic=deadline_monotonic)
             result = collect_native_temperature_source(conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
                 cycle_deadline_monotonic=deadline_monotonic, _priority=plan["priority"])
+            result = {**result, "paired_originals": paired}
         except Exception as exc:  # Optional failure is not mandatory failure.
             result = {"status": "DEFERRED", "qualification_status": "UNKNOWN", "reason": str(exc)}
         status = {"AVAILABLE": "SUCCESS", "INCOMPLETE": "PARTIAL"}.get(result["status"], "FAILED")

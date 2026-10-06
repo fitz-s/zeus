@@ -16,6 +16,150 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("fault", (None, "wrong_hash", "future_clock", "wrong_header", "expired", "fast503", "fullcut", "partialcut"))
+def test_normal_journaled_paired_original_restoration_keeps_old_clocks(normal_native_poll, tmp_path, monkeypatch, track, fault):
+    """Normal wrapper restores actual original bodies without re-ingesting truth."""
+    import hashlib
+    import time
+    import eccodes as ec
+    from types import SimpleNamespace
+    from scripts import extract_open_ens_localday as decoder
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+    s = normal_native_poll
+    metric = "high" if track == "mx2t6_high" else "low"
+    folder = tmp_path / "paired-capture"; folder.mkdir()
+    original, _, _, _ = _tiny_native_grib(folder, track, issue=s.run, horizon=24)
+    captures, ranges, index_rows = [], {}, {}
+    with original.open("rb") as stream:
+        while (gid := ec.codes_grib_new_from_file(stream)) is not None:
+            try:
+                ec.codes_set(gid, "generatingProcessIdentifier", 161)
+                member = int(ec.codes_get(gid, "perturbationNumber"))
+                if member == 0: ec.codes_set(gid, "dataType", "fc")
+                raw = ec.codes_get_message(gid); capture = decoder._native_message_capture(gid)
+                h = capture["observed_headers"]; step = int(h["endStep"])
+                stream_name, kind = ("oper", "fc") if member == 0 else ("enfo", "ef")
+                url = (f"https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{s.run:%Y%m%d}/"
+                    f"{s.run:%H}z/ifs/0p25/{stream_name}/{s.run:%Y%m%d%H}0000-{step}h-{stream_name}-{kind}.grib2")
+                offset = 1000000 + member * 2000
+                ranges[(url, offset)] = raw
+                index_rows.setdefault(url[:-6] + ".index", []).append(dict(param=decoder.TRACKS[track].open_data_param,
+                    levtype="sfc", date=s.run.strftime("%Y%m%d"), time=s.run.strftime("%H%M"),
+                    step=str(step), stream=stream_name, type="fc" if member == 0 else "pf",
+                    number=str(member), _offset=offset, _length=len(raw), **{"class":"od"}))
+                captures.append(capture)
+                s.module._publish_role_message(s.paths.raw_root, capture, raw)
+            finally: ec.codes_release(gid)
+    original.unlink()  # Private aggregate really goes away, not a no-delete mock.
+    missing = captures[0]
+    missing_path = s.module._role_message_path(s.paths.raw_root, missing["raw_message_sha256"])
+    missing_path.unlink()
+    if fault == "partialcut":
+        second_missing=captures[1]
+        second_path=s.module._role_message_path(s.paths.raw_root,second_missing["raw_message_sha256"])
+        second_path.unlink()
+    if fault == "wrong_header": missing["observed_headers"]["level"] = 3
+    if fault == "wrong_hash": missing["raw_message_sha256"] = "0" * 64
+    written = s.now + timedelta(hours=1) if fault == "future_clock" else s.now
+    run_id = s.daemon._expected_source_run_id(s.identities[track])
+    s.conn.execute("""INSERT INTO ensemble_snapshots(city,target_date,temperature_metric,source_run_id,
+        source_cycle_time,source_available_at,recorded_at,provenance_json,physical_quantity,
+        observation_field,available_at,fetch_time,lead_hours,members_json,model_version,dataset_id)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", ("London",s.run.date().isoformat(),metric,run_id,s.run.isoformat(),
+        s.now.isoformat(),written.replace(tzinfo=None).isoformat(" "),json.dumps({"native_capture_receipt":
+            {"capture_status":"OBSERVED","messages":captures}}),decoder.TRACKS[track].physical_quantity,
+        "high_temp" if metric == "high" else "low_temp",s.now.isoformat(),s.now.isoformat(),1.0,
+        json.dumps([11.0]*51),"ecmwf_open_data",s.identities[track]["data_version"]))
+    s.conn.commit()
+    before = tuple(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (run_id,)).fetchone())
+    snapshot_before = tuple(s.conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=?", (run_id,)).fetchone())
+    old_get = s.session.get
+    mirrors=[];clock=[100.]
+    if fault in {"fast503","fullcut","partialcut"}:
+        monkeypatch.setattr(s.module,"_DOWNLOAD_SOURCES",("aws","google"))
+        monkeypatch.setattr(s.module.time,"monotonic",lambda:clock[0])
+    def get(url, **kwargs):
+        google="storage.googleapis.com" in url
+        if fault in {"fast503","fullcut","partialcut"}:
+            mirrors.append("google" if google else "aws")
+            if not google and fault != "partialcut":
+                prototype=old_get(url)
+                if fault == "fullcut": clock[0]=s.session._zeus_deadline
+                return type(prototype)(b"",503,{"Content-Length":"0"})
+        url=url.replace("https://storage.googleapis.com/ecmwf-open-data",
+            "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com")
+        response = old_get(url, **kwargs) if url.endswith(".index") or "Range" not in kwargs.get("headers",{}) else None
+        if url.endswith(".index"):
+            body=b"\n".join([*response.content.splitlines(),
+                *(json.dumps(v).encode() for v in index_rows.get(url,[]))])+b"\n"
+            return type(response)(body,200,{"Content-Length":str(len(body))})
+        offset,end=map(int,kwargs["headers"]["Range"][6:].split("-"))
+        if (url,offset) not in ranges: return old_get(url,**kwargs)
+        s.calls.append((url,kwargs))
+        prototype=old_get(url[:-6]+".index")
+        if fault == "partialcut" and clock[0] == 100.: clock[0]=s.session._zeus_deadline
+        return type(prototype)(ranges[(url,offset)],206,
+            {"Content-Range":f"bytes {offset}-{end}/2000000","Content-Length":str(end-offset+1)})
+    monkeypatch.setattr(s.session,"get",get)
+    import ecmwf.opendata
+    client=ecmwf.opendata.Client
+    class PairedClient(client):
+        def __init__(self,**kwargs):
+            self.mirror=kwargs["source"];super().__init__(**kwargs)
+        def _get_urls(self,**kwargs):
+            result=super()._get_urls(**kwargs);result.for_index={"param":kwargs["param"]}
+            if self.mirror == "google":
+                result.urls=[url.replace("https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com",
+                    "https://storage.googleapis.com/ecmwf-open-data") for url in result.urls]
+            return result
+    monkeypatch.setattr(ecmwf.opendata,"Client",PairedClient)
+    # The normal dispatcher recomputes its own strong transport plan. Keep the
+    # sibling market out of this exact restoration case, not its mandatory job.
+    s.conn.execute("DELETE FROM market_events WHERE temperature_metric!=?",(metric,));s.conn.commit()
+    if fault == "expired":
+        plan=s.daemon._native_temperature_transport_plans(s.conn,now_utc=s.now)[0]
+        result=s.module.restore_paired_role_originals(s.conn,plan=plan,decision_at=s.now,
+            deadline_monotonic=time.monotonic(),_paths=s.paths)
+    else:
+        normal=s.daemon._run_journaled_opendata_track_if_due(track)["native_temperature_source"]
+        if fault is None: assert missing_path.exists(), "normal SUCCESS poll did not restore paired original body"
+        result=normal["paired_originals"]
+    if fault == "fullcut":
+        assert result["status"] == "UNKNOWN" and not missing_path.exists()
+        receipt=s.paths.raw_root/"raw/ecmwf_open_ens/native_2t_scheduled"/f"{s.run:%Y%m%dT%HZ}"/".paired-originals/mirror-attempt.json"
+        assert json.loads(receipt.read_bytes())["last_attempted_mirror"] == "aws"
+        assert mirrors == ["aws"]
+        clock[0]=200.;mirrors.clear()
+        result=s.daemon._run_journaled_opendata_track_if_due(track)["native_temperature_source"]["paired_originals"]
+        assert mirrors[0] == "google"
+    if fault == "partialcut":
+        assert result["status"] == "UNKNOWN" and missing_path.exists() and not second_path.exists()
+        first_bytes=missing_path.read_bytes();first_stat=missing_path.stat()
+        clock[0]=200.;mirrors.clear();call_start=len(s.calls)
+        result=s.daemon._run_journaled_opendata_track_if_due(track)["native_temperature_source"]["paired_originals"]
+        assert result["restored_count"] == 1 and second_path.exists() and mirrors[0] == "google"
+        assert missing_path.read_bytes()==first_bytes and missing_path.stat().st_mtime_ns==first_stat.st_mtime_ns
+        first_range=next((url,offset) for (url,offset),raw in ranges.items() if hashlib.sha256(raw).hexdigest()==missing["raw_message_sha256"])
+        assert not any(url==first_range[0] and kwargs.get("headers",{}).get("Range","").startswith(f"bytes={first_range[1]}-")
+            for url,kwargs in s.calls[call_start:])
+    if fault in {None,"fast503","fullcut","partialcut"}:
+        assert result["status"] == "AVAILABLE",result
+        if fault == "fast503": assert mirrors[0] == "aws" and "google" in mirrors
+        assert s.module._read_role_message_bytes(s.paths.raw_root,missing) == ranges[next(iter(ranges))]
+        call_count=len(s.calls)
+        second=s.daemon._run_journaled_opendata_track_if_due(track)["native_temperature_source"]["paired_originals"]
+        assert second == {"status":"AVAILABLE","restored_count":0}
+        assert not any(int(call[1]["headers"]["Range"][6:].split("-")[0]) >= 1000000
+            for call in s.calls[call_count:] if "Range" in call[1].get("headers",{}))
+        if fault is None: assert len(s.calls)==call_count
+    else:
+        assert result["status"] == "UNKNOWN",result
+        assert not s.module._role_message_path(s.paths.raw_root,missing["raw_message_sha256"]).exists()
+    assert tuple(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?",(run_id,)).fetchone()) == before
+    assert tuple(s.conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=?",(run_id,)).fetchone()) == snapshot_before
+
 @pytest.fixture
 def normal_native_poll(tmp_path, monkeypatch, request):
     """Real normal wrapper, journals, GRIB and source inventory; fake HTTP only."""

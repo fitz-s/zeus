@@ -2432,15 +2432,15 @@ def _fetch_cycle_land_mask(
     raise ValueError(f"ENS_LAND_MASK_UNAVAILABLE:{type(last_error).__name__ if last_error else 'NO_MIRROR'}")
 
 
-def _native_temperature_index_parts(body: bytes, run: datetime, step: int, *, control: bool) -> list[dict]:
+def _native_temperature_index_parts(body: bytes, run: datetime, step: int, *, control: bool, param: str = "2t") -> list[dict]:
     """Exact original-index 2t fields; control follows the 50r1 oper/fc envelope."""
-    wanted = {"param": "2t", "levtype": "sfc", "class": "od", "date": run.strftime("%Y%m%d"),
+    wanted = {"param": param, "levtype": "sfc", "class": "od", "date": run.strftime("%Y%m%d"),
               "time": run.strftime("%H%M"), "step": str(step),
               "stream": "oper" if control else "enfo", "type": "fc" if control else "pf"}
     parts = []
     for line in body.splitlines():
         row = json.loads(line)
-        if row.get("param") != "2t":
+        if row.get("param") != param:
             continue
         if any(str(row.get(k)) != v for k, v in wanted.items()):
             raise ValueError("NATIVE_2T_INDEX_IDENTITY_MISMATCH")
@@ -2465,6 +2465,160 @@ def _native_temperature_index_parts(body: bytes, run: datetime, step: int, *, co
 
 
 _native_temperature_source_lock = threading.Lock()
+
+
+def restore_paired_role_originals(conn, *, plan: dict, decision_at: datetime,
+        deadline_monotonic: float, _paths: OpenDataPaths | None = None) -> dict:
+    """Restore only byte-identical canonical captures, never re-ingest a run.
+
+    SCOPE: selected source/city/date/metric and original SHA. DRAIN: the existing
+    bounded normal turn resumes exclusive CAS publication with configured
+    replicas. RESET: strict original readback, or an independently captured new
+    run. Missing/changed evidence cannot renew any canonical possession clock.
+    """
+    import eccodes as ec
+    from ecmwf.opendata import Client
+    from scripts import extract_open_ens_localday as decoder
+    paths = _paths or _resolve_opendata_paths()
+    if not _native_temperature_source_lock.acquire(blocking=False):
+        return {"status": "DEFERRED", "reason": "NATIVE_2T_SINGLEFLIGHT_BUSY"}
+    session = None
+    missing = {}
+    checked = {}
+    try:
+        run = plan["run"]
+        if (decision_at.tzinfo is None or decision_at.utcoffset() != timedelta(0)
+                or decision_at > datetime.now(timezone.utc) or run.tzinfo is None
+                or run.utcoffset() != timedelta(0) or run > decision_at):
+            raise ValueError("ROLE_ORIGINAL_CANONICAL_CLOCK_UNKNOWN")
+        for city, target, metric, role in plan["targets"]:
+            track = {"high": "mx2t6_high", "low": "mn2t6_low"}[metric]
+            row = conn.execute("""SELECT provenance_json,source_available_at,recorded_at
+                FROM ensemble_snapshots WHERE source_run_id=? AND city=? AND target_date=?
+                  AND temperature_metric=? AND source_cycle_time=?
+                ORDER BY snapshot_id DESC LIMIT 1""",
+                (plan["sources"][track], city, target, metric, run.isoformat())).fetchone()
+            if row is None:
+                raise ValueError("ROLE_ORIGINAL_CANONICAL_CAPTURE_UNKNOWN")
+            clocks = [datetime.fromisoformat(str(row[1])),
+                      datetime.fromisoformat(str(row[2]))]
+            # SQLite's owning recorded_at DEFAULT is UTC, unlike provider clocks.
+            clocks[1] = clocks[1].replace(tzinfo=timezone.utc) if clocks[1].tzinfo is None else clocks[1]
+            if any(clock.tzinfo is None or not run <= clock <= decision_at for clock in clocks):
+                raise ValueError("ROLE_ORIGINAL_CANONICAL_CLOCK_UNKNOWN")
+            capture = json.loads(row[0])["native_capture_receipt"]
+            if capture["capture_status"] != "OBSERVED" or not capture["messages"]:
+                raise ValueError("ROLE_ORIGINAL_CANONICAL_CAPTURE_UNKNOWN")
+            for saved in capture["messages"]:
+                h = saved["observed_headers"]
+                digest = saved["raw_message_sha256"]
+                if digest in checked:
+                    if saved != checked[digest]:
+                        raise ValueError("ROLE_ORIGINAL_CANONICAL_CAPTURE_CONFLICT")
+                    continue
+                definition = decoder.TRACKS[track]
+                if (not re.fullmatch(r"[0-9a-f]{64}", digest)
+                        or saved["capture_status"] != "OBSERVED"
+                        or h["paramId"] != definition.paramId or h["stepType"] != definition.step_type
+                        or h["units"] != "K" or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
+                        or h["dataDate"] != int(run.strftime("%Y%m%d")) or h["dataTime"] != run.hour * 100):
+                    raise ValueError("ROLE_ORIGINAL_CANONICAL_IDENTITY_UNKNOWN")
+                member = int(h.get("perturbationNumber", h.get("number", 0)))
+                if not 0 <= member <= 50 or h["dataType"] != ("fc" if member == 0 else "pf"):
+                    raise ValueError("ROLE_ORIGINAL_CANONICAL_IDENTITY_UNKNOWN")
+                path = _role_message_path(paths.raw_root, digest)
+                if _path_present(path):
+                    _read_role_message_bytes(paths.raw_root, saved)
+                else:
+                    missing[digest] = (track, saved, member, int(h["endStep"]))
+                checked[digest] = saved
+        if not missing:
+            return {"status": "AVAILABLE", "restored_count": 0}
+        mirrors = tuple(dict.fromkeys(_DOWNLOAD_SOURCES))
+        if not mirrors or any(m not in {"aws", "google"} for m in mirrors):
+            raise ValueError("NATIVE_2T_MIRROR_POOL_UNSUPPORTED")
+        cache = paths.raw_root / "raw/ecmwf_open_ens/native_2t_scheduled" / f"{run:%Y%m%dT%HZ}" / ".paired-originals"
+        cursor = _native_mirror_attempt(cache, paths.raw_root, run, mirrors)
+        cache.mkdir(parents=True, exist_ok=True)
+        order = mirrors
+        if cursor.get("configured_mirrors") == list(mirrors):
+            offset = mirrors.index(cursor["last_attempted_mirror"])
+            if cursor["status"] != "COMPLETE": offset = (offset + 1) % len(mirrors)
+            order = mirrors[offset:] + mirrors[:offset]
+        session = _NativeDeadlineSession()
+        session._zeus_deadline = deadline_monotonic
+        restored = 0
+        for mirror in order:
+            _remaining_step_timeout(deadline_monotonic)
+            if plan["priority"]() is not True:
+                raise ValueError("NATIVE_2T_MANDATORY_PRIORITY")
+            attempt = {"last_attempted_mirror": mirror, "status": "RUNNING",
+                "attempt_started_at": datetime.now(timezone.utc).isoformat(), "attempt_finished_at": None, "reason": None}
+            _native_mirror_attempt(cache, paths.raw_root, run, mirrors, attempt)
+            try:
+                indexes = {}
+                for digest, (track, saved, member, step) in tuple(missing.items()):
+                    _remaining_step_timeout(deadline_monotonic)
+                    if plan["priority"]() is not True: raise ValueError("NATIVE_2T_MANDATORY_PRIORITY")
+                    param = decoder.TRACKS[track].open_data_param
+                    key = param, step, member == 0
+                    if key not in indexes:
+                        client = Client(source=mirror); client.session = session
+                        result = client._get_urls(target=str(cache / "unused"), use_index=False,
+                            date=int(run.strftime("%Y%m%d")), time=run.hour, stream="oper" if member == 0 else "enfo",
+                            type=["fc" if member == 0 else "pf"], step=[step], param=[param])
+                        entities = []
+                        _resolve_index_parts(client, result, deadline=deadline_monotonic,
+                            original_indexes=entities, native_complete_body=True)
+                        if len(entities) != 1: raise ValueError("ROLE_ORIGINAL_INDEX_UNKNOWN")
+                        entity = entities[0]
+                        origin = ("https://storage.googleapis.com/ecmwf-open-data/" if mirror == "google"
+                            else "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/")
+                        stream = "oper" if member == 0 else "enfo"
+                        kind = "fc" if member == 0 else "ef"
+                        expected_url = (f"{origin}{run:%Y%m%d}/{run:%H}z/ifs/0p25/{stream}/"
+                            f"{run:%Y%m%d%H}0000-{step}h-{stream}-{kind}.grib2")
+                        if entity["source_url"] != expected_url:
+                            raise ValueError("ROLE_ORIGINAL_REPLICA_ORIGIN_UNKNOWN")
+                        indexes[key] = entity, _native_temperature_index_parts(entity["body"], run, step,
+                            control=member == 0, param=param)
+                    entity, parts = indexes[key]
+                    part = next(p for p in parts if p["member"] == member)
+                    offset, length = part["source_index_offset"], part["source_index_length"]
+                    response = session.get(entity["source_url"], stream=True,
+                        headers={"Range": f"bytes={offset}-{offset+length-1}"},
+                        timeout=_remaining_step_timeout(deadline_monotonic), verify=getattr(client, "verify", True))
+                    try:
+                        _validate_range_response(response, offset=offset, length=length)
+                        raw = response.content
+                        if (getattr(response, "_native_body_complete", False) is not True
+                                or len(raw) != saved["raw_message_length"] or hashlib.sha256(raw).hexdigest() != digest):
+                            raise ValueError("ROLE_ORIGINAL_REPLICA_MISMATCH")
+                        gid = ec.codes_new_from_message(raw)
+                        try:
+                            if (decoder._native_message_capture(gid) != saved
+                                    or ec.codes_get(gid, "generatingProcessIdentifier") != 161):
+                                raise ValueError("ROLE_ORIGINAL_CAPTURE_MISMATCH")
+                        finally: ec.codes_release(gid)
+                        _publish_role_message(paths.raw_root, saved, raw)
+                        _read_role_message_bytes(paths.raw_root, saved)
+                        del missing[digest]; restored += 1
+                    finally: response.close()
+                _native_mirror_attempt(cache, paths.raw_root, run, mirrors,
+                    {**attempt, "status": "COMPLETE", "attempt_finished_at": datetime.now(timezone.utc).isoformat()})
+                return {"status": "AVAILABLE", "restored_count": restored}
+            except (OSError, ValueError, requests.RequestException) as exc:
+                _native_mirror_attempt(cache, paths.raw_root, run, mirrors,
+                    {**attempt, "status": "FAILED", "reason": str(exc), "attempt_finished_at": datetime.now(timezone.utc).isoformat()})
+                if not isinstance(exc, requests.RequestException): raise
+        return {"status": "INCOMPLETE", "restored_count": restored, "missing_count": len(missing)}
+    except (OSError, ValueError, KeyError, TypeError, requests.RequestException) as exc:
+        return {"status": "UNKNOWN", "reason": str(exc), "missing_count": len(missing)}
+    finally:
+        try:
+            if session is not None: session.close()
+        finally:
+            _native_temperature_source_lock.release()
 
 
 def _native_mirror_attempt(cache: Path, root: Path, run: datetime, mirrors: tuple[str, ...],

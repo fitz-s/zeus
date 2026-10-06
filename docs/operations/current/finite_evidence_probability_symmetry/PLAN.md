@@ -19422,3 +19422,46 @@ a normal independent new run supplies a new lawful role. No missing manifest
 clear, clock backfill or mutation of old decision-time provenance is allowed.
 Production code remains unchanged at this checkpoint; writer/transport choice
 is escalated before implementing a same-identity recollection.
+
+### Exact-CAS normal repair: frozen author evidence
+
+ROOT selected exact restoration, not re-ingestion. Owned implementation is only
+src/data/ecmwf_open_data.py, src/ingest/forecast_live_daemon.py and the existing
+tests/test_forecast_live_daemon.py. The existing native normal turn now checks
+paired originals and restores missing bodies through configured AWS/Google,
+under its unchanged absolute59s cut, bucket and durable mirror cursor. Only a
+full original SHA, length and identical full ecCodes capture/GPI161 authorize
+exclusive CAS publication. Canonical source/snapshot/status/clock/revision rows
+are untouched; the new HTTP attempt is diagnostic, not old possession evidence.
+
+SCOPE is the selected exact source/city/date/metric/originalSHA. DRAIN is the
+existing bounded normal optional turn; validated CAS bodies are NOOP, multiple
+missing bodies resume without re-fetching already restored bytes. RESET is real
+strict readback, or independently captured lawful new-run truth. Unknown old
+receipt, future clock, wrong hash/header or exhausted cut stays UNKNOWN and
+never manufactures old evidence or weakens the public reader.
+
+Actual old-function RED:1F7.10s, missing paired body remained absent after the
+normal SUCCESS-journal wrapper. XML /tmp/zeus-paired-restore-red.xml SHA
+472826908de28856449d965912fb14c1a128af07d4ce524d1bf281ed2b3fe267.
+Final same-source-epoch controls:19P85.14s (16 H/L originals/negative/mirror/
+two-missing-prefix cases,2 journaled00/06 entries,1 mandatory independent-budget
+case), no failures/skips. XML /tmp/zeus-paired-restore-frozen.xml SHA
+f30c4d222e573a0ff5c3f0cf92ac97b962a2941a16ecb25e74d7a68dcb32aaba.
+Source SHA b7f191d89bb0b4f605fb1825635d950ef65ec961ea45a8d3438139683e87a8be;
+daemon SHA c5dc9e0659ff38cd5cd61cd4a2cb38b5fecd9cd9f2909f2ee7f1fc29165ff8bd;
+test SHA c7f5f600c25390857aba6b8e60e75c3d2ce553d7483ed556abe242d841db83e3.
+AST and diff-check passed. Private tests used isolated state and BLAS threads1;
+no weatherHTTP/liveDB/forcedwake/load/venue action occurred.
+
+Existing causal queue RESET is code-proven, not a new notification: generic
+CURRENT_SHAPE_ENS_UNAVAILABLE has no typed blocked evidence (materializer5777
+through5804). The m5 queue _bound_verdict4548 rejects this unsupported computation
+fence; process977x restores its exact request to the normal retry directory.
+The daemon materialize lane2640 processes it while recovery discovery2820
+defers only its broad scan when a request is pending. Restoring the same CAS
+bytes therefore permits the next normal worker read without changing source
+identity or clocks. This is not evidence of actual production posterior recovery.
+Actual provider byte availability, later physical/PIT/public qualification and
+production consumption remain unproven; existing valid bodies and canonical
+rows were conserved in private controls. Independent review is pending.
