@@ -355,6 +355,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     hash_modules = {getattr(alias, '_binding_name', alias.asname or alias.name) for node in nodes if isinstance(node, ast.Import)
                     for alias in node.names if alias.name == 'hashlib'}
     json_mutations = set()
+    trusted_setattr_mutations = set()
     for node in nodes:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
@@ -387,10 +388,14 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             hash_modules.discard(node.name)
             physical_semantics.discard(node.name)
             temperature_readers.discard(node.name)
-        if (isinstance(node, ast.Call) and _call_name(node.func) == 'setattr'
-                and node.args and isinstance(node.args[0], ast.Name)):
-            json_mutations.add(node.args[0].id)
-            hash_modules.discard(node.args[0].id)
+        if isinstance(node, ast.Call) and _call_name(node.func) == 'setattr' and node.args:
+            receiver = node.args[0]
+            while isinstance(receiver, (ast.Attribute, ast.Subscript)):
+                receiver = receiver.value
+            if isinstance(receiver, ast.Name):
+                json_mutations.add(receiver.id)
+                hash_modules.discard(receiver.id)
+                trusted_setattr_mutations.add(receiver.id)
     encoded_json = '__encoded_json_value__'
     encoded_bytes = '__encoded_json_bytes__'
     hash_state = '__stdlib_sha256_state__'
@@ -459,6 +464,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     hash_modules = {root(name) for name in hash_modules} - {root(name) for name in json_mutations}
     physical_semantics = {root(name) for name in physical_semantics}
     temperature_readers = {root(name) for name in temperature_readers}
+    mutated_trust_roots = {root(name) for name in trusted_setattr_mutations}
+    physical_semantics.difference_update(mutated_trust_roots)
+    temperature_readers.difference_update(mutated_trust_roots)
     source_grade = source_grade or {}
 
     def join(values):
@@ -523,8 +531,17 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 getattr(alias, '_binding_name', alias.asname or alias.name) == expected for alias in item.names)
                 for item in nodes):
             return False
-        definitions = [item.value for item in nodes if isinstance(item, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == expected for target in item.targets)]
+        definitions = []
+        for item in nodes:
+            targets = item.targets if isinstance(item, ast.Assign) else [item.target] if isinstance(
+                item, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) else []
+            if any(isinstance(target, ast.Name) and target.id == expected for target in targets):
+                if not isinstance(item, ast.Assign):
+                    return False
+                definitions.append(item.value)
+            if (isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and item.name == expected
+                    or isinstance(item, ast.arg) and item.arg == expected):
+                return False
         return (expected and isinstance(node, ast.Assign) and len(node.targets) == 1
             and isinstance(node.targets[0], ast.Name)
             and getattr(node.targets[0], '_control_field', node.targets[0].id) == 'capture_status'

@@ -19,6 +19,22 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize('reason', [
+    'ROLE_ORIGINAL_CANONICAL_CLOCK_UNKNOWN', 'ROLE_ORIGINAL_CANONICAL_CAPTURE_UNKNOWN',
+    'ROLE_ORIGINAL_CANONICAL_IDENTITY_UNKNOWN', 'ROLE_ORIGINAL_INDEX_UNKNOWN',
+    'ROLE_ORIGINAL_REPLICA_ORIGIN_UNKNOWN',
+])
+def test_paired_original_exception_protocol_cannot_launder_money_states(tmp_path, reason):
+    rc, payload = _source_protocol_classification(tmp_path, 'raise ValueError(' + repr(reason) + ')')
+    assert rc == 0 and not payload['unregistered_objects']
+    for strong in ("status=" + repr(reason),
+                   "class Choices(Enum):\n STATE=" + repr(reason),
+                   'sql="CHECK(state IN (\'' + reason + '\'))"'):
+        rc, payload = _source_protocol_classification(tmp_path,
+            'raise ValueError(' + repr(reason) + ')\n' + strong)
+        assert rc == 2 and payload['unregistered_objects']
+
+
 def _source_protocol_classification(tmp_path, source, *, owner="src/data/ecmwf_open_data.py"):
     diff = tmp_path / "source.patch"
     diff.write_text(f"diff --git a/{owner} b/{owner}\n+++ b/{owner}\n" +
@@ -64,7 +80,7 @@ def test_classifier_native_21_tokens_have_structural_protocol_proof():
     assert not payload["unregistered_objects"], payload["unregistered_objects"]
     protocols = {value.rsplit(":", 1)[-1] for value in payload["new_source_protocol_values"]}
     assert "ARCHIVE_BACKFILL" in protocols
-    assert len([value for value in protocols if value.endswith("_UNKNOWN")]) == 20
+    assert len([value for value in protocols if value.endswith("_UNKNOWN")]) == 25
     assert not protocols.intersection(payload["new_states"])
 
 

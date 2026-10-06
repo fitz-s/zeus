@@ -434,6 +434,38 @@ def test_exact_source_grade_proof_is_not_a_general_status_or_owner_waiver():
     assert gate._alternate_control_violations(source.replace("if 'diagnostic':", "from plugin import REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT\nif 'diagnostic':"), declaration)
 
 
+@pytest.mark.parametrize('rebind', [
+    "REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT: str='diagnostic'",
+    "REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT += 'diagnostic'",
+])
+def test_reviewed_source_grade_loses_trust_after_any_binding_write(rebind):
+    from scripts import check_single_live_semantics as gate
+    statement = 'capture_status=REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT'
+    digest = gate._evidence_use_hash(ast.parse(statement).body[0], {})
+    declaration = {'role':'source_grade_evidence','proof':'exact producer',
+                   'reviewed_source_qualification_uses':{digest:'REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT'}}
+    source = "REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT='FULL_CURRENT'\n" + rebind
+    source += "\nif 'diagnostic':\n " + statement + '\n'
+    assert gate._alternate_control_violations(source, declaration)
+
+
+@pytest.mark.parametrize('receiver', ['reader', 'alias'])
+def test_temperature_reader_setattr_mutation_revokes_identity_trust(receiver):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = _TEMPERATURE_READER_SOURCE.split('state=')[0] + 'alias=reader\n'
+    source += "setattr(" + receiver + ",'__code__',evil.__code__)\n"
+    source += "if 'diagnostic':\n state=reader(conn=conn,city=city,target_date=date,decision_time=cut)\n"
+    assert _alternate_control_violations(source)
+
+
+def test_physical_constructor_setattr_alias_revokes_identity_trust():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = ('from src.contracts.settlement_semantics import SettlementSemantics\n'
+              "alias=SettlementSemantics\nsetattr(alias,'__init__',evil)\n"
+              "if 'diagnostic':\n semantics=SettlementSemantics('forecast_preimage',1)\n")
+    assert _alternate_control_violations(source)
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",

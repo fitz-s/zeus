@@ -19465,3 +19465,26 @@ identity or clocks. This is not evidence of actual production posterior recovery
 Actual provider byte availability, later physical/PIT/public qualification and
 production consumption remain unproven; existing valid bodies and canonical
 rows were conserved in private controls. Independent review is pending.
+
+ROOT BEFOREEDIT bounded cd6 review repair: source-grade trust must reject all
+binding writes including annotated/augmented assignments and imports; literal
+setattr mutations must revoke canonical temperature-reader/physical-constructor
+trust across aliases. Preserve the exact finite producer assignments, not new
+types. Register only the five paired-restoration ValueError diagnostic reasons
+under the existing ECMWF source-protocol owner; mixed state/Enum/SQL uses remain
+money-state checks. Own checker/tests/money registry and PLAN, no production
+source, CLI or new finding exemptions. cd6 actual CLI remains rc1/10 findings;
+typed binding review has two Important findings until the new antibodies pass.
+
+Bounded binding/protocol repair actual RED10F2.50s before implementation
+(/tmp/zeus-binding-protocol-cd6-red.xml): annotated/augmented constant writes,
+direct/alias reader setattr, physical constructor alias setattr, and five
+unregistered source exception reasons. Final focused203P12.28s0F/E/S
+(/tmp/zeus-binding-protocol-final.xml), including the former193 and all10 new
+cases, on the same final bytes. Source-grade definitions now count all binding
+writes; setter mutation revokes trusted callable roots after alias resolution.
+Existing import/dynamic and strong selector controls remain. The original
+unknown-reason count assertion intentionally changes20 to25 for the five exact
+ValueError reasons; no lifecycle exemption or production source change.
+AST3/YAML/diff-check pass; no repeated whole CLI. cd6's rc1/10 findings remain
+open, and the separate type-marker disposition is read-only pending ROOT.
