@@ -18950,3 +18950,33 @@ Actual5dc->d6e2177c combined classification exits0 with unregistered[] in
 as another17 unique cases. Independent wrong-owner neutral SCHEDULED_LIVE
 command-status omission is unchanged in both parent and candidate; it is not
 waived or claimed fixed by this exact21-token source protocol correction.
+
+2026-10-06 single-live required-gate BEFOREEDIT, ROOT-authorized exactly
+scripts/check_single_live_semantics.py; tests/test_single_live_semantics.py;
+architecture/money_path_objects.yaml, with this existing PLAN as evidence.
+Current ac8 source and exact5dc baseline both produce56 findings, immutable
+artifact /tmp/zeus-single-live-recovery-attribution.json SHA256
+3e9f20d499cfd2e49b09be92fa212f3a6706efaca22b8064afee279cdf6a4c28.
+This is required FAIL, not a baseline waiver. Independent bounded traces
+classify41 global-batch/risk evidence uses as same-current-q venue-inert
+counterfactual/regret receipts, not another actuator or probability kernel;
+five documentary references are prose/evidence rather than live bindings.
+The remaining10 identifier uses are loader stderr reporting, current-proof
+reports, offline no-promotion fit families, same-prepared-witness byte budget,
+and the one normal scheduler's maintenance progress. No risk/mean/wealth law
+will change. Existing permission is source_rationale2230, DB ownership1387–1391,
+and money_path_objects1311–1319; actual fill/PnL and actual bankroll remain
+independent authorities, not counterfactual cash.
+Replace lexical name verdicts with exact-owner typed reviewed AST-use evidence
+and independent runtime/probability control-flow checks. A declaration cannot
+exempt mode/runtime/lane/category/probability-authority assignment, comparison,
+Enum/CLI selector or alias/helper laundering; new/opaque use stays UNKNOWN.
+No whole-file or shadow/diagnostic wildcard exemption. Historical/docstring
+references and receipt field names are not actors, but executable document
+control bindings and live-reachable archived code retain the existing gate.
+SCOPE the exact reviewed evidence usages and actual alternate-control sinks;
+DRAIN repair the checker category and rerun its real CLI; RESET real legal
+uses pass while same-owner mixed/opaque or live-selector mutations still fail.
+Preserve every retired-token and archived-live-execution antibody. Required
+CLI zero plus hostile structural controls and independent exact-hash review
+are mandatory before this gate can be reported green; no live-load authority.
