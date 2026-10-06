@@ -19702,3 +19702,39 @@ OPEN until that dependency's approved repair. Final common-tip production
 numeric and keeper changes require precise affected-input review/retests;
 this child result is not their proof, a 53-selector PASS, or live readiness.
 The changed cash helper also requires final merged money-path verification.
+
+### Pure native decoding performance — BEFORE EDIT
+
+ROOT authorizes held as the sole writer in a child based on
+dd2e0e4015c0a809187b55ffde06aa855f21a396. Candidate existing source scope is
+src/data/day0_hourly_vectors.py, src/data/ecmwf_open_data.py and
+scripts/extract_open_ens_localday.py; corresponding existing antibodies belong
+in tests/test_ecmwf_open_data_collect_cycle.py. First measure selected-point and
+record decoding and choose the fewest necessary interfaces; an hourly-only fix
+is preferable if sufficient. Native's numeric 39b source is frozen, its
+integration fixture remains separately owned, and q's five test files do not
+overlap this slice. No new module, config, API, TTL or probability regime.
+
+The actual cold preparation took 3.259s and missed the existing 2.5s whole
+deadline; the next normal turn on the same originals prepared in 0.194354s.
+This refutes a permanent latch, not the cold-path missed earliest cycle. Keep
+the whole deadline, action law and natural normal-turn RESET unchanged; reduce
+repeated pure immutable decoding instead of extending the budget.
+
+Memoize only finite immutable headers/Kelvin mathematical primitives or selected
+point/scalar decoding, keyed by complete original SHA, grid SHA, flat index,
+instantaneous semantics and raw unit as applicable. Do not retain global GRIB
+bytes or cache q, READY, qualification, current clocks, HWM, refs or certificates.
+Every use revalidates current original bytes/hash, proof, index, PIT and scoped
+custody; current provider inputs, mu/sigma and q are recomputed normally.
+Test-only header memo is not evidence of production optimization.
+
+SCOPE is the exact immutable decode identity. DRAIN is ordinary normal capture
+and preparation; RESET includes a real cold/new-text-SHA miss, later hot reuse
+and successful restoration without changing original first clocks. Require
+actual cold/new-posterior preparation within the unchanged 2.5s deadline plus
+hot proof, H/L and C/F key-unit-cell isolation, warm corruption/new-HWM/PIT
+refusal and original-clock restoration. Unknown or invalid inputs cannot borrow
+a cached successful grade. Final CLI, HEAD secret scan and required-gate batch
+wait for this source freeze and the native fixture review; the two pricing-common
+old-fixture prerequisite failures remain recorded, not passes.
