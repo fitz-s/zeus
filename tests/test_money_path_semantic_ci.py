@@ -83,6 +83,11 @@ def test_classifier_source_declared_literal_enum_or_sql_check_is_not_exempt(tmp_
                  'sql = "CHECK (state IN (\'NATIVE_2T_CAPTURE_UNKNOWN\'))"\n'):
         rc, payload = _source_protocol_classification(tmp_path, body)
         assert rc == 2 and payload["unregistered_objects"]
+        # A separate legitimate reason cannot launder the same SQL/Enum state.
+        rc, payload = _source_protocol_classification(tmp_path,
+            'report = {"reason": "NATIVE_2T_CAPTURE_UNKNOWN"}\n' + body)
+        assert rc == 2 and payload["unregistered_objects"]
+        assert not payload["new_source_protocol_values"]
 
 
 def test_classifier_source_wrong_owner_unknown_reason_and_mode_fail(tmp_path):

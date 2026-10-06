@@ -252,6 +252,11 @@ def _source_protocol_values(path: str, source: str, objects: dict[str, Any]) -> 
         return {}
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     constants = [node for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+    sql_check_values = {
+        value.strip().strip("'\"")
+        for node in constants for check in CHECK_IN_RE.finditer(node.value)
+        for value in check.group("values").split(",")
+    }
     out: dict[str, tuple[str, bool]] = {}
     for spec in declarations:
         values = set(spec.get("values", ()))
@@ -262,6 +267,9 @@ def _source_protocol_values(path: str, source: str, objects: dict[str, Any]) -> 
         for value in values:
             occurrences = [node for node in constants if node.value == value]
             if occurrences:
+                if value in sql_check_values:
+                    out[value] = (str(spec["kind"]), False)
+                    continue
                 if (spec.get("kind") == "source_ingest_mode" and value in spec.get("values", ())
                         and not any(marker in value for marker in _STATE_MARKERS)
                         and not any(_money_literal_use(node, parents) for node in occurrences)):
@@ -360,10 +368,18 @@ def classify(diff: str, files: list[str], objects: dict[str, Any], mapping: dict
         error_codes = set(ERROR_CODE_RE.findall(body)) if "errorCode" in body else set()
         state_candidates = {m.group(1) for m in STATE_RE.finditer(body)}
         state_candidates.update(m.group(1) for m in ENUM_MEMBER_RE.finditer(line))
+        check_states = set()
         for check in CHECK_IN_RE.finditer(body):
             raw_values = [v.strip().strip("'\"") for v in check.group("values").split(",")]
-            state_candidates.update(v for v in raw_values if re.fullmatch(r"[A-Z][A-Z0-9_]{3,}", v))
+            check_states.update(v for v in raw_values if re.fullmatch(r"[A-Z][A-Z0-9_]{3,}", v))
+        state_candidates.update(check_states)
         for state in sorted(state_candidates):
+            if state in check_states:
+                result.add_many("new_states", [state])
+                result.bump("P0")
+                if state not in registered_states:
+                    result.add_many("unregistered_objects", [f"state:{state}"])
+                continue
             if state in error_codes:
                 continue
             protocol = protocols.get(path, {}).get(state)

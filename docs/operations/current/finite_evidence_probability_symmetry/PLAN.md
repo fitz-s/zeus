@@ -18905,3 +18905,48 @@ subsequently prepares the current family, while a prior immutable carrier may
 only be a valid base across an incomplete successor wave. Same-clock prefix
 corrections cannot pass as monotone advances; no fabricated event or None
 consumability can substitute for the canonical event/rebuild relationship.
+
+2026-10-06 custody recovery integrated as d6e2177c97f3d6d6b1a57443f1a24787e33bf975
+from the sole approved child4cb8baf9ceca6c419cc9dc2bb98abb322af644f5. Exactly
+five production/four test paths equal their approved a577 bytes. The child
+same-epoch2F producer RED is preserved, then15 positive/NOOP and33 negative
+controls pass48 unique. Parent merged controls pass4 in2.19s, XML
+/tmp/zeus-custody-recovery-merged4.xml SHA256
+b825f43e1cf598ea3a04aac28b89309f58edc077f9c0db5d27aadfd2e22f14a9:
+normal WU single-entity canonical receipt, Ogimet multichunk contributors,
+HKO actual-content/actual-response-clock H/L reuse, and old-NULL same-hash NOOP.
+No historical entity, initial-issued clock or absorbing authority is invented.
+Fresh origin/live remains5dc34c4cd4df21aaa94fd1a93f3b767f8fa7a272 and is an
+ancestor of the candidate. No production checkout, process or DB was changed.
+
+Rollback dispositions now: native configured-mirror/resume/strict original
+role/PIT and finite paired-message CAS/GC FIXED in the f1f restored source
+candidate; canonical SQLite-written UTC mismatch FIXED by the narrow hourly
+adapter, with same-epoch Google-to-public H/L proof. Generic WU/Ogimet forward
+entity custody and HKO DailyExtract forward body/actual HTTP clock FIXED by
+the integrated exact child. Durable monitor timing FIXED by approved33-line
+restoration and actual canonical receipt controls. HKO cumulative prefix
+bridge as a rollback casualty REFUTED: its producer/reader/request source
+was not reverted, and provisional evidence remains nonabsorbing. Current
+initial publication, historical missing DailyExtract bodies, unknown sensor
+quantization composition, model-to-settlement representativeness and actual
+live Google/HK native/v7-v35 qualification remain explicit evidence gaps,
+not blanket physical/source accuracy PASS. Upgrade preSTOP proof and final
+required release/money-path checks remain open separate dependencies.
+
+2026-10-06 independent CI Important and bounded correction: the5a92 classifier
+incorrectly reused file-level protocol proof when a legitimate reason literal
+also appeared inside a SQL CHECK string. The parent classifier rejected this
+mixed state, so it is a new regression, not baseline drift. SQL-extracted
+states now take their independent registered-money-state gate before protocol
+exemption; embedded CHECK occurrences also invalidate that literal's source
+protocol proof. Mixed legitimate reason+CHECK and reason+Enum are checked as
+complete producer ASTs, not SQL-alone controls. The final17-node suite passes
+4.98s, XML /tmp/zeus-native-protocol-classifier-mixed-final.xml SHA256
+954fb5ead5764906def97d431f465a1e6410cc89f33fabefd00c519f0f7c3644.
+Actual5dc->d6e2177c combined classification exits0 with unregistered[] in
+/tmp/zeus-native-recovery-semantic-combined-mixed-final.json. The earlier
+17-node/CLI result is superseded for final classifier acceptance, not counted
+as another17 unique cases. Independent wrong-owner neutral SCHEDULED_LIVE
+command-status omission is unchanged in both parent and candidate; it is not
+waived or claimed fixed by this exact21-token source protocol correction.
