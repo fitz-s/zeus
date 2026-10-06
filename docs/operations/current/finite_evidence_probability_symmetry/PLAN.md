@@ -18373,3 +18373,31 @@ The source/test slice now comprises three identity seams in the same two paths.
 Parent peer127 controls already passed4 cases in2.18s; no repeat is required.
 Source remains unlanded/unloaded pending final ordinary freeze, independent
 review, parent integration and ROOT's separate new-tip landing authorization.
+
+Coordinate dispatcher integration closeout (not runtime consumption): native
+ordinary commit ddc6a793c9b835c3a37a3cd1e79aba85b0547dea, exact two paths,
+previewed clean and picked as7ed21f66ffa69266d8f18b47f02e6e1be6ef1dc4 onto
+origin127c15b88456e0275887f814af6a3a0610c678fe plus the existing PLAN saves.
+Source SHA6788c4cf5f5dce7391a335ec9a3070e7e48da42e0ff56c2e0bae08697e6d25a6
+and test SHAe724375cfd284fbc5a15433b35c4c27f206de45197fc49b2aa8fddbec52cd734
+match the source-owner freeze exactly. Independent final three-seam review
+APPROVE/zero Critical or Important; old-coordinate coexistence now gives1,
+old-only0, restored current1 without deleting evidence or renewing clocks.
+Author real2P30.61s XML /tmp/zeus-native-coordinate-final-real.xml SHA
+a3272514be2a207be17b6fe782baa4f6f68b659b346966271fcd8bc9f3fb8745 and short29P
+25.60s XML /tmp/zeus-native-coordinate-final-small.xml SHA
+4db8842a3e55e526aae30a383786fefd197c42e7fda7eb634b6183c0fe3d0a46 were parsed
+with zero failures/errors/skips and reused only for these identical bytes.
+Merged raw-full interval-PARTIAL HIGH and old-coordinate LOW controls passed2
+in3.03s, /tmp/zeus-native-coordinate-merged2.xml; peer markerless/logic-RESET
+controls passed4 in2.18s, /tmp/zeus-native-coordinate-peer127-controls.xml.
+AST2/diff, changed-surface planning/freshness/map gates passed with zero issues.
+No q/math/exit/kernel change or repeated whole-consumer/data10 suite is claimed.
+All dependent checks completed; the task-created ignored regular config was
+verified untracked/non-symlink and exact example SHAe95eb2066414092e2b4416cd24b94a9a08ff050493df2ebff1d38a543d519a3b,
+then deleted by apply_patch, recoverable from the tracked example. All123 raw
+originals remain untracked/unstaged in place. This candidate has not been pushed
+or loaded; ROOT must authorize the new exact tip before ordinary FF/restart.
+Post-load proof must show actual normal native source/role evidence and v7/v35
+consumer DRAIN or exact typed refusal; private AVAILABLE, a heartbeat or the
+earlier registered77ac restart cannot substitute for that proof.
