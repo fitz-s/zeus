@@ -637,6 +637,28 @@ scripts:
     required_helpers: [src.state.ledger.append_many_and_project, src.state.projection.upsert_position_current]
     required_tests: [tests/test_repair_dust_exit_projection.py, tests/test_check_live_restart_preflight.py]
     reason: "Eliminates reload/projection risk where chain dust or snapshot-min-order dust already reached canonical backoff_exhausted but position_current no longer exposes pending_exit/backoff_exhausted."
+  repair_historical_position_economics_2026_10_06.py:
+    # Created: 2026-10-06
+    # Last reused or audited: 2026-10-06
+    # Authority basis: AGENTS.md section 2 lifecycle law; src/state/close_economics.py;
+    # operator-approved 2026-10-06 historical position correction.
+    class: repair
+    lifecycle: long_lived
+    status: active
+    authority_scope: live_trade_projection_repair
+    canonical_command: "python3 scripts/repair_historical_position_economics_2026_10_06.py [--trades-db PATH] [--apply]"
+    read_targets: [state/zeus_trades.db]
+    write_targets: [state/zeus_trades.db, stdout]
+    dry_run_default: true
+    apply_flag: "--apply"
+    target_db: state/zeus_trades.db
+    external_inputs: [live_runtime_dbs]
+    dangerous_if_run: false
+    delete_policy: retain_for_audit
+    promotion_barrier: "Books realized P&L only for the hard-coded operator-approved position ids, only when CONFIRMED trade facts, PROVEN cash facts, a finalized binary payout and a verified redemption agree; appends events and never updates or deletes them; no venue, collateral or cash-ledger write."
+    required_helpers: [src.state.ledger.append_many_and_project, src.state.close_economics.compute_realized_pnl_usd, src.state.fill_dedup.economic_trade_facts_for_command, src.state.write_coordinator.WriteCoordinator]
+    required_tests: [tests/test_repair_historical_position_economics_2026_10_06.py]
+    reason: "Wrongly voided venue-confirmed fills that were held to a redeemed winning payout carried no realized P&L; re-running is a no-op by deterministic idempotency keys."
   repair_position_events_corruption.py:
     # Created: 2026-07-24
     # Last reused or audited: 2026-07-24
