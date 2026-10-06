@@ -8062,9 +8062,14 @@ def test_exact_held_sell_debt_preempts_every_cut_but_its_own_turn():
         reactor._EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
 
 
-def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
+@pytest.mark.parametrize("monitor_due", (False, True))
+def test_active_lock_reads_exact_debt_before_skipping(monkeypatch, monitor_due):
+    """Exact debt survives setup yielding; only final actuation owns its turn."""
+
+    import src.execution.executor as executor_module
     import src.events.reactor as reactor_module
     import src.main as main
+    import src.state.db as db
     from src.runtime import reactor_wake
 
     calls = []
@@ -8083,13 +8088,33 @@ def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
 
     class HeldLock:
         def locked(self):
+            calls.append("locked")
             return True
+
+        def acquire(self, **_kwargs):
+            pytest.fail("setup must not acquire an already-owned active lock")
+
+        def release(self):
+            pytest.fail("setup must not release another owner's active lock")
+
+    def defer(job):
+        assert job == "edli_event_reactor"
+        calls.append("monitor")
+        return monitor_due
 
     monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         main,
         "_defer_for_held_position_monitor",
-        lambda _job: pytest.fail("exact signal must bypass monitor defer"),
+        defer,
+    )
+    monkeypatch.setattr(
+        db, "get_world_connection",
+        lambda: pytest.fail("setup yield/active lock must precede runtime DB setup"),
+    )
+    monkeypatch.setattr(
+        executor_module, "execute_final_intent",
+        lambda *_args, **_kwargs: pytest.fail("setup yielding must not submit BUY"),
     )
     monkeypatch.setattr(
         reactor_module,
@@ -8120,7 +8145,9 @@ def test_active_lock_reads_exact_debt_before_skipping(monkeypatch):
     _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
     try:
         assert reactor_module.run_edli_event_reactor_cycle(active_lock=HeldLock()) is False
-        assert calls == ["pending", "requests", "eligible"]
+        assert calls == ["pending", "requests", "eligible", "monitor"] + (
+            [] if monitor_due else ["locked"]
+        )
         assert _EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
     finally:
         _EXACT_EXECUTABLE_HELD_SELL_PENDING.clear()
