@@ -153,7 +153,7 @@ def test_projected_evidence_does_not_taint_clean_selected_value(source):
     "label='diagnostic'\ndef pick():\n return label\nruntime=pick()\n",
     "def outer():\n label='diagnostic'\n def inner():\n  return label\n return inner()\nruntime=outer()\n",
     "record={'mode':'live','report':'diagnostic'}\nmode=record[key]\n",
-    "record={'report':'diagnostic'}\nopaque(record)\n",
+    "record={'report':'diagnostic'}\nmode=opaque(record)\n",
     "bag={}\nbag['value']='diagnostic'\nmode=bag['value']\n",
     "bag={'value':'live'}\nalias=bag\nalias['value']='diagnostic'\nruntime=bag['value']\n",
     "def pick(evidence,value):\n global runtime\n runtime=evidence\n return value\nmode=pick('diagnostic','live')\n",
@@ -162,10 +162,10 @@ def test_projected_evidence_does_not_taint_clean_selected_value(source):
     "def mutate(*,p,value):\n p['value']=value\nbag={}\nalias=bag\nmutate(p=alias,value='diagnostic')\nmode=bag['value']\n",
     "def mutate(p,value):\n p['value']=value\nbag={'nested':{}}\nmutate(bag['nested'],'diagnostic')\nruntime=bag['nested']['value']\n",
     "def mutate(*,p,value):\n p['value']=value\nbag={}\nmutate(p=bag.nested,value='diagnostic')\nruntime=bag.nested['value']\n",
-    "def mutate(p,value):\n p['value']=value\nmutate(p=opaque_target(),value='diagnostic')\n",
-    "receipt=opaque('diagnostic')\n",
-    "def report():\n return opaque('diagnostic')\nreport()\n",
-    "if opaque('diagnostic'):\n pass\n",
+    "def mutate(p,value):\n p['value']=value\nbag=opaque_target()\nmutate(p=bag,value='diagnostic')\nruntime=bag['value']\n",
+    "receipt=opaque('diagnostic')\nmode=receipt\n",
+    "def report():\n return opaque('diagnostic')\nruntime=report()\n",
+    "if opaque('diagnostic'):\n lane='live'\n",
     "flag='diagnostic'\nlane='live'\nif flag:\n lane='disabled'\n",
     "flag='diagnostic'\nif flag=='diagnostic':\n q_authority='enabled'\n",
     "flag='diagnostic'\nwhile flag:\n runtime=None\n",
@@ -200,7 +200,7 @@ def test_registered_data_effect_never_exempts_new_control_or_opaque_use(tmp_path
         legal + "lane='diagnostic'\n",
         legal + "q_authority=payload['report']\n",
         legal.replace("{'report':'diagnostic'}", "{'mode':'shadow'}"),
-        legal + "opaque('diagnostic')\n",
+        legal + "runtime=opaque('diagnostic')\n",
     ):
         path.write_text(source)
         assert violations(tmp_path), source
@@ -236,15 +236,15 @@ def test_known_structure_transfers_preserve_clean_selected_values(source):
     "r='diagnostic'\nrecord={**r}\nmode=record['anything']\n",
     "import json\nr={'report':'diagnostic','number':2.}\nparsed=json.loads(json.dumps(r))\nmode=parsed['report']\n",
     "import json\nr={'report':'diagnostic'}\nruntime=json.dumps(r)\n",
-    "import json\nr={'report':'diagnostic'}\nparsed=json.loads(json.dumps(r,default=custom))\n",
-    "import json\nparsed=json.loads('diagnostic',object_hook=custom)\n",
-    "import json\njson.dumps=custom\nr={'report':'diagnostic'}\nresult=json.dumps(r)\n",
-    "import json\nalias=json\nalias.dumps=custom\nr={'report':'diagnostic'}\nresult=json.dumps(r)\n",
-    "import json\nsetattr(json,'dumps',custom)\nr={'report':'diagnostic'}\nresult=json.dumps(r)\n",
+    "import json\nr={'report':'diagnostic'}\nparsed=json.loads(json.dumps(r,default=custom))\nmode=parsed['report']\n",
+    "import json\nmode=json.loads('diagnostic',object_hook=custom)\n",
+    "import json\njson.dumps=custom\nr={'report':'diagnostic'}\nmode=json.dumps(r)\n",
+    "import json\nalias=json\nalias.dumps=custom\nr={'report':'diagnostic'}\nmode=json.dumps(r)\n",
+    "import json\nsetattr(json,'dumps',custom)\nr={'report':'diagnostic'}\nmode=json.dumps(r)\n",
     "rows=[{'report':'diagnostic','number':2.}]\nmode=next(row['report'] for row in rows)\n",
     "rows=[{'report':'diagnostic','number':2.}]\nmode=next('live' for row in rows if row['report'])\n",
     "rows='diagnostic'\nmode=next(row['number'] for row in rows)\n",
-    "rows=[{'report':'diagnostic'}]\nresult=[opaque(row['report']) for row in rows]\n",
+    "rows=[{'report':'diagnostic'}]\nmode=[opaque(row['report']) for row in rows]\n",
 ])
 def test_structure_transfers_do_not_exempt_control_unknown_or_hooks(source):
     from scripts.check_single_live_semantics import _alternate_control_violations
@@ -260,14 +260,40 @@ def test_builtin_str_json_metadata_preserves_primitive_clock_and_center():
 
 
 @pytest.mark.parametrize('source', [
-    "import json\nr={'report':'diagnostic'}\nparsed=json.loads(json.dumps(r,default=evil))\n",
-    "import json\nstr=evil\nr={'report':'diagnostic'}\nparsed=json.loads(json.dumps(r,default=str))\n",
-    "import json\nclass str:\n pass\nr={'report':'diagnostic'}\nparsed=json.loads(json.dumps(r,default=str))\n",
+    "import json\nr={'report':'diagnostic'}\nmode=json.loads(json.dumps(r,default=evil))\n",
+    "import json\nstr=evil\nr={'report':'diagnostic'}\nmode=json.loads(json.dumps(r,default=str))\n",
+    "import json\nclass str:\n pass\nr={'report':'diagnostic'}\nmode=json.loads(json.dumps(r,default=str))\n",
     "import json\nclass Box:\n def __init__(self,label):\n  self.label=label\n def __str__(self):\n  global runtime\n  runtime=self.label\n  return '20'\nbox=Box('diagnostic')\nresult=json.dumps({'box':box},default=str)\n",
     "import json\nclass Box:\n def __str__(self):\n  global mode\n  mode=self.label\n  return '20'\nbox=Box(label='diagnostic')\nresult=json.dumps({'box':box},default=str)\n",
-    "import json\nobj=unknown_object('diagnostic')\nresult=json.dumps({'obj':obj},default=str)\n",
+    "import json\nobj=unknown_object('diagnostic')\nmode=json.dumps({'obj':obj},default=str)\n",
 ])
 def test_builtin_str_json_does_not_prove_hook_or_object_effects(source):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(source)
+
+
+@pytest.mark.parametrize('source', [
+    "receipt=opaque('diagnostic')\n",
+    "def report():\n return opaque('diagnostic')\nreport()\n",
+    "if opaque('diagnostic'):\n report={'value':2.}\n",
+    "value=opaque({'report':'diagnostic'})\nclock=parse_clock(value)\nnumber=sqrt(value)\n",
+    "from src.contracts.settlement_semantics import SettlementSemantics\n"
+    "if 'diagnostic':\n semantics=SettlementSemantics('forecast_preimage',precision=1)\n",
+])
+def test_unknown_metadata_without_protected_sink_is_coverage_not_violation(source):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(source) == []
+
+
+@pytest.mark.parametrize('source', [
+    "import json\ndef evil(value):\n global runtime\n runtime=value['report']\n return '2'\n"
+    "result=json.dumps({'report':'diagnostic'},default=evil)\n",
+    "import json\ndef hook(value):\n global mode\n mode=value\n return {}\n"
+    "result=json.loads('diagnostic',object_hook=hook)\n",
+    "if opaque('diagnostic'):\n state='enabled'\n",
+    "from src.contracts.settlement_semantics import SettlementSemantics\nsemantics='diagnostic'\n",
+])
+def test_unknown_or_formatting_dependency_at_protected_sink_still_rejects(source):
     from scripts.check_single_live_semantics import _alternate_control_violations
     assert _alternate_control_violations(source)
 

@@ -19246,3 +19246,35 @@ Retain lexical binding, projection, alias/keyword mutation, actual protected
 predicate writes and resolved custom-hook control effects; no whole-helper
 exemption or second-runtime escape. Wait for ROOT's concrete followup before
 changing this rule or running another whole CLI. Source/q/loader stay frozen.
+
+ROOT BEFOREEDIT now authorizes the bounded protected-sink-directed rule:
+unknown report/hash/clock/numeric effects are coverage UNKNOWN, not alternate
+runtime violations unless their value, receiver mutation, callback or predicate
+reaches a protected selector. Keep alias/keyword and lexical effect summaries;
+resolved local formatting hooks' protected writes must still reject. Only
+checker/existing tests (registry only if explanatory wording is necessary),
+no source/q change or generic effect interpreter. Trusted imported physical
+SettlementSemantics construction is not a scalar runtime selector; scalar
+semantics, Enum/CLI/SQL controls remain protected. One focused epoch including
+134 prior cases and20 semantic controls; no whole CLI before ROOT review.
+
+Protected-sink checkpoint:5 exact ordinary metadata/physical-constructor cases
+fail against the previous1e28 checker (5F1.831s), XML
+/tmp/zeus-single-live-sink-directed-red.xml SHA256
+8d762a466927f93b67b8d82e215fac8caf3a74e7ec43ee436901ff7b96828b3a.
+New same-source focused suite163P9.358s,0F/E/S (134 prior single-live cases,
+9 new cases,20 unchanged semantic cases), XML
+/tmp/zeus-single-live-sink-directed-focused.xml SHA256
+0e3c937b833cca482e35b0d7757b81b474d324ca7da46d8275a8bf56d5e82800.
+Intent changes are explicit:16 former bare opaque/report/custom-format cases
+now test the unknown value at an actual protected sink, instead of asserting
+unconditional purity of metadata effects. Known Box.__str__ global runtime
+writes and explicit local JSON default/object_hook writes remain rejected via
+the existing local-function checks. Unknown metadata effects remain a coverage
+limit, not a claim that callees are pure. Scalar semantics/Enum/CLI/SQL/mixed
+state controls, keyword/alias mutations and predicate controls retain tests.
+Only a trusted direct SettlementSemantics constructor is distinguished from
+a scalar runtime selector; no arbitrary physical helper is exempted.
+No registry waiver or source/q/loader changes, AST/diff-check pass. The actual
+whole CLI was not run; release qualification and upstream213 stay OPEN until
+ROOT reviews this exact checkpoint and authorizes the next actual gate.

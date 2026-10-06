@@ -338,6 +338,10 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     functions = {node.name: node for node in nodes
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     classes = {node.name for node in nodes if isinstance(node, ast.ClassDef)}
+    class_defs = {node.name: node for node in nodes if isinstance(node, ast.ClassDef)}
+    physical_semantics = {alias.asname or alias.name for node in nodes if isinstance(node, ast.ImportFrom)
+                          and node.module == 'src.contracts.settlement_semantics'
+                          for alias in node.names if alias.name == 'SettlementSemantics'}
     json_modules = {alias.asname or alias.name for node in nodes if isinstance(node, ast.Import)
                     for alias in node.names if alias.name == 'json'}
     hash_modules = {alias.asname or alias.name for node in nodes if isinstance(node, ast.Import)
@@ -354,9 +358,11 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 json_modules.discard(base.id)
                 hash_modules.discard(base.id)
                 json_mutations.add(base.id)
+                physical_semantics.discard(base.id)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             json_modules.discard(node.name)
             hash_modules.discard(node.name)
+            physical_semantics.discard(node.name)
         if (isinstance(node, ast.Call) and _call_name(node.func) == 'setattr'
                 and node.args and isinstance(node.args[0], ast.Name)):
             json_mutations.add(node.args[0].id)
@@ -427,6 +433,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 (writes if path else assignments).setdefault(root(name), []).append((path, value))
     json_modules = {root(name) for name in json_modules} - {root(name) for name in json_mutations}
     hash_modules = {root(name) for name in hash_modules} - {root(name) for name in json_mutations}
+    physical_semantics = {root(name) for name in physical_semantics}
 
     def join(values):
         return set().union(*values) if values else set()
@@ -444,6 +451,31 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     active = set()
     call_active = set()
     opaque_calls = set()
+
+    def formatting_effects(node, bindings, paths):
+        # Reuse local function write checks, not a purity claim about hooks.
+        hooks = []
+        for kw in node.keywords:
+            if kw.arg in {'default', 'object_hook', 'object_pairs_hook', 'cls'}:
+                hook = functions.get(root(_call_name(kw.value)))
+                if hook is not None:
+                    hooks.append((hook, paths))
+                if kw.arg == 'default' and isinstance(kw.value, ast.Name) and root(kw.value.id) == 'str':
+                    for path in paths:
+                        if formatted_object in path:
+                            index = path.index(formatted_object)
+                            klass = class_defs.get(path[index + 1]) if len(path) > index + 1 else None
+                            if klass is not None:
+                                hooks.extend((child, {('*',)}) for child in klass.body
+                                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                    and child.name == '__str__')
+        for hook, inputs in hooks:
+            params = [*hook.args.posonlyargs, *hook.args.args]
+            supplied = dict(bindings)
+            if params:
+                supplied[root(params[0].arg)] = inputs
+            for child in own_nodes(hook):
+                check(child, supplied)
 
     def value(node, bindings):
         if node is None:
@@ -510,6 +542,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             name = root(_call_name(node.func))
             arguments = [value(arg, bindings) for arg in node.args]
             keywords = {arg.arg: value(arg.value, bindings) for arg in node.keywords}
+            if (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                    and root(node.func.value.id) in json_modules and node.func.attr in {'dumps', 'loads'}):
+                formatting_effects(node, bindings, join(arguments))
             fn = functions.get(name)
             if fn is not None and fn not in call_active:
                 call_active.add(fn)
@@ -627,7 +662,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 if name in classes and join([*arguments, *keywords.values()]):
                     # Known fields do not prove that serializing a custom
                     # object's __str__ is a primitive-data operation.
-                    result.add((formatted_object,))
+                    result.add((formatted_object, name))
             elif name in {'str', 'float', 'int', 'bool', 'bytes', 'len', 'repr', 'list', 'tuple'}:
                 result = join(arguments)
             elif isinstance(node.func, ast.Attribute) and node.func.attr in {'upper', 'lower', 'strip', 'copy'}:
@@ -673,12 +708,15 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             pending = list(branches)
             seen_helpers = set()
             mutated = set()
-            branch_controls = _LIVE_CONTROL_TARGETS | {'probability_authority', 'q_authority', 'trade_authority'}
+            branch_controls = _LIVE_CONTROL_TARGETS | {'probability_authority', 'q_authority', 'trade_authority', 'state'}
             while pending:
                 child = pending.pop()
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
                     continue
-                if isinstance(child, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.Dict, ast.Call)):
+                physical_assignment = (isinstance(child, (ast.Assign, ast.AnnAssign))
+                    and isinstance(child.value, ast.Call)
+                    and root(_call_name(child.value.func)) in physical_semantics)
+                if not physical_assignment and isinstance(child, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.Dict, ast.Call)):
                     mutated |= _mutated_controls(child, {}, controls=branch_controls)
                 if isinstance(child, ast.Call):
                     helper = functions.get(root(_call_name(child.func)))
@@ -718,8 +756,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             statement = node
             while not isinstance(statement, ast.stmt) and statement in parents:
                 statement = parents[statement]
-            if node in opaque_calls and getattr(statement, '_source_use_hash', None) not in approved:
-                out.add(f"alternate-runtime UNKNOWN opaque side effect at line {node.lineno}")
+            # Unknown metadata effects are a coverage limit, not proof of a
+            # second runtime. Their returned paths remain unknown, so actual
+            # selector reads, mutations and control predicates still fail.
     # Resolve call-side mutations before reading sink expressions; statement
     # traversal order must not make a previously cached alias look clean.
     for node in nodes:
