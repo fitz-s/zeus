@@ -1109,7 +1109,8 @@ def test_normal_HKO_X_only_without_independent_Y_originals(tmp_path, monkeypatch
 
 
 def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missing_full_y=False,
-                                       city_name="London", producer_only=False, google_resume=False):
+                                       city_name="London", producer_only=False, google_resume=False,
+                                       full_y_ready=None):
     import eccodes as ec
     import numpy as np
     from types import SimpleNamespace
@@ -1484,6 +1485,11 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
                     enforce_raw_input_hwm=True, authority_purpose=purpose)
                 assert served.ok, served.reason_code
                 assert served.bundle.posterior_id == full.posterior_id
+            if full_y_ready is not None:
+                # Optional integration seam: originals and both public readers
+                # have passed; the callback owns no admission or q overrides.
+                return full_y_ready(conn=s.conn, city=city, request=full_request,
+                                    bundle=served.bundle, decision_time=cut)
         # Same canonical originals, now Day0 with actual typed station prints
         # and parsed provider vectors. A spot is not a complete prefix.
         from src.data.day0_hourly_vectors import day0_hourly_models_for_city, parse_openmeteo_hourly_payload, persist_day0_hourly_vectors
