@@ -117,6 +117,64 @@ and 21:38:23 requests remain superseded. HIGH/LOW keeper payload SHA prefixes
 current temperature 25.2 at 21:40 UTC. This proves queue transport urgency,
 not a committed posterior, executable edge, fill, or readiness.
 
+NOTE 2026-10-06 (not landed; ordering cannot serve both Day0 and newly listed
+markets under congestion; capacity is the lever). Branch
+`fix/queue-station-revision-all-sources`, commit `26098f97d`, generalized the
+own-clock tier from the `hko_`/`cwa_` provider prefix to the domain fact (a
+typed current-temperature or `day0_observation_advanced` revision with a valid
+conditioning identity for the city's own local day) and added a reserved claim
+slot. It is NOT merged and its commit message replay table is INVALID: the
+replay harness deleted its forecast DB before the planner ran, so the
+never-priced tier and the `current_baseline` fresh-print rung never fired in
+any table reported with it. Do not trust that table. Corrected figures, 24 h of
+real arrivals through the real claim planner, 3 claims per run, held/global
+frozen from live, forecast DB live, `source_run` and never-priced modelled
+(minutes, p50/p90/p99; "listed<3h" = D+1/D+2 whose family was first listed
+under 3 h before the request; n=21-39, so tails are near the maximum):
+
+| run interval (claims/h) | variant | D0 current-state | D+1/D+2 all | listed<3h | backlog 05:30Z |
+|---|---|---|---|---|---|
+| 22.5 s (480) | old | 0.6/5.5/19.5 | 11.1/46.7/88.4 | 4.5/18.5/20.0 | 0 |
+| | slot | 1.4/6.9/17.2 | 9.6/34.1/61.3 | 7.5/35.8/40.3 | 0 |
+| | rung | 0.7/5.6/12.0 | 14.4/86.8/250.3 | 4.7/21.2/23.4 | 0 |
+| 30 s (360) | old | 0.9/6.9/64.2 | 20.5/143.1/520.9 | 7.8/34.2/36.8 | 0 |
+| | slot | 3.6/12.3/29.8 | 27.8/92.6/200.2 | 31.8/186.3/286.8 | 1 |
+| | rung | 1.4/9.8/26.7 | 22.5/474.7/715.9 | 9.8/38.7/40.8 | 213 |
+| 35 s (309) | old | 1.1/7.9/113.5 | 25.2/288.1/632.7 | 11.0/42.2/44.8 | 143 |
+| | slot | 4.4/16.4/46.0 | 36.2/143.9/651.0 | 34.0/367.0/667.4 | 69 |
+| | rung | 1.7/12.4/32.7 | 42.3/659.8/832.9 | 27.3/58.0/59.9 | 420 |
+
+`slot` = own-clock tier -9 for every provider plus a reserved last claim slot.
+`rung` = no tier lift; each current-local-day observation revision gets
+`tier - 0.5` inside its own tier with the 900 s freshness gate removed. A
+rung that keeps the 900 s gate and drops only the `current_baseline` gate is
+bit-identical to old: `source_run` baselines are SUCCESS at the request's own
+cycle for all 13,438 requests, so the existing rung already covers every
+observation under 900 s old, and only 52.6% of current-state revisions are
+that fresh when written (p50 age 805 s).
+
+Verdict. `slot` protects D+1/D+2 draining but delays newly listed markets
+(listed<3h p99 20.0 to 40.3 at 480/h, 36.8 to 286.8 at 360/h), the early-market
+axis. `rung` protects newly listed markets (p99 within 17%/11%/34% of old) but
+does not improve Day0 p90 and lets D+1/D+2 backlog grow without bound once Day0
+arrivals (measured about 395/h into the own-clock tier before coalescing)
+approach capacity. Each only reorders a fixed capacity; below roughly 360
+claims/h neither serves both. Live capacity is below the nominal 480/h:
+24 h posterior writes averaged 384/h (range 137-533/h). The lever is capacity:
+coordinator's fit on 873 live three-request runs is runner_wait = 2.86 s + 2.35
+s per committed posterior plus about 4.7 s (p50) planning/claim per run, so
+fixed per-run overhead (~7.5 s) exceeds the marginal cost; raising the per-run
+limit amortizes it. That decision is the operator's and is not made here.
+
+Residual uncertainty: the replay models 3 claims per run at zero service time
+(no 5 s/posterior serialization, child timeouts, retries, already-covered or
+blocked skips); capacity tiers are inferred from posterior writes; listing age
+uses `market_events.created_at` only; the 02:50Z queue is rebuilt from
+receipts with six lagging families added by hand. In the forward replay from
+that queue, London high and Jeddah high wait 14-40 min under every variant and
+every capacity tier (480/h: 14.2-21.8; 360/h: 23.0-31.5; 309/h: up to 39.7),
+which ordering alone does not fix.
+
 ## 2026-10-02 exact zero-current-extras queue drain
 
 Verified defect: a completed current capture can legitimately select zero
