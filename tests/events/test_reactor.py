@@ -4240,12 +4240,69 @@ def test_blocked_entry_cycle_returns_before_runtime_db_setup(monkeypatch):
 
 
 def test_blocked_entry_cycle_keeps_untyped_held_sell_completion_wake(monkeypatch):
+    """Pause reads/proof setup are legal; an untyped wake is not a SELL target.
+
+    Stop at runtime setup, not a full SDK cycle. The adjacent canonical generic
+    completion cut test covers the subsequent no-BUY/fairness drain.
+    """
+
+    import src.engine.event_reactor_adapter as adapter_module
+    import src.events.reactor as reactor_module
+    import src.execution.executor as executor_module
     import src.main as main
     import src.state.db as db
     from src.events.reactor import run_edli_event_reactor_cycle
     from src.riskguard import riskguard
     from src.riskguard.risk_level import RiskLevel
     from src.runtime import reactor_wake
+
+    class RuntimeSetupReached(RuntimeError):
+        pass
+
+    conn, _ = _store()
+    conn.row_factory = sqlite3.Row
+    assert db.upsert_control_override(
+        conn,
+        override_id="control_plane:global:entries_paused",
+        target_type="global",
+        target_key="entries",
+        action_type="gate",
+        value="true",
+        issued_by="control_plane",
+        issued_at="2026-05-24T00:00:00+00:00",
+        reason="operator_pause",
+    )["status"] == "written"
+    conn.commit()
+    wake = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+    )
+    calls = {"world": 0, "evaluate": 0, "buy": 0}
+    pause_states = []
+    query_pause = db.query_control_override_state
+
+    def read_pause(current_conn, **kwargs):
+        state = query_pause(current_conn, **kwargs)
+        pause_states.append(state)
+        return state
+
+    def world_connection():
+        calls["world"] += 1
+        if calls["world"] == 1:
+            return conn  # The owning pause reader closes this connection.
+        raise RuntimeSetupReached
+
+    def evaluate(*_args, **_kwargs):
+        calls["evaluate"] += 1
+        pytest.fail("runtime boundary must precede ordinary evaluation")
+
+    def buy(*_args, **_kwargs):
+        calls["buy"] += 1
+        pytest.fail("blocked entry must not submit BUY")
+
+    monkeypatch.setattr(db, "query_control_override_state", read_pause)
+    monkeypatch.setattr(adapter_module, "event_bound_live_adapter_from_trade_conn", evaluate)
+    monkeypatch.setattr(executor_module, "execute_final_intent", buy)
 
     monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
@@ -4266,18 +4323,33 @@ def test_blocked_entry_cycle_keeps_untyped_held_sell_completion_wake(monkeypatch
     monkeypatch.setattr(
         db,
         "get_world_connection",
-        lambda: pytest.fail("completion wake must stay durable while blocked"),
+        world_connection,
     )
 
-    assert (
-        run_edli_event_reactor_cycle(
-            active_lock=threading.Lock(),
-            producer_wake_reason=(
-                "held_sell_global_auction_completion_requested"
-            ),
+    lock = threading.Lock()
+    try:
+        with pytest.raises(RuntimeSetupReached):
+            run_edli_event_reactor_cycle(
+                active_lock=lock,
+                producer_wake_reason=wake.reason,
+                producer_wake_ids=(wake.wake_id,),
+                producer_wake_published_at=wake.published_at,
+            )
+        assert calls == {"world": 2, "evaluate": 0, "buy": 0}
+        assert len(pause_states) == 1
+        assert pause_states[0]["entries_paused"] is True
+        assert pause_states[0]["entries_pause_reason"] == "operator_pause"
+        assert lock.locked() is False
+        queued = reactor_wake.reactor_wakes_since(None, fail_on_error=True)
+        assert wake in queued
+        assert wake.held_sell_reauction_requests == ()
+        assert wake.wake_id not in reactor_wake.exact_held_sell_completion_wake_ids(
+            fail_on_error=True,
         )
-        is False
-    )
+        assert not reactor_module._EXACT_EXECUTABLE_HELD_SELL_PENDING.is_set()
+    finally:
+        conn.close()
+        reactor_wake.acknowledge_reactor_wake(wake)
 
 
 @pytest.mark.parametrize("risk_level_name", ("YELLOW", "ORANGE", "RED"))
