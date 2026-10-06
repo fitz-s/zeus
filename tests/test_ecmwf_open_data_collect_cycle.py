@@ -1,6 +1,6 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-10-04
-# Lifecycle: created=2026-05-11; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Last reused/audited: 2026-10-06
+# Lifecycle: created=2026-05-11; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Protect collector isolation, optional native capture and offline 2t knots without prediction-budget regression.
 # Reuse: Inspect source-run, land-mask and shared-deadline contracts; use private DB/GRIB fixtures and fake HTTP.
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.5
@@ -3442,6 +3442,441 @@ def _record_raw_authority(
             ),
         )
     conn.commit()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkeypatch, metric):
+    """Normal capture/commit/cleanup feeds the unmocked public role reader."""
+    import eccodes as ec
+    import numpy as np
+    from tests import test_replacement_forecast_materializer as fixture
+    from src.data import ecmwf_open_data as native
+
+    # Actual original bytes are controlled before transport/index/capture.
+    # No capture header, possession, role qualification or width is mocked.
+    set_values = ec.codes_set_values
+    def atom_values(gid, values):
+        if ec.codes_get(gid, "paramId") in {167, 228026, 228027}:
+            ec.codes_set(gid, "packingType", "grid_ieee")
+            ec.codes_set(gid, "precision", 2)
+            values = np.full(len(values), 284.15)
+        return set_values(gid, values)
+    monkeypatch.setattr(ec, "codes_set_values", atom_values)
+    shape_reader = fixture.materializer_mod._read_current_evidence_shape
+    class Verified(BaseException):
+        pass
+    def check_retained_role(conn, request, **kwargs):
+        shape = shape_reader(conn, request, **kwargs)
+        assert shape is not None
+        point = shape.native_point_model
+        assert point["member_points_c"] == [11.] * 51
+        paths = native._resolve_opendata_paths()
+        source = native._download_output_path(run_date=date(2026, 10, 3), run_hour=12,
+            param="mx2t3" if metric == "high" else "mn2t3", raw_root=paths.raw_root)
+        assert not source.exists()  # Real operator zero-grace cleanup executed.
+        snapshot = conn.execute("SELECT provenance_json FROM ensemble_snapshots WHERE snapshot_id=?",
+            (shape.snapshot_id,)).fetchone()
+        capture = json.loads(snapshot[0])["native_capture_receipt"]["messages"][0]
+        retained = native._role_message_path(paths.raw_root, capture["raw_message_sha256"])
+        original = retained.read_bytes()
+        clocks = (point["interval_snapshot_available_at"], point["interval_snapshot_written_at"])
+        assert clocks == ("2026-10-03T22:00:00+00:00", "2026-10-03T22:00:00.000+00:00")
+        retained.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        assert shape_reader(conn, request, **kwargs) is None
+        retained.write_bytes(original)  # Exact evidence restoration, no new clock.
+        restored = shape_reader(conn, request, **kwargs)
+        assert restored is not None
+        assert (restored.native_point_model["interval_snapshot_available_at"],
+                restored.native_point_model["interval_snapshot_written_at"]) == clocks
+
+        # Real private canonical reference rows, not a mocked references API.
+        # This is a custody ledger fixture; it grants no venue/q admission.
+        from src import config
+        from src.state import db as state_db
+        from src.data import replacement_forecast_production as production
+        from src.data.replacement_forecast_cycle_policy import replacement_source_cycle_max_age_hours
+        from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+        from src.execution.command_bus import CommandState
+        ledgers = tmp_path / "ledgers"
+        ledgers.mkdir()
+        world_path, trade_path = ledgers / "zeus-world.db", ledgers / "zeus_trades.db"
+        world, trade = sqlite3.connect(world_path), sqlite3.connect(trade_path)
+        state_db.init_schema_world_only(world)
+        state_db.init_schema_trade_only(trade)
+        world.commit(); trade.commit()
+        monkeypatch.setattr(config, "STATE_DIR", ledgers)
+        monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
+        queued = {name: tmp_path / name for name in ("seed_dir", "request_dir", "inflight_dir")}
+        for directory in queued.values():
+            directory.mkdir()
+        monkeypatch.setattr(production, "_replacement_forecast_live_materialization_queue_config", lambda: queued)
+        provenance = {"bayes_precision_fusion": {"current_evidence_shape": shape.as_payload()}}
+        # Retain actual primary AND actual paired original identities.
+        posterior_hash = "private-custody-posterior-" + metric
+        cycle = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+        cursor = conn.execute("""INSERT INTO forecast_posteriors(source_id,product_id,data_version,city,
+            target_date,temperature_metric,source_cycle_time,source_available_at,computed_at,
+            q_json,posterior_method,posterior_identity_hash,provenance_json)
+            VALUES('TEST_ONLY_CUSTODY','TEST_ONLY_CUSTODY','TEST_ONLY_CUSTODY','London','2026-10-04',?,?,?,?,?,'TEST_ONLY_CUSTODY',?,?)""",
+            (metric, cycle.isoformat(), clocks[0], request.computed_at.isoformat(), "[]", posterior_hash, json.dumps(provenance)))
+        posterior_id = cursor.lastrowid
+        conn.commit()
+        boundary = cycle + timedelta(hours=replacement_source_cycle_max_age_hours()) + 2 * FRESHNESS_WINDOW_DEFAULT
+        def sweep(at):
+            plan = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+                reference_date=at.date(), reference_time=at)
+            assert plan.role_reference_complete, plan.role_reference_errors
+            return native._apply_decoded_open_data_raw_retention(plan)
+        assert sweep(boundary)["role_message_deleted_count"] >= 0
+        assert retained.exists()  # <= the real derived deadline remains live.
+        late = boundary + timedelta(microseconds=1)
+        replicas = {p: p.read_bytes() for p in retained.parent.glob("*.grib2")}
+        assert sweep(late)["role_message_deleted_count"] > 0
+        assert not retained.exists()  # +epsilon without consumers really clears.
+        for path, body in replicas.items():
+            path.write_bytes(body)  # Restore only the exact previously captured bytes.
+
+        # A new ordinary collector capture replaces the legal Y frontier,
+        # without unpinning the old frozen posterior/unfinished dependencies.
+        from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+        from scripts import extract_open_ens_localday as decoder
+        from src.config import runtime_coordinate_manifest_json
+        next_run = cycle + timedelta(hours=6)
+        next_now = next_run + timedelta(hours=10)
+        conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) VALUES('next-normal-frontier','London','2026-10-04',?,'next-normal-token','11C')", (metric,))
+        conn.commit()
+        class NextClock(native.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return next_now.astimezone(tz or timezone.utc)
+        monkeypatch.setattr(native, "datetime", NextClock)
+        monkeypatch.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: next_now.isoformat())
+        coord_json = runtime_coordinate_manifest_json()
+        coord_sha = hashlib.sha256(coord_json.encode()).hexdigest()
+        coord = tmp_path / "next-coordinate-manifest.json"
+        coord.write_text(coord_json)
+        static_dir = tmp_path / "next-static"
+        static_dir.mkdir()
+        static = _native_temperature_knots_fixture(static_dir, steps=(0, 3), hour=18)
+        for next_metric, track_name in (("high", "mx2t6_high"), ("low", "mn2t6_low")):
+            folder = tmp_path / ("next-" + track_name)
+            folder.mkdir()
+            original_path, _, _, _ = _tiny_native_grib(folder, track_name, issue=next_run, horizon=36)
+            track = decoder.TRACKS[track_name]
+            target = native._download_output_path(run_date=next_run.date(), run_hour=18,
+                param=track.open_data_param, raw_root=paths.raw_root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            bodies = []
+            with original_path.open("rb") as stream:
+                while (gid := ec.codes_grib_new_from_file(stream)) is not None:
+                    try:
+                        ec.codes_set(gid, "generatingProcessIdentifier", 161)
+                        bodies.append(ec.codes_get_message(gid))
+                    finally:
+                        ec.codes_release(gid)
+            target.write_bytes(b"".join(bodies))
+            mask, phi = _physical_static_originals(static, directory=target.parent, track=track_name)
+            extracted = decoder.extract_open_ens_localday(grib_path=target, track_name=track_name,
+                manifest_path=coord, cities_filter={"London"},
+                output_root=paths.raw_root / "raw/coordinate_manifests" / coord_sha,
+                mask_grib_path=mask, mask_proof_path=mask.with_suffix(".proof.json"),
+                surface_geopotential_grib_path=phi, surface_geopotential_proof_path=phi.with_suffix(".proof.json"))
+            sample = json.loads(Path(extracted["sample_outputs"][0]).read_text())
+            collected = native.collect_open_ens_cycle(track=track_name, skip_download=True,
+                skip_extract=True, conn=conn, now_utc=next_now, _paths=paths,
+                grid_surface_source_evidence=sample["grid_surface_evidence"])
+            assert collected["status"] == "ok", collected
+            assert not target.exists()
+            assert conn.execute("SELECT COUNT(*) FROM ensemble_snapshots WHERE city='London' AND temperature_metric=? AND source_cycle_time=?",
+                (next_metric, next_run.isoformat())).fetchone()[0] > 0
+        assert sweep(next_now)["role_message_deleted_count"] == 0
+        assert retained.exists()  # A new frontier alone cannot erase old authority.
+        aggregate_root = paths.raw_root / "raw/ecmwf_open_ens/ecmwf"
+        parked_root = aggregate_root.with_name("private-aggregate-parked")
+        aggregate_root.rename(parked_root)
+        assert sweep(next_now)["role_message_deleted_count"] == 0
+        assert retained.exists()  # Missing aggregates do not imply missing consumers.
+        postday = datetime(2026, 10, 5, tzinfo=timezone.utc)
+        batch = queued["inflight_dir"] / "claimed-real-request"
+        batch.mkdir()
+        pending = batch / "request.json"
+        pending.write_text(json.dumps({"city": "London", "target_date": "2026-10-04",
+            "temperature_metric": metric, "computed_at": request.computed_at.isoformat(),
+            "posterior_id": posterior_id}))
+        sweep(postday)  # Unreferenced new-run bodies may already drain.
+        assert retained.exists()  # Immutable request cut is not wall-clock age.
+        from src.data import replacement_forecast_live_materialization_queue as queue
+        staged = batch.with_name(queue._STAGING_PREFIX + "actual-old-cut")
+        batch.rename(staged)
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        assert retained.exists()  # Normal unpublished atomic-claim window.
+        staged.rename(batch)
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        recovered = queued["request_dir"] / "request.json"
+        (batch / pending.name).rename(recovered)
+        batch.rmdir()
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        assert retained.exists()  # Normal reverse recovery still holds the cut.
+        capture_dir = queued["request_dir"].parent / queue._REQUEST_ALIAS_DIR / (queue._CAPTURE_PREFIX + "actual-old-cut")
+        payload_dir = capture_dir / queue._CAPTURE_PAYLOAD_DIR
+        payload_dir.mkdir(parents=True)
+        recovered.rename(payload_dir / recovered.name)
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        assert retained.exists()  # Regular capture payload awaits normal recovery.
+        assert queue._settle_capture(capture_dir, queued["request_dir"]) is None
+        assert recovered.exists()
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        moved_batch = queued["inflight_dir"] / "private-moving-claim"
+        moved_batch.mkdir()
+        actual_read = queue.read_regular_request
+        moved = []
+        def move_during_read(path):
+            result = actual_read(path)
+            if path == recovered and not moved:
+                recovered.rename(moved_batch / recovered.name)
+                moved.append(True)
+            return result
+        with monkeypatch.context() as concurrent_move:
+            concurrent_move.setattr(queue, "read_regular_request", move_during_read)
+            changing = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+                reference_date=postday.date(), reference_time=postday)
+        assert "ROLE_RETENTION_REFERENCE_MUTATED" in changing.role_reference_errors
+        assert not changing.role_reference_complete
+        assert native._apply_decoded_open_data_raw_retention(changing)["role_message_deleted_count"] == 0
+        assert retained.exists()
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        (moved_batch / recovered.name).unlink()
+        moved_batch.rmdir()
+        empty_plan = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+            reference_date=postday.date(), reference_time=postday)
+        assert capture["raw_message_sha256"] not in empty_plan.live_role_hashes
+        recovered.write_text(json.dumps({"city": "London", "target_date": "2026-10-04",
+            "temperature_metric": metric, "computed_at": request.computed_at.isoformat(),
+            "posterior_id": posterior_id}))
+        refreshed = native._apply_decoded_open_data_raw_retention(empty_plan)
+        assert not refreshed["errors"] and retained.exists()
+        recovered.unlink()  # A valid new exact reference also defeats stale GC.
+        # A derived Day0 q_version must resolve through the actual command
+        # attribution and WORLD parent edge, not string-match posterior hash.
+        for cert_id, digest, body in (("parent", "parent-hash", {"posterior_id": posterior_id}),
+                                     ("child", "child-hash", {"TEST_ONLY_CUSTODY_REFERENCE": True})):
+            world.execute("""INSERT INTO decision_certificates(certificate_id,certificate_type,schema_version,
+                canonicalization_version,semantic_key,claim_type,mode,decision_time,authority_id,
+                authority_version,algorithm_id,algorithm_version,payload_json,payload_hash,
+                certificate_hash,verifier_status,created_at)
+                VALUES(?, 'TEST_ONLY_CUSTODY_REFERENCE',1,'v1',?,'TEST_ONLY_CUSTODY_REFERENCE','LIVE',?,
+                'TEST_ONLY_CUSTODY','v1','TEST_ONLY_CUSTODY','v1',?,'TEST_ONLY_CUSTODY',?,'VERIFIED',?)""",
+                (cert_id, cert_id, cycle.isoformat(), json.dumps(body), digest, cycle.isoformat()))
+        world.execute("INSERT INTO decision_certificate_edges VALUES('child','forecast_parent','parent-hash','TEST_ONLY_CUSTODY_REFERENCE',1,?)", (cycle.isoformat(),))
+        world.commit()
+        conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) VALUES('custody-ref','London','2026-10-04',?,'custody-token','11C')", (metric,))
+        conn.commit()
+        trade.execute("""INSERT INTO venue_commands(command_id,snapshot_id,envelope_id,position_id,
+            decision_id,idempotency_key,intent_kind,market_id,token_id,side,size,price,state,
+            created_at,updated_at,q_version) VALUES('custody-command','TEST_ONLY','TEST_ONLY','TEST_ONLY',
+            'NOT_A_CERTIFICATE_HASH','custody-command','ENTRY','TEST_ONLY','custody-token','BUY',1,.5,?,?,?,'derived-day0-q-version')""",
+            (CommandState.INTENT_CREATED.value, cycle.isoformat(), cycle.isoformat()))
+        trade.execute("""INSERT INTO position_decision_attribution(attribution_id,position_id,command_id,
+            decision_certificate_hash,resolution,source,intent_kind,created_at,schema_version)
+            VALUES('custody-ref','TEST_ONLY','custody-command','child-hash','ATTRIBUTED','LIVE_DECISION','ENTRY',?,1)""", (cycle.isoformat(),))
+        trade.commit()
+        assert sweep(postday)["role_message_deleted_count"] == 0
+        assert retained.exists()
+        world.execute("DELETE FROM decision_certificate_edges WHERE child_certificate_id='child'")
+        world.commit()
+        # Missing mapping is scoped UNKNOWN, never absence of a consumer.
+        uncertain = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+            reference_date=postday.date(), reference_time=postday)
+        assert "ROLE_RETENTION_COMMAND_REFERENCE_UNKNOWN" in uncertain.role_reference_errors
+        native._apply_decoded_open_data_raw_retention(uncertain)
+        assert retained.exists()
+        trade.execute("UPDATE venue_commands SET state=? WHERE command_id='custody-command'", (CommandState.FILLED.value,))
+        trade.commit()
+        cleared = sweep(postday)
+        assert cleared["role_message_deleted_count"] > 0
+        assert not retained.exists()  # Normal clearing of real references resets GC.
+        parked_root.rename(aggregate_root)
+        world.close(); trade.close()
+        raise Verified
+    monkeypatch.setattr(fixture.materializer_mod, "_read_current_evidence_shape", check_retained_role)
+    surfaces = fixture._hko_native_surfaces.__wrapped__(tmp_path, monkeypatch)
+    next(surfaces)
+    ground = fixture._hko_source_surface.__wrapped__(tmp_path, monkeypatch, None)
+    next(ground)
+    try:
+        with pytest.raises(Verified):
+            fixture.test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkeypatch, metric)
+    finally:
+        ground.close()
+        surfaces.close()
+
+
+@pytest.mark.parametrize("replacement", ("root", "parent"))
+def test_role_original_gc_rejects_replaced_symlink_ancestor(tmp_path, replacement):
+    from src.data import ecmwf_open_data as native
+    raw_root = tmp_path / "owned"
+    root = raw_root / "raw/ecmwf_open_ens/ecmwf"
+    root.mkdir(parents=True)
+    body = native._role_message_path(raw_root, "a" * 64)
+    body.parent.mkdir()
+    body.write_bytes(b"outside evidence must remain")
+    plan = native._RawRetentionPlan(root, (), 0, 0, 0, 0)
+    component = root if replacement == "root" else root.parent
+    saved = component.with_name(component.name + "-original")
+    component.rename(saved)
+    component.symlink_to(saved, target_is_directory=True)
+    result = native._apply_decoded_open_data_raw_retention(plan)
+    assert result["status"] == "ERROR"
+    assert result["role_message_deleted_count"] == 0
+    assert body.read_bytes() == b"outside evidence must remain"
+
+
+def test_role_original_publication_failure_retains_group_and_normal_retry_resets(tmp_path, monkeypatch):
+    from src.data import ecmwf_open_data as native
+    from scripts.extract_open_ens_localday import _native_message_capture
+    ec = pytest.importorskip("eccodes")
+    gid = ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+    try:
+        ec.codes_set(gid, "productDefinitionTemplateNumber", 11)
+        ec.codes_set(gid, "paramId", 228026)
+        raw, capture = ec.codes_get_message(gid), _native_message_capture(gid)
+        assert capture["capture_status"] == "OBSERVED", capture
+    finally:
+        ec.codes_release(gid)
+    raw_root = tmp_path / "owned"
+    root = raw_root / "raw/ecmwf_open_ens/ecmwf"
+    source = root / "20261003" / "open_ens_20261003_12z_steps_test_params_mx2t3.grib2"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(raw)
+    plan = native._RawRetentionPlan(root, (source,), 1, 0, 0, len(raw),
+        (((source,), (capture,)),), frozenset({capture["raw_message_sha256"]}))
+    original_link = os.link
+    def interrupt_publish(*args, **kwargs):
+        raise OSError("private publication interruption")
+    monkeypatch.setattr(os, "link", interrupt_publish)
+    failed = native._apply_decoded_open_data_raw_retention(plan)
+    assert failed["status"] == "ERROR" and source.read_bytes() == raw
+    assert failed["role_message_deleted_count"] == 0
+    monkeypatch.setattr(os, "link", original_link)
+    reset = native._apply_decoded_open_data_raw_retention(plan)
+    assert reset["status"] == "APPLIED" and not source.exists()
+    assert native._read_role_message_bytes(raw_root, capture) == raw
+    body = native._role_message_path(raw_root, capture["raw_message_sha256"])
+    body.write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(raw)
+    bad_original = native._apply_decoded_open_data_raw_retention(plan)
+    assert bad_original["status"] == "ERROR" and source.exists()
+    assert body.read_bytes() != raw  # No overwrite/re-capture of committed identity.
+    body.write_bytes(raw)
+    assert native._apply_decoded_open_data_raw_retention(plan)["status"] == "APPLIED"
+
+
+@pytest.mark.parametrize("fault", ("symlink", "fifo", "malformed", "batch_alias", "root_alias", "staging_alias"))
+def test_role_original_gc_keeps_unknown_claim_and_releases_after_real_removal(tmp_path, monkeypatch, fault):
+    from src import config
+    from src.state import db as state_db
+    from src.data import ecmwf_open_data as native
+    from src.data import replacement_forecast_production as production
+    conn = _make_conn(tmp_path)
+    ledgers = tmp_path / "ledgers"
+    ledgers.mkdir()
+    world_path, trade_path = ledgers / "zeus-world.db", ledgers / "zeus_trades.db"
+    world, trade = sqlite3.connect(world_path), sqlite3.connect(trade_path)
+    state_db.init_schema_world_only(world)
+    state_db.init_schema_trade_only(trade)
+    world.commit(); trade.commit(); world.close(); trade.close()
+    monkeypatch.setattr(config, "STATE_DIR", ledgers)
+    monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
+    cfg = {key: tmp_path / key for key in ("seed_dir", "request_dir", "inflight_dir")}
+    for directory in cfg.values():
+        directory.mkdir()
+    monkeypatch.setattr(production, "_replacement_forecast_live_materialization_queue_config", lambda: cfg)
+    batch = cfg["inflight_dir"] / "actual-claim"
+    batch.mkdir()
+    entry = batch / "captured.json"
+    if fault == "symlink":
+        entry.symlink_to(tmp_path / "missing-worker-held-request.json")
+    elif fault == "fifo":
+        os.mkfifo(entry)
+    elif fault == "malformed":
+        entry.write_bytes(b"{unreadable original request")
+    else:
+        if fault == "staging_alias":
+            from src.data import replacement_forecast_live_materialization_queue as queue
+            staged = batch.with_name(queue._STAGING_PREFIX + "actual-claim")
+            batch.rename(staged)
+            batch = staged
+            entry = batch / "captured.json"
+        directory = batch if fault == "batch_alias" else cfg["inflight_dir"]
+        if fault == "staging_alias":
+            directory = batch
+        saved = directory.with_name(directory.name + "-original")
+        directory.rename(saved)
+        directory.symlink_to(saved, target_is_directory=True)
+    raw_root = tmp_path / "owned"
+    root = raw_root / "raw/ecmwf_open_ens/ecmwf"
+    root.mkdir(parents=True)
+    original = native._role_message_path(raw_root, "a" * 64)
+    original.parent.mkdir()
+    original.write_bytes(b"worker-held evidence")
+    now = datetime(2026, 10, 6, tzinfo=timezone.utc)
+    def plan():
+        return native._plan_decoded_open_data_raw_retention(conn, raw_root=raw_root,
+            reference_date=now.date(), reference_time=now)
+    unknown = plan()
+    assert not unknown.role_reference_complete, unknown.role_reference_errors
+    assert ("ROLE_RETENTION_UNFINISHED_REFERENCE_UNKNOWN" if fault in {"symlink", "fifo", "malformed"}
+            else "ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN") in unknown.role_reference_errors
+    assert native._apply_decoded_open_data_raw_retention(unknown)["role_message_deleted_count"] == 0
+    assert original.exists()
+    if fault in {"symlink", "fifo", "malformed"}:
+        entry.unlink()
+    else:
+        directory.unlink()
+        saved.rename(directory)
+    known = plan()
+    assert known.role_reference_complete, known.role_reference_errors
+    # A second normal producer publishes after the first deletion plan.
+    # The old plan may release only its observed object, never this new one.
+    from scripts.extract_open_ens_localday import _native_message_capture
+    ec = pytest.importorskip("eccodes")
+    gid = ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
+    try:
+        ec.codes_set(gid, "productDefinitionTemplateNumber", 11)
+        ec.codes_set(gid, "paramId", 228026)
+        raw, capture = ec.codes_get_message(gid), _native_message_capture(gid)
+    finally:
+        ec.codes_release(gid)
+    native._publish_role_message(raw_root, capture, raw)
+    concurrent = native._role_message_path(raw_root, capture["raw_message_sha256"])
+    assert native._apply_decoded_open_data_raw_retention(known)["role_message_deleted_count"] == 1
+    assert not original.exists()
+    assert concurrent.read_bytes() == raw
+    # New unfinished evidence on an already-observed object must also defeat
+    # the old plan. Its actual pending bad-entry classification is re-read.
+    later = plan()
+    entry.write_bytes(b"{new worker-held immutable request")
+    assert native._apply_decoded_open_data_raw_retention(later)["role_message_deleted_count"] == 0
+    assert concurrent.read_bytes() == raw
+    entry.unlink()
+    assert native._apply_decoded_open_data_raw_retention(plan())["role_message_deleted_count"] == 1
+    assert not concurrent.exists()
+    # The owning terminal receipt is different from an unfinished regular
+    # capture. A stable quarantined alias is not a q consumer forever.
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    capture_dir = cfg["request_dir"].parent / queue._REQUEST_ALIAS_DIR / (queue._CAPTURE_PREFIX + "terminal-alias")
+    payload_dir = capture_dir / queue._CAPTURE_PAYLOAD_DIR
+    payload_dir.mkdir(parents=True)
+    (payload_dir / "captured.json").symlink_to(tmp_path / "terminal-missing.json")
+    (capture_dir / queue._ALIAS_RECEIPT_NAME).write_text(json.dumps({
+        "status": "QUARANTINED_REQUEST_ALIAS", "request_name": "captured.json"}))
+    native._publish_role_message(raw_root, capture, raw)
+    terminal = plan()
+    assert terminal.role_reference_complete, terminal.role_reference_errors
+    assert native._apply_decoded_open_data_raw_retention(terminal)["role_message_deleted_count"] == 1
+    assert not concurrent.exists()
+    conn.close()
 
 
 def test_raw_retention_deletes_only_old_complete_verified_groups(tmp_path):

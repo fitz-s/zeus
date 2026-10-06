@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-10-04
+# Last reused or audited: 2026-10-06
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -670,8 +670,9 @@ MODEL_VERSION = "ecmwf_open_data"
 # cycle+track has durable COMPLETE source-run evidence AND an equal count of
 # VERIFIED canonical snapshots (the proof gate in
 # _plan_decoded_open_data_raw_retention is unchanged and remains the only thing
-# that authorizes a delete). Any GRIB still needed is re-fetchable from ECMWF,
-# so retaining a calendar window buys nothing a re-fetch does not.
+# that authorizes aggregate deletion). Still-consumable role receipts keep
+# byte-identical original messages separately; a re-fetch is not proof of the
+# original acquisition clock.
 #
 # 2026-09-17 (operator directive, twice restated): was 2, which retained ~46 GB
 # across two day-dirs on a host at 96% full — for the only one of 13 sources that
@@ -701,6 +702,358 @@ class _RawRetentionPlan:
     retained_group_count: int
     unrecognized_file_count: int
     planned_bytes: int
+    role_originals: tuple[tuple[tuple[Path, ...], tuple[dict, ...]], ...] = ()
+    live_role_hashes: frozenset[str] = frozenset()
+    role_reference_errors: tuple[str, ...] = ()
+    role_reference_complete: bool = False
+    role_gc_files: tuple[tuple[Path, int, int, int, int], ...] = ()
+    reference_db: Path | None = None
+    reference_time: datetime | None = None
+
+
+def _role_message_path(raw_root: Path, digest: str) -> Path:
+    """Address an original by its canonical receipt, never a new capture clock."""
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("ROLE_ORIGINAL_DIGEST_INVALID")
+    raw_root = raw_root.absolute()
+    path = raw_root / "raw" / "ecmwf_open_ens" / "role_messages" / f"{digest}.grib2"
+    if raw_root.is_symlink():
+        raise ValueError("ROLE_ORIGINAL_ROOT_SYMLINK")
+    parent = path.parent
+    while parent != raw_root:
+        if parent.is_symlink():
+            raise ValueError("ROLE_ORIGINAL_DIRECTORY_SYMLINK")
+        parent = parent.parent
+    return path
+
+
+def _read_role_message_bytes(raw_root: Path, capture: Mapping[str, object]) -> bytes:
+    path = _role_message_path(raw_root, str(capture["raw_message_sha256"]))
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("ROLE_ORIGINAL_BODY_UNAVAILABLE")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        if os.fstat(stream.fileno()).st_size != int(capture["raw_message_length"]):
+            raise ValueError("ROLE_ORIGINAL_LENGTH_MISMATCH")
+        raw = stream.read()
+    if hashlib.sha256(raw).hexdigest() != capture["raw_message_sha256"]:
+        raise ValueError("ROLE_ORIGINAL_HASH_MISMATCH")
+    return raw
+
+
+def _publish_role_message(raw_root: Path, capture: Mapping[str, object], raw: bytes) -> None:
+    """An exclusive atomic replica of observed bytes; no receipt or clock minting."""
+    import tempfile
+    if (len(raw) != int(capture["raw_message_length"])
+            or hashlib.sha256(raw).hexdigest() != capture["raw_message_sha256"]):
+        raise ValueError("ROLE_ORIGINAL_PUBLICATION_MISMATCH")
+    path = _role_message_path(raw_root, str(capture["raw_message_sha256"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _role_message_path(raw_root, str(capture["raw_message_sha256"]))
+    if path.exists() or path.is_symlink():
+        if _read_role_message_bytes(raw_root, capture) != raw:
+            raise ValueError("ROLE_ORIGINAL_PUBLICATION_CONFLICT")
+        return
+    with tempfile.TemporaryDirectory(prefix=".publish-", dir=path.parent) as directory:
+        staged = Path(directory) / "original.grib2"
+        with staged.open("wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(staged, path)
+        except FileExistsError:
+            if _read_role_message_bytes(raw_root, capture) != raw:
+                raise ValueError("ROLE_ORIGINAL_PUBLICATION_CONFLICT")
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+
+def _preserve_role_originals(raw_root: Path, sources: tuple[Path, ...], captures: tuple[dict, ...]) -> None:
+    """Complete the original-body replica before any proven aggregate deletion.
+
+    SCOPE: this exact run/quantity group. DRAIN: ordinary collection retries
+    publication from its retained original bytes. RESET: every canonical
+    capture has a byte-identical replica. No network or acquisition clock.
+    """
+    import eccodes as ec
+    from scripts.extract_open_ens_localday import _native_message_capture
+
+    remaining = {str(capture["raw_message_sha256"]): capture for capture in captures}
+    for digest, capture in tuple(remaining.items()):
+        path = _role_message_path(raw_root, digest)
+        if path.exists() or path.is_symlink():
+            _read_role_message_bytes(raw_root, capture)
+            del remaining[digest]
+    for source in sources:
+        if not remaining:
+            break
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("ROLE_ORIGINAL_SOURCE_UNAVAILABLE")
+        with source.open("rb") as stream:
+            while (gid := ec.codes_grib_new_from_file(stream)) is not None:
+                try:
+                    raw = ec.codes_get_message(gid)
+                    digest = hashlib.sha256(raw).hexdigest()
+                    if digest not in remaining:
+                        continue
+                    capture = remaining[digest]
+                    if _native_message_capture(gid) != capture:
+                        raise ValueError("ROLE_ORIGINAL_CAPTURE_MISMATCH")
+                    _publish_role_message(raw_root, capture, raw)
+                    _read_role_message_bytes(raw_root, capture)
+                    del remaining[digest]
+                finally:
+                    ec.codes_release(gid)
+    if remaining:
+        raise ValueError("ROLE_ORIGINAL_CAPTURE_INCOMPLETE")
+
+
+def _role_original_snapshot_references(conn, now_utc: datetime) -> tuple[set[int], set[tuple[str, str, str]], list[str]]:
+    """Read existing consumers only; never turn missing evidence into no reference.
+
+    SCOPE: original-message hashes of exact normal source snapshots. DRAIN:
+    each normal cleanup recomputes market frontiers, current-revision posterior
+    age plus the existing Prepared two-stage bound, unfinished claims and
+    nonterminal command parents. RESET: expiry/removal/terminal state without
+    another exact consumer releases that original; unresolved mappings retain
+    their scope, never require an always-newest manifest or a guard clear.
+    """
+    from src.config import STATE_DIR
+    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.data.replacement_forecast_cycle_policy import (
+        CURRENT_EVIDENCE_SEMANTICS_REVISION, replacement_source_cycle_max_age_hours,
+    )
+    from src.state.db import _connect_read_only, ZEUS_WORLD_DB_PATH
+    from src.execution.command_bus import TERMINAL_STATES
+    from src.data.replacement_forecast_production import _replacement_forecast_live_materialization_queue_config
+    from src.data import replacement_forecast_live_materialization_queue as queue
+
+    selected: set[int] = set()
+    uncertain: set[tuple[str, str, str]] = set()
+    errors: list[str] = []
+    visited_posteriors = set()
+
+    def scope_of(payload):
+        scope = (str(payload.get("city", "")), str(payload.get("target_date", "")),
+                 str(payload.get("temperature_metric", payload.get("metric", ""))))
+        return scope if scope[0] and scope[1] and scope[2] in {"high", "low"} else None
+
+    def preserve_scope(scope):
+        if scope is None:
+            errors.append("ROLE_RETENTION_REFERENCE_SCOPE_UNKNOWN")
+            return
+        uncertain.add(scope)
+        selected.update(int(row[0]) for row in conn.execute(
+            "SELECT snapshot_id FROM ensemble_snapshots WHERE city=? AND target_date=? AND temperature_metric=?",
+            scope))
+
+    def consume(payload, scope=None):
+        found = False
+        if isinstance(payload, Mapping):
+            for key, value in payload.items():
+                if key == "native_snapshot_id":
+                    selected.add(int(value)); found = True
+                elif key == "paired_snapshot_ids":
+                    selected.update(int(v) for v in value); found = True
+                elif key in {"posterior_id", "posterior_identity_hash"} and value not in (None, ""):
+                    column = "posterior_id" if key == "posterior_id" else "posterior_identity_hash"
+                    if (column, str(value)) not in visited_posteriors:
+                        visited_posteriors.add((column, str(value)))
+                        row = conn.execute(f"SELECT provenance_json FROM forecast_posteriors WHERE {column}=?", (value,)).fetchone()
+                        if row is not None:
+                            found = consume(json.loads(row[0]), scope) or found
+                elif isinstance(value, (Mapping, list, tuple)):
+                    found = consume(value, scope) or found
+        elif isinstance(payload, (list, tuple)):
+            for value in payload:
+                found = consume(value, scope) or found
+        return found
+
+    # Actual unexpired market frontiers: late X can never supersede full Y.
+    frontiers = conn.execute("""SELECT coverage.city, coverage.target_local_date,
+            coverage.temperature_metric, coverage.target_window_start_utc,
+            coverage.target_window_end_utc, source.source_cycle_time, coverage.source_run_id
+        FROM source_run_coverage coverage JOIN source_run source
+          ON source.source_run_id=coverage.source_run_id
+        WHERE coverage.source_id=? AND source.status='SUCCESS'
+          AND source.completeness_status='COMPLETE' AND source.partial_run=0
+          AND source.ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP')
+          AND source.source_cycle_time<=? AND coverage.target_window_end_utc>?
+          AND EXISTS (SELECT 1 FROM market_events market
+            WHERE market.city=coverage.city AND market.target_date=coverage.target_local_date
+              AND market.temperature_metric=coverage.temperature_metric
+              AND market.token_id IS NOT NULL AND market.range_label IS NOT NULL)
+        ORDER BY source.source_cycle_time DESC""", (SOURCE_ID, now_utc.isoformat(), now_utc.isoformat()))
+    chosen = set()
+    for row in frontiers:
+        scope = tuple(str(v) for v in row[:3])
+        start, end, cycle = (datetime.fromisoformat(str(v)) for v in row[3:6])
+        roles = ("Y",) if cycle <= start else ()
+        if start <= now_utc < end:
+            roles += ("X",)
+        for role in roles:
+            if (*scope, role) not in chosen:
+                chosen.add((*scope, role))
+                selected.update(int(r[0]) for r in conn.execute(
+                    "SELECT snapshot_id FROM ensemble_snapshots WHERE city=? AND target_date=? AND temperature_metric=? AND source_run_id=?",
+                    (*scope, row[6])))
+
+    # A Prepared may be selected at T+C and execute until its book's S+C.
+    # This is the existing contract's two-stage upper bound, not a new TTL.
+    bound = replacement_source_cycle_max_age_hours()
+    if not math.isfinite(bound):
+        errors.append("ROLE_RETENTION_AGE_POLICY_UNBOUNDED")
+        return selected, uncertain, errors
+    earliest = now_utc - timedelta(hours=bound) - 2 * FRESHNESS_WINDOW_DEFAULT
+    for row in conn.execute("""SELECT city,target_date,temperature_metric,provenance_json
+            FROM forecast_posteriors WHERE runtime_layer='live'
+              AND source_cycle_time>=? AND source_cycle_time<=?""",
+            (earliest.isoformat(), now_utc.isoformat())):
+        scope = tuple(str(v) for v in row[:3])
+        try:
+            payload = json.loads(row[3])
+            shape = payload.get("bayes_precision_fusion", {}).get("current_evidence_shape", {})
+            if shape.get("semantics_revision") == CURRENT_EVIDENCE_SEMANTICS_REVISION:
+                if not consume(payload, scope):
+                    preserve_scope(scope)
+        except (ValueError, TypeError, KeyError):
+            preserve_scope(scope)
+            errors.append("ROLE_RETENTION_POSTERIOR_REFERENCE_UNKNOWN")
+
+    cfg = _replacement_forecast_live_materialization_queue_config()
+    capture_root = Path(cfg["request_dir"]).parent / queue._REQUEST_ALIAS_DIR
+    def queue_inventory():
+        # An IO mutation fence only. It confers no temporal qualification.
+        directories = {Path(cfg[k]) for k in ("seed_dir", "request_dir", "inflight_dir")}
+        directories.add(capture_root)
+        for base in (Path(cfg["inflight_dir"]), capture_root):
+            if base.is_symlink():
+                continue
+            if base.exists():
+                for entry in base.iterdir():
+                    if base == capture_root and not entry.name.startswith(queue._CAPTURE_PREFIX):
+                        continue
+                    if (base != capture_root and entry.name.startswith(".")
+                            and not entry.name.startswith(queue._STAGING_PREFIX)):
+                        continue
+                    if entry.is_dir() and not entry.is_symlink():
+                        directories.add(entry)
+                        if base == capture_root:
+                            directories.add(entry / queue._CAPTURE_PAYLOAD_DIR)
+        objects = set(directories)
+        for directory in directories:
+            if directory.is_dir() and not directory.is_symlink():
+                objects.update(directory.iterdir())
+        result = []
+        for path in sorted(objects):
+            try:
+                stat = path.lstat()
+                identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+            except FileNotFoundError:
+                identity = None
+            result.append((str(path), identity))
+        return tuple(result)
+    before_inventory = queue_inventory()
+    paths = []
+    for key in ("seed_dir", "request_dir"):
+        directory = Path(cfg[key])
+        if directory.is_symlink():
+            errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
+        elif directory.exists():
+            paths.extend(directory.glob("*.json"))
+    inflight = Path(cfg["inflight_dir"])
+    if inflight.is_symlink():
+        errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
+    elif inflight.exists():
+        batches = []
+        for entry in inflight.iterdir():
+            if ((entry.name.startswith(".") and not entry.name.startswith(queue._STAGING_PREFIX))
+                    or entry.name == queue._lease.LEASE_DIR_NAME):
+                continue
+            if entry.is_symlink() or not entry.is_dir():
+                errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
+            else:
+                batches.append(entry)
+        for batch in sorted(batches, key=lambda p: not p.name.startswith(queue._STAGING_PREFIX)):
+            # A replaced captured entry can still have a live worker holding
+            # its parsed immutable body. Regular-only enumeration would turn
+            # missing proof into a false no-consumer declaration.
+            paths.extend(queue._captured_entries(batch))
+        # Recovery can move a published claim back to its source directory.
+        # Observe that reverse destination again. A captured path moved while
+        # reading is UNKNOWN, never proof that its frozen request disappeared.
+        for key in ("seed_dir", "request_dir"):
+            directory = Path(cfg[key])
+            if directory.is_symlink():
+                errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
+            elif directory.exists():
+                paths.extend(directory.glob("*.json"))
+    if capture_root.is_symlink():
+        errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
+    else:
+        for capture in queue._capture_dirs(Path(cfg["request_dir"])):
+            payload = capture / queue._CAPTURE_PAYLOAD_DIR
+            if capture.is_symlink() or not capture.is_dir() or payload.is_symlink():
+                errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
+                continue
+            # Only the owning terminal classification may remove this from
+            # the consumer union. Unfinished regular payloads are requests.
+            if not queue._capture_settled(capture):
+                paths.extend(queue._capture_entries(capture))
+    for path in paths:
+        try:
+            body, _ = queue.read_regular_request(path)
+            payload = json.loads(body)
+            scope = scope_of(payload)
+            if not consume(payload, scope):
+                # Unfinished construction has no point certificate yet. Its
+                # committed baseline and counterpart are still dependencies.
+                preserve_scope(scope)
+        except (OSError, ValueError, TypeError, KeyError):
+            errors.append("ROLE_RETENTION_UNFINISHED_REFERENCE_UNKNOWN")
+
+    if before_inventory != queue_inventory():
+        errors.append("ROLE_RETENTION_REFERENCE_MUTATED")
+
+    terminal = {state.value for state in TERMINAL_STATES}
+    trade = world = None
+    try:
+        trade = _connect_read_only(STATE_DIR / "zeus_trades.db")
+        world = _connect_read_only(ZEUS_WORLD_DB_PATH)
+        trade.execute("PRAGMA query_only=ON"); world.execute("PRAGMA query_only=ON")
+        for command in trade.execute("SELECT command_id,token_id,q_version,state FROM venue_commands WHERE state NOT IN (" + ",".join("?" for _ in terminal) + ")", tuple(terminal)):
+            scope_row = conn.execute("SELECT city,target_date,temperature_metric FROM market_events WHERE token_id=? LIMIT 1", (command[1],)).fetchone()
+            scope = None if scope_row is None else tuple(str(v) for v in scope_row)
+            row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_identity_hash=?", (command[2],)).fetchone()
+            found = row is not None and consume(json.loads(row[0]), scope)
+            bridge = trade.execute("SELECT decision_certificate_hash FROM position_decision_attribution WHERE command_id=? AND resolution='ATTRIBUTED'", (command[0],)).fetchone()
+            pending, visited = ([] if bridge is None else [str(bridge[0])]), set()
+            while pending:
+                digest = pending.pop()
+                if digest in visited:
+                    continue
+                visited.add(digest)
+                cert = world.execute("SELECT payload_json FROM decision_certificates WHERE certificate_hash=?", (digest,)).fetchone()
+                if cert is None:
+                    preserve_scope(scope)
+                    errors.append("ROLE_RETENTION_COMMAND_CERTIFICATE_UNKNOWN")
+                    continue
+                found = consume(json.loads(cert[0]), scope) or found
+                pending.extend(str(r[0]) for r in world.execute("SELECT parent_certificate_hash FROM decision_certificate_edges WHERE child_certificate_id=(SELECT certificate_id FROM decision_certificates WHERE certificate_hash=?)", (digest,)))
+            if not found or bridge is None:
+                preserve_scope(scope)
+                errors.append("ROLE_RETENTION_COMMAND_REFERENCE_UNKNOWN")
+    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+        errors.append("ROLE_RETENTION_COMMAND_AUTHORITY_UNKNOWN")
+    finally:
+        for connection in (trade, world):
+            if connection is not None:
+                connection.close()
+    return selected, uncertain, errors
 
 
 def _raw_file_identity(path: Path) -> tuple[str, int, str] | None:
@@ -808,6 +1161,7 @@ def _plan_decoded_open_data_raw_retention(
     raw_root: Path,
     reference_date: date,
     retention_days: int = _RAW_RETENTION_CALENDAR_DAYS,
+    reference_time: datetime | None = None,
 ) -> _RawRetentionPlan:
     """Plan deletion only for raw groups reproduced by canonical DB truth.
 
@@ -819,14 +1173,15 @@ def _plan_decoded_open_data_raw_retention(
     if retention_days < 0:
         raise ValueError("OpenData raw retention days must not be negative")
     root = raw_root / "raw" / "ecmwf_open_ens" / "ecmwf"
-    if not root.exists() or root.is_symlink() or not root.is_dir():
-        return _RawRetentionPlan(root, (), 0, 0, 0, 0)
+    if root.is_symlink() or (root.exists() and not root.is_dir()):
+        return _RawRetentionPlan(root, (), 0, 0, 0, 0,
+            role_reference_errors=("ROLE_RETENTION_RAW_DIRECTORY_UNKNOWN",))
 
     cutoff = reference_date - timedelta(days=retention_days - 1)
     groups: dict[tuple[str, int, str], list[Path]] = {}
     blocked_groups: set[tuple[str, int, str]] = set()
     unrecognized = 0
-    for day_dir in sorted(root.iterdir()):
+    for day_dir in (sorted(root.iterdir()) if root.exists() else ()):
         if day_dir.is_symlink() or not day_dir.is_dir():
             continue
         try:
@@ -847,6 +1202,7 @@ def _plan_decoded_open_data_raw_retention(
             groups.setdefault(identity, []).append(candidate)
 
     planned: list[Path] = []
+    role_originals: list[tuple[tuple[Path, ...], tuple[dict, ...]]] = []
     eligible_groups = 0
     retained_groups = 0
     for (day_text, hour, param), paths in sorted(groups.items()):
@@ -935,9 +1291,78 @@ def _plan_decoded_open_data_raw_retention(
             continue
         eligible_groups += 1
         planned.extend(paths)
+        # Canonical observed captures are the evidence already published by
+        # normal ingest, not a newly inferred source role or first clock.
+        captures: dict[str, dict] = {}
+        for snapshot in conn.execute(
+            """SELECT snapshot.provenance_json FROM ensemble_snapshots snapshot
+               JOIN source_run source ON source.source_run_id=snapshot.source_run_id
+               WHERE snapshot.source_id=? AND snapshot.temperature_metric=?
+                 AND (snapshot.source_run_id=? OR snapshot.source_run_id LIKE ? ESCAPE '\\')
+                 AND source.ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP')""",
+            (SOURCE_ID, metric, source_run_prefix, _sql_like_escape(source_run_prefix) + ":%"),
+        ):
+            provenance = json.loads(snapshot[0] or "{}")
+            capture = provenance.get("native_capture_receipt", {})
+            if capture.get("capture_status") == "OBSERVED":
+                for message in capture.get("messages", ()):
+                    digest = str(message["raw_message_sha256"])
+                    if digest in captures and captures[digest] != message:
+                        raise ValueError("ROLE_ORIGINAL_CANONICAL_CAPTURE_CONFLICT")
+                    captures[digest] = message
+        if captures:
+            role_originals.append((tuple(paths), tuple(captures.values())))
 
-    planned.extend(_orphaned_transport_sidecars(root, planned_canonical=set(planned)))
+    if root.exists():
+        planned.extend(_orphaned_transport_sidecars(root, planned_canonical=set(planned)))
 
+    live_hashes: set[str] = set()
+    reference_errors: list[str] = []
+    reference_complete = True
+    store = raw_root / "raw/ecmwf_open_ens/role_messages"
+    if role_originals or store.exists() or store.is_symlink():
+        try:
+            selected, _, reference_errors = _role_original_snapshot_references(conn,
+                reference_time or datetime.combine(reference_date, datetime.min.time(), tzinfo=timezone.utc))
+            # A straddling native interval requires the same-run opposite
+            # extrema quantity even when that metric has no separate market.
+            for snapshot_id in tuple(selected):
+                scope = conn.execute("SELECT city,target_date,temperature_metric,source_cycle_time FROM ensemble_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+                if scope is not None:
+                    selected.update(int(r[0]) for r in conn.execute(
+                        "SELECT snapshot_id FROM ensemble_snapshots WHERE city=? AND target_date=? AND temperature_metric=? AND source_cycle_time=?",
+                        (scope[0], scope[1], "low" if scope[2] == "high" else "high", scope[3])))
+            for snapshot_id in selected:
+                row = conn.execute("SELECT provenance_json FROM ensemble_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+                if row is None:
+                    reference_errors.append("ROLE_RETENTION_SNAPSHOT_REFERENCE_UNKNOWN")
+                    continue
+                capture = json.loads(row[0])["native_capture_receipt"]
+                if capture.get("capture_status") != "OBSERVED" or not capture.get("messages"):
+                    reference_errors.append("ROLE_RETENTION_CAPTURE_REFERENCE_UNKNOWN")
+                    continue
+                live_hashes.update(str(m["raw_message_sha256"]) for m in capture["messages"])
+        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
+            reference_errors.append("ROLE_RETENTION_CANONICAL_REFERENCE_UNKNOWN")
+        global_unknown = {
+            "ROLE_RETENTION_REFERENCE_SCOPE_UNKNOWN", "ROLE_RETENTION_AGE_POLICY_UNBOUNDED",
+            "ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN", "ROLE_RETENTION_UNFINISHED_REFERENCE_UNKNOWN",
+            "ROLE_RETENTION_COMMAND_AUTHORITY_UNKNOWN", "ROLE_RETENTION_CANONICAL_REFERENCE_UNKNOWN",
+            "ROLE_RETENTION_SNAPSHOT_REFERENCE_UNKNOWN", "ROLE_RETENTION_CAPTURE_REFERENCE_UNKNOWN",
+            "ROLE_RETENTION_REFERENCE_MUTATED",
+        }
+        reference_complete = not global_unknown.intersection(reference_errors)
+        if reference_complete:
+            role_originals = [(sources, tuple(m for m in captures if str(m["raw_message_sha256"]) in live_hashes))
+                              for sources, captures in role_originals]
+
+    gc_files = []
+    if reference_complete and store.exists() and not store.is_symlink():
+        for path in store.glob("*.grib2"):
+            if re.fullmatch(r"[0-9a-f]{64}\.grib2", path.name) and not path.is_symlink() and path.is_file():
+                stat = path.stat()
+                gc_files.append((path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+    database = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
     return _RawRetentionPlan(
         root=root,
         files=tuple(sorted(planned)),
@@ -945,6 +1370,13 @@ def _plan_decoded_open_data_raw_retention(
         retained_group_count=retained_groups,
         unrecognized_file_count=unrecognized,
         planned_bytes=sum(path.stat().st_size for path in planned),
+        role_originals=tuple(role_originals),
+        live_role_hashes=frozenset(live_hashes),
+        role_reference_errors=tuple(reference_errors),
+        role_reference_complete=reference_complete,
+        role_gc_files=tuple(gc_files),
+        reference_db=Path(database) if database else None,
+        reference_time=reference_time or datetime.combine(reference_date, datetime.min.time(), tzinfo=timezone.utc),
     )
 
 
@@ -954,10 +1386,28 @@ def _apply_decoded_open_data_raw_retention(plan: _RawRetentionPlan) -> dict[str,
     deleted_bytes = 0
     errors: list[str] = []
     parents: set[Path] = set()
-    if plan.root.is_symlink():
+    protected: set[Path] = set()
+    raw_root = plan.root.parents[2]
+    try:
+        store = _role_message_path(raw_root, "0" * 64).parent
+        unsafe_root = plan.root.is_symlink()
+    except ValueError:
+        store = None
+        unsafe_root = True
+    if unsafe_root:
         errors.append("raw_root_became_symlink")
     else:
+        for sources, captures in plan.role_originals:
+            try:
+                _preserve_role_originals(plan.root.parents[2], sources, captures)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                # A storage/receipt gap does not undo already-committed
+                # mandatory truth; it only prevents this group's raw cleanup.
+                protected.update(sources)
+                errors.append(f"ROLE_ORIGINAL_RETENTION_DEFERRED:{type(exc).__name__}")
         for path in plan.files:
+            if path in protected:
+                continue
             parents.add(path.parent)
             if path.parent.parent != plan.root:
                 errors.append(f"path_outside_raw_root:{path}")
@@ -980,8 +1430,56 @@ def _apply_decoded_open_data_raw_retention(plan: _RawRetentionPlan) -> dict[str,
             except OSError:
                 pass
     status = "ERROR" if errors else ("APPLIED" if plan.files else "NO_ELIGIBLE_RAW")
+    role_deleted = 0
+    if (not unsafe_root and store is not None and store.exists()
+            and plan.role_reference_complete and not protected and plan.role_gc_files):
+        if store.is_symlink():
+            errors.append("ROLE_ORIGINAL_GC_DIRECTORY_SYMLINK")
+        else:
+            # The other H/L collector can publish after this plan leaves the
+            # writer lock. Never extend the deletion set to its new objects.
+            # Refresh exact consumers before unlinking an existing object;
+            # timestamps below are mutation fences, not possession or TTL.
+            live_hashes = set(plan.live_role_hashes)
+            try:
+                if plan.reference_db is None or plan.reference_time is None:
+                    raise ValueError("ROLE_RETENTION_REFERENCE_REVALIDATION_UNKNOWN")
+                from src.state.db import _connect_read_only
+                fresh_conn = _connect_read_only(plan.reference_db)
+                try:
+                    fresh_conn.execute("PRAGMA query_only=ON")
+                    fresh = _plan_decoded_open_data_raw_retention(fresh_conn,
+                        raw_root=raw_root, reference_date=plan.reference_time.date(),
+                        reference_time=plan.reference_time)
+                    if not fresh.role_reference_complete:
+                        raise ValueError("ROLE_RETENTION_REFERENCE_REVALIDATION_UNKNOWN")
+                    live_hashes.update(fresh.live_role_hashes)
+                finally:
+                    fresh_conn.close()
+            except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+                errors.append("ROLE_RETENTION_REFERENCE_REVALIDATION_UNKNOWN")
+                live_hashes.update(path.stem for path, *_ in plan.role_gc_files)
+            for path, dev, ino, size, modified in plan.role_gc_files:
+                if path.stem in live_hashes:
+                    continue
+                if path.is_symlink() or not path.is_file():
+                    errors.append("ROLE_ORIGINAL_GC_FILE_UNKNOWN")
+                    continue
+                # Original bodies are released only after the complete live
+                # reference union is known. Missing bodies are not proof of
+                # unreferenced state; unknown authority prevents this sweep.
+                try:
+                    stat = path.stat()
+                    if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != (dev, ino, size, modified):
+                        continue
+                    path.unlink()
+                    role_deleted += 1
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    errors.append(f"ROLE_ORIGINAL_GC_DEFERRED:{type(exc).__name__}")
     return {
-        "status": status,
+        "status": "ERROR" if errors else status,
         "eligible_group_count": plan.eligible_group_count,
         "retained_group_count": plan.retained_group_count,
         "unrecognized_file_count": plan.unrecognized_file_count,
@@ -990,6 +1488,8 @@ def _apply_decoded_open_data_raw_retention(plan: _RawRetentionPlan) -> dict[str,
         "deleted_file_count": deleted_files,
         "deleted_bytes": deleted_bytes,
         "errors": errors[:10],
+        "role_reference_errors": list(plan.role_reference_errors),
+        "role_message_deleted_count": role_deleted,
     }
 
 # ECMWF Open Data is replicated across multiple mirrors. AWS is fastest but
@@ -5881,6 +6381,7 @@ def collect_open_ens_cycle(
                     conn,
                     raw_root=paths.raw_root,
                     reference_date=now.date(),
+                    reference_time=now,
                 )
             except Exception as exc:  # noqa: BLE001 - retention must fail closed
                 retention_summary = {

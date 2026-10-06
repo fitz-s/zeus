@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-10-02 (rolling capture aged at window close; CURRENT_REUSABLE)
+# Last reused or audited: 2026-10-06 (exact original-message retention replay)
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector option from the day0 first-principles
 #   review §6.1/§6.3). INV-37: all writes go to zeus-forecasts.db under
@@ -1316,7 +1316,8 @@ def read_native_measurement_role(
     RESET replays their exact originals, never a midpoint or old width fallback.
     """
     from src.data.ecmwf_open_data import (
-        _resolve_opendata_paths, _download_output_path, read_native_temperature_scope,
+        _resolve_opendata_paths, _download_output_path, _read_role_message_bytes,
+        read_native_temperature_scope,
     )
     from src.data.forecast_target_contract import compute_target_local_day_window_utc
     import eccodes as ec
@@ -1382,38 +1383,50 @@ def read_native_measurement_role(
                 source = _download_output_path(run_date=cycle.date(), run_hour=cycle.hour,
                     param=track.open_data_param, raw_root=paths.raw_root)
                 identities = []
-                with source.open("rb") as stream:
-                    while (gid := ec.codes_grib_new_from_file(stream)) is not None:
-                        try:
-                            if ec.codes_get(gid, "paramId") != track.paramId:
-                                continue
-                            original = decoder._native_message_capture(gid)
-                            saved = retained.get(str(original.get("raw_message_sha256")))
-                            if saved != original:
-                                continue
-                            h = original["observed_headers"]
-                            member = int(h.get("perturbationNumber", h.get("number", 0)))
-                            start = cycle + timedelta(hours=int(h["startStep"]))
-                            end = cycle + timedelta(hours=int(h["endStep"]))
-                            if not (start < day.end_utc and end > scope_start):
-                                continue
-                            if (int(h["dataDate"]) != int(cycle.strftime("%Y%m%d"))
-                                    or int(h["dataTime"]) != cycle.hour * 100
-                                    or h["stepType"] != track.step_type or h["units"] != "K"
-                                    or ec.codes_get(gid, "generatingProcessIdentifier") != 161
-                                    or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
-                                    or hashlib.sha256(base64.b64decode(next(s["bytes_base64"]
-                                        for s in original["metadata_sections"] if s["section_number"] == 3))).hexdigest()
-                                    != scope.physical_witness["grid_sha256"]):
-                                raise ValueError("MEASUREMENT_NATIVE_INTERVAL_IDENTITY_INVALID")
-                            value = float(ec.codes_get_elements(gid, "values", [int(point["flat_index"])])[0]) - 273.15
-                            if cities[0]["unit"] == "F":
-                                value = value * 1.8 + 32.0
-                            by_member[member].append((start, end, value))
-                            identities.append(original["raw_message_sha256"])
-                            part_ids[(member, start, end)] = original["raw_message_sha256"]
-                        finally:
-                            ec.codes_release(gid)
+                def original_messages():
+                    if source.exists() or source.is_symlink():
+                        if source.is_symlink():
+                            raise ValueError("MEASUREMENT_NATIVE_ORIGINAL_SYMLINK")
+                        with source.open("rb") as stream:
+                            while (gid := ec.codes_grib_new_from_file(stream)) is not None:
+                                yield gid
+                    else:
+                        # Retention replicas preserve the exact captured body.
+                        # The canonical receipt/clock and all checks below are
+                        # unchanged; a CAS file's mtime conveys no availability.
+                        for saved in messages:
+                            yield ec.codes_new_from_message(_read_role_message_bytes(paths.raw_root, saved))
+                for gid in original_messages():
+                    try:
+                        if ec.codes_get(gid, "paramId") != track.paramId:
+                            continue
+                        original = decoder._native_message_capture(gid)
+                        saved = retained.get(str(original.get("raw_message_sha256")))
+                        if saved != original:
+                            continue
+                        h = original["observed_headers"]
+                        member = int(h.get("perturbationNumber", h.get("number", 0)))
+                        start = cycle + timedelta(hours=int(h["startStep"]))
+                        end = cycle + timedelta(hours=int(h["endStep"]))
+                        if not (start < day.end_utc and end > scope_start):
+                            continue
+                        if (int(h["dataDate"]) != int(cycle.strftime("%Y%m%d"))
+                                or int(h["dataTime"]) != cycle.hour * 100
+                                or h["stepType"] != track.step_type or h["units"] != "K"
+                                or ec.codes_get(gid, "generatingProcessIdentifier") != 161
+                                or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
+                                or hashlib.sha256(base64.b64decode(next(s["bytes_base64"]
+                                    for s in original["metadata_sections"] if s["section_number"] == 3))).hexdigest()
+                                != scope.physical_witness["grid_sha256"]):
+                            raise ValueError("MEASUREMENT_NATIVE_INTERVAL_IDENTITY_INVALID")
+                        value = float(ec.codes_get_elements(gid, "values", [int(point["flat_index"])])[0]) - 273.15
+                        if cities[0]["unit"] == "F":
+                            value = value * 1.8 + 32.0
+                        by_member[member].append((start, end, value))
+                        identities.append(original["raw_message_sha256"])
+                        part_ids[(member, start, end)] = original["raw_message_sha256"]
+                    finally:
+                        ec.codes_release(gid)
                 return by_member, identities, part_ids
             track = decoder.TRACKS["mx2t6_high" if metric == "high" else "mn2t6_low"]
             by_member, identities, primary_part_ids = read_intervals(track, capture["messages"])
