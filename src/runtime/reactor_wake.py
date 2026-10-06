@@ -3202,18 +3202,31 @@ def _published_at_or_after(wake: ReactorWake, cutoff: str) -> bool:
     return at >= floor
 
 
-# Reasons whose wake only asks for a re-read of committed truth: no capital
-# obligation (fill, held-SELL debt), no hard physical fact (Day0), no event ids
-# that must finish first. A forecast wake asks for a global cut; a substrate
-# wake asks for a redecision screen, which a cut does not perform.
+# Reasons a queued hint may be retired for: a forecast wake asks for a global
+# cut, a substrate wake for a redecision screen, a Day0 or current-print wake
+# for a held-position monitor and a belief reseed. Only a forecast wake can be
+# served by a completed cut (CUT_SERVED_WAKE_REASONS). Every reason retires once
+# every family it names is unreachable: no reader can value a family past the
+# date lag with no open position or entry rest, and the canonical event rows a
+# Day0 hint announces stay owned by the event queue, not by the hint.
+DAY0_WAKE_REASON = "day0_extreme_event_committed"
 RETIRABLE_WAKE_REASONS = frozenset(
-    {"forecast_posterior_advanced", "money_path_substrate_refreshed"}
+    {
+        "forecast_posterior_advanced",
+        "money_path_substrate_refreshed",
+        "current_temperature_print_committed",
+        DAY0_WAKE_REASON,
+    }
 )
 CUT_SERVED_WAKE_REASONS = frozenset({"forecast_posterior_advanced"})
 RETIRE_SERVED_WAKES_LIMIT = 500
 # One reachability read (a trade-DB open plus the open-rest resolver, ~0.8 s
 # live) and one queue scan per interval, never per listener poll.
 RETIRE_SERVED_WAKES_INTERVAL_S = 60.0
+# Day0 event ids resolve to families through one shared read-only world
+# connection (~2 ms each live). Past this budget a pass resolves no more, so a
+# slow world DB bounds the listener stall instead of the backlog size.
+RETIRE_SERVED_WAKES_RESOLVE_BUDGET_S = 2.0
 _RETIRE_LAST_RUN_MONOTONIC: list[float | None] = [None]
 # (city, target_date, metric) -> scope-scan instant of the latest completed
 # cut that valued the family. Process-local: a restart only delays retirement
@@ -3221,6 +3234,62 @@ _RETIRE_LAST_RUN_MONOTONIC: list[float | None] = [None]
 # the reachable floor.
 _CONSUMED_SCOPE_LOCK = threading.Lock()
 _CONSUMED_SCOPE: dict[tuple[str, str, str], datetime] = {}
+
+
+def day0_event_families(
+    conn,
+    event_ids: Collection[str],
+    *,
+    expected_event_type: str | None = "DAY0_EXTREME_UPDATED",
+) -> frozenset[tuple[str, str, str]] | None:
+    """Families named by committed opportunity events, or None unless all resolve.
+
+    The one event-id to family law for wake consumers: ``src.main`` scopes a
+    held-position monitor with it and the retirement pass classifies a Day0
+    hint with it. A database error propagates (unknown); a missing, mistyped or
+    malformed event returns None (underivable). Neither names a family.
+    """
+
+    ids = tuple(
+        dict.fromkeys(
+            event_id
+            for raw_event_id in event_ids
+            if (event_id := str(raw_event_id or "").strip())
+        )
+    )
+    if not ids:
+        return None
+    marks = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""
+        SELECT event_id, event_type, payload_json
+          FROM opportunity_events
+         WHERE event_id IN ({marks})
+        """,
+        ids,
+    ).fetchall()
+    if len(rows) != len(ids):
+        return None
+    families: set[tuple[str, str, str]] = set()
+    try:
+        for _event_id, event_type, payload_json in rows:
+            if (
+                expected_event_type is not None
+                and str(event_type or "") != expected_event_type
+            ):
+                return None
+            payload = json.loads(str(payload_json or ""))
+            city = str(payload.get("city") or "").strip()
+            target_date = date.fromisoformat(
+                str(payload.get("target_date") or "").strip()[:10]
+            ).isoformat()
+            metric = str(payload.get("metric") or "").strip().lower()
+            if not city or metric not in {"high", "low"}:
+                return None
+            families.add((city, target_date, metric))
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return frozenset(families) or None
 
 
 def _family(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
@@ -3258,6 +3327,10 @@ def wake_is_served(
     *,
     reachable: Callable[[tuple[str, str, str]], bool],
     consumed: Mapping[tuple[str, str, str], datetime],
+    event_families: Callable[
+        [tuple[str, ...]], frozenset[tuple[str, str, str]] | None
+    ]
+    | None = None,
 ) -> bool:
     """Whether no consumer can learn anything more from this queued hint.
 
@@ -3266,16 +3339,29 @@ def wake_is_served(
     the date lag with no non-terminal position and no open ENTRY rest, so no
     scan, screen or held monitor still values it) or, for a cut-served reason,
     was valued by a completed cut whose scope scan began after the wake was
-    published (the publisher commits truth before publishing). A wake naming
-    no family, or any other family, is not served.
+    published (the publisher commits truth before publishing). A Day0 hint
+    names its families through its event ids as well as its declared ones, and
+    is served only when ``event_families`` resolves every event: an event it
+    cannot resolve names an unknown family, which retires nothing. A wake
+    naming no family, or any other family, is not served.
     """
 
     if (
         wake.reason not in RETIRABLE_WAKE_REASONS
-        or not wake.forecast_families
-        or wake.event_ids
         or wake.held_sell_reauction_requests
     ):
+        return False
+    families = tuple(_family(*raw) for raw in wake.forecast_families)
+    if wake.reason == DAY0_WAKE_REASON:
+        if event_families is None or any(reachable(family) for family in families):
+            return False  # declared reachable: no event read can retire it
+        resolved = event_families(wake.event_ids)
+        if resolved is None:
+            return False
+        families += tuple(_family(*raw) for raw in resolved)
+    elif wake.event_ids:
+        return False
+    if not families:
         return False
     try:
         published = datetime.fromisoformat(
@@ -3283,8 +3369,7 @@ def wake_is_served(
         ).astimezone(timezone.utc)
     except ValueError:
         return False
-    for raw in wake.forecast_families:
-        family = _family(*raw)
+    for family in families:
         if not reachable(family):
             continue
         if wake.reason not in CUT_SERVED_WAKE_REASONS:
@@ -3300,6 +3385,7 @@ def retire_served_wakes(
     now: datetime | None = None,
     path: Path | None = None,
     trade_db: Path | None = None,
+    world_db: Path | None = None,
     limit: int = RETIRE_SERVED_WAKES_LIMIT,
 ) -> int:
     """Acknowledge queued hints that ``wake_is_served`` proves unservable.
@@ -3309,7 +3395,8 @@ def retire_served_wakes(
     ``acknowledge_reactor_wakes`` path. RESET: bounded by reachability and
     consumption, not age; every other wake stays queued for the scheduler.
     Unknown reachability (a trade-DB read failure or an unnamed open family)
-    retires nothing.
+    retires nothing, and a Day0 hint whose events the world DB cannot resolve
+    stays queued.
     """
 
     from src.data.forecast_retention import build_reachability
@@ -3326,16 +3413,50 @@ def retire_served_wakes(
             (family[0].replace(" ", "_"), family[1], family[2])
         )
 
+    world_conn = None
+    world_unreadable = False
+    resolve_deadline = time.monotonic() + RETIRE_SERVED_WAKES_RESOLVE_BUDGET_S
+
+    def event_families(event_ids):
+        nonlocal world_conn, world_unreadable
+        if world_unreadable or time.monotonic() > resolve_deadline:
+            return None
+        try:
+            if world_conn is None:
+                if world_db is None:
+                    from src.state.db import get_world_connection_read_only
+
+                    world_conn = get_world_connection_read_only()
+                else:
+                    from src.data.family_reachability import read_only
+
+                    world_conn = read_only(Path(world_db))
+            return day0_event_families(world_conn, event_ids)
+        except Exception:  # noqa: BLE001 - an unreadable world keeps every Day0 hint
+            world_unreadable = True
+            return None
+
     with _CONSUMED_SCOPE_LOCK:
         for family in [key for key in _CONSUMED_SCOPE if not reachable(key)]:
             del _CONSUMED_SCOPE[family]
         consumed = dict(_CONSUMED_SCOPE)
-    served = tuple(
-        wake
-        for _queue_file, wake in _queued_wakes(path)
-        if wake_is_served(wake, reachable=reachable, consumed=consumed)
-    )[: max(0, int(limit))]
-    if not served or not acknowledge_reactor_wakes(served, path=path):
+    cap = max(0, int(limit))
+    served: list[ReactorWake] = []
+    try:
+        for _queue_file, wake in _queued_wakes(path):
+            if len(served) >= cap:
+                break
+            if wake_is_served(
+                wake,
+                reachable=reachable,
+                consumed=consumed,
+                event_families=event_families,
+            ):
+                served.append(wake)
+    finally:
+        if world_conn is not None:
+            world_conn.close()
+    if not served or not acknowledge_reactor_wakes(tuple(served), path=path):
         return 0
     return len(served)
 

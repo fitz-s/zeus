@@ -5082,28 +5082,14 @@ def _day0_wake_target_families(
     *,
     expected_event_type: str | None = "DAY0_EXTREME_UPDATED",
 ) -> frozenset[tuple[str, str, str]] | None:
-    clean_event_ids = tuple(
-        dict.fromkeys(
-            event_id
-            for raw_event_id in event_ids
-            if (event_id := str(raw_event_id or "").strip())
-        )
-    )
-    if not clean_event_ids:
-        return None
+    from src.runtime.reactor_wake import day0_event_families
 
     conn = None
     try:
         conn = get_world_connection_read_only()
-        placeholders = ",".join("?" for _ in clean_event_ids)
-        rows = conn.execute(
-            f"""
-            SELECT event_id, event_type, payload_json
-              FROM opportunity_events
-             WHERE event_id IN ({placeholders})
-            """,
-            clean_event_ids,
-        ).fetchall()
+        families = day0_event_families(
+            conn, event_ids, expected_event_type=expected_event_type
+        )
     except Exception:
         logger.warning(
             "Day0 wake family scope unavailable; using full exit monitor",
@@ -5113,40 +5099,12 @@ def _day0_wake_target_families(
     finally:
         if conn is not None:
             conn.close()
-
-    if len(rows) != len(clean_event_ids):
+    if families is None and any(str(event_id or "").strip() for event_id in event_ids):
         logger.warning(
-            "Day0 wake family scope incomplete events=%d rows=%d; "
-            "using full exit monitor",
-            len(clean_event_ids),
-            len(rows),
+            "Day0 wake family scope unresolved events=%d; using full exit monitor",
+            len(event_ids),
         )
-        return None
-
-    families: set[tuple[str, str, str]] = set()
-    try:
-        for _event_id, event_type, payload_json in rows:
-            if (
-                expected_event_type is not None
-                and str(event_type or "") != expected_event_type
-            ):
-                return None
-            payload = json.loads(str(payload_json or ""))
-            city = str(payload.get("city") or "").strip()
-            target_date = date.fromisoformat(
-                str(payload.get("target_date") or "").strip()[:10]
-            ).isoformat()
-            metric = str(payload.get("metric") or "").strip().lower()
-            if not city or metric not in {"high", "low"}:
-                return None
-            families.add((city, target_date, metric))
-    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
-        logger.warning(
-            "Day0 wake family payload invalid; using full exit monitor",
-            exc_info=True,
-        )
-        return None
-    return frozenset(families) or None
+    return families
 
 
 def _price_wake_target_families(
@@ -7351,7 +7309,12 @@ def _edli_reactor_wake_poll_once() -> bool:
                     monitor_succeeded=True,
                 )
                 _edli_family_completion_post_monitor_yield.arm(wake.wake_id)
-                return False
+                # A Day0 wake whose events already finished has nothing left
+                # but its ack below. The held monitor republishes strict
+                # markers continuously, so returning here would re-run this
+                # branch on every selection and never acknowledge it.
+                if wake_event_state is None or not wake_event_state.finished:
+                    return False
     monitor_wake_families = wake_families
     if price_wake and not monitor_wake_families:
         monitor_wake_families = tuple(_price_wake_target_families(wake_event_ids) or ())
