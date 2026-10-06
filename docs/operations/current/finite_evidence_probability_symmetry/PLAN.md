@@ -19897,3 +19897,16 @@ exact original proof bytes. Require real malformed-proof collector/reader
 controls with no HTTP and unchanged rows/clocks, followed by exact restoration.
 Preserve original12P and merged2-node epoch; neither proves this new boundary.
 Final CLI/secret batch waits for the followup and independent closure.
+
+Final publisher followup1f0f is integrated as7d215f8baeb113e74b81e94b079260512e8adf92
+and independently approved with the combined2617 scope. Source348d6045...9cfd
+and test9371c636...edab match the author bytes. Five actual malformed JSON
+collector/reader controls pass (5P5.663s, XMLa4bcdc48...), restore original
+proofs and retain UNKNOWN/no HTTP without changing source clocks. The prior
+12 valid-string controls keep their exact branch AST; 17 unique controls are
+cross-epoch, not a new same-tip whole-suite pass. Local-day326c approval and
+its26P likewise retain their explicit scope. All code and this receipt now
+freeze before the single final shared CLI, ancestry secret and narrow impacted
+checks. Actual source qualification/13-scope public consumption remain separate
+runtime obligations; no new landing or registered retry without ROOT acceptance
+of the precise final tip.
