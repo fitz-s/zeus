@@ -9303,6 +9303,7 @@ def _v4_stable_debt_attempts(
     *,
     publish_old=True,
     publish_fresh=True,
+    complete_lineage=False,
 ):
     """Publish deterministic old/new witnesses for one V4 stable debt."""
     from src.runtime import reactor_wake
@@ -9316,6 +9317,13 @@ def _v4_stable_debt_attempts(
         "held_best_bid": 0.22,
         "book_state": "EXECUTABLE",
     }
+    if complete_lineage:
+        common.update(
+            selection_epoch_identity="epoch-istanbul-v4-lineage",
+            sell_book_witness_identity="book-istanbul-v4-lineage",
+            debt_event_id="istanbul-v4-lineage:exit_retry_released:7",
+            monitor_event_id="istanbul-v4-lineage:monitor_refreshed:8",
+        )
     old = reactor_wake.make_held_sell_reauction_request(
         **common,
         probability_content_identity="q-old",
@@ -9819,11 +9827,17 @@ def test_v4_queue_read_error_fails_closed_without_publish(tmp_path):
     assert queue_path.is_dir()
 
 
-def test_v4_latest_lookup_is_bounded_under_unrelated_backlog(monkeypatch, tmp_path):
+@pytest.mark.parametrize("complete_lineage", (False, True))
+def test_v4_latest_lookup_is_bounded_under_unrelated_backlog(
+    monkeypatch, tmp_path, caplog, complete_lineage,
+):
+    """Bounded lineage lookup cannot grant missing canonical submit lineage."""
     from src.events import reactor
     from src.runtime import reactor_wake
 
-    path, _old, fresh = _v4_stable_debt_attempts(tmp_path)
+    path, _old, fresh = _v4_stable_debt_attempts(
+        tmp_path, complete_lineage=complete_lineage,
+    )
     assert reactor_wake.persist_held_sell_reauction_receipts(
         (_v4_actuated_receipt(fresh),),
         path=path,
@@ -9857,8 +9871,13 @@ def test_v4_latest_lookup_is_bounded_under_unrelated_backlog(monkeypatch, tmp_pa
         wake_path=path,
         return_request=True,
     )
-    assert accepted is True
+    assert accepted is complete_lineage
     assert request == fresh
+    assert request.lineage_status == (
+        "COMPLETE" if complete_lineage else "PENDING_CANONICAL_LINEAGE"
+    )
+    if not complete_lineage:
+        assert "HELD_SELL_REAUCTION_CANONICAL_LINEAGE_PENDING" in caplog.text
 
 
 def test_v4_receipt_lineage_restart_requires_and_retains_latest_attempt(tmp_path):
