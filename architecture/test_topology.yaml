@@ -936,6 +936,7 @@ categories:
     - tests/test_wal_busy_factory_fail_conservative.py
     - tests/test_bayes_precision_fusion_download.py
     - tests/test_openmeteo_model_surface.py
+    - tests/test_om9_bounded_station_ground.py
     - tests/test_bayes_precision_fusion_arrival_guard.py
     - tests/test_finite_evidence_probability_symmetry.py
     - tests/test_replacement_forecast_extras_coverage_gate.py
