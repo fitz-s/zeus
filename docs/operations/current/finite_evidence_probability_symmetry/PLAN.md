@@ -18011,3 +18011,47 @@ capital before STOP; invocation-generation entry guard/CAS ownership; actual
 loader return code and boot SHA/PID/heartbeat; and normal post-load q/reader/
 ENTRY/held/JIT receipts plus named degraded reasons. This slice does not run
 the loader, clear guards, manufacture new source evidence or force a cycle.
+
+### Qualified zero-width consumer repair — frozen private proof
+
+The zero-width boundary is now reproduced on actual HIGH/LOW private originals:
+normal scheduled 51-member 2t capture plus paired native mn/mx and static
+originals, real provider bodies, typed canonical ingestion, normal materializer
+and persisted public reader reach the Day0 preparation gate with finite sigma
+zero. Original adapter behavior fails both twins with
+GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID (2 failed, 80.28s,
+/tmp/zeus-XY-zero-public-red.xml). This supersedes the earlier AST-only boundary
+reproduction, not the record of that earlier limited check.
+
+Only qualified current-v35 roles accept an explicit finite zero at the Day0
+bundle sanity boundary. After strong current remaining-member reconstruction,
+the same roles do not apply the legacy extra-process-width helper; bootstrap
+uses their existing certified, aligned carrier rows instead of legacy member
+resampling/noise. Boolean sigma is rejected before float conversion. Legacy
+direct-entry, unknown/old/missing roles and negative/nonfinite inputs remain
+rejecting; no epsilon, fitted floor, absorbing upgrade or revision restamp is
+introduced. The non-Day0 v7 atom already passes normal materializer/persisted
+public reader in these fixtures; the repaired gate is inside the is_day0 branch.
+This is not a separate full non-Day0 atom ENTRY/JIT runtime proof.
+
+Frozen adapter SHA9058dac6fb61288a88786851bb84158b7fa336e9930bdbfe05d3468f84240e45,
+pricing-test SHAd02d59f98e0a0aadbae39244e7e2f8a87ae08779f0a9da4e2a8281857756098b:
+HIGH/LOW atom public ENTRY/held positives and canonical old/missing-role,
+wrong-unit, negative/NaN/boolean negatives pass (2 passed, 121.67s,
+/tmp/zeus-XY-zero-public-green.xml); positive-width generic twins preserve the
+persisted point law and never call legacy bootstrap (2 passed, 87.25s,
+/tmp/zeus-XY-positive-generic-rows.xml); missing/nonfinite/nonnormalized row
+controls reject (3 passed, 2.89s, /tmp/zeus-XY-row-sampler-negative.xml).
+The same frozen source then passes both complete normal materializer→persisted
+reader→fresh canonical body ENTRY/held→primary JIT and revision-only normal
+DRAIN twins (2 passed, 199.19s, /tmp/zeus-XY-zero-affected-fullconsumer.xml).
+
+Retention remains OPEN and blocks final loading. The atom fixture retains
+private originals after observing the real retention plan, without replacing
+any physical/clock/reader qualification. Fresh source diagnosis found normal
+retention=0 can delete assembled originals that the new reader still requires;
+this is a distinct producer/consumer dependency conflict, not a sigma failure.
+The native owner is preparing its separately authorized bounded canonical-CAS
+retention/readback repair. That source slice, independent review and integrated
+affected proof must close before delivery. The private no-delete seam is not a
+production retention fix or a claim that current native inputs are available.

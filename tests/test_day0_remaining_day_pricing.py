@@ -2949,6 +2949,151 @@ def test_complete_prefix_cannot_be_priced_as_a_coarsened_Y_truncation(metric):
     assert coarse["measurement_domain_replay_inputs"]["identity_inputs"]["city"] == "Tel Aviv"
 
 
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_native_zero_width_atom_reaches_public_day0_preparation(tmp_path, monkeypatch, metric):
+    _verify_native_width_public_day0_preparation(tmp_path, monkeypatch, metric, spread=False)
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_native_positive_width_generic_role_preserves_public_point(tmp_path, monkeypatch, metric):
+    _verify_native_width_public_day0_preparation(tmp_path, monkeypatch, metric, spread=True)
+
+
+def _verify_native_width_public_day0_preparation(tmp_path, monkeypatch, metric, *, spread):
+    """Real private originals and normal admission, not a relabelled sigma field."""
+    import hashlib
+    import eccodes as ec
+    from copy import deepcopy
+    from tests import test_replacement_forecast_materializer as fixtures
+    from src.engine import event_reactor_adapter as era
+    from src.events.opportunity_event import make_opportunity_event
+    from src.data import day0_hourly_vectors as hourly
+    from src.data import ecmwf_open_data as native_source
+    # This case needs the actual original replay after canonical decoding.
+    # Observe the real retention plan but retain private bytes; do not replace
+    # physical/clock admission with a shape stub.
+    retention_plans = []
+    def retain_private_originals(plan):
+        retention_plans.append(plan)
+        return {"status": "PRIVATE_ORIGINALS_RETAINED_FOR_READBACK"}
+    monkeypatch.setattr(native_source, "_apply_decoded_open_data_raw_retention", retain_private_originals)
+
+    # Rewrite the synthetic temperature messages before their original bytes,
+    # indexes and capture receipts are created. LSM/phi are not temperature.
+    set_values = ec.codes_set_values
+    atom_c = 11.0
+    def original_atom_values(gid, values):
+        if ec.codes_get(gid, "paramId") in {167, 228026, 228027}:
+            ec.codes_set(gid, "packingType", "grid_ieee")
+            ec.codes_set(gid, "precision", 2)
+            values = np.full(len(values), 284.15)
+        return set_values(gid, values)
+    monkeypatch.setattr(ec, "codes_set_values", original_atom_values)
+    provider_capture = fixtures._hko_current_provider_inputs
+    if not spread:
+        monkeypatch.setattr(fixtures, "_hko_current_provider_inputs", lambda request, values, **kwargs:
+            provider_capture(request, dict.fromkeys(values, atom_c), **kwargs))
+    parse = hourly.parse_openmeteo_hourly_payload
+    def atom_provider_body(payload, **kwargs):
+        body = deepcopy(payload)
+        body["hourly"]["temperature_2m"] = [atom_c] * len(body["hourly"]["time"])
+        metadata = json.loads(kwargs["source_run_meta_json"])
+        metadata["original_body_sha256"] = hashlib.sha256(json.dumps(body).encode()).hexdigest()
+        return parse(body, **{**kwargs, "source_run_meta_json": json.dumps(metadata)})
+    if not spread:
+        monkeypatch.setattr(hourly, "parse_openmeteo_hourly_payload", atom_provider_body)
+    def no_legacy_bootstrap(**kwargs):
+        raise AssertionError("current role must use its certified rows, not legacy bootstrap")
+    monkeypatch.setattr(era, "_make_day0_bootstrap_sampler", no_legacy_bootstrap)
+
+    class AtomVerified(BaseException):
+        pass
+    projection = era._global_day0_execution_payload
+    preparing = [False]
+    def verify_first_public_projection(event, **kwargs):
+        payload = projection(event, **kwargs)
+        if preparing[0]:
+            return payload
+        family = kwargs["family"]
+        payload.update(city=family.city, target_date=family.target_date, metric=metric)
+        conn = kwargs["observation_conn"]
+        row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+                           (kwargs["posterior_id"],)).fetchone()
+        provenance = json.loads(row[0])
+        sigma = provenance["bayes_precision_fusion"]["predictive_sigma_c"]
+        assert sigma > 0.0 if spread else sigma == 0.0
+        point = provenance["bayes_precision_fusion"]["current_evidence_shape"]["native_point_model"]
+        assert len(point["member_points_c"]) == 51
+        assert set(point["member_points_c"]) == {atom_c}
+        assert retention_plans
+        assert era._day0_uses_native_role_contract_metadata(payload)
+        normal = make_opportunity_event(event_type="DAY0_EXTREME_UPDATED", entity_key=event.entity_key,
+            source="private-original-atom", observed_at=event.observed_at, available_at=event.available_at,
+            received_at=event.received_at, payload=payload, causal_snapshot_id="private-original-atom")
+        preparing[0] = True
+        try:
+            for use in (era._CurrentProbabilityUse.ENTRY, era._CurrentProbabilityUse.HELD_MONITOR):
+                prepared = era._prepare_current_global_probability_family(normal, forecast_conn=conn,
+                    topology_conn=conn, observation_conn=conn, raw_input_hwm_conn=conn,
+                    decision_time=kwargs["decision_time"], max_age=timedelta(seconds=30),
+                    allow_provisional_day0_replacement=True, probability_use=use)
+                assert np.isfinite(prepared.probability_witness.yes_point_q).all()
+                assert prepared.probability_witness.yes_point_q == pytest.approx(
+                    provenance["day0_remaining_carrier_q"])
+                if not spread:
+                    assert prepared.probability_witness.yes_point_q == pytest.approx([0., 1., 0.])
+            if spread:
+                raise AtomVerified
+            for damage in ("missing_role", "old_revision", "wrong_unit", -1., float("nan"), False, True):
+                bad = deepcopy(provenance)
+                if damage == "missing_role":
+                    bad.pop("day0_measurement_domain_shapes")
+                elif damage == "old_revision":
+                    bad["day0_measurement_domain_shapes"]["semantics_revision"] = "prior-revision"
+                elif damage == "wrong_unit":
+                    bad["day0_measurement_domain_shapes"]["unit"] = "F"
+                else:
+                    bad["bayes_precision_fusion"]["predictive_sigma_c"] = damage
+                try:
+                    conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+                                 (json.dumps(bad), kwargs["posterior_id"]))
+                    conn.commit()
+                    with pytest.raises(ValueError, match="BLOCKED|INVALID|MISSING"):
+                        era._prepare_current_global_probability_family(normal, forecast_conn=conn,
+                            topology_conn=conn, observation_conn=conn, raw_input_hwm_conn=conn,
+                            decision_time=kwargs["decision_time"], max_age=timedelta(seconds=30),
+                            allow_provisional_day0_replacement=True,
+                            probability_use=era._CurrentProbabilityUse.ENTRY)
+                finally:
+                    conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+                                 (json.dumps(provenance), kwargs["posterior_id"]))
+                    conn.commit()
+        finally:
+            preparing[0] = False
+        # Stop this dedicated atom case after actual public consumption. The
+        # ordinary full-chain case separately tests later body changes and JIT.
+        raise AtomVerified
+    monkeypatch.setattr(era, "_global_day0_execution_payload", verify_first_public_projection)
+    native = fixtures._hko_native_surfaces.__wrapped__(tmp_path, monkeypatch)
+    next(native)
+    surface = fixtures._hko_source_surface.__wrapped__(tmp_path, monkeypatch, None)
+    next(surface)
+    try:
+        with pytest.raises(AtomVerified):
+            fixtures.test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkeypatch, metric)
+    finally:
+        surface.close()
+        native.close()
+
+
+@pytest.mark.parametrize("rows", [None, [[float("nan"), 0., 1.]] * 2, [[.1, .2, .3]] * 2])
+def test_current_role_row_sampler_rejects_missing_or_malformed_rows(rows):
+    from src.engine.event_reactor_adapter import _Day0CarrierRowSampler
+
+    with pytest.raises(ValueError, match="CARRIER_SAMPLES_INVALID"):
+        _Day0CarrierRowSampler.from_payload({"_edli_day0_remaining_probability_samples": rows})
+
+
 def test_v3_none_boundary_keeps_final_center_untruncated_and_is_deterministic():
     kwargs = dict(
         future_extremes_c=[0.0],

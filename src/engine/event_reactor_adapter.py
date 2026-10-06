@@ -38311,7 +38311,7 @@ def _replacement_predictive_sigma_c(replacement_bundle: object) -> float | None:
     if not isinstance(fusion, Mapping):
         return None
     value = fusion.get("predictive_sigma_c")
-    if value is None:
+    if value is None or isinstance(value, bool):
         return None
     try:
         return float(value)
@@ -41973,8 +41973,11 @@ def _prepare_current_global_probability_family(
                 )
                 if not (
                     settlement_unit in {"C", "F"}
-                    and predictive_sigma_native > 0.0
                     and math.isfinite(predictive_sigma_native)
+                    and (predictive_sigma_native > 0.0 or (
+                        predictive_sigma_native == 0.0
+                        and _day0_uses_native_role_contract_metadata(current_day0_payload)
+                    ))
                 ):
                     raise ValueError(
                         "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID"
@@ -45534,9 +45537,9 @@ def _day0_resolver_terminal_carrier(payload: Mapping[str, object]) -> bool:
 class _Day0CarrierRowSampler:
     """Bootstrap from the carrier's own composed rows.
 
-    The resolver-graded composition is terminal: its rows already carry
-    ``s``/``G-`` uncertainty.  Re-sampling members and applying a boundary here
-    would apply the boundary a second time.
+    Resolver composition already carries ``s``/``G-`` uncertainty; qualified
+    current native roles carry their own point-model draws. Re-sampling members
+    or adding legacy process noise would change either certified distribution.
     """
 
     rows: np.ndarray
@@ -46036,7 +46039,7 @@ def _market_analysis_from_event_snapshot(
         if _day0_rd_members is None:
             payload["_edli_q_source"] = "platt"
         day0_extra_member_sigma = 0.0
-        if _day0_rd_members is not None:
+        if _day0_rd_members is not None and not current_role_metadata:
             day0_extra_member_sigma = _day0_extra_member_sigma_native(
                 payload=payload,
                 family=family,
@@ -46121,6 +46124,7 @@ def _market_analysis_from_event_snapshot(
             )
             if _day0_resolver_terminal_carrier(payload)
             or "_edli_day0_composed_probability_samples" in payload
+            or current_role_metadata
             else _make_day0_bootstrap_sampler(
                 members_native=members,
                 payload=payload,
