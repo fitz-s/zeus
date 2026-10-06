@@ -643,7 +643,7 @@ def _station_ground_prerequisite_reason(city_config: object) -> str | None:
     station = runtime_station_geometry_for_city(city_config, effective_at=datetime.now(tz=UTC))
     if station["validity_reason"] is not None:
         return f"OM9_STATION_SOURCE_INVALID:{station['validity_reason']}"
-    if station["ground_status"] != "VERIFIED":
+    if station["ground_status"] not in ("VERIFIED", "BOUNDED"):
         return f"OM9_STATION_GROUND_PROOF_UNPROVEN:{station['ground_reason']}"
     return None
 

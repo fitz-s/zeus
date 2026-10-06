@@ -256,14 +256,19 @@ def _anchor_station_ground_has_authority(geometry: Mapping[str, object], audit: 
                 return False
         elif frozen["source_kind"] == OSCAR_WMD_SOURCE_KIND:
             return False
+        from src.config import station_ground_status
         station = runtime_station_geometry_for_city(city)
+        status = station_ground_status(frozen["facts"])
         return (
             station.get("validity_reason") is None
             and ground.get("revision") == "station_ground_roles_v1"
-            and ground.get("status") == "VERIFIED"
+            and status in ("VERIFIED", "BOUNDED")
+            and ground.get("status") == status
             and facts == frozen["facts"]
             and anchor["station_id"] == station["station_id"]
-            and float(anchor["station_elevation_m"]) == float(facts["elevation_m"])
+            # BOUNDED ground has no point height to carry.
+            and (anchor["station_elevation_m"] is None if status == "BOUNDED"
+                 else float(anchor["station_elevation_m"]) == float(facts["elevation_m"]))
             and float(anchor["station_lat"]) == float(station["lat"])
             and float(anchor["station_lon"]) == float(station["lon"])
         )

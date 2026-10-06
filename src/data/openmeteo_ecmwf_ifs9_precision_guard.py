@@ -118,6 +118,39 @@ def grid_surface_elevation_m(proof: Mapping[str, object]) -> float:
     return 0.0 if proof["cell_is_sea"] else float(proof["raw_grid_elevation_m"])
 
 
+def station_height_bounds_m(facts: Mapping[str, object]) -> tuple[float, float]:
+    """[lo, hi] station height: a VERIFIED point, or a BOUNDED station's published hull."""
+    from src.config import station_ground_status
+
+    status = station_ground_status(facts)
+    if status == "VERIFIED":
+        height = float(facts["elevation_m"])
+        return height, height
+    if status == "BOUNDED":
+        return float(facts["elevation_min_m"]), float(facts["elevation_max_m"])
+    raise ValueError("station ground unproven")
+
+
+def _metadata_station_heights(metadata: OpenMeteoIfs9PrecisionMetadata) -> tuple[float, float] | None:
+    """A point station height, else the BOUNDED hull its ground proof carries.
+
+    The proof's own claim; geometry_proof_authenticity_reason binds it to the
+    registry/frozen entity, so a forged hull blocks there.
+    """
+    if metadata.station_elevation_m is not None:
+        height = float(metadata.station_elevation_m)
+        return height, height
+    proof = metadata.source_geometry_proof
+    ground = proof.get("station_ground_proof") if isinstance(proof, Mapping) else None
+    if not isinstance(ground, Mapping) or ground.get("status") != "BOUNDED" or not isinstance(ground.get("facts"), Mapping):
+        return None
+    try:
+        bounds = station_height_bounds_m(ground["facts"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return bounds if all(math.isfinite(v) for v in bounds) and bounds[0] <= bounds[1] else None
+
+
 def geometry_proof_authenticity_reason(
     metadata: OpenMeteoIfs9PrecisionMetadata,
     *,
@@ -165,7 +198,9 @@ def geometry_proof_authenticity_reason(
         from src.data.openmeteo_ecmwf_ifs9_bucket_transport import (
             same_grid_cell, validate_source_cell_geometry_proof,
         )
-        from src.config import cities_by_name, runtime_station_geometry_for_city, station_ground_source_artifact_ref
+        from src.config import (
+            cities_by_name, runtime_station_geometry_for_city, station_ground_source_artifact_ref, station_ground_status,
+        )
 
         city = cities_by_name.get(metadata.city)
         if city is None:
@@ -174,7 +209,7 @@ def geometry_proof_authenticity_reason(
         if station["validity_reason"] is not None:
             return "OM9_STATION_SOURCE_INVALID"
         ground_facts = station.get("ground_facts")
-        ground_verified = station.get("ground_status") == "VERIFIED"
+        ground_status = station.get("ground_status")
         if station_ground_evidence is not None:
             from src.data.station_ground_evidence import (
                 read_current_station_ground_evidence, read_frozen_station_ground_evidence,
@@ -186,13 +221,14 @@ def geometry_proof_authenticity_reason(
             if frozen is None or current is None or current["facts"] != frozen["facts"]:
                 return "OM9_STATION_GROUND_PROOF_UNPROVEN"
             ground_facts = frozen["facts"]
-            ground_verified = True
+            ground_status = station_ground_status(ground_facts)
         ground = proof.get("station_ground_proof")
         if (
-            not ground_verified
+            ground_status not in ("VERIFIED", "BOUNDED")
+            or ground_status != station_ground_status(ground_facts)
             or not isinstance(ground, Mapping)
             or ground.get("revision") != "station_ground_roles_v1"
-            or ground.get("status") != "VERIFIED"
+            or ground.get("status") != ground_status
             or ground.get("facts") != ground_facts
             or not isinstance(ground.get("facts"), Mapping)
         ):
@@ -219,14 +255,16 @@ def geometry_proof_authenticity_reason(
         # Producer validation uses actual current official bytes. Frozen readers
         # use their own canonical entity at the independent certificate cutoff;
         # neither a later page nor a later physical fact rewrites that old cut.
-        station_height = float(ground_facts["elevation_m"])
+        # BOUNDED ground has no point height; its metadata must carry none.
+        heights = station_height_bounds_m(ground_facts)
         station_lat = float(station["lat"])
         station_lon = float(station["lon"])
-        if not all(math.isfinite(v) for v in (station_height, station_lat, station_lon)):
+        if not all(math.isfinite(v) for v in (*heights, station_lat, station_lon)) or heights[0] > heights[-1]:
             return "OM9_STATION_SOURCE_INVALID"
         if (
             str(station["station_id"]) != metadata.station_id
-            or abs(station_height - float(metadata.station_elevation_m)) > 1e-6
+            or (abs(heights[0] - float(metadata.station_elevation_m)) > 1e-6 if ground_status == "VERIFIED"
+                else metadata.station_elevation_m is not None)
             or abs(station_lat - metadata.station_lat) > 1e-6
             or abs(station_lon - metadata.station_lon) > 1e-6
         ):
@@ -302,12 +340,17 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
         reasons.append("OM9_REQUESTED_COORDINATE_NOT_SETTLEMENT_STATION")
     if unit not in {"c", "celsius"}:
         reasons.append("OM9_ANCHOR_UNIT_MUST_BE_CELSIUS")
-    if metadata.grid_elevation_m is None or metadata.station_elevation_m is None:
+    # Each predicate must hold for every station height in [lo, hi]; |grid - h|
+    # is convex in h, so its maximum is at an endpoint. A point is lo == hi.
+    heights = _metadata_station_heights(metadata)
+    elevation_delta = worst_delta = None
+    if metadata.grid_elevation_m is None or heights is None:
         reasons.append("OM9_ELEVATION_METADATA_REQUIRED")
-        elevation_delta = None
     else:
-        elevation_delta = float(metadata.grid_elevation_m) - float(metadata.station_elevation_m)
-        if abs(elevation_delta) > 250.0:
+        if metadata.station_elevation_m is not None:
+            elevation_delta = float(metadata.grid_elevation_m) - float(metadata.station_elevation_m)
+        worst_delta = max(abs(float(metadata.grid_elevation_m) - height) for height in heights)
+        if worst_delta > 250.0:
             reasons.append("OM9_ELEVATION_DELTA_HIGH")
     if not land_sea:
         reasons.append("OM9_LAND_SEA_MASK_REQUIRED")
@@ -325,7 +368,7 @@ def evaluate_openmeteo_ecmwf_ifs9_precision_guard(
     high_risk_bucket = "standard"
     if city_class in {"coastal", "island", "peninsula", "mountain", "valley"}:
         high_risk_bucket = city_class
-    if city_class in {"mountain", "valley"} and (elevation_delta is None or abs(elevation_delta) > 100.0):
+    if city_class in {"mountain", "valley"} and (worst_delta is None or worst_delta > 100.0):
         reasons.append("OM9_TERRAIN_ELEVATION_REVIEW_REQUIRED")
 
     blocking_reasons = {
