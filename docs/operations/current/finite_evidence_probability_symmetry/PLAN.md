@@ -18980,3 +18980,22 @@ uses pass while same-owner mixed/opaque or live-selector mutations still fail.
 Preserve every retired-token and archived-live-execution antibody. Required
 CLI zero plus hostile structural controls and independent exact-hash review
 are mandatory before this gate can be reported green; no live-load authority.
+
+Current checker implementation is NOT final: first actual typed CLI returned1
+with14 findings, saved at /tmp/zeus-single-live-first-typed-cli.txt. Its lexical
+name findings are reduced, but its reused cutover taint engine conflates
+structured evidence with scalar selector values. After three bounded
+diagnostic hypotheses, the integrator escalated instead of adding owner-wide
+exemptions. Actual pure counterexample: report returns {'evidence':'shadow'},
+candidate contains that report and mode='TAKER_LIMIT', mode_of(candidate)
+returns candidate['mode']; the analysis incorrectly marks that mode tainted.
+The same defect flags materializer's physical SettlementSemantics constructors
+at1760/7459 and global-batch's current execution-mode reads at1751/5724.
+Lexical alpha-binding already isolates unrelated local names and preserves
+the existing real helper controls, but is insufficient for field/call-result
+precision. Focused63 tests pass (4.20s, /tmp/zeus-single-live-typed-lexical.xml),
+including same-owner status/state/side misuse and all original retired-token
+controls; this is NOT required CLI PASS. The three authorized checker files
+remain uncommitted pending a bounded projected-value analysis decision and
+independent review. Source/q/timing/loader files and123 raw originals remain
+unchanged. No push, live FF, load or runtime qualification is authorized.
