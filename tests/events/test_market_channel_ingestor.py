@@ -766,6 +766,13 @@ def test_selective_audit_token_appends_bba_without_depth() -> None:
 
 
 def test_selective_audit_coalescer_skips_ask_only_depth_history() -> None:
+    from datetime import timedelta
+
+    # This is a live audit-sampling test, not historical-retention backfill.
+    quote_base = datetime.now(timezone.utc) - timedelta(seconds=3)
+    quote_times = tuple(
+        (quote_base + timedelta(seconds=index)).isoformat() for index in range(3)
+    )
     conn, writer = _conn_writer()
     ingestor = MarketChannelIngestor(
         writer,
@@ -800,13 +807,13 @@ def test_selective_audit_coalescer_skips_ask_only_depth_history() -> None:
         bid="0.48",
         bid_size="10",
         ask="0.52",
-        seen_at="2026-08-30T10:00:00+00:00",
+        seen_at=quote_times[0],
     )
     flush_book(
         bid="0.48",
         bid_size="10",
         ask="0.51",
-        seen_at="2026-08-30T10:00:01+00:00",
+        seen_at=quote_times[1],
     )
 
     assert conn.execute(
@@ -821,12 +828,22 @@ def test_selective_audit_coalescer_skips_ask_only_depth_history() -> None:
         bid="0.48",
         bid_size="11",
         ask="0.51",
-        seen_at="2026-08-30T10:00:02+00:00",
+        seen_at=quote_times[2],
     )
 
     assert conn.execute(
         "SELECT COUNT(*) FROM execution_feasibility_evidence"
     ).fetchone()[0] == 2
+    latest_clock, latest_depth = conn.execute(
+        "SELECT quote_seen_at,depth_before_json FROM execution_feasibility_latest "
+        "WHERE token_id='token-1' AND direction='buy_yes'"
+    ).fetchone()
+    expected_bids = [{"price": "0.48", "size": "11"}]
+    assert latest_clock == quote_times[2]
+    assert json.loads(latest_depth)["bids"] == expected_bids
+    cached = ingestor.quote_cache.get("token-1")
+    assert cached.quote_seen_at == quote_times[2]
+    assert json.loads(cached.depth_json)["bids"] == expected_bids
 
 
 def test_selective_audit_coalescer_appends_first_row_after_token_becomes_audited() -> None:
