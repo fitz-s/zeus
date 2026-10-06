@@ -19885,3 +19885,15 @@ receipt/restart controls on the merged bytes and one final shared CLI/HEAD
 secret/classifier/changed-surface batch after this receipt freeze; no repeated
 a345159/741 suite or all-city accuracy claim. A new registered restart still
 requires independent approval and ROOT's exact final-tip authorization.
+
+Publisher2617 independent review found one Important: a non-string JSON
+index_receipt_sha256 reaches regex TypeError instead of the existing typed
+ValueError/UNKNOWN drain. ROOT grants native only the same helper and collect
+test followup: require an actual str and exact lowercase64hex before regex;
+reject null/bool/int/list/dict with the existing exception reason. No coercion,
+broad catch, fallback, source-clock or qualification change. SCOPE is malformed
+receipt identity; DRAIN remains normal collector refusal, RESET restores the
+exact original proof bytes. Require real malformed-proof collector/reader
+controls with no HTTP and unchanged rows/clocks, followed by exact restoration.
+Preserve original12P and merged2-node epoch; neither proves this new boundary.
+Final CLI/secret batch waits for the followup and independent closure.
