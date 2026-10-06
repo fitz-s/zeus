@@ -18632,9 +18632,16 @@ the selected attempt before transport so crash/full-cut progression survives
 normal restart, including zero SourceRun rows and the unjournaled normal drain
 path. This generated diagnostic artifact is owned by the same source writer,
 scoped to exact native run/configured pool; it is not a new actor/schema or
-evidence source. Its exact relative filename/fields will be supplied by the
-source owner and registered through the existing metadata owner only if
-required; no ad-hoc tracked report or additional writer is introduced.
+evidence source. Exact runtime path (under the configured raw root) is
+raw/ecmwf_open_ens/native_2t_scheduled/YYYYMMDDTHHZ/mirror-attempt.json.
+Fields are version/run_time_utc/ingest_mode=SCHEDULED_LIVE/configured_mirrors/
+last_attempted_mirror/status/attempt_started_at/attempt_finished_at/reason.
+Only the normal collector reads these for scheduling; capture_receipt,
+source-manifest/index/proof/source clocks and q identity do not consume them.
+Isolated stages are exact-run .mirror-<existing resume-source namespace>.partial/
+body/index/proof, excluded from native canonical inventory before promotion.
+Required dynamic-artifact ownership notes go through the existing metadata
+owner; no ad-hoc tracked report or additional writer is introduced.
 
 Cross-mirror partial stages stay isolated. Before appending missing parts,
 fully replay the retained prefix's actual original bytes/SHA/cycle/grid/member
