@@ -1430,8 +1430,18 @@ def _run_opendata_track_if_due(
         current_identity=identity,
         now_utc=retry_now,
     )
-    if retry is None or time.monotonic() >= poll_deadline_monotonic:
+    if time.monotonic() >= poll_deadline_monotonic:
         return newest_result
+    if retry is None:
+        # Only this call's actual availability result, after mandatory retry
+        # opportunities, permits prior-role debt. A stored SKIP is not a probe.
+        try:
+            turn = _native_temperature_fair_turn(_job_conn, track=track, now_utc=retry_now,
+                deadline_monotonic=poll_deadline_monotonic, _current_check=(identity, newest_result))
+        except Exception as exc:  # Optional planning cannot replace mandatory truth.
+            logger.warning("forecast-live unreleased native turn deferred track=%s: %s", track, exc)
+            turn = None
+        return turn if turn is not None else newest_result
     retry_identity, retry_debt = retry
     retry_result = run_opendata_track(
         track,
@@ -1927,7 +1937,8 @@ def _drain_native_temperature_source(conn, *, now_utc: datetime, deadline_monoto
         "reason": "NATIVE_2T_TARGET_OR_MANDATORY_PLAN_UNKNOWN"}
 
 
-def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadline_monotonic: float) -> dict | None:
+def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadline_monotonic: float,
+        _current_check: tuple[dict, dict] | None = None) -> dict | None:
     """Drain source debt fairly without borrowing another poll's budget.
 
     SCOPE: exact normal run/current coordinate city/date/metric transport debt.
@@ -1942,6 +1953,8 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     alternate by the exact scope's durable phase receipt, including RUNNING.
     One phase consumes this poll's original cut; incomplete inventory is not
     role qualification, and a paired turn cannot mint a native SUCCESS.
+    A same-frame unreleased check, after current probe and mandatory retries,
+    permits the same phase drain for legal prior Y; the next tick probes again.
     """
     from src.data.ecmwf_open_data import collect_native_temperature_source, restore_paired_role_originals
     from src.data.release_calendar import FetchDecision
@@ -1950,23 +1963,41 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     identity = _forecast_work_identity(track, now_utc=now_utc)
     if identity["decision"] is not FetchDecision.FETCH_ALLOWED or _is_source_paused(str(identity["source_id"])):
         return None
+    checked_unreleased = False
+    if _current_check is not None:
+        checked_identity, outcome = _current_check
+        checked_unreleased = (checked_identity.get("decision") is FetchDecision.FETCH_ALLOWED
+            and all(checked_identity.get(key) == identity.get(key) for key in (
+                "track", "source_id", "scheduled_for", "job_name", "release_calendar_key", "data_version", "coordinate_manifest_json"))
+            and checked_identity.get("track") == track
+            and outcome.get("status") == "skipped_not_released"
+            and outcome.get("source") == identity["source_id"] and outcome.get("track") == track
+            and ("availability_probe" not in outcome or outcome["availability_probe"].get("status") == "not_released"))
+        if not checked_unreleased:
+            return None
     mandatory = conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (_job_run_id(identity),)).fetchone()
-    if mandatory is None or mandatory["status"] not in {"FAILED", "PARTIAL", "SUCCESS"}:
+    if checked_unreleased:
+        if mandatory is not None and mandatory["status"] != "SKIPPED_NOT_RELEASED":
+            return None
+    elif mandatory is None or mandatory["status"] not in {"FAILED", "PARTIAL", "SUCCESS"}:
         return None
-    completed_mandatory = mandatory["status"] == "SUCCESS"
-    acquired, finished = (_parse_utc_timestamp(mandatory[field]) for field in ("lock_acquired_at", "finished_at"))
-    if (acquired is None or finished is None or finished < acquired
+    completed_mandatory = mandatory is not None and mandatory["status"] == "SUCCESS"
+    if mandatory is not None:
+        acquired, finished = (_parse_utc_timestamp(mandatory[field]) for field in ("lock_acquired_at", "finished_at"))
+        if (acquired is None or finished is None or finished < acquired
             or mandatory["scheduled_for"] != identity["scheduled_for"].isoformat()
             or mandatory["release_calendar_key"] != identity["release_calendar_key"]):
-        return None
+            return None
     # One durable turn per real terminal attempt, across candidate changes and
     # across process restarts. A 503 with no native inventory is still a turn.
-    attempt = [mandatory["job_run_id"], mandatory["started_at"], mandatory["lock_acquired_at"], mandatory["finished_at"]]
+    attempt = ([mandatory[field] for field in ("job_run_id", "started_at", "lock_acquired_at", "finished_at")]
+        if mandatory is not None else None)
+    phase_turn = completed_mandatory or checked_unreleased
     job_name = "forecast_live_native_2t_" + track
     previous = conn.execute("SELECT meta_json FROM job_run WHERE job_name=? AND source_id=? "
         "AND track='2t_instant_native_knots' ORDER BY started_at DESC,rowid DESC LIMIT 1",
         (job_name, "ecmwf_open_data")).fetchone()
-    if previous is not None and not completed_mandatory:
+    if previous is not None and not phase_turn:
         try:
             if json.loads(previous["meta_json"]).get("mandatory_attempt") == attempt:
                 return None
@@ -2000,7 +2031,7 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
         if cached["status"] == "AVAILABLE" and paired_cache["status"] == "AVAILABLE":
             continue
         transport_kind = None
-        if completed_mandatory:
+        if phase_turn:
             previous_kind = None
             if receipt is not None:
                 try:
@@ -2017,6 +2048,8 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
             release_calendar_key="ecmwf_open_data:native_2t:" + scope_hash,
             started_at=_utcnow(), expected_scope_json=scope)
         meta = {"mandatory_attempt": attempt, "qualification_status": "UNKNOWN"}
+        if checked_unreleased:
+            meta["current_availability_check"] = {"job_run_id": _job_run_id(identity), "status": "not_released"}
         if transport_kind is not None:
             meta["transport_kind"] = transport_kind
         write_job_run(conn, **journal, status="RUNNING", meta_json=meta)
@@ -2038,7 +2071,7 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
             # and all canonical evidence; no other UNKNOWN is transport expiry.
             result = {**result, "status": "DEFERRED", "collector_status": collector_status}
         status = {"AVAILABLE": "SUCCESS", "INCOMPLETE": "PARTIAL"}.get(result["status"], "FAILED")
-        if completed_mandatory and status == "SUCCESS" and result.get("paired_originals", {}).get("status") != "AVAILABLE":
+        if phase_turn and status == "SUCCESS" and result.get("paired_originals", {}).get("status") != "AVAILABLE":
             status = "PARTIAL"
         write_job_run(conn, **journal, status=status, finished_at=_utcnow(),
             source_run_id=result.get("source_run_id"), reason_code=result.get("reason"),
@@ -2048,7 +2081,7 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
         conn.commit()
         return {"status": "current_cycle_already_journaled" if completed_mandatory else "native_temperature_optional_turn",
             "source": "ecmwf_open_data", "track": track,
-            "mandatory_job_run_id": mandatory["job_run_id"], "mandatory_status": mandatory["status"],
+            "mandatory_job_run_id": _job_run_id(identity), "mandatory_status": mandatory["status"] if mandatory is not None else None,
             "native_temperature_source": {**result, "transport_run_utc": plan["run"].isoformat()}}
     return None
 
@@ -2090,6 +2123,8 @@ def _run_journaled_opendata_track_if_due(
             _use_availability_probe=_use_availability_probe,
         )
         committed = _commit_opendata_result_and_wake(conn, result)
+        if result.get("status") == "native_temperature_optional_turn":
+            return {**committed, "committed_held_wake": replay}
         try:
             native = _drain_native_temperature_source(conn, now_utc=_utcnow(), deadline_monotonic=poll_deadline)
         except Exception as exc:  # Optional source debt cannot fail mandatory ingest.
