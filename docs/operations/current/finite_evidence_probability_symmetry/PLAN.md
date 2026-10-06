@@ -19865,3 +19865,23 @@ validation without rewriting any old body, receipt, proof or first clock.
 No inventory deletion, synthetic clock, schema or qualification weakening.
 Require actual RED/GREEN, unchanged old tuples and mixed receipt replay controls.
 Final shared static/secret/changed checks wait for both bounded fixes to freeze.
+
+The a345 restart returned rc1 at PRESTOP after 114.61s, with its own guard
+released and old MAIN9870 preserved. At the qualification cut it checked 13
+actual scopes; later indexed RO reads still found v6 posteriors in all 13.
+Source actors71771/71777 were PID-bound to a345, not a new MAIN. This is an
+uncompleted qualification handoff, not a successful new-revision consumption.
+
+Local-calendar diagnostic326c is independently approved (26P26.24s,
+XMLa292bfe6...): actual normal H/L full-Y is legal before local midnight,
+current X absence still blocks after midnight, and a private legacy-v6 row
+retains its real public rejection. Two H/L scopes use one frozen cut; no
+source or probability qualification was weakened. The publisher delta2617 is
+integrated as037b8c4a9b09036fabc8d352518706e8ff41a702, only its existing source
+and collect test. Exact hashes02da934b...8904 and68188289...c5a4 match the
+author freeze; actual12P8.865s (XML5ef63b93...) remains its declared scope,
+not a live 51/member-role or new posterior proof. Run the two decisive mixed
+receipt/restart controls on the merged bytes and one final shared CLI/HEAD
+secret/classifier/changed-surface batch after this receipt freeze; no repeated
+a345159/741 suite or all-city accuracy claim. A new registered restart still
+requires independent approval and ROOT's exact final-tip authorization.
