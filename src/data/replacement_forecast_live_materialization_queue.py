@@ -4608,8 +4608,18 @@ def _blocked_attempt_state(
     input_json: Path,
     payload: Mapping[str, object],
     forecast_db: Path | str | None,
+    markerless_unchanged_only: bool = False,
 ) -> tuple[Path | None, str | None, bool]:
+    """The family's blocked marker, this attempt's fingerprint, and whether they match.
+
+    ``markerless_unchanged_only``: the caller reads only the unchanged verdict,
+    which needs an existing marker, so a missing marker skips the fingerprint
+    (~1 s of instrument reads). Callers that write the first marker after a
+    BLOCKED attempt leave it False and always receive the fingerprint.
+    """
     marker_path = _blocked_attempt_marker_path(marker_dir, payload)
+    if markerless_unchanged_only and (marker_path is None or not marker_path.is_file()):
+        return marker_path, None, False
     fingerprint = _blocked_attempt_fingerprint(
         input_json=input_json,
         payload=payload,
@@ -8341,6 +8351,7 @@ def _prepare_seed_requests_with_connection(
                 input_json=request_dir / seed_json.name,
                 payload=result.request,
                 forecast_db=forecast_db,
+                markerless_unchanged_only=True,
             )
             if unchanged and marker_path is not None:
                 # A fusion-upgrade publisher retains private staging until its
