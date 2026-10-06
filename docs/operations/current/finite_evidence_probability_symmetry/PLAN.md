@@ -18459,11 +18459,15 @@ ROOT authorizes exactly three owned paths for this bounded slice: integrator
 owns this existing PLAN; native owner alone edits
 src/ingest/forecast_live_daemon.py and tests/test_forecast_live_daemon.py.
 Rank exact logical native scope/job_name by never-attempted first and existing
-job_run started_at/rowid least-recent turn, not status-only failed priority,
-global newest cycle, a permanent latch or a new TTL/schema. All attempted
-statuses consume that turn; actual AVAILABLE cache does not need a new HTTP
-attempt. Maintain one transport attempt per ordinary tranche and its original
+job_run started_at least-recent turn, within the existing active/current versus
+future priority layers; rowid is only a deterministic tie-break, never an
+attempt count. Do not use status-only failed priority, global newest cycle, a
+permanent latch or a new TTL/schema. All attempted statuses consume that turn;
+actual AVAILABLE cache does not need another transport turn. Maintain one
+bounded native plan/collector turn per ordinary tranche and its original
 absolute cut, so exhausted18Z cannot simply continue to12Z on borrowed time.
+The collector's existing index/member/part HTTP GETs are unchanged; one turn
+does not mean one literal HTTP GET.
 The next normal tranche instead selects12Z using durable ledger evidence.
 No old18Z row is deleted; source-issued/available/PIT/original body clocks,
 mandatory priority and all original quantity/coordinate/step qualifications
@@ -18473,7 +18477,7 @@ True RED->GREEN must use actual dispatcher H/L and existing private canonical
 journal writers, show18failure then12normal DRAIN across distinct tranches,
 and prove persisted-journal restart RESET without an in-memory turn flag.
 Negative qualification/deadline/unchanged mandatory-attempt controls remain;
-one exhausted callback never starts a second HTTP attempt. SCOPE is each
+one exhausted callback never starts a second native plan/collector turn. SCOPE is each
 exact native run/target-role/cohort/job_name; DRAIN is the existing scheduler's
 next ordinary eligible tranche; RESET is ledger turn progress, completed
 original subset, expiry or legitimate scope change, not raw clock renewal.
