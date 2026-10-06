@@ -657,6 +657,8 @@ def _capture_equivalence_fixture(
     changed_run: bool = False,
     window_shift_hours: int = 0,
     disjoint_window: bool = False,
+    replica_clock_skew: bool = False,
+    advanced_cycle: bool = False,
 ):
     import src.data.day0_hourly_vectors as hourly
 
@@ -688,9 +690,18 @@ def _capture_equivalence_fixture(
             row_times, row_temps = list(times), list(temps)
         if current and changed_payload:
             row_temps[8] += 1.0
-        run_id = "openmeteo:icon_d2:2026-06-10T00:00:00+00:00"
+        row_cycle = cycle
+        if current and advanced_cycle:
+            row_cycle = "2026-06-10T01:00:00+00:00"
+        run_id = f"openmeteo:icon_d2:{row_cycle}"
         if current and changed_run:
             run_id = "openmeteo:icon_d2:2026-06-10T01:00:00+00:00"
+        # Open-Meteo replicas disagree on these two clocks for the SAME run.
+        available_at = "2026-06-10T08:00:00+00:00"
+        modified_at = "2026-06-10T08:05:00+00:00"
+        if current and replica_clock_skew:
+            available_at = "2026-06-10T08:30:00+00:00"
+            modified_at = "2026-06-10T08:20:00+00:00"
         fetch_finished = (
             "2026-06-10T10:01:00+00:00"
             if current
@@ -699,9 +710,9 @@ def _capture_equivalence_fixture(
         meta = {
             "source_run_id": f"day0_hourly:{request_hash}",
             "provider_run_id": run_id,
-            "provider_source_cycle_time_utc": cycle,
-            "provider_source_available_at_utc": "2026-06-10T08:00:00+00:00",
-            "provider_source_modified_at_utc": "2026-06-10T08:05:00+00:00",
+            "provider_source_cycle_time_utc": row_cycle,
+            "provider_source_available_at_utc": available_at,
+            "provider_source_modified_at_utc": modified_at,
             "source_run_authority": "run_pinned_single_runs",
             "endpoint_mode": "single_runs",
             "model": "icon_d2",
@@ -709,7 +720,7 @@ def _capture_equivalence_fixture(
             "provider": "openmeteo",
             "endpoint": endpoint,
             "request_params_json": json.dumps(
-                {"city": "Paris", "models": ["icon_d2"], "run": cycle},
+                {"city": "Paris", "models": ["icon_d2"], "run": row_cycle},
                 sort_keys=True,
                 separators=(",", ":"),
             ),
@@ -903,6 +914,99 @@ def test_day0_v1_capture_equivalence_rejects_payload_or_issue_change(
         "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SEMANTIC_META_MISMATCH",
         "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PROVIDER_BINDING_INVALID",
     }
+
+
+def _prove_capture_equivalence(**fixture_kwargs) -> dict:
+    import src.data.day0_hourly_vectors as hourly
+
+    (
+        conn,
+        expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture(**fixture_kwargs)
+    return hourly.prove_day0_causal_capture_equivalence(
+        expected=expected,
+        actual=actual,
+        current_witness=current_witness,
+        conn=conn,
+        city="Paris",
+        target_date="2026-06-10",
+        timezone_name="Europe/Paris",
+        decision_time_utc=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        current_vectors=current_vectors,
+        remaining_window_start_utc=remaining_window_start,
+    )
+
+
+def test_day0_v1_capture_equivalence_accepts_same_run_with_replica_clock_skew():
+    # Open-Meteo replicas serve different availability/modification clocks for
+    # the SAME run (measured live 2026-10-05); identical run identity plus
+    # byte-identical payload is the same evidence.
+    proof = _prove_capture_equivalence(replica_clock_skew=True)
+    assert proof["ok"] is True, proof
+    assert proof["reason"] == "DAY0_CAUSAL_CAPTURE_EQUIVALENT"
+    assert "provider_source_available_at_utc" in proof["allowed_differences"]
+    assert "provider_source_modified_at_utc" in proof["allowed_differences"]
+    assert "provider_run_id" not in proof["allowed_differences"]
+    assert "provider_source_cycle_time_utc" not in proof["allowed_differences"]
+
+
+def test_day0_v1_capture_equivalence_rejects_advanced_run_despite_replica_clock_skew():
+    proof = _prove_capture_equivalence(advanced_cycle=True, replica_clock_skew=True)
+    assert proof["ok"] is False
+    assert proof["reason"] == "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SEMANTIC_META_MISMATCH"
+
+
+def test_day0_v1_capture_equivalence_rejects_changed_payload_despite_replica_clock_skew():
+    proof = _prove_capture_equivalence(replica_clock_skew=True, changed_payload=True)
+    assert proof["ok"] is False
+    assert proof["reason"] == "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_PAYLOAD_MISMATCH"
+
+
+def test_day0_v1_capture_equivalence_still_validates_replica_clock_order_per_row():
+    # Exempting the replica clocks from the cross-row hash must not exempt them
+    # from the per-row clock-order law: an availability clock after the row's own
+    # fetch end is rejected regardless of what the other capture says.
+    import src.data.day0_hourly_vectors as hourly
+
+    (
+        conn,
+        expected,
+        actual,
+        current_witness,
+        current_vectors,
+        remaining_window_start,
+    ) = _capture_equivalence_fixture()
+    late = "2026-06-10T10:30:00+00:00"  # after the current row's fetch_finished_at
+    row = conn.execute(
+        "SELECT source_run_meta_json FROM day0_hourly_vectors WHERE vector_id = 'new-vector'"
+    ).fetchone()
+    meta = json.loads(row[0])
+    meta["provider_source_available_at_utc"] = late
+    conn.execute(
+        "UPDATE day0_hourly_vectors SET source_run_meta_json = ? WHERE vector_id = 'new-vector'",
+        (json.dumps(meta, sort_keys=True),),
+    )
+    conn.commit()
+    current_witness = dict(current_witness)
+    current_witness["provider_source_available_at_by_model_utc"] = {"icon_d2": late}
+    proof = hourly.prove_day0_causal_capture_equivalence(
+        expected=expected,
+        actual=actual,
+        current_witness=current_witness,
+        conn=conn,
+        city="Paris",
+        target_date="2026-06-10",
+        timezone_name="Europe/Paris",
+        decision_time_utc=datetime(2026, 6, 10, 11, 0, tzinfo=UTC),
+        current_vectors=current_vectors,
+        remaining_window_start_utc=remaining_window_start,
+    )
+    assert proof["ok"] is False
+    assert proof["reason"] == "DAY0_CAUSAL_CAPTURE_EQUIVALENCE_CLOCK_INVALID"
 
 
 def test_day0_v1_capture_equivalence_accepts_window_slid_recapture_with_equal_overlap():

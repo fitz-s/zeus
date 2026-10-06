@@ -13,8 +13,18 @@ shared target-day timestamp, yet the semantic hash rejected the entry as
 ``DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SEMANTIC_META_MISMATCH`` ->
 ``GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED`` -- the largest single
 winner-preflight rejection class (39 of 106).
+
+Corrected 2026-10-05: ``provider_source_available_at_utc`` /
+``provider_source_modified_at_utc`` are replica-local clocks (Open-Meteo serves
+``meta.json`` from replicas that disagree on them for the SAME run), so they
+no longer decide equivalence. Run identity (``provider_run_id``,
+``provider_source_cycle_time_utc``, ``model_api_id``, ``provider``) still does.
+Live: every Denver ecmwf_ifs capture of one run alternated ``available_at``
+between two values while every other semantic key stayed identical.
 """
 import json
+
+import pytest
 
 import src.data.day0_hourly_vectors as hourly
 
@@ -91,20 +101,55 @@ def test_a_different_run_still_diverges_through_either_endpoint():
     assert hourly._day0_json_hash(single) != hourly._day0_json_hash(other_standard)
 
 
-def test_a_differing_provider_availability_clock_still_diverges():
+def test_a_differing_replica_clock_on_the_same_run_is_equivalent():
     single = _meta(endpoint_mode="single_runs", run=RUN)
     standard = _meta(endpoint_mode="standard_meta_stamped", run=RUN)
-    # Live data carries 4 same-run flips whose two endpoints reported different
-    # availability clocks; that is real provenance, not transport.
+    # Replicas disagree on availability/modification for one run; neither is
+    # evidence that the run or its payload changed.
     standard["provider_source_available_at_utc"] = "2026-09-18T05:55:00+00:00"
+    standard["provider_source_modified_at_utc"] = "2026-09-18T05:50:00+00:00"
     assert hourly._day0_json_hash(
         _semantic_meta(single, model="icon_global")
-    ) != hourly._day0_json_hash(_semantic_meta(standard, model="icon_global"))
+    ) == hourly._day0_json_hash(_semantic_meta(standard, model="icon_global"))
 
 
-def test_transport_fields_are_the_only_widening():
-    # Guards against a future blanket widening: run identity and every provider
-    # clock must stay OUTSIDE the capture-only allow-list.
+def test_a_replica_clock_flip_with_a_different_run_still_diverges():
+    base = _meta(endpoint_mode="single_runs", run=RUN)
+    other = _meta(endpoint_mode="single_runs", run=OTHER_RUN)
+    # The same replica clocks on both sides must not mask a run advance.
+    other["provider_source_available_at_utc"] = base["provider_source_available_at_utc"]
+    other["provider_source_modified_at_utc"] = base["provider_source_modified_at_utc"]
+    assert hourly._day0_json_hash(
+        _semantic_meta(base, model="icon_global")
+    ) != hourly._day0_json_hash(_semantic_meta(other, model="icon_global"))
+    # And differing replica clocks on top of a run advance diverge too.
+    other["provider_source_available_at_utc"] = "2026-09-18T05:55:00+00:00"
+    assert hourly._day0_json_hash(
+        _semantic_meta(base, model="icon_global")
+    ) != hourly._day0_json_hash(_semantic_meta(other, model="icon_global"))
+
+
+@pytest.mark.parametrize(
+    "field,other",
+    [
+        ("provider_run_id", "openmeteo:icon_global:2026-09-18T00:00:00+00:00"),
+        ("provider_source_cycle_time_utc", "2026-09-18T00:00:00+00:00"),
+        ("model_api_id", "icon_eu"),
+        ("provider", "other_provider"),
+    ],
+)
+def test_each_run_identity_field_alone_still_diverges(field, other):
+    base = _meta(endpoint_mode="single_runs", run=RUN)
+    changed = dict(base)
+    changed[field] = other
+    assert hourly._day0_json_hash(
+        _semantic_meta(base, model="icon_global")
+    ) != hourly._day0_json_hash(_semantic_meta(changed, model="icon_global"))
+
+
+def test_transport_and_replica_clock_fields_are_the_only_widening():
+    # Guards against a future blanket widening: run identity must stay OUTSIDE
+    # the capture-only allow-list.
     assert hourly._DAY0_CAPTURE_EQUIVALENCE_ONLY_META == frozenset(
         {
             "fetch_started_at",
@@ -114,13 +159,13 @@ def test_transport_fields_are_the_only_widening():
             "endpoint",
             "endpoint_mode",
             "source_run_authority",
+            "provider_source_available_at_utc",
+            "provider_source_modified_at_utc",
         }
     )
     for field in (
         "provider_run_id",
         "provider_source_cycle_time_utc",
-        "provider_source_available_at_utc",
-        "provider_source_modified_at_utc",
         "model_api_id",
         "provider",
     ):
