@@ -19388,3 +19388,37 @@ not193 same-byte passes. Scope remains the three declared contexts; dependencies
 are not cleared and no source/probability revision changed. No CLI/required
 union/live proof in this epoch. Await independent typed-context review, then
 merge the approved exact paired-original normal DRAIN slice before final gates.
+## 2026-10-06 paired original normal drainage: writer boundary checkpoint
+
+ROOT-authorized child branch `fix/paired-original-normal-drain-20261006`
+starts at692868c623af80146216277932473de6ee326691; old453/740 refs retained.
+Scope is ECMWF normal journal/collector original-body validation and existing
+tests; no live edits, HTTP, forced wake, canonical writes or schema changes.
+
+Verified defect: a successful exact journal is considered current from rows
+and status without checking whether its paired mx/mn assembled or CAS originals
+remain readable. The normal native collector captures2t only; completing that
+inventory cannot reconstruct the paired body consumed by the role reader.
+
+Implementation boundary found before source editing: collector identity is
+run+coordinate SHA+data revision. Re-entering collect under the same identity
+clears existing authority, writes snapshots with overwrite=True and replaces
+source_run. Therefore simply invalidating the successful journal would renew
+old evidence clocks/references, not create an independent fresh capture.
+
+Safe candidate direction is exact original-CAS restoration only: existing
+_preserve_role_originals requires full message SHA and identical ecCodes capture
+before exclusive publication, without changing canonical receipts/clocks. Its
+current inputs are local bodies only; normal bounded network restoration is
+not yet connected. The existing _fetch_one_step adapter uses idle-timeout
+requests, not native curl total-cut transport, so it cannot be silently treated
+as a bounded optional59s repair path.
+
+SCOPE: the exact source run, city/date/metric and captured message SHA.
+DRAIN: normal bounded restoration of byte-identical originals after ROOT
+accepts the transport/readback connection; differing bytes or unproved old
+receipts stay UNKNOWN. RESET: every required original strictly reads back, or
+a normal independent new run supplies a new lawful role. No missing manifest
+clear, clock backfill or mutation of old decision-time provenance is allowed.
+Production code remains unchanged at this checkpoint; writer/transport choice
+is escalated before implementing a same-identity recollection.
