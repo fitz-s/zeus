@@ -19362,3 +19362,29 @@ temperature value/observed clock/source evidence (hourly295/4880), carried by
 materializer1731/1748/1800/1979/2030, while capture_status8755–8763 declares
 the original current-source qualification consumed at public reader2359.
 These facts do not themselves authorize any new checker exemption.
+
+ROOT now authorizes three finite typed AST contexts, not a generic state
+waiver: canonical temperature-reader object and exact identity projection;
+provider-temperature dictionary with exactly the four physical fields; owning
+capture qualification constants at their five reviewed producer assignments.
+Trusted imports must survive scope/rebinding checks. Preserve all dependency
+paths; copying evidence to actual mode/runtime, foreign/unknown readers, extra
+control keys and setters remains rejected. Capture evidence uses the existing
+materializer exact AST producer/public admission contract, no enum license or
+whole-owner exemption. Only checker/test/existing money registry and PLAN.
+One focused epoch then freeze/XY; no whole CLI until independently accepted.
+
+Typed-context checkpoint: prototype193 cases produced187P/6F (no expectation
+changes); canonical-reader seeds and exact original constant definitions closed
+those six. Focused193P9.537s0F/E/S XML
+/tmp/zeus-typed-physical-context-final.xml SHA256
+d3d331486d668e842d09e3a21702ec2d7a2c0a4dcffcf5ad55b9e88e6da9ca17.
+Final two strict guards (unshadowed builtin float and foreign-import capture
+constant rejection) passed14 overlapping controls1.75s, XML
+/tmp/zeus-typed-physical-context-final-delta.xml SHA256
+e3dff17a0bf526f7797dc904992e9bdc0885356cfea6b50f44f1b5cff2119f57.
+The193 suite was not rerun after these guards; final bytes have14 controls,
+not193 same-byte passes. Scope remains the three declared contexts; dependencies
+are not cleared and no source/probability revision changed. No CLI/required
+union/live proof in this epoch. Await independent typed-context review, then
+merge the approved exact paired-original normal DRAIN slice before final gates.

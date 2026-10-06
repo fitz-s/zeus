@@ -374,6 +374,66 @@ def test_local_json_import_alias_preserves_clean_field_projection():
     assert _alternate_control_violations(source) == []
 
 
+_TEMPERATURE_READER_SOURCE = (
+    "from src.data.day0_hourly_vectors import read_day0_current_temperature_state as reader\n"
+    "state=reader(conn=conn,city=city,target_date=date,decision_time=cut)\n")
+
+
+@pytest.mark.parametrize('metric', ['high', 'low'])
+def test_typed_temperature_reader_identity_and_provider_dictionary_are_evidence(metric):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = "flag='diagnostic'\nif flag:\n " + _TEMPERATURE_READER_SOURCE.replace('\n','\n ')
+    source += "\n carrier['current_path_state']=state.identity()\n"
+    source += (" shape['provider_current_state']={'value_native':float(state.value_native),"
+               "'observed_at_utc':state.observed_at.isoformat(),'source':state.source,'input_ref':state.input_ref}\n")
+    source += "metric=" + repr(metric) + "\n"
+    assert _alternate_control_violations(source) == []
+
+
+@pytest.mark.parametrize('sink', [
+    "mode=state\n", "runtime=state.identity()\n", "command.state=state\n",
+    "def mutate(p,value):\n p['value']=value\nbag={}\nmutate(p=bag,value=opaque(state))\nruntime=bag['value']\n",
+    "if opaque('diagnostic'):\n setattr(command,'status',state)\n",
+    "from enum import Enum\nclass Choices(Enum):\n MODE=state\nmode=Choices.MODE\n",
+])
+def test_typed_temperature_evidence_cannot_authorize_a_runtime_selector(sink):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(_TEMPERATURE_READER_SOURCE + sink)
+
+
+@pytest.mark.parametrize('source', [
+    "from plugin import read_day0_current_temperature_state as reader\nif opaque('diagnostic'):\n state=reader(conn=conn,city=city,target_date=date,decision_time=cut)\n",
+    "from src.data.day0_hourly_vectors import read_day0_current_temperature_state as reader\nfrom plugin import factory as reader\nif opaque('diagnostic'):\n state=reader(conn=conn,city=city,target_date=date,decision_time=cut)\n",
+    "if opaque('diagnostic'):\n state=unknown_factory('diagnostic')\n",
+    "state=unknown_factory('diagnostic')\nmode=state.identity()\n",
+])
+def test_temperature_context_requires_exact_trusted_reader(source):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(source)
+
+
+def test_provider_temperature_dictionary_extra_control_key_is_not_evidence():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = _TEMPERATURE_READER_SOURCE + (
+        "if 'diagnostic':\n shape['provider_current_state']={'value_native':float(state.value_native),"
+        "'observed_at_utc':state.observed_at.isoformat(),'source':state.source,'input_ref':state.input_ref,'mode':'live'}\n")
+    assert _alternate_control_violations(source)
+
+
+def test_exact_source_grade_proof_is_not_a_general_status_or_owner_waiver():
+    from scripts import check_single_live_semantics as gate
+    statement = "capture_status=REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT"
+    digest = gate._evidence_use_hash(ast.parse(statement).body[0], {})
+    declaration = {'role':'source_grade_evidence','proof':'exact producer/public-reader contract',
+                   'reviewed_source_qualification_uses':{digest:'REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT'}}
+    source = "REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT='FULL_CURRENT'\nif 'diagnostic':\n " + statement + "\n"
+    assert gate._alternate_control_violations(source, declaration) == []
+    assert gate._alternate_control_violations(source + "mode=capture_status\n", declaration)
+    assert gate._alternate_control_violations(source.replace(statement, "status=REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT"), declaration)
+    assert gate._alternate_control_violations(source.replace("'FULL_CURRENT'", "'diagnostic'"), declaration)
+    assert gate._alternate_control_violations(source.replace("if 'diagnostic':", "from plugin import REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT\nif 'diagnostic':"), declaration)
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",

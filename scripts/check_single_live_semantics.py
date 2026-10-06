@@ -292,6 +292,9 @@ def _alternate_control_violations(source: str, declaration=None, *, _tree=None) 
         return ["alternate-runtime control AST unavailable"]
     seeded = any(isinstance(node, ast.Constant) and isinstance(node.value, str)
                  and re.fullmatch(r"[\w-]+", node.value) and _concept_name(node.value) for node in ast.walk(tree))
+    seeded |= any(isinstance(node, ast.ImportFrom) and node.module == 'src.data.day0_hourly_vectors'
+                  and any(alias.name == 'read_day0_current_temperature_state' for alias in node.names)
+                  for node in ast.walk(tree))
     declaration = declaration or {}
     approved = set().union(*[set(items) for items in declaration.get('reviewed_ast_uses', {}).values()]) if (
         declaration.get('role') and declaration.get('proof')) else set()
@@ -299,6 +302,8 @@ def _alternate_control_violations(source: str, declaration=None, *, _tree=None) 
         approved.update(declaration.get('reviewed_evidence_effects', {}))
     report_status = set(declaration.get('reviewed_report_status_uses', ())) if (
         declaration.get('role') and declaration.get('proof')) else set()
+    source_grade = declaration.get('reviewed_source_qualification_uses', {}) if (
+        declaration.get('role') and declaration.get('proof')) else {}
     analysis_tree = copy.deepcopy(tree) if seeded else None
     if analysis_tree is not None:
         for node in ast.walk(analysis_tree):
@@ -306,7 +311,7 @@ def _alternate_control_violations(source: str, declaration=None, *, _tree=None) 
                     ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.If, ast.For,
                     ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith, ast.Match)):
                 node._source_use_hash = hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest()
-    out = _projected_control_violations(_lexical_flow_tree(analysis_tree), approved, report_status) if seeded else []
+    out = _projected_control_violations(_lexical_flow_tree(analysis_tree), approved, report_status, source_grade) if seeded else []
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and any(
             ast.unparse(base).split(".")[-1] in {"Enum", "StrEnum", "IntEnum"} for base in node.bases
@@ -326,7 +331,7 @@ def _alternate_control_violations(source: str, declaration=None, *, _tree=None) 
     return sorted(set(out))
 
 
-def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_status=frozenset()) -> list[str]:
+def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_status=frozenset(), source_grade=None) -> list[str]:
     """Paths describe alternate values, not the whole object holding them.
 
     () is a scalar; ('mode',) and (0,) are selected container fields. Unknown
@@ -342,6 +347,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     physical_semantics = {getattr(alias, '_binding_name', alias.asname or alias.name) for node in nodes if isinstance(node, ast.ImportFrom)
                           and node.module == 'src.contracts.settlement_semantics'
                           for alias in node.names if alias.name == 'SettlementSemantics'}
+    temperature_readers = {getattr(alias, '_binding_name', alias.asname or alias.name)
+        for node in nodes if isinstance(node, ast.ImportFrom) and node.module == 'src.data.day0_hourly_vectors'
+        for alias in node.names if alias.name == 'read_day0_current_temperature_state'}
     json_modules = {getattr(alias, '_binding_name', alias.asname or alias.name) for node in nodes if isinstance(node, ast.Import)
                     for alias in node.names if alias.name == 'json'}
     hash_modules = {getattr(alias, '_binding_name', alias.asname or alias.name) for node in nodes if isinstance(node, ast.Import)
@@ -355,6 +363,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                         and node.module == 'src.contracts.settlement_semantics'
                         and alias.name == 'SettlementSemantics'):
                     physical_semantics.discard(imported)
+                if not (isinstance(node, ast.ImportFrom) and node.module == 'src.data.day0_hourly_vectors'
+                        and alias.name == 'read_day0_current_temperature_state'):
+                    temperature_readers.discard(imported)
                 if not (isinstance(node, ast.Import) and alias.name == 'json'):
                     json_modules.discard(imported)
                 if not (isinstance(node, ast.Import) and alias.name == 'hashlib'):
@@ -370,10 +381,12 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 hash_modules.discard(base.id)
                 json_mutations.add(base.id)
                 physical_semantics.discard(base.id)
+                temperature_readers.discard(base.id)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             json_modules.discard(node.name)
             hash_modules.discard(node.name)
             physical_semantics.discard(node.name)
+            temperature_readers.discard(node.name)
         if (isinstance(node, ast.Call) and _call_name(node.func) == 'setattr'
                 and node.args and isinstance(node.args[0], ast.Name)):
             json_mutations.add(node.args[0].id)
@@ -445,6 +458,8 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     json_modules = {root(name) for name in json_modules} - {root(name) for name in json_mutations}
     hash_modules = {root(name) for name in hash_modules} - {root(name) for name in json_mutations}
     physical_semantics = {root(name) for name in physical_semantics}
+    temperature_readers = {root(name) for name in temperature_readers}
+    source_grade = source_grade or {}
 
     def join(values):
         return set().union(*values) if values else set()
@@ -462,6 +477,71 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     active = set()
     call_active = set()
     opaque_calls = set()
+
+    def temperature_kind(expr, seen=frozenset()):
+        if expr is None or expr in seen:
+            return None
+        seen = seen | {expr}
+        if isinstance(expr, ast.Name):
+            name = root(expr.id)
+            choices = assignments.get(name, ())
+            kinds = {temperature_kind(item, seen) for _, item in choices}
+            return next(iter(kinds)) if choices and len(kinds) == 1 and not writes.get(name) else None
+        if isinstance(expr, ast.Call):
+            if (root(_call_name(expr.func)) in temperature_readers and not expr.args
+                    and {kw.arg for kw in expr.keywords} == {'conn', 'city', 'target_date', 'decision_time'}):
+                return 'object'
+            if (isinstance(expr.func, ast.Attribute) and expr.func.attr == 'identity'
+                    and not expr.args and not expr.keywords
+                    and temperature_kind(expr.func.value, seen) == 'object'):
+                return 'identity'
+        if isinstance(expr, ast.Dict):
+            keys = [key.value if isinstance(key, ast.Constant) else None for key in expr.keys]
+            fields = {'value_native', 'observed_at_utc', 'source', 'input_ref'}
+            if len(keys) != 4 or set(keys) != fields:
+                return None
+            receivers = set()
+            for key, item in zip(keys, expr.values, strict=True):
+                if key == 'value_native' and isinstance(item, ast.Call) and _call_name(item.func) == 'float' and len(item.args) == 1:
+                    if 'float' in functions or 'float' in assignments or item.keywords:
+                        return None
+                    item = item.args[0]
+                if key == 'observed_at_utc' and isinstance(item, ast.Call) and isinstance(item.func, ast.Attribute) and item.func.attr == 'isoformat' and not item.args and not item.keywords:
+                    item = item.func.value
+                expected = 'observed_at' if key == 'observed_at_utc' else key
+                if not isinstance(item, ast.Attribute) or item.attr != expected or temperature_kind(item.value, seen) != 'object':
+                    return None
+                receivers.add(ast.dump(item.value, include_attributes=False))
+            return 'provider' if len(receivers) == 1 else None
+        return None
+
+    def source_grade_assignment(node):
+        expected = source_grade.get(getattr(node, '_source_use_hash', None))
+        if not expected:
+            return False
+        if any(isinstance(item, (ast.Import, ast.ImportFrom)) and any(
+                getattr(alias, '_binding_name', alias.asname or alias.name) == expected for alias in item.names)
+                for item in nodes):
+            return False
+        definitions = [item.value for item in nodes if isinstance(item, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == expected for target in item.targets)]
+        return (expected and isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and getattr(node.targets[0], '_control_field', node.targets[0].id) == 'capture_status'
+            and isinstance(node.value, ast.Name) and node.value.id == expected
+            and len(definitions) == 1 and isinstance(definitions[0], ast.Constant)
+            and definitions[0].value in {'FULL_CURRENT', 'PARTIAL_CURRENT',
+                'CURRENT_EVIDENCE_NOT_LIVE', 'SOURCE_CLOCK_SCHEME_UNAVAILABLE', 'STALE_HISTORY_ONLY'})
+
+    def physical_binding(target, expr):
+        if isinstance(target, ast.Name):
+            return getattr(target, '_control_field', target.id) in {'state', 'current_state'} and temperature_kind(expr) == 'object'
+        if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant):
+            return (target.slice.value == 'current_path_state' and temperature_kind(expr) == 'identity'
+                    or target.slice.value == 'provider_current_state' and temperature_kind(expr) == 'provider')
+        return False
+
+    qualified_grades = {root(node.targets[0].id) for node in nodes if source_grade_assignment(node)}
 
     def callable_choices(expr, path=(), seen=frozenset()):
         # Finite existing AST sources only; unresolved choices remain coverage
@@ -535,6 +615,8 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
         elif isinstance(node, ast.Name):
             name = root(node.id)
             result = set(bindings.get(name, ()))
+            if name in qualified_grades:
+                result.add(('__source_qualification__',))
             result |= join([value(expr, bindings) for _, expr in assignments.get(name, ())])
             result |= join([{path + item for item in value(expr, bindings)}
                             for path, expr in writes.get(name, ())])
@@ -704,6 +786,11 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                     # Known fields do not prove that serializing a custom
                     # object's __str__ is a primitive-data operation.
                     result.add((formatted_object, name))
+            elif name in temperature_readers:
+                result = join([*arguments, *keywords.values()]) | {('__temperature_witness__',), (formatted_object, 'Day0CurrentTemperatureState')}
+            elif (isinstance(node.func, ast.Attribute) and node.func.attr == 'identity'
+                  and temperature_kind(node.func.value) == 'object'):
+                result = value(node.func.value, bindings) | {('__temperature_identity__',)}
             elif name in {'str', 'float', 'int', 'bool', 'bytes', 'len', 'repr', 'list', 'tuple'}:
                 result = join(arguments)
             elif isinstance(node.func, ast.Attribute) and node.func.attr in {'upper', 'lower', 'strip', 'copy'}:
@@ -723,6 +810,12 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
         return name.lower() in controls or bool(re.search(r'(?:^|_)(?:state|status)$', name.lower()))
 
     def reject(name, expr, bindings, node):
+        if name == 'capture_status' and isinstance(expr, ast.Name) and root(expr.id) in qualified_grades:
+            return
+        if name in {'current_path_state', 'provider_current_state'} and temperature_kind(expr) in {'identity', 'provider'}:
+            return
+        if is_control(name) and temperature_kind(expr):
+            out.add(f"physical evidence used as runtime selector {name!r} at line {node.lineno}")
         paths = value(expr, bindings) if is_control(name) else set()
         statement = node
         while not isinstance(statement, ast.stmt) and statement in parents:
@@ -757,6 +850,10 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 physical_assignment = (isinstance(child, (ast.Assign, ast.AnnAssign))
                     and isinstance(child.value, ast.Call)
                     and root(_call_name(child.value.func)) in physical_semantics)
+                if isinstance(child, (ast.Assign, ast.AnnAssign)):
+                    targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+                    physical_assignment |= bool(targets) and all(physical_binding(target, child.value) for target in targets)
+                    physical_assignment |= bool(source_grade_assignment(child))
                 if not physical_assignment and isinstance(child, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.Dict, ast.Call)):
                     fields = set(branch_controls)
                     targets = child.targets if isinstance(child, ast.Assign) else [child.target] if isinstance(
@@ -786,7 +883,8 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 name = getattr(target, '_control_field', target.id) if isinstance(target, ast.Name) else (
                     target.attr if isinstance(target, ast.Attribute) else target.slice.value
                     if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) else '')
-                reject(str(name), node.value, bindings, node)
+                if not physical_binding(target, node.value) and not source_grade_assignment(node):
+                    reject(str(name), node.value, bindings, node)
         elif isinstance(node, ast.Dict):
             for key, expr in zip(node.keys, node.values, strict=True):
                 if isinstance(key, ast.Constant):

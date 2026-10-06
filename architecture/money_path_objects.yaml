@@ -1621,6 +1621,13 @@ single_live_evidence_contexts:
     "src/data/replacement_forecast_materializer.py": {
       "role": "owning_current_q_factory_evidence_transport",
       "proof": "replacement_final_form;single-q regime;PLAN:approved source f1f and single-live effect disposition",
+      "reviewed_source_qualification_uses": {
+        "70f47c0df67f4f5135565866697c0b792085a6e32dcdb9e624fdf0fedb46d93c": "REPLACEMENT_CAPTURE_STATUS_SOURCE_CLOCK_SCHEME_UNAVAILABLE",
+        "88ba994dbf589bdc7a006d753267e92ddd6c4d9faee672b05977fb94ef43beb3": "REPLACEMENT_CAPTURE_STATUS_STALE_HISTORY_ONLY",
+        "6597a9bb837b6051eb0a7f46b78e36c26bc13d9678f577185464f13d6a09f3bd": "REPLACEMENT_CAPTURE_STATUS_CURRENT_EVIDENCE_NOT_LIVE",
+        "6f1e604ff8c1e5f05de4f515b5355dc053da204a58fadc6b90436f4bd1c1857d": "REPLACEMENT_CAPTURE_STATUS_FULL_CURRENT",
+        "a75cfc74dd1b4e81111ba2b50d53fc4d2a10993b94f9aa826bee79dd59e4c73f": "REPLACEMENT_CAPTURE_STATUS_PARTIAL_CURRENT"
+      },
       "reviewed_evidence_effects": {
         "e5f8c779eff83606f49766c7f5a7c4465781db937670c21e3c2ad0ae99d03eb3": "update_own_current_shape_evidence_not_runtime_mode",
         "4ab4fd6aad44a8e1afe615ea99681b5f2541611903be5077680c31fc09b9e132": "update_own_current_provider_cohort_shape_evidence",
