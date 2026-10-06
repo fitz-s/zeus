@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-09-30
-# Lifecycle: created=2026-05-24; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Last reused/audited: 2026-10-06
+# Lifecycle: created=2026-05-24; last_reviewed=2026-09-30; last_reused=2026-10-06
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -2628,47 +2628,31 @@ def test_paused_debt_drains_once_after_canonical_family_materializes(tmp_path):
     assert reactor_wake.read_reactor_wake(path=path) is None
 
 
-def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
-    import src.engine.event_reactor_adapter as adapter_module
+@pytest.mark.parametrize(
+    ("allow_capital_proof_progress", "expected_park"),
+    [(False, True), (True, False)],
+    ids=["ordinary_buy_parks", "capital_proof_progress_preserved"],
+)
+def test_paused_no_held_parking_is_conditional_on_capital_proof_progress(
+    allow_capital_proof_progress, expected_park,
+):
+    """Pause parks ordinary BUY work, not an owning no-submit capital-proof cut.
+
+    The normal cycle explicitly requests proof progress. It must not be tested
+    as an unconditional early park using an uninitialized WORLD connection.
+    Adjacent canonical queue controls separately prove progress without BUY
+    and reset of the reserved monitor-completion debt.
+    """
     import src.events.reactor as reactor_module
-    import src.main as main
-    from src.riskguard import riskguard
-    from src.riskguard.risk_level import RiskLevel
-
-    monkeypatch.setattr(
-        main,
-        "_settings_section",
-        lambda *_args, **_kwargs: {"enabled": True, "event_writer_enabled": True},
-    )
-    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
-    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
-    monkeypatch.setattr(
-        reactor_module,
-        "_edli_reactor_held_family_provider",
-        lambda: (lambda: frozenset()),
-    )
-    monkeypatch.setattr(
-        reactor_module,
-        "_edli_held_sell_request_exposure_provider",
-        lambda: (lambda: frozenset()),
-    )
-    monkeypatch.setattr(
-        adapter_module,
-        "_entry_pause_blocks_live_submit",
-        lambda _conn: "operator_pause",
-    )
-    drains = []
-    monkeypatch.setattr(
-        reactor_module,
-        "_edli_prune_paused_mutable_working_set",
-        lambda: drains.append(True) or {"forecast_snapshot": 0, "day0": 0},
-    )
-
-    lock = threading.Lock()
-    assert reactor_module.run_edli_event_reactor_cycle(active_lock=lock) is False
-    assert drains == [True]
-    assert lock.acquire(blocking=False) is True
-    lock.release()
+    assert reactor_module._paused_entry_wake_should_park(
+        pause_reason="operator_pause",
+        held_sell_reauction_requests=(),
+        held_sell_request_exposure_provider=lambda: frozenset(),
+        allow_forecast_carrier_progress=False,
+        durable_exact_held_completion=False,
+        monitor_completion_reserved=False,
+        allow_capital_proof_progress=allow_capital_proof_progress,
+    ) is expected_park
 
 
 def test_paused_mutable_drain_is_bounded_and_cadence_limited(monkeypatch):
