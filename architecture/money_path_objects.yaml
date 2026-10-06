@@ -1207,6 +1207,23 @@ state_machines:
       - tests/test_run_mode_failure_surfaces.py
 
 source_protocol_objects:
+  probability_upgrade_preflight_diagnostic_reason:
+    owner: scripts/check_live_restart_preflight.py
+    kind: source_diagnostic_reason
+    description: Scoped upgrade qualification refusals, never lifecycle or action states.
+    values: [PROBABILITY_UPGRADE_CURRENT_INPUT_ROLE_UNKNOWN, PROBABILITY_UPGRADE_HELD_SCOPE_UNKNOWN]
+    uses:
+      dictionary_fields: [reason]
+      written_reason_fields: [reason]
+    invariant_tests: [tests/test_money_path_semantic_ci.py, tests/test_check_live_restart_preflight.py]
+  probability_upgrade_loader_diagnostic_reason:
+    owner: scripts/deploy_live.py
+    kind: source_diagnostic_reason
+    description: A false/reason upgrade refusal, not an execution state or source clock.
+    values: [PROBABILITY_UPGRADE_CODE_IDENTITY_UNKNOWN]
+    uses:
+      false_reason_return: true
+    invariant_tests: [tests/test_money_path_semantic_ci.py, tests/test_ops_scripts_smoke.py]
   native_temperature_diagnostic_reason:
     owner: src/data/ecmwf_open_data.py
     kind: source_diagnostic_reason

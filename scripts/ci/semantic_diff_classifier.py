@@ -206,6 +206,17 @@ def _declared_protocol_use(node: ast.Constant, parents: dict[ast.AST, ast.AST], 
             if any(value is child and isinstance(key, ast.Constant)
                    and key.value in uses.get("dictionary_fields", ()) for key, value in zip(parent.keys, parent.values)):
                 return True
+        if (uses.get("false_reason_return") and isinstance(parent, ast.Tuple)
+                and len(parent.elts) == 2 and parent.elts[1] is node
+                and isinstance(parent.elts[0], ast.Constant) and parent.elts[0].value is False
+                and isinstance(parents.get(parent), ast.Return)):
+            return True
+        if isinstance(parent, (ast.Assign, ast.AnnAssign)) and child is node:
+            targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+            if targets and all(isinstance(target, ast.Subscript)
+                    and isinstance(target.slice, ast.Constant)
+                    and target.slice.value in uses.get("written_reason_fields", ()) for target in targets):
+                return True
         if isinstance(parent, ast.keyword) and parent.arg in uses.get("keyword_fields", ()):
             return True
         if isinstance(parent, ast.Call):

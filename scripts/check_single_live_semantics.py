@@ -448,17 +448,22 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             if fn is not None and fn not in call_active:
                 call_active.add(fn)
                 supplied = dict(bindings)
+                actual_keywords = {arg.arg: arg.value for arg in node.keywords}
+                destinations = {}
                 params = [*fn.args.posonlyargs, *fn.args.args]
                 defaults = dict(zip([param.arg for param in params[len(params) - len(fn.args.defaults):]],
                                     fn.args.defaults, strict=True)) if fn.args.defaults else {}
                 for index, param in enumerate(params):
                     original = getattr(param, '_parameter_name', param.arg)
+                    actual = node.args[index] if index < len(node.args) else actual_keywords.get(original)
+                    destinations[root(param.arg)] = location(actual)
                     supplied[root(param.arg)] = (arguments[index] if index < len(arguments)
                         else keywords[original] if original in keywords else
                         project(keywords[None], original, node) if None in keywords else
                         value(defaults.get(param.arg), bindings))
                 for param, default in zip(fn.args.kwonlyargs, fn.args.kw_defaults, strict=True):
                     original = getattr(param, '_parameter_name', param.arg)
+                    destinations[root(param.arg)] = location(actual_keywords.get(original))
                     supplied[root(param.arg)] = (keywords[original] if original in keywords else
                         project(keywords[None], original, node) if None in keywords else value(default, bindings))
                 if fn.args.vararg:
@@ -470,15 +475,21 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 if None in keywords and any(not path or path[0] == '*' for path in keywords[None]):
                     result |= {('*',)}
                 supplied = {key: paths for key, paths in supplied.items() if key in function_refs[name]}
-                for index, param in enumerate(params):
-                    if index < len(node.args) and isinstance(node.args[index], ast.Name):
-                        destination = root(node.args[index].id)
-                        for path, expr in writes.get(root(param.arg), ()):
-                            # A call-side write must be visible through all aliases.
-                            paths = {path + item for item in value(expr, supplied)}
+                for param in [*params, *fn.args.kwonlyargs]:
+                    destination, prefix = destinations[root(param.arg)]
+                    for path, expr in writes.get(root(param.arg), ()):
+                        paths = {prefix + path + item for item in value(expr, supplied)}
+                        if destination:
+                            # Positional and keyword actuals share the same
+                            # container identity and selected-field prefix.
+                            destination = root(destination)
                             if not paths.issubset(call_mutations.get(destination, set())):
                                 call_mutations.setdefault(destination, set()).update(paths)
                                 memo.clear()
+                        elif paths:
+                            # A dynamic actual cannot discard a known control
+                            # mutation merely because its owner is unresolved.
+                            opaque_calls.add(node)
                 for child in own_nodes(fn):
                     check(child, supplied)
                 result = join([value(expr, supplied) for expr in returns[name]])
@@ -539,6 +550,33 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             out.add(f"alternate-runtime value flows into {name!r} at line {node.lineno}")
 
     def check(node, bindings):
+        controlled = []
+        if isinstance(node, (ast.If, ast.While)):
+            controlled.append((node.test, [*node.body, *node.orelse]))
+        elif isinstance(node, ast.Match):
+            controlled.append((node.subject, [item for case in node.cases for item in case.body]))
+            controlled.extend((case.guard, case.body) for case in node.cases if case.guard is not None)
+        for predicate, branches in controlled:
+            if not any(not path or path[0] == '*' for path in value(predicate, bindings)):
+                continue
+            pending = list(branches)
+            seen_helpers = set()
+            mutated = set()
+            branch_controls = _LIVE_CONTROL_TARGETS | {'probability_authority', 'q_authority', 'trade_authority'}
+            while pending:
+                child = pending.pop()
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    continue
+                if isinstance(child, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.Dict, ast.Call)):
+                    mutated |= _mutated_controls(child, {}, controls=branch_controls)
+                if isinstance(child, ast.Call):
+                    helper = functions.get(root(_call_name(child.func)))
+                    if helper is not None and helper not in seen_helpers:
+                        seen_helpers.add(helper)
+                        pending.extend(helper.body)
+                pending.extend(ast.iter_child_nodes(child))
+            for control in mutated:
+                out.add(f"alternate-runtime predicate controls {control!r} at line {node.lineno}")
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
             for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
                 name = getattr(target, '_control_field', target.id) if isinstance(target, ast.Name) else (
@@ -566,9 +604,10 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                         if kw.arg in {'default', 'const', 'choices'}:
                             reject('mode', kw.value, bindings, node)
             value(node, bindings)
-        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-            value(node.value, bindings)
-            if node.value in opaque_calls and getattr(node, '_source_use_hash', None) not in approved:
+            statement = node
+            while not isinstance(statement, ast.stmt) and statement in parents:
+                statement = parents[statement]
+            if node in opaque_calls and getattr(statement, '_source_use_hash', None) not in approved:
                 out.add(f"alternate-runtime UNKNOWN opaque side effect at line {node.lineno}")
     # Resolve call-side mutations before reading sink expressions; statement
     # traversal order must not make a previously cached alias look clean.

@@ -98,6 +98,19 @@ def test_projected_evidence_does_not_taint_clean_selected_value(source):
     "bag={'value':'live'}\nalias=bag\nalias['value']='diagnostic'\nruntime=bag['value']\n",
     "def pick(evidence,value):\n global runtime\n runtime=evidence\n return value\nmode=pick('diagnostic','live')\n",
     "def mutate(bag):\n bag['value']='diagnostic'\nbag={}\nmutate(bag)\nruntime=bag['value']\n",
+    "def mutate(p,value):\n p['value']=value\nbag={}\nmutate(p=bag,value='diagnostic')\nruntime=bag['value']\n",
+    "def mutate(*,p,value):\n p['value']=value\nbag={}\nalias=bag\nmutate(p=alias,value='diagnostic')\nmode=bag['value']\n",
+    "def mutate(p,value):\n p['value']=value\nbag={'nested':{}}\nmutate(bag['nested'],'diagnostic')\nruntime=bag['nested']['value']\n",
+    "def mutate(*,p,value):\n p['value']=value\nbag={}\nmutate(p=bag.nested,value='diagnostic')\nruntime=bag.nested['value']\n",
+    "def mutate(p,value):\n p['value']=value\nmutate(p=opaque_target(),value='diagnostic')\n",
+    "receipt=opaque('diagnostic')\n",
+    "def report():\n return opaque('diagnostic')\nreport()\n",
+    "if opaque('diagnostic'):\n pass\n",
+    "flag='diagnostic'\nlane='live'\nif flag:\n lane='disabled'\n",
+    "flag='diagnostic'\nif flag=='diagnostic':\n q_authority='enabled'\n",
+    "flag='diagnostic'\nwhile flag:\n runtime=None\n",
+    "flag='diagnostic'\nmatch flag:\n case 'diagnostic':\n  mode='live'\n",
+    "def change():\n global lane\n lane='disabled'\nflag='diagnostic'\nif flag:\n change()\n",
     "def pick(label='diagnostic'):\n return label\nruntime=pick()\n",
     "def outer():\n label='live'\n def mutate():\n  nonlocal label\n  label='diagnostic'\n mutate()\n return label\nruntime=outer()\n",
     "bag={'mode':'diagnostic'}\nruntime=bag.get('mode')\n",
@@ -131,6 +144,20 @@ def test_registered_data_effect_never_exempts_new_control_or_opaque_use(tmp_path
     ):
         path.write_text(source)
         assert violations(tmp_path), source
+
+
+def test_keyword_mutation_retains_clean_selected_field():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = ("def mutate(*,p,value):\n p['report']=value\n"
+              "bag={'mode':'live'}\nmutate(p=bag,value='diagnostic')\nmode=bag['mode']\n")
+    assert _alternate_control_violations(source) == []
+
+
+def test_diagnostic_predicate_report_only_has_no_control_effect():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = ("flag='diagnostic'\nif flag:\n report={'status':'done'}\n"
+              " def unused():\n  runtime='disabled'\n")
+    assert _alternate_control_violations(source) == []
 
 
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:

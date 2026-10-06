@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -46,7 +48,8 @@ def test_classifier_native_21_tokens_have_structural_protocol_proof():
     from scripts.ci.semantic_diff_classifier import classify, load_yaml
     objects = load_yaml(ROOT / "architecture/money_path_objects.yaml")
     mapping = load_yaml(ROOT / "architecture/money_path_ci.yaml")
-    declarations = objects["source_protocol_objects"]
+    declarations = {key: spec for key, spec in objects["source_protocol_objects"].items()
+                    if spec["owner"] in {"src/data/ecmwf_open_data.py", "src/ingest/forecast_live_daemon.py"}}
     owners = {spec["owner"] for spec in declarations.values()}
     sources = {owner: (ROOT / owner).read_text() for owner in owners}
     # Real producer AST, without a historical git-object dependency in shallow
@@ -76,6 +79,21 @@ def test_classifier_source_reason_mixed_with_money_uses_remains_failclosed(tmp_p
             f'def capture():\n    report = {{"reason": "{reason}"}}\n    {use}\n')
         assert rc == 2 and payload["unregistered_objects"], use
         assert not any(value.endswith(reason) for value in payload["new_source_protocol_values"])
+
+
+@pytest.mark.parametrize("owner,reason,statement", [
+    ("scripts/deploy_live.py", "PROBABILITY_UPGRADE_CODE_IDENTITY_UNKNOWN", "return False, {value}"),
+    ("scripts/check_live_restart_preflight.py", "PROBABILITY_UPGRADE_CURRENT_INPUT_ROLE_UNKNOWN", "return {{'reason': {value}}}"),
+    ("scripts/check_live_restart_preflight.py", "PROBABILITY_UPGRADE_HELD_SCOPE_UNKNOWN", "scope['reason'] = {value}"),
+])
+def test_classifier_upgrade_refusal_is_reason_not_state(tmp_path, owner, reason, statement):
+    legal = "def qualify():\n    " + statement.format(value=repr(reason)) + "\n"
+    rc, payload = _source_protocol_classification(tmp_path, legal, owner=owner)
+    assert rc == 0 and not payload["unregistered_objects"]
+    for money in (f"status = {reason!r}\n", f"sql = \"CHECK(state IN ('{reason}'))\"\n",
+                  f"from enum import Enum\nclass Status(Enum):\n    FIELD={reason!r}\n"):
+        rc, payload = _source_protocol_classification(tmp_path, legal + money, owner=owner)
+        assert rc == 2 and payload["unregistered_objects"]
 
 
 def test_classifier_source_declared_literal_enum_or_sql_check_is_not_exempt(tmp_path):

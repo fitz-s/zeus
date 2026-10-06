@@ -19086,3 +19086,40 @@ exact owner and diagnostic structural use (false/reason return or reason field
 write); same token in state/status/Enum/SQL CHECK still fails. No source,
 probability or upgrade gate is relaxed. All five existing code/test paths plus
 the shared money_path_objects registry retain their scoped ownership.
+
+The same ROOT-authorized bounded review correction includes Call-level opaque
+effect checks in Assign/Return/If contexts using the nearest original statement
+hash, and known alternate-value predicates controlling actual mode/lane/runtime
+or probability-authority writes in If/While/Match. Existing mutated-control
+inspection follows only proved helpers; report-status-only branches are not
+upgraded to execution controls. No ordinary numeric operation is intended to
+be another live regime. Keyword-only and alias mutation, selected Subscript/
+Attribute actuals and unresolved mutation destinations retain explicit tests.
+
+This review epoch is NOT a final gate PASS: focused117P9.59s (single-live97 plus
+semantic classifier20), XML /tmp/zeus-required-three-review-boundaries.xml
+SHA256 b8a0b7e4c708101401b79e5c4281b62fa86451f537e60560d298fc8ac3fc39b6,
+closes the three demonstrated controls but the actual full CLI returned1 in
+103.96s. Original stdout/time remains /tmp/zeus-single-live-review-final-cli.txt:
+209 findings =206 opaque effects plus3 control predicates. Owners are
+materializer188, offline fit14, native transport3, global batch2, migration1,
+optional trace1. Examples include datetime parsing, convex member-variance
+arithmetic and JSON-safe numeric copies; the predicate cases target physical
+SettlementSemantics under sigma-zero logic. These are unresolved analysis
+category/propagation findings, not proved209 alternative probability kernels.
+The integrator escalated at this circuit boundary; no wider statement/callee
+exemption, interpreter expansion or source/math change was made. Preserve the
+hostile controls and failed CLI artifact for the next bounded design decision.
+
+Merged required semantic classifier now reports unregistered_objects=[] after
+the three exact loader reasons; schema fingerprint, test quality and invariant
+coverage pass. Secret453 and loader039/7d9 were picked normally, then all task
+commits rebased without conflict on local origin6fa8f663dcbe2e3337cdcc12d18892b411c09c2a.
+The new peer only scopes residual anchor row gaps; its five decisive nodes and
+loader controls produced37P4.66s, XML /tmp/zeus-recovery-fresh-peer-loader-merged.xml
+SHA25662ad44e81d0e3db45f9f6ca0686a82614f240867e29a5ae7ebc50df9c9ed671d.
+The approved three money fixture files from ad0 were picked as af9aa3bc8;
+merged4 controls pass2.03s. Cash's fourth file and whole money-path gate remain
+open. Full candidate secrets, remote CI and actual native/current q consumption
+are not asserted. The123 raw originals, recovery refs and same-hash private
+settings are preserved; no push/live FF/reload or production request occurred.
