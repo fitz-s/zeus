@@ -172,6 +172,27 @@ Their lengths are 24–38 characters. The seventh is a documented synthetic
 
 ---
 
+## [REVIEW-SAFE: AUDIT_REPORT_ROW_FINGERPRINT] — Immutable report-row metadata
+
+**Operator ruling 2026-10-06**: suppress only
+`68c3dd9704b6b466056be34d52b3fd5e3b45fe57:artifacts/fast_obs_audit/daily_extreme_agreement/build_summary.py:generic-api-key:19`.
+No file, commit, value, or field-name regex is exempted.
+
+**Why cleared**: the historical line belongs to the `MAIN` audit-row list
+(lines14–26), not a credential assignment. The loop at100 unpacks
+`label, kind, stem, city, live_stem`;101 loads a local report using `stem`,
+105 reads the corresponding local report, and103 appends display text. The
+summary comprehension at175 consumes the same report rows. The relevant
+23-byte identifier is a report filename stem. No literal value or credential
+validation is needed for this structural producer/consumer proof.
+
+**Exclusion boundary (INV-47)**: exact immutable commit/path/rule/line only.
+Normal HEAD-ancestry scans skip this known false positive; any new commit or
+line remains scanned. This adds one fingerprint beside the seven previously
+verified historical entries, without changing `.gitleaks.toml` or scan scope.
+
+---
+
 ## How to add a new entry
 
 When the operator clears another false-positive:

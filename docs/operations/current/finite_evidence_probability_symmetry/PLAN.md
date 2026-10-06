@@ -19303,3 +19303,14 @@ provenance and ordinary structured report fields out of scalar control claims.
 No prior expectation was changed in this correction batch. No whole CLI,
 source/q/loader change or live operation; AST/diff-check pass, gate still OPEN
 pending exact independent review and authorized actual CLI.
+
+ROOT-approved separate secrets disposition after static freeze: the692
+explicit HEAD-ancestry redacted scan returned1 in33s,10463 commits, one new
+peer68c3dd audit-row metadata false positive. Only that exact immutable
+commit/path/rule/line is appended to .gitleaksignore and the existing security
+false-positive reference; no new regex, registry row, credential value or
+other-local-ref exemption. Raw report remains private:
+/tmp/zeus-692-head-gitleaks.8wfKBj/report.json SHA256
+9b55b49e4508f4c370054166a7ee5c3ba365500e9a69fb4765ff736511905c30.
+This is not final secrets PASS: one final explicit HEAD-ancestry scan awaits
+all accepted source/gate merges; no --all rescan or current live operation.
