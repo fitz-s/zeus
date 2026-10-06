@@ -295,6 +295,16 @@ The former farthest-endpoint point law and its fitted serving ladder belong to
 the old `ensemble_center_scenarios_v6` contract. The new point/confidence split
 has no instrument, latency, settlement or fitted width floor and no city mix.
 The owning revision is `native_role_point_interval_confidence_v7`.
+For an eligible Day0 carrier, missing full-Y originals need not erase a
+separately proved remaining-X role. Its v7 admission variant explicitly binds
+`remaining_X`, its current role center and equal-provider-center mixture
+component noise (W²+delta², between spread endogenous), original scope and
+member/cohort identity. This variant is not a full-day Normal; its whole-day
+probability is only the owning current max/min carrier pushforward. It cannot
+authorize a non-Day0/FY consumer, missing prefix/carrier, or parameter-bootstrap
+fallback. Retained daily/center-confidence fields are nonacting diagnostics;
+the X component width is not a full-day mean confidence. Serialized replay
+requires the main shape's X identity to equal the carrier's original-backed X.
 Activation requires an atomic owning semantics revision across normal seed,
 materializer, serialized reader, ENTRY, held redecision and submit replay. Old
 certificates retain their original identities and drain through normal

@@ -1109,6 +1109,18 @@ def _current_ensemble_snapshot_identity_reason(
     shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
     if not isinstance(shape, Mapping) or shape.get("snapshot_id") != snapshot_id:
         return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
+    if shape.get("admission_role") == "remaining_X":
+        # Full-day coverage is not X scope coverage. The current Day0 variant
+        # must reproduce both its carrier and its exact original role subset.
+        from src.data.replacement_forecast_cycle_policy import remaining_x_admission_shape_matches_domain
+        from src.data.day0_hourly_vectors import replay_native_measurement_role_identity
+        if (not remaining_x_admission_shape_matches_domain(provenance)
+                or not replay_native_measurement_role_identity(conn, shape["native_point_model"],
+                    city=cities_by_name[city], target_date=target_date, metric=metric,
+                    decision_time=_parse_utc(provenance["day0_remaining_carrier_probability_cutoff_utc"],
+                        field_name="day0_remaining_carrier_probability_cutoff_utc"))):
+            return "REPLACEMENT_CURRENT_X_SCOPE_AUTHORITY_UNAVAILABLE"
+        return None
     compatibility_reason = native_coordinate_certificate_reason(conn, shape=shape,
         city=city, target_date=target_date, metric=metric)
     if compatibility_reason is not None:

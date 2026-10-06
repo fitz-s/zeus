@@ -506,6 +506,57 @@ def fast_residual_coverage_dependency(*, city: str, target_date: str) -> dict[st
         else f"noaa_wrh_{station.lower()}"}
 
 
+def remaining_x_admission_shape_matches_domain(provenance: Mapping[str, object]) -> bool:
+    """Seal X component noise to the actual Day0 carrier, never a full-Y Normal."""
+    try:
+        import numpy as np
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+        from src.data.day0_hourly_vectors import _day0_role_noise
+        from src.data.replacement_forecast_bundle_reader import _day0_measurement_domain_carrier_reason
+        shape = provenance["bayes_precision_fusion"]["current_evidence_shape"]
+        domains = provenance["day0_measurement_domain_shapes"]
+        x = domains["X"]
+        if (shape["admission_role"] != "remaining_X"
+                or shape["variance_representation"] != "equal_provider_center_mixture_component_noise"
+                or shape["parameter_confidence_role"] != "DIAGNOSTIC_ONLY_NON_ACTION"
+                or domains["schema"] != "day0_measurement_domain_shapes_v1"
+                or domains["semantics_revision"] != DAY0_PROBABILITY_SEMANTICS_REVISION
+                or domains["unit"] != x["unit"] or x["unit"] not in ("C", "F")
+                or "Y" in domains or x != shape["native_point_model"]
+                or shape["snapshot_id"] != x["native_snapshot_id"]
+                or shape["source_available_at"] != x["physical_dependency_available_at"]):
+            return False
+        families = x["provider_families"]
+        if (len(families) < 2 or len(set(families)) != len(families)
+                or any(not isinstance(f, str) or not f.strip() for f in families)):
+            return False
+        scalars = [*x["provider_centers_native"], *x["member_points_native"],
+            *(v for pair in x["member_interval_bounds_native"] for v in pair)]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in scalars):
+            return False
+        centers = np.sort(np.asarray(x["provider_centers_native"], dtype=float))
+        sigma, interval = _day0_role_noise(x, role="remaining_X", centers=centers)
+        scale, offset = (1.8, 32.) if x["unit"] == "F" else (1., 0.)
+        expected = {"role_center_c": (float(np.mean(centers)) - offset) / scale,
+            "predictive_sigma_c": sigma / scale}
+        for field, value in expected.items():
+            stored = shape[field]
+            if (isinstance(stored, bool) or not isinstance(stored, (int, float))
+                    or not math.isfinite(stored) or stored != value):
+                return False
+        stored_interval = shape["predictive_sigma_interval_c"]
+        if len(stored_interval) != 2 or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                or not math.isfinite(v) or v != expected_v / scale
+                for v, expected_v in zip(stored_interval, interval)):
+            return False
+        points = [(float(v) - offset) / scale for v in x["member_points_native"]]
+        member_hash = hashlib.sha256(json.dumps(points, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return (shape["member_count"] == 51 and shape["member_values_hash"] == member_hash
+                and _day0_measurement_domain_carrier_reason(provenance) is None)
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+        return False
+
+
 def _current_evidence_shape_has_probability_authority(
     provenance: object, *, materialized_at: object = None, city: object = None, target_date: object = None,
     metric: object = None, anchor_id: object = None, request_anchor_artifact_id: object = None,
@@ -538,6 +589,12 @@ def _current_evidence_shape_has_probability_authority(
             or not 0.0 <= sigma_interval[0] <= sigma_interval[1]):
         return False
     payload = json.loads(provenance) if isinstance(provenance, str) else provenance
+    x_admission = shape.get("admission_role") == "remaining_X"
+    if x_admission:
+        if not remaining_x_admission_shape_matches_domain(payload):
+            return False
+    elif shape.get("admission_role") is not None or shape["native_point_model"].get("role") != "full_Y":
+        return False
     if payload.get("day0_remaining_carrier_content_identity") is not None:
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
         domains = payload.get("day0_measurement_domain_shapes")
@@ -560,9 +617,14 @@ def _current_evidence_shape_has_probability_authority(
         from src.data.replacement_forecast_source_run_identity import native_coordinate_certificate_reason
         native_conn = _connect_read_only(forecast_db)
         try:
-            if native_coordinate_certificate_reason(native_conn, shape=shape,
+            if not x_admission and native_coordinate_certificate_reason(native_conn, shape=shape,
                     city=city, target_date=target_date, metric=metric) is not None:
                 return False
+            if x_admission:
+                row = native_conn.execute("SELECT source_cycle_time FROM ensemble_snapshots WHERE snapshot_id=?",
+                    (shape["snapshot_id"],)).fetchone()
+                if row is None or row[0] != shape["source_cycle_time"]:
+                    return False
             point_model = shape.get("native_point_model")
             if point_model is not None:
                 from src.config import runtime_cities_by_name

@@ -3664,6 +3664,10 @@ class _CurrentEvidenceShape:
     provider_geometry_evidence: Mapping[str, object] | None = None
     provider_geometry_identity_hash: str | None = None
     provider_geometry_audit: Mapping[str, object] | None = None
+    admission_role: str | None = None
+    variance_representation: str | None = None
+    role_center_c: float | None = None
+    parameter_confidence_role: str | None = None
 
     def as_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -3688,6 +3692,9 @@ class _CurrentEvidenceShape:
             payload.pop("between_cohort_excluded", None)
         if payload.get("shape_age_sigma_term_c2") is None:
             payload.pop("shape_age_sigma_term_c2", None)
+        for field in ("admission_role", "variance_representation", "role_center_c", "parameter_confidence_role"):
+            if payload.get(field) is None:
+                payload.pop(field, None)
         return payload
 
 
@@ -4391,7 +4398,63 @@ def read_current_evidence_snapshot_id(
     return None if identity is None else identity.snapshot_id
 
 
-def _read_current_evidence_shape(
+def _read_current_evidence_shape(conn, request, *, metric, provider_values_c,
+                                 provider_weights, center_c, provider_cycles=None):
+    """Full Y, or an independently proved Day0 X component, never a Normal fallback."""
+    shape = _read_full_Y_evidence_shape(conn, request, metric=metric,
+        provider_values_c=provider_values_c, provider_weights=provider_weights,
+        center_c=center_c, provider_cycles=provider_cycles)
+    if shape is not None:
+        return shape
+    from src.events.day0_authority import day0_is_carrier_source
+    if (not _target_local_day_has_started(request)
+            or _day0_carrier_extreme_c(request) is None
+            or not day0_is_carrier_source(request.day0_observed_extreme_source)):
+        return None
+    try:
+        from src.data.day0_hourly_vectors import _day0_role_noise
+        from src.contracts.ensemble_snapshot_provenance import grid_surface_evidence_identity_hash
+        future, _, _ = _day0_noaa_future_vector_members(conn, request, metric=metric)
+        domains = _day0_measurement_domain_shapes(conn, request, metric=metric,
+            future=future, station_evidence=())
+        native = domains["X"]
+        families = native["provider_families"]
+        if len(families) < 2 or len(set(families)) != len(families):
+            return None
+        centers = np.sort(np.asarray(native["provider_centers_native"], dtype=float))
+        sigma, interval = _day0_role_noise(native, role="remaining_X", centers=centers)
+        scale, offset = (1.8, 32.) if native["unit"] == "F" else (1., 0.)
+        mu = (float(np.mean(centers)) - offset) / scale
+        points = tuple((float(v) - offset) / scale for v in native["member_points_native"])
+        bounds = tuple(((float(lo) - offset) / scale, (float(hi) - offset) / scale)
+            for lo, hi in native["member_interval_bounds_native"])
+        row = conn.execute("SELECT source_cycle_time,provenance_json FROM ensemble_snapshots WHERE snapshot_id=?",
+            (native["native_snapshot_id"],)).fetchone()
+        surface = json.loads(row[1])["grid_surface_evidence"]
+        source_cycles = {family: json.loads(item["source_run_meta_json"])["provider_source_cycle_time_utc"]
+            for family, item in zip(families, native["provider_inputs"])}
+        values = {family: (float(value) - offset) / scale
+            for family, value in zip(families, native["provider_centers_native"])}
+        shape = _current_evidence_shape_from_values(snapshot_id=int(native["native_snapshot_id"]),
+            source_cycle_time=str(row[0]), source_available_at=str(native["physical_dependency_available_at"]),
+            members_c=points, provider_values_c=values,
+            provider_weights=dict.fromkeys(families, 1. / len(families)), center_c=mu,
+            carrier_cycle_time=str(row[0]), provider_cycles=source_cycles,
+            grid_surface_evidence_revision=surface["revision"],
+            grid_surface_evidence_identity_hash=grid_surface_evidence_identity_hash(surface))
+        variant = {"admission_role": "remaining_X",
+            "variance_representation": "equal_provider_center_mixture_component_noise",
+            "role_center_c": mu, "parameter_confidence_role": "DIAGNOSTIC_ONLY_NON_ACTION",
+            "native_point_model": native, "predictive_sigma_c": sigma / scale,
+            "predictive_sigma_interval_c": [v / scale for v in interval]}
+        return replace(shape, **{**variant, "predictive_sigma_interval_c": tuple(variant["predictive_sigma_interval_c"])},
+            member_bounds_c=bounds, interval_censored_member_count=sum(lo < hi for lo, hi in bounds),
+            shape_hash=_json_hash({"base_shape_hash": shape.shape_hash, **variant}))
+    except (OSError, sqlite3.Error, TypeError, ValueError, KeyError, IndexError):
+        return None
+
+
+def _read_full_Y_evidence_shape(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
     *,
@@ -4495,15 +4558,35 @@ def _read_current_evidence_shape(
 
 def _fusion_current_evidence_shape_has_live_authority(
     fusion: object, *, request: ReplacementForecastMaterializeRequest, conn: sqlite3.Connection,
+    day0_carrier: Mapping[str, object] | None = None,
+    day0_future: Sequence[float] = (),
 ) -> bool:
     """Apply the shared live shape law at the producer commit boundary."""
 
     shape = getattr(fusion, "current_evidence_shape", None)
     if not isinstance(shape, Mapping):
         return False
+    extra = {}
+    if shape.get("admission_role") == "remaining_X":
+        if day0_carrier is None:
+            return False
+        from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY, DAY0_PROBABILITY_MIXTURE_POLICY
+        extra = {**_day0_measurement_domain_carrier_provenance(day0_carrier),
+            "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+            "day0_remaining_center_bias_c": 0., "day0_probability_mixture_policy": DAY0_PROBABILITY_MIXTURE_POLICY,
+            "day0_remaining_carrier_content_identity": day0_carrier["content_identity"],
+            "day0_remaining_carrier_operator": day0_carrier["operator"],
+            "day0_remaining_carrier_q": day0_carrier["q"],
+            "day0_remaining_carrier_sample_count": day0_carrier["sample_count"],
+            "day0_remaining_carrier_probability_samples": day0_carrier["samples"],
+            "day0_remaining_carrier_future_extremes_c": list(day0_future),
+            "day0_remaining_carrier_final_extremes_c": [],
+            "day0_remaining_carrier_station_extreme_providers": [],
+            "day0_remaining_carrier_path_error_sigma_c": 0.,
+            "bin_topology": _bin_topology_payload(request.bins, settlement_step_c=float(request.settlement_step_c))}
     from src.data.station_ground_evidence import forecast_db_from_connection
     return current_evidence_shape_has_entry_authority(
-        {"bayes_precision_fusion": {"current_evidence_shape": shape,
+        {**extra, "bayes_precision_fusion": {"current_evidence_shape": shape,
             "current_value_serving": getattr(fusion, "current_value_serving", None),
             "used_models": getattr(fusion, "used_models", None)},
             "openmeteo_anchor_artifact_id":request.anchor_artifact_id,
@@ -7838,6 +7921,9 @@ def _compute_posterior_payload(
                     _day0_shared_carrier_likelihood.get("identity_hash") or ""
                 ):
                     raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISSING")
+            if (_current_shape is not None and _current_shape.get("admission_role") == "remaining_X"
+                    and _day0_shared_carrier is None):
+                raise ValueError("CURRENT_REMAINING_X_CARRIER_UNAVAILABLE")
             # C3 CALIBRATION SURFACE (2026-06-12) — FITTED σ_pred scale (k) + uniform-mixture (w).
             # OPERATOR LAW 2026-06-12: the correction factor must be FITTED by math, never hand-set.
             # k and w are read from state/sigma_scale_fit.json (MLE over settled cells; only
@@ -8663,6 +8749,7 @@ def _compute_posterior_payload(
     # STALE_HISTORY_ONLY (the live gate rejects it via BAYES_PRECISION_FUSION_CAPTURE_MISSING regardless).
     current_shape_live = _fusion_current_evidence_shape_has_live_authority(
         bayes_precision_fusion_override, request=request, conn=conn,
+        day0_carrier=_day0_shared_carrier, day0_future=(() if _day0_shared_carrier is None else _carrier_future),
     )
     if source_clock_scheme_unavailable:
         capture_status = REPLACEMENT_CAPTURE_STATUS_SOURCE_CLOCK_SCHEME_UNAVAILABLE

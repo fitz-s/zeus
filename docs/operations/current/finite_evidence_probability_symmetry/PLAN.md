@@ -18182,3 +18182,44 @@ current role/cut; DRAIN is the existing normal seed loop after X originals
 qualify; RESET is exact lawful role/source identity, not latest replica clock.
 New-epoch public H/L, missing-X/non-Day0 rejection, role/unit tamper, coherent
 point/draw/confidence, SQL covered/normal DRAIN and scoped data10 follow freeze.
+
+The genuine prerequisite uses private Hong Kong geometry encoded in original
+GRIB sections before body/index/hash capture, not London relabeled as HK.
+Y12 precedes the HK local-day start16Z; X18 starts after it. The qualified native
+provisional prefix cut00:50 follows completed X capture and is coarsened, not
+an absorbing exact-prefix assertion. Removing actual Y12 message-CAS files
+while preserving all X18 originals produced FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE
+in the unchanged normal producer (1 failed, 23.13s,
+/tmp/zeus-HKO-X-only-missing-Y-red.xml). An earlier London attempt was refuted:
+18Z itself precedes London's local start23Z and is lawful full-Y evidence;
+it is retained as a positive old-frontier replacement control, not a RED.
+Native capture first-possession equal to the calculation cut was correctly
+AFTER_DECISION; the fixture advances only the subsequent decision by one second.
+No original capture, import, written, expiry or source clock is renewed.
+Actual prior HKO entities22:50H39/L5.5,23:50H40/L5 and next-day08:50H30/L10
+provide normal reset and one revision-history transition. No qualifier,
+rollover or likelihood is mocked. The narrow patch's first HIGH normal producer
+passed1/1,28.87s (/tmp/zeus-HKO-X-only-missing-Y-green.xml), not yet a full
+consumer verdict. Public H/L consumers, exact-full-Y-scope custody restoration,
+tampered main-role/carrier rejection and coverage RESET are pending below.
+Current live/origin has independently advanced to8069ecb46f309a8078634a2d0557d360fc7f8633;
+this private candidate is not loaded, and final normal rebase/affected proof is
+required before ROOT can authorize landing or loading.
+
+The new-variant public H/L pair passed2/2,179.26s, actualexit0 in
+/tmp/zeus-HKO-X-only-public-twins.xml: normal materialize/persisted public
+ENTRY/HELD, primary prepared-family and JIT same-certificate reproduction;
+five actual canonical tamper controls (missing carrier, daily/prefix borrowed
+mean, wrong unit and role) reject publicly and become not-covered; exact
+restoration returns covered. Full-Y custody negative uses the actual local-day
+start, not remaining/asof: original Y12 positive, actual message bytes absent
+with ROLE_ORIGINAL_BODY_UNAVAILABLE, original-clock restore equal positive.
+This JIT result is same-event/same-cut reproduction, NOT a fresh-body result or
+a running seed/request loop. The final same-fixture subsequent-cut test is in
+progress: lawful old-Y READY remains immutable, its missing originals cause
+not-covered, normal subsequent materialization creates independent X READY;
+then a later real RHR body with changed current temperature must update X
+provider role/identity and q, reproduce in public ENTRY/HELD/JIT, and reject
+the superseded selected certificate. No source/likelihood/retention gate is
+changed for these controls. Source3 is frozen for independent delta review;
+tests/closeout and current-origin integration remain pending. NOT LOAD READY.
