@@ -668,6 +668,92 @@ def test_normal_native_fast_503_uses_configured_google_originals(configured_nati
     assert result["qualification_status"] == "UNKNOWN"
 
 
+@pytest.mark.parametrize("interrupted", (False, True), ids=("mixed_receipts", "restart_stage"))
+def test_normal_native_partial_index_entity_accepts_new_http_receipt_without_remint(configured_native_pool, monkeypatch, tmp_path, interrupted):
+    """Same index bytes have distinct, truthful immutable acquisition receipts."""
+    s = configured_native_pool
+    s.mode = "healthy"
+    monkeypatch.setattr(s.module, "_DOWNLOAD_SOURCES", ("aws",))
+    original_get = s.session.get
+    phase = [0]
+    ranges = [0]
+    def get(url, **kwargs):
+        response = original_get(url, **kwargs)
+        if url.endswith(".index"):
+            response.headers.update({"ETag": '"same-original-index"',
+                "Last-Modified": "Tue, 06 Oct 2026 07:40:02 GMT",
+                "Date": "Tue, 06 Oct 2026 08:48:52 GMT" if phase[0] == 0 else "Tue, 06 Oct 2026 21:59:44 GMT"})
+        elif phase[0] == 0:
+            ranges[0] += 1
+            if ranges[0] == 3:
+                s.clock[0] = s.session._zeus_deadline
+        return response
+    s.session.get = get
+    first = s.poll()
+    assert first["status"] == "INCOMPLETE" and first["observed_count"] == 2, first
+    before = json.loads(Path(first["manifest_path"]).read_bytes())["retained_identities"]
+    stage = s.cache / f".mirror-{s.module._resume_source_namespace('aws')}.partial"
+    # A legacy partial capture predates the mirror stage. Preserve the private
+    # stage forensics, while exercising the next ordinary acquisition generation.
+    stage.rename(stage.with_name(".private-original-stage"))
+    original_cache = {p.name: p.read_bytes() for p in s.cache.iterdir() if p.is_file() and p.name != "mirror-attempt.json"}
+    phase[0] = 1
+    s.clock[0] += 60.
+    real_link = s.module.os.link
+    stopped = [False]
+    raced = [False]
+    def link(origin, destination, **kwargs):
+        p = Path(destination)
+        if interrupted and p.parent == s.cache and p.name.endswith(".grib2.proof.json") and not p.exists() and not stopped[0]:
+            stopped[0] = True
+            raise OSError("private new-generation proof publication interruption")
+        if not interrupted and p.parent == s.cache and ".http-" in p.name and not p.exists() and not raced[0]:
+            raced[0] = True
+            real_link(origin, destination, **kwargs)
+            raise FileExistsError("private byte-equal concurrent immutable receipt publication")
+        return real_link(origin, destination, **kwargs)
+    monkeypatch.setattr(s.module.os, "link", link)
+    second = s.poll()
+    if interrupted:
+        assert second["status"] == "UNKNOWN" and stopped[0], second
+        s.conn.close()
+        s.conn = sqlite3.connect(s.paths.raw_root.parent / "normal-forecasts.db")
+        s.conn.row_factory = sqlite3.Row
+        s.args["conn"] = s.conn
+        s.clock[0] += 60.
+        second = s.poll()
+    assert second["status"] == "AVAILABLE" and second["observed_count"] == 102, second
+    assert stopped[0] if interrupted else raced[0]
+    after = json.loads(Path(second["manifest_path"]).read_bytes())["retained_identities"]
+    for old in before:
+        assert next(r for r in after if (r["member"], r["step_hours"]) == (old["member"], old["step_hours"])) == old
+    for name, body in original_cache.items():
+        if name != "source-manifest.json": assert (s.cache / name).read_bytes() == body
+    assert second["qualification_status"] == "UNKNOWN" and second["available_at"] is None
+    calls = len(s.calls)
+    assert s.poll()["status"] == "AVAILABLE" and len(s.calls) == calls
+    from types import SimpleNamespace
+    readback_dir = tmp_path / "mixed-readback"; readback_dir.mkdir()
+    inputs = _native_temperature_knots_fixture(readback_dir, steps=(0, 3))
+    scope = _native_source_scope(s.conn, SimpleNamespace(source_run_id=second["source_run_id"]), Path(second["manifest_path"]), inputs)
+    assert scope.status == "AVAILABLE" and len(scope.native_knots) == 102, scope
+    fresh = next(r for r in after if (r["member"], r["step_hours"]) not in {(r["member"], r["step_hours"]) for r in before})
+    part = Path(fresh["path"])
+    proof = json.loads(part.with_suffix(".grib2.proof.json").read_bytes())
+    index = part.parent / proof["index_path"]
+    receipt = s.module._native_index_receipt_path(index, proof["index_receipt_sha256"])
+    assert hashlib.sha256(receipt.read_bytes()).hexdigest() == proof["index_receipt_sha256"]
+    assert json.loads(receipt.read_bytes())["http"]["headers"]["Date"].endswith("21:59:44 GMT")
+    # An exact referenced generation must fail closed, not fall back to a
+    # different receipt or mint old possession clocks on a normal retry.
+    for damaged in (index, receipt):
+        saved = damaged.read_bytes(); damaged.write_bytes(b"{}\n")
+        failed = s.poll()
+        assert failed["status"] == "UNKNOWN" and len(s.calls) == calls, failed
+        damaged.write_bytes(saved)
+        assert s.poll()["status"] == "AVAILABLE" and len(s.calls) == calls
+
+
 @pytest.mark.parametrize("crash", (False, True), ids=("fullcut", "crash"))
 def test_normal_native_full_cut_or_crash_rotates_from_durable_mirror_attempt(configured_native_pool, crash):
     s = configured_native_pool
@@ -1238,7 +1324,7 @@ def test_normal_native_retained_tamper_never_remints(tmp_path, monkeypatch, faul
         elif fault == "index":
             (body.parent / proof["index_path"]).write_bytes(b"{}\n")
         elif fault == "index_receipt":
-            (body.parent / proof["index_path"]).with_suffix(".http.json").write_bytes(b"{}\n")
+            s.module._native_index_receipt_path(body.parent / proof["index_path"], proof["index_receipt_sha256"]).write_bytes(b"{}\n")
         else:
             proof["source_fetched_at" if fault == "clock" else "ingest_mode"] = (
                 "2099-01-01T00:00:00+00:00" if fault == "clock" else "ARCHIVE_BACKFILL")

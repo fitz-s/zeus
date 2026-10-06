@@ -162,6 +162,23 @@ def _native_temperature_steps(run: datetime, steps: list[int]) -> list[int]:
     return sorted(steps)
 
 
+def _native_index_receipt_path(index: Path, receipt_sha: str) -> Path:
+    """Resolve the proof's immutable receipt, never another acquisition clock.
+
+    SCOPE: this exact index/receipt digest. DRAIN: restore its original bytes on
+    a normal poll. RESET: strict digest readback; legacy is permitted only when
+    no digest generation exists and its bytes match the exact original digest.
+    """
+    if not re.fullmatch(r"[0-9a-f]{64}", receipt_sha):
+        raise ValueError("NATIVE_2T_ORIGINAL_INDEX_RECEIPT_INVALID")
+    generation = index.with_name(f"{index.stem}.http-{receipt_sha}.json")
+    receipt = generation if _path_present(generation) else index.with_suffix(".http.json")
+    if (receipt.is_symlink() or not receipt.is_file()
+            or hashlib.sha256(receipt.read_bytes()).hexdigest() != receipt_sha):
+        raise ValueError("NATIVE_2T_ORIGINAL_INDEX_RECEIPT_INVALID")
+    return receipt
+
+
 def _read_native_temperature_record(path: Path, run: datetime, *,
         flat_indices: tuple[int, ...] = ()) -> tuple[dict, bytes]:
     """Revalidate retained originals; metadata echoes never replace GRIB sections."""
@@ -203,7 +220,7 @@ def _read_native_temperature_record(path: Path, run: datetime, *,
         raise ValueError("NATIVE_2T_INDEX_OUTSIDE_CACHE")
     index = index_path.read_bytes()
     if proof.get("ingest_mode") == "SCHEDULED_LIVE":
-        receipt_bytes = index_path.with_suffix(".http.json").read_bytes()
+        receipt_bytes = _native_index_receipt_path(index_path, proof["index_receipt_sha256"]).read_bytes()
         receipt = json.loads(receipt_bytes)
         started = datetime.fromisoformat(receipt["fetch_started_at"])
         received = datetime.fromisoformat(receipt["source_fetched_at"])
@@ -2681,10 +2698,12 @@ def _promote_native_mirror_part(path: Path, cache: Path, run: datetime) -> dict:
     if mirror is None or not record["source_url"].startswith(origins[mirror]):
         raise ValueError("NATIVE_2T_MIRROR_STAGE_ORIGIN_INVALID")
     index = path.parent / proof["index_path"]
+    receipt = _native_index_receipt_path(index, proof["index_receipt_sha256"])
+    receipt_destination = cache / f"{index.stem}.http-{proof['index_receipt_sha256']}.json"
     # Links also retain the staged proof across interrupted publication. An
     # identical body-only publication can restore this exact proof, not recapture.
     for origin, destination in ((index, cache / index.name),
-            (index.with_suffix(".http.json"), cache / index.with_suffix(".http.json").name),
+            (receipt, receipt_destination),
             (path, cache / path.name),
             (path.with_suffix(".grib2.proof.json"), cache / path.with_suffix(".grib2.proof.json").name)):
         if origin.is_symlink() or not origin.is_file():
@@ -2693,7 +2712,23 @@ def _promote_native_mirror_part(path: Path, cache: Path, run: datetime) -> dict:
             if destination.is_symlink() or not destination.is_file() or destination.read_bytes() != origin.read_bytes():
                 raise ValueError("NATIVE_2T_MIRROR_PUBLICATION_CONFLICT")
         else:
-            os.link(origin, destination)
+            try:
+                os.link(origin, destination)
+            except FileExistsError:
+                if destination.is_symlink() or not destination.is_file() or destination.read_bytes() != origin.read_bytes():
+                    raise ValueError("NATIVE_2T_MIRROR_PUBLICATION_CONFLICT")
+    # Preserve the first legacy receipt byte-for-byte for old readers/proofs.
+    # Later acquisitions coexist by their proof's digest, not by overwriting
+    # the original HTTP Date or possession clock for this index entity.
+    legacy = cache / index.with_suffix(".http.json").name
+    if not _path_present(legacy):
+        try:
+            os.link(receipt, legacy)
+        except FileExistsError:
+            # A concurrent acquisition may have established the first legacy
+            # receipt. Its contents are never our new proof's authority.
+            if legacy.is_symlink() or not legacy.is_file():
+                raise ValueError("NATIVE_2T_MIRROR_STAGE_ALIAS")
     return _read_native_temperature_record(cache / path.name, run)[0]
 
 
