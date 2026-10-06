@@ -812,7 +812,7 @@ def _preserve_role_originals(raw_root: Path, sources: tuple[Path, ...], captures
         raise ValueError("ROLE_ORIGINAL_CAPTURE_INCOMPLETE")
 
 
-def _role_original_snapshot_references(conn, now_utc: datetime) -> tuple[set[int], set[tuple[str, str, str]], list[str]]:
+def _role_original_snapshot_references(conn, now_utc: datetime, *, raw_root: Path | None = None) -> tuple[set[int], set[tuple[str, str, str]], list[str]]:
     """Read existing consumers only; never turn missing evidence into no reference.
 
     SCOPE: original-message hashes of exact normal source snapshots. DRAIN:
@@ -873,7 +873,9 @@ def _role_original_snapshot_references(conn, now_utc: datetime) -> tuple[set[int
                 found = consume(value, scope) or found
         return found
 
-    # Actual unexpired market frontiers: late X can never supersede full Y.
+    # Retain the required transport frontier for upcoming native capture AND
+    # the independently qualified native role. A transport SUCCESS is not a
+    # native qualification; missing new X never authorizes a stale X action.
     frontiers = conn.execute("""SELECT coverage.city, coverage.target_local_date,
             coverage.temperature_metric, coverage.target_window_start_utc,
             coverage.target_window_end_utc, source.source_cycle_time, coverage.source_run_id
@@ -898,9 +900,30 @@ def _role_original_snapshot_references(conn, now_utc: datetime) -> tuple[set[int
         for role in roles:
             if (*scope, role) not in chosen:
                 chosen.add((*scope, role))
-                selected.update(int(r[0]) for r in conn.execute(
-                    "SELECT snapshot_id FROM ensemble_snapshots WHERE city=? AND target_date=? AND temperature_metric=? AND source_run_id=?",
+                transport_ids = tuple(int(r[0]) for r in conn.execute(
+                    "SELECT snapshot_id FROM ensemble_snapshots WHERE city=? AND target_date=? AND temperature_metric=? AND source_run_id=? ORDER BY snapshot_id DESC",
                     (*scope, row[6])))
+                selected.update(transport_ids)
+                try:
+                    from src.config import runtime_cities_by_name
+                    from src.data.day0_hourly_vectors import read_native_measurement_role
+                    native = read_native_measurement_role(conn=conn,
+                        city=runtime_cities_by_name()[scope[0]], target_date=scope[1],
+                        decision_time=now_utc, metric=scope[2],
+                        role="full_Y" if role == "Y" else "remaining_X",
+                        scope_start=start if role == "Y" else now_utc,
+                        # Y is an independent prior-start frontier. X is pinned
+                        # to this current run, not an older native run fallback.
+                        snapshot_id=None if role == "Y" else transport_ids[0],
+                        _paths=_resolve_opendata_paths(source_root=raw_root, environ={}))
+                    selected.add(int(native["native_snapshot_id"]))
+                    selected.update(int(v) for v in native.get("paired_snapshot_ids", ()))
+                except (OSError, ValueError, TypeError, KeyError, IndexError):
+                    # SCOPE: this exact market family. DRAIN: ordinary native
+                    # capture/proof restoration. RESET: the raw-role reader
+                    # verifies the exact original subset, or the target expires.
+                    preserve_scope(scope)
+                    errors.append("ROLE_RETENTION_NATIVE_FRONTIER_UNKNOWN")
 
     # A Prepared may be selected at T+C and execute until its book's S+C.
     # This is the existing contract's two-stage upper bound, not a new TTL.
@@ -1323,7 +1346,8 @@ def _plan_decoded_open_data_raw_retention(
     if role_originals or store.exists() or store.is_symlink():
         try:
             selected, _, reference_errors = _role_original_snapshot_references(conn,
-                reference_time or datetime.combine(reference_date, datetime.min.time(), tzinfo=timezone.utc))
+                reference_time or datetime.combine(reference_date, datetime.min.time(), tzinfo=timezone.utc),
+                raw_root=raw_root)
             # A straddling native interval requires the same-run opposite
             # extrema quantity even when that metric has no separate market.
             for snapshot_id in tuple(selected):

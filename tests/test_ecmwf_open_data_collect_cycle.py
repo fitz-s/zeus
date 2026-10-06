@@ -3445,7 +3445,7 @@ def _record_raw_authority(
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
-def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkeypatch, metric):
+def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkeypatch, metric, _bootstrap_only=False):
     """Normal capture/commit/cleanup feeds the unmocked public role reader."""
     import eccodes as ec
     import numpy as np
@@ -3514,27 +3514,29 @@ def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkey
         # Retain actual primary AND actual paired original identities.
         posterior_hash = "private-custody-posterior-" + metric
         cycle = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
-        cursor = conn.execute("""INSERT INTO forecast_posteriors(source_id,product_id,data_version,city,
+        if not _bootstrap_only:
+            cursor = conn.execute("""INSERT INTO forecast_posteriors(source_id,product_id,data_version,city,
             target_date,temperature_metric,source_cycle_time,source_available_at,computed_at,
             q_json,posterior_method,posterior_identity_hash,provenance_json)
             VALUES('TEST_ONLY_CUSTODY','TEST_ONLY_CUSTODY','TEST_ONLY_CUSTODY','London','2026-10-04',?,?,?,?,?,'TEST_ONLY_CUSTODY',?,?)""",
             (metric, cycle.isoformat(), clocks[0], request.computed_at.isoformat(), "[]", posterior_hash, json.dumps(provenance)))
-        posterior_id = cursor.lastrowid
-        conn.commit()
+            posterior_id = cursor.lastrowid
+            conn.commit()
         boundary = cycle + timedelta(hours=replacement_source_cycle_max_age_hours()) + 2 * FRESHNESS_WINDOW_DEFAULT
         def sweep(at):
             plan = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
                 reference_date=at.date(), reference_time=at)
             assert plan.role_reference_complete, plan.role_reference_errors
             return native._apply_decoded_open_data_raw_retention(plan)
-        assert sweep(boundary)["role_message_deleted_count"] >= 0
-        assert retained.exists()  # <= the real derived deadline remains live.
-        late = boundary + timedelta(microseconds=1)
-        replicas = {p: p.read_bytes() for p in retained.parent.glob("*.grib2")}
-        assert sweep(late)["role_message_deleted_count"] > 0
-        assert not retained.exists()  # +epsilon without consumers really clears.
-        for path, body in replicas.items():
-            path.write_bytes(body)  # Restore only the exact previously captured bytes.
+        if not _bootstrap_only:
+            assert sweep(boundary)["role_message_deleted_count"] >= 0
+            assert retained.exists()  # <= the real derived deadline remains live.
+            late = boundary + timedelta(microseconds=1)
+            replicas = {p: p.read_bytes() for p in retained.parent.glob("*.grib2")}
+            assert sweep(late)["role_message_deleted_count"] > 0
+            assert not retained.exists()  # +epsilon without consumers really clears.
+            for path, body in replicas.items():
+                path.write_bytes(body)  # Restore only the exact previously captured bytes.
 
         # A new ordinary collector capture replaces the legal Y frontier,
         # without unpinning the old frozen posterior/unfinished dependencies.
@@ -3551,6 +3553,10 @@ def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkey
                 return next_now.astimezone(tz or timezone.utc)
         monkeypatch.setattr(native, "datetime", NextClock)
         monkeypatch.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: next_now.isoformat())
+        sql_clock = sqlite3.connect(":memory:")
+        conn.create_function("strftime", 2, lambda fmt, value:
+            next_now.isoformat(timespec="milliseconds") if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now")
+            else sql_clock.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
         coord_json = runtime_coordinate_manifest_json()
         coord_sha = hashlib.sha256(coord_json.encode()).hexdigest()
         coord = tmp_path / "next-coordinate-manifest.json"
@@ -3589,6 +3595,32 @@ def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkey
             assert not target.exists()
             assert conn.execute("SELECT COUNT(*) FROM ensemble_snapshots WHERE city='London' AND temperature_metric=? AND source_cycle_time=?",
                 (next_metric, next_run.isoformat())).fetchone()[0] > 0
+        if _bootstrap_only:
+            from src.config import runtime_cities_by_name
+            from src.data.day0_hourly_vectors import read_native_measurement_role
+            assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
+            assert not any(p.is_file() for d in queued.values() for p in d.rglob("*.json"))
+            assert conn.execute("SELECT COUNT(*) FROM source_run WHERE track='2t_instant_native_knots' AND source_cycle_time=?",
+                (next_run.isoformat(),)).fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM source_run WHERE source_cycle_time=? AND status='SUCCESS' AND completeness_status='COMPLETE' AND partial_run=0",
+                (next_run.isoformat(),)).fetchone()[0] == 2
+            city = runtime_cities_by_name()["London"]
+            y = read_native_measurement_role(conn=conn, city=city, target_date="2026-10-04",
+                decision_time=next_now, metric=metric, role="full_Y",
+                scope_start=datetime(2026, 10, 3, 23, tzinfo=timezone.utc), _paths=paths)
+            assert y["native_snapshot_id"] == shape.snapshot_id
+            assert len(y["member_points_native"]) == 51
+            current_snapshot = conn.execute("SELECT snapshot_id FROM ensemble_snapshots WHERE city='London' AND target_date='2026-10-04' AND temperature_metric=? AND source_cycle_time=?",
+                (metric, next_run.isoformat())).fetchone()[0]
+            with pytest.raises(ValueError, match="MEASUREMENT_ROLE_NATIVE_POINT_UNAVAILABLE"):
+                read_native_measurement_role(conn=conn, city=city, target_date="2026-10-04",
+                    decision_time=next_now, metric=metric, role="remaining_X", scope_start=next_now,
+                    snapshot_id=current_snapshot, _paths=paths)
+            assert sweep(next_now)["role_message_deleted_count"] == 0
+            assert native._read_role_message_bytes(paths.raw_root, capture) == original
+            assert y["interval_snapshot_available_at"] == clocks[0]
+            sql_clock.close(); world.close(); trade.close()
+            raise Verified
         assert sweep(next_now)["role_message_deleted_count"] == 0
         assert retained.exists()  # A new frontier alone cannot erase old authority.
         aggregate_root = paths.raw_root / "raw/ecmwf_open_ens/ecmwf"
@@ -3697,6 +3729,7 @@ def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkey
         assert not retained.exists()  # Normal clearing of real references resets GC.
         parked_root.rename(aggregate_root)
         world.close(); trade.close()
+        sql_clock.close()
         raise Verified
     monkeypatch.setattr(fixture.materializer_mod, "_read_current_evidence_shape", check_retained_role)
     surfaces = fixture._hko_native_surfaces.__wrapped__(tmp_path, monkeypatch)
@@ -3709,6 +3742,12 @@ def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkey
     finally:
         ground.close()
         surfaces.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_unqualified_new_run_keeps_legal_Y_bootstrap_originals(tmp_path, monkeypatch, metric):
+    test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkeypatch, metric,
+        _bootstrap_only=True)
 
 
 @pytest.mark.parametrize("replacement", ("root", "parent"))
