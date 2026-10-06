@@ -19314,3 +19314,20 @@ other-local-ref exemption. Raw report remains private:
 9b55b49e4508f4c370054166a7ee5c3ba365500e9a69fb4765ff736511905c30.
 This is not final secrets PASS: one final explicit HEAD-ancestry scan awaits
 all accepted source/gate merges; no --all rescan or current live operation.
+
+ROOT BEFOREEDIT last named status boundary only: literal setattr status and
+suffix fields use the same predicate/direct control grammar and existing exact
+report provenance. No new callable resolver or effect interpretation. Add two
+status setters plus lane/ordinary-note twins, focused once and freeze for XY.
+After freeze,8322 test-only reactor fix is independently approved for normal
+pick; do not run money/full selected tests until native original-body merge.
+
+Literal-setter boundary actual RED2F/1P1.70s, XML
+/tmp/zeus-status-setter-red.xml SHA256
+ddf53b1427b2fec27c52b10c93c4e388265310fcffcbbbc947b02fd670c9dd10.
+Final focused174P9.50s,0F/E/S, XML
+/tmp/zeus-status-setter-focused-final.xml SHA256
+b36765554b79abc90c086b10475829a99959d198c765d9249a344dcf529b6202.
+Only literal setattr control-field expansion changed. Existing lane setter
+and ordinary report note twin pass; no old expected value changed. AST/diff
+check pass; no whole CLI or production source/q change. Await XY named closure.

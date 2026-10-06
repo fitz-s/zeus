@@ -333,6 +333,18 @@ def test_known_formatter_return_and_field_clean_report_stays_coverage_only():
     assert _alternate_control_violations(source) == []
 
 
+@pytest.mark.parametrize('field', ['status', 'command_status', 'lane'])
+def test_unknown_predicate_protects_literal_setter_fields(field):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = "if opaque('diagnostic'):\n setattr(command," + repr(field) + ",'enabled')\n"
+    assert _alternate_control_violations(source)
+
+
+def test_unknown_predicate_ordinary_report_note_setter_is_not_control():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations("if opaque('diagnostic'):\n setattr(report,'note','enabled')\n") == []
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",

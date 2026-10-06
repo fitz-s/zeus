@@ -762,6 +762,11 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                             if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) else '')
                         if is_control(str(field)) and getattr(child, '_source_use_hash', None) not in report_status:
                             fields.add(str(field).lower())
+                    if (isinstance(child, ast.Call) and _call_name(child.func) == 'setattr'
+                            and len(child.args) >= 2 and isinstance(child.args[1], ast.Constant)
+                            and is_control(str(child.args[1].value))
+                            and getattr(child, '_source_use_hash', None) not in report_status):
+                        fields.add(str(child.args[1].value).lower())
                     mutated |= _mutated_controls(child, {}, controls=fields)
                 if isinstance(child, ast.Call):
                     helper = functions.get(root(_call_name(child.func)))
