@@ -1,5 +1,5 @@
 # Created: 2026-04-21
-# Last reused/audited: 2026-05-18
+# Last reused/audited: 2026-10-06 (forward decoded entity custody)
 # Authority basis: plan v3 Phase 0 file #5 (.omc/plans/observation-instants-
 #                  migration-iter3.md L86-93); step2_phase0_pilot_plan.md.
 #                  F3 PR 2/3: typed temperature boundary per Path A (src/types/temperature.py).
@@ -43,7 +43,7 @@ import httpx
 
 from src.data.daily_obs_append import OgimetStationIdentityInvalid, _assert_ogimet_metar_station
 from src.data.metar_temperature import metar_temperature_c
-from src.data.wu_hourly_client import HourlyObservation
+from src.data.wu_hourly_client import HourlyObservation, CapturedEntity, capture_entity
 from src.types.temperature import Celsius, CelsiusBox, c_to_f
 
 
@@ -100,6 +100,7 @@ class OgimetHourlyFetchResult:
     failure_reason: Optional[str] = None
     retryable: bool = False
     error: Optional[str] = None
+    captures: tuple[CapturedEntity, ...] = ()
 
     @property
     def failed(self) -> bool:
@@ -208,6 +209,7 @@ def fetch_ogimet_hourly(
 
     all_rows: list[tuple[datetime, Celsius]] = []
     raw_count = 0
+    captures: list[CapturedEntity] = []
     current, end_utc = _local_date_range_to_utc_window(
         start_date,
         end_date,
@@ -242,6 +244,7 @@ def fetch_ogimet_hourly(
                 error=result.error,
             )
         all_rows.extend(result.observations)  # list of (utc_dt, temp_c)
+        captures.extend(result.captures)
         raw_count += result.raw_metar_count
         current = chunk_end + timedelta(seconds=1)
 
@@ -260,6 +263,7 @@ def fetch_ogimet_hourly(
     return OgimetHourlyFetchResult(
         observations=observations,
         raw_metar_count=raw_count,
+        captures=tuple(captures),
     )
 
 
@@ -289,6 +293,7 @@ class _ChunkResult:
     failure_reason: Optional[str] = None
     retryable: bool = False
     error: Optional[str] = None
+    captures: tuple[CapturedEntity, ...] = ()
 
     @property
     def failed(self) -> bool:
@@ -348,11 +353,13 @@ def _fetch_one_chunk(
         "begin": begin.strftime("%Y%m%d%H%M"),
         "end": end.strftime("%Y%m%d%H%M"),
     }
+    capture_started = datetime.now(timezone.utc)
     try:
         resp = _request_ogimet(
             params=params,
             timeout_seconds=timeout_seconds,
         )
+        capture_finished = datetime.now(timezone.utc)
     except (httpx.HTTPError, httpx.RequestError) as exc:
         logger.warning(
             "Ogimet fetch raised %s for %s %s..%s: %s",
@@ -387,7 +394,7 @@ def _fetch_one_chunk(
 
     parsed: list[tuple[datetime, Celsius]] = []
     raw = 0
-    for line in resp.text.splitlines():
+    for line in resp.text.lstrip('\ufeff').splitlines():
         line = line.strip()
         if not line:
             continue
@@ -401,7 +408,11 @@ def _fetch_one_chunk(
         row = _parse_metar_csv_line(line)
         if row is not None:
             parsed.append(row)
-    return _ChunkResult(observations=parsed, raw_metar_count=raw)
+    return _ChunkResult(observations=parsed, raw_metar_count=raw,
+        captures=(capture_entity(resp, started_at=capture_started,
+            finished_at=capture_finished, request_url=OGIMET_METAR_URL,
+            request_params=params, native_unit='C',
+            report_timestamps=(dt.isoformat() for dt, _temp in parsed)),))
 
 
 # ----------------------------------------------------------------------
