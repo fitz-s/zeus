@@ -1094,7 +1094,46 @@
   "lat": "8.97334",
   "lon": "-79.555603",
   "source": "OurAirports",
-  "station": "MPMG"
+  "station": "MPMG",
+  "station_height_bound": {
+   "revision": "station_height_bound_v1",
+   "source_kind": "synoptic_wrh_awc_station_height_bound_v1",
+   "station_id": "MPMG",
+   "height_role": "published_station_height_hull",
+   "elevation_min_m": 5.5,
+   "elevation_max_m": 13.2588,
+   "published_heights": {
+    "synoptic_wrh": {
+     "quantity": "STATION.ELEVATION.whole_ft",
+     "value": "43.0",
+     "source_station_id": "34479",
+     "site_lat": 8.9833,
+     "site_lon": -79.5167
+    },
+    "awc_stationinfo": {
+     "quantity": "elev.whole_m",
+     "value": 6,
+     "site_lat": 8.967,
+     "site_lon": -79.555
+    }
+   },
+   "site_lat": 8.967,
+   "site_lon": -79.555,
+   "location_role": "current_metar_station_reference",
+   "source_url": "https://api.synopticdata.com/v2/stations/metadata?STID=MPMG&complete=1",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/synoptic_wrh_mpmg_station.json",
+   "body_sha256": "3b0b7e4721bc615f81a1fb52b8fe52b75080ff2a55af354457e52879060501dc",
+   "source_checked_at": "2026-10-06T05:50:57.889724+00:00",
+   "checked_at": "2026-10-06T05:50:57.889724+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57+00:00",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "Paris": {
   "distance_from_citiesjson_m": 815,
@@ -1136,7 +1175,46 @@
   "lat": "36.361953",
   "lon": "120.088171",
   "source": "OurAirports",
-  "station": "ZSQD"
+  "station": "ZSQD",
+  "station_height_bound": {
+   "revision": "station_height_bound_v1",
+   "source_kind": "synoptic_wrh_awc_station_height_bound_v1",
+   "station_id": "ZSQD",
+   "height_role": "published_station_height_hull",
+   "elevation_min_m": 1.5,
+   "elevation_max_m": 10.2108,
+   "published_heights": {
+    "synoptic_wrh": {
+     "quantity": "STATION.ELEVATION.whole_ft",
+     "value": "33.0",
+     "source_station_id": "75095",
+     "site_lat": 36.2661,
+     "site_lon": 120.374
+    },
+    "awc_stationinfo": {
+     "quantity": "elev.whole_m",
+     "value": 2,
+     "site_lat": 36.362,
+     "site_lon": 120.087
+    }
+   },
+   "site_lat": 36.362,
+   "site_lon": 120.087,
+   "location_role": "current_metar_station_reference",
+   "source_url": "https://api.synopticdata.com/v2/stations/metadata?STID=ZSQD&complete=1",
+   "identity_bridge_source_url": "https://aviationweather.gov/api/data/stationinfo",
+   "artifact_ref": "config/synoptic_wrh_zsqd_station.json",
+   "body_sha256": "751ef2aebacdbfc0510b604a4053c495a38e4939bd5f793d9f350454a95c8f0d",
+   "source_checked_at": "2026-10-06T05:50:55.538316+00:00",
+   "checked_at": "2026-10-06T05:50:55.538316+00:00",
+   "bridge": {
+    "source_kind": "awc_stationinfo_v1",
+    "artifact_ref": "config/awc_stationinfo_53_station.json",
+    "body_sha256": "8eff09fce91637f1d4f52a8bdecd15eee0f05626f3c05c31f8da198829f960d1",
+    "checked_at": "2026-09-29T23:47:57+00:00",
+    "source_url": "https://aviationweather.gov/api/data/stationinfo"
+   }
+  }
  },
  "San Francisco": {
   "distance_from_citiesjson_m": 812,

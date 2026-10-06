@@ -56,6 +56,7 @@ test_trust_policy:
     tests/test_full_loss_investigation_loop.py: {created: "2026-08-22", last_used: "2026-08-22", note: "Deterministic whole-position full-loss economics from command-deduped entry fills, reversible false-incident retraction/restoration, isolated-memory boundary, idempotent batching, repair-worktree fail-closed gate, and validated result persistence."}
     tests/test_total_loss_loop.py: {created: "2026-08-22", last_used: "2026-09-29", note: "248 isolated relationship checks retain incident/settlement detection and permit bounded diagnostics under fresh DEGRADED truth; config-bound main/forecast/composite roles, stop at each launch boundary, and worker argv/status debt cannot confer new repair or delivery authority."}
     tests/test_station_ground_evidence.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Owner-reviewed private canonical DB/raw-artifact ground evidence tests; immutable physical facts, original source versus first-recorded possession, scoped recovery and cutoff replay. Pending consumer/dual-source combinations remain separately admitted."}
+    tests/test_om9_bounded_station_ground.py: {created: "2026-10-06", last_used: "2026-10-06", note: "MPMG/ZSQD BOUNDED published-height hull: OM9 elevation predicates over the whole hull, point ground stays UNPROVEN, VERIFIED stations unchanged."}
     tests/test_healthcheck.py: {created: "2026-04-30", last_used: "2026-07-31", note: "Live health relationships including terminal command versus venue-fact conflicts classified by canonical lifecycle and order-truth reducer proof."}
     tests/test_data_freshness_gate.py: {created: "2026-04-30", last_used: "2026-08-03", note: "Source freshness three-branch behavior, source-role-scoped Day0 veto, and operator override."}
     tests/test_status_summary_single_writer.py: {created: "2026-06-10", last_used: "2026-07-31", note: "Daemon-only status writer ownership, freshness, and canonical command-recommendation projection contract across pulse and result writes."}
@@ -935,6 +936,7 @@ categories:
     - tests/test_wal_busy_factory_fail_conservative.py
     - tests/test_bayes_precision_fusion_download.py
     - tests/test_openmeteo_model_surface.py
+    - tests/test_om9_bounded_station_ground.py
     - tests/test_bayes_precision_fusion_arrival_guard.py
     - tests/test_finite_evidence_probability_symmetry.py
     - tests/test_replacement_forecast_extras_coverage_gate.py
@@ -3871,6 +3873,24 @@ test_metadata:
       source truth.
     created: 2026-09-29
     last_reused_or_audited: 2026-09-29
+  tests/test_om9_bounded_station_ground.py:
+    modules: [data]
+    category: core_law_antibody
+    kind: relationship
+    profile: source_precision
+    blocks_commit: true
+    asserted_invariants: [INV-14, INV-47]
+    source_under_test: [src/config.py, src/data/openmeteo_ecmwf_ifs9_precision_guard.py, src/data/station_ground_evidence.py]
+    law_dependencies: [docs/authority/replacement_final_form_2026_06_09.md]
+    notes: >
+      MPMG/ZSQD real WRH+AWC bodies replay to a BOUNDED published-height hull,
+      never VERIFIED ground or a point; a bound cannot pose as a ground proof or
+      drift from its bodies. OM9 elevation predicates must hold over the whole
+      hull (100 m/250 m straddles block); unreadable archived bodies block
+      UNPROVEN; VERIFIED stations keep the old guard and coverage shape. Real
+      archive, producer metadata and guard end to end on private state only.
+    created: 2026-10-06
+    last_reused_or_audited: 2026-10-06
   tests/test_openmeteo_model_surface.py:
     modules: [data]
     category: core_law_antibody

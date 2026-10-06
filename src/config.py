@@ -567,10 +567,17 @@ STATION_GROUND_SOURCE_ARTIFACTS = {
     "hko_station_table_v1": "config/hko_station_metadata.html",
     "noaa_homr_primary_dcp_snapshot_v1": "config/noaa_homr_kord_station.json",
 }
+# No published source proves these stations' point ground; their own WRH
+# settlement record and current AWC METAR record each publish a height. Their
+# hull is a BOUNDED claim, never ground (a separate registry key and kind).
+STATION_HEIGHT_BOUND_KIND = "synoptic_wrh_awc_station_height_bound_v1"
+STATION_HEIGHT_BOUND_REVISION = "station_height_bound_v1"
+_STATION_HEIGHT_BOUND_STATIONS = frozenset({"MPMG", "ZSQD"})
 _STATION_GROUND_SOURCE_KINDS = frozenset({*STATION_GROUND_SOURCE_ARTIFACTS, OSCAR_WMD_SOURCE_KIND,
-    HOMR_INTERNATIONAL_GROUND_SOURCE_KIND, SYNOPTIC_WRH_SOURCE_KIND})
-# Kinds whose ground fact exists only as the agreement of two whole entities.
-DUAL_BODY_GROUND_SOURCE_KINDS = frozenset({OSCAR_WMD_SOURCE_KIND, SYNOPTIC_WRH_SOURCE_KIND})
+    HOMR_INTERNATIONAL_GROUND_SOURCE_KIND, SYNOPTIC_WRH_SOURCE_KIND, STATION_HEIGHT_BOUND_KIND})
+# Kinds whose fact exists only as a combination of two whole entities.
+DUAL_BODY_GROUND_SOURCE_KINDS = frozenset({OSCAR_WMD_SOURCE_KIND, SYNOPTIC_WRH_SOURCE_KIND,
+    STATION_HEIGHT_BOUND_KIND})
 _HOMR_INTERNATIONAL_GROUND_NCDC = {
     "ZSPD": "30137822", "EGLC": "30146303",
     "NZAA": "30151541", "RKPK": "20029737", "ZUUU": "30137836",
@@ -600,7 +607,8 @@ def station_ground_source_artifact_ref(*, source_kind: str, station_id: str) -> 
         return f"config/noaa_homr_{station_id.lower()}_station.json"
     if source_kind == OSCAR_WMD_SOURCE_KIND and station_id in _OSCAR_WMD_STATIONS:
         return f"config/wmo_wmd_{station_id.lower()}_station.xml"
-    if source_kind == SYNOPTIC_WRH_SOURCE_KIND and station_id in _SYNOPTIC_WRH_STATIONS:
+    if (source_kind == SYNOPTIC_WRH_SOURCE_KIND and station_id in _SYNOPTIC_WRH_STATIONS
+            or source_kind == STATION_HEIGHT_BOUND_KIND and station_id in _STATION_HEIGHT_BOUND_STATIONS):
         return f"config/synoptic_wrh_{station_id.lower()}_station.json"
     return None
 
@@ -612,7 +620,8 @@ def synoptic_wrh_source_url(station_id: str) -> str:
 
 def station_ground_identity_bridge(*, source_kind: str, station_id: str) -> tuple[str, str, str] | None:
     """The approved independent entity: (bridge kind, config artifact, source URL)."""
-    if source_kind == OSCAR_WMD_SOURCE_KIND and station_id in _OSCAR_WMD_STATIONS:
+    if (source_kind == OSCAR_WMD_SOURCE_KIND and station_id in _OSCAR_WMD_STATIONS
+            or source_kind == STATION_HEIGHT_BOUND_KIND and station_id in _STATION_HEIGHT_BOUND_STATIONS):
         return "awc_stationinfo_v1", "config/awc_stationinfo_53_station.json", AWC_STATION_IDENTITY_SOURCE_URL
     if source_kind == SYNOPTIC_WRH_SOURCE_KIND and station_id in _SYNOPTIC_WRH_STATIONS:
         kind, ident = _SYNOPTIC_WRH_BRIDGES[station_id]
@@ -1115,15 +1124,8 @@ def _nws_bridge_site(raw: bytes, station_id: str) -> tuple[Decimal, Decimal, Dec
     return lat, lon, properties["elevation"]["value"]
 
 
-def _synoptic_wrh_ground_facts(raw: bytes, station_id: str, bridge_raw: bytes) -> dict[str, object]:
-    """Settlement page's own station record, admitted only with an independent NOAA site.
-
-    SCOPE: this ICAO's OM9 precision ground. DRAIN: a fresh capture of both
-    bodies. RESET: both bodies name one station whose coordinates and height
-    meet within their displayed rounding; any disagreement leaves UNPROVEN.
-    """
-    if station_id not in _SYNOPTIC_WRH_STATIONS:
-        raise ValueError("unsupported Synoptic settlement station")
+def _synoptic_wrh_record(raw: bytes, station_id: str) -> tuple[dict, Decimal, dict[str, str], float, float]:
+    """The settlement page's one ACTIVE Synoptic record for this ICAO, height in whole feet."""
     payload = json.loads(raw)
     summary, stations = payload["SUMMARY"], payload["STATION"]
     if summary.get("RESPONSE_CODE") != 1 or not isinstance(stations, list) or len(stations) != 1:
@@ -1144,6 +1146,19 @@ def _synoptic_wrh_ground_facts(raw: bytes, station_id: str, bridge_raw: bytes) -
     lat, lon = float(texts["lat"]), float(texts["lon"])
     if not (math.isfinite(lat) and math.isfinite(lon) and abs(lat) <= 90 and abs(lon) <= 180):
         raise ValueError("Synoptic coordinate invalid")
+    return station, feet, texts, lat, lon
+
+
+def _synoptic_wrh_ground_facts(raw: bytes, station_id: str, bridge_raw: bytes) -> dict[str, object]:
+    """Settlement page's own station record, admitted only with an independent NOAA site.
+
+    SCOPE: this ICAO's OM9 precision ground. DRAIN: a fresh capture of both
+    bodies. RESET: both bodies name one station whose coordinates and height
+    meet within their displayed rounding; any disagreement leaves UNPROVEN.
+    """
+    if station_id not in _SYNOPTIC_WRH_STATIONS:
+        raise ValueError("unsupported Synoptic settlement station")
+    station, feet, texts, lat, lon = _synoptic_wrh_record(raw, station_id)
     height = _displayed_interval(feet, Decimal("0.3048"))
     kind, ident = _SYNOPTIC_WRH_BRIDGES[station_id]
     if kind == NCEI_ISD_BRIDGE_KIND:
@@ -1165,6 +1180,64 @@ def _synoptic_wrh_ground_facts(raw: bytes, station_id: str, bridge_raw: bytes) -
         "identity_bridge_kind": kind, "identity_bridge_station_id": ident,
         "identity_bridge_source_url": bridge_url,
     }
+
+
+def _station_height_bound_facts(raw: bytes, station_id: str, bridge_raw: bytes) -> dict[str, object]:
+    """Hull of the heights this ICAO's own two current records publish; point ground UNPROVEN.
+
+    The settlement page's Synoptic record and the current AWC METAR record name
+    the station by ICAO but disagree on its site (ZSQD's WRH record is still old
+    Liuting; MPMG's lies 3.7 km from the METAR site), so neither height is
+    ground. Each enters at its displayed precision: whole feet, and AWC whole
+    metres (its data API schema: site elevation in meters). Only the AWC site,
+    the current METAR identity, is the reference coordinate.
+    SCOPE: this ICAO's OM9 elevation predicates. DRAIN: a fresh capture of both
+    bodies. RESET: both whole bodies re-parse to the recorded hull.
+    """
+    if station_id not in _STATION_HEIGHT_BOUND_STATIONS:
+        raise ValueError("unsupported height-bound station")
+    record, feet, _, wrh_lat, wrh_lon = _synoptic_wrh_record(raw, station_id)
+    rows = json.loads(bridge_raw)
+    if not isinstance(rows, list):
+        raise ValueError("AWC station identity entity is not a list")
+    matches = [row for row in rows if isinstance(row, dict) and row.get("icaoId") == station_id]
+    if len(matches) != 1:
+        raise ValueError("AWC ICAO identity ambiguous or missing")
+    metar = matches[0]
+    if (metar.get("id") != station_id or not isinstance(metar.get("siteType"), list)
+            or "METAR" not in metar["siteType"]):
+        raise ValueError("current METAR station identity unavailable")
+    elev = metar.get("elev")
+    if isinstance(elev, bool) or not isinstance(elev, int):
+        raise ValueError("AWC elevation is not whole metres")
+    for key, limit in (("lat", 90), ("lon", 180)):
+        value = metar.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or abs(value) > limit:
+            raise ValueError("AWC identity coordinate invalid")
+    wrh = _displayed_interval(feet, Decimal("0.3048"))
+    awc = _displayed_interval(elev)
+    return {
+        "revision": STATION_HEIGHT_BOUND_REVISION, "source_kind": STATION_HEIGHT_BOUND_KIND,
+        "station_id": station_id, "height_role": "published_station_height_hull",
+        "elevation_min_m": float(min(wrh[0], awc[0])), "elevation_max_m": float(max(wrh[1], awc[1])),
+        "published_heights": {
+            "synoptic_wrh": {"quantity": "STATION.ELEVATION.whole_ft", "value": str(feet),
+                "source_station_id": str(record["ID"]), "site_lat": wrh_lat, "site_lon": wrh_lon},
+            "awc_stationinfo": {"quantity": "elev.whole_m", "value": elev,
+                "site_lat": float(metar["lat"]), "site_lon": float(metar["lon"])},
+        },
+        "site_lat": float(metar["lat"]), "site_lon": float(metar["lon"]),
+        "location_role": "current_metar_station_reference",
+        "source_url": synoptic_wrh_source_url(station_id),
+        "identity_bridge_source_url": station_ground_identity_bridge(
+            source_kind=STATION_HEIGHT_BOUND_KIND, station_id=station_id)[2],
+    }
+
+
+def station_ground_status(facts: object) -> str | None:
+    """VERIFIED point ground, or BOUNDED: a hull of published heights, point UNPROVEN."""
+    revision = facts.get("revision") if isinstance(facts, dict) else None
+    return {STATION_GROUND_PROOF_REVISION: "VERIFIED", STATION_HEIGHT_BOUND_REVISION: "BOUNDED"}.get(revision)
 
 
 def station_ground_facts_from_bytes(
@@ -1191,10 +1264,11 @@ def station_ground_facts_from_bytes(
                     or not isinstance(effective_at, datetime)):
                 return None
             return _oscar_wmd_ground_facts(raw_body, station_id, identity_bridge_bytes, effective_at)
-        if source_kind == SYNOPTIC_WRH_SOURCE_KIND:
+        if source_kind in (SYNOPTIC_WRH_SOURCE_KIND, STATION_HEIGHT_BOUND_KIND):
             if not isinstance(identity_bridge_bytes, bytes) or len(identity_bridge_bytes) > 256 * 1024:
                 return None
-            return _synoptic_wrh_ground_facts(raw_body, station_id, identity_bridge_bytes)
+            parse = _synoptic_wrh_ground_facts if source_kind == SYNOPTIC_WRH_SOURCE_KIND else _station_height_bound_facts
+            return parse(raw_body, station_id, identity_bridge_bytes)
         return _homr_ground_facts(raw_body, station_id)
     except (ValueError, TypeError, KeyError, IndexError, AttributeError, UnicodeError, ArithmeticError,
             ET.ParseError, csv.Error):
@@ -1225,12 +1299,17 @@ def _station_ground_for_entry(
         "ground_status": "UNPROVEN", "ground_reason": "STATION_GROUND_PROOF_MISSING",
         "ground_elevation_m": None, "ground_facts": None, "ground_audit": None,
     }
-    claim = entry.get("station_ground_proof")
+    # A height bound lives under its own key, read only where no ground proof
+    # exists: neither can be relabelled as the other.
+    bounded = "station_ground_proof" not in entry
+    claim = entry.get("station_height_bound" if bounded else "station_ground_proof")
     if not isinstance(claim, dict):
         return result
     try:
         kind = claim.get("source_kind")
-        if kind not in _STATION_GROUND_SOURCE_KINDS or claim.get("revision") != STATION_GROUND_PROOF_REVISION:
+        revision = STATION_HEIGHT_BOUND_REVISION if bounded else STATION_GROUND_PROOF_REVISION
+        if (kind not in _STATION_GROUND_SOURCE_KINDS or (kind == STATION_HEIGHT_BOUND_KIND) is not bounded
+                or claim.get("revision") != revision):
             raise ValueError("unsupported ground source/revision")
         checked = datetime.fromisoformat(str(claim["checked_at"]).replace("Z", "+00:00"))
         if checked.tzinfo is None or checked.utcoffset() is None:
@@ -1320,9 +1399,12 @@ def _station_ground_for_entry(
         a = math.sin((p1 - p2) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
         if 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a))) > 5:
             raise ValueError("official site differs from station reference identity")
+        status = station_ground_status(facts)
+        if status is None:
+            raise ValueError("unsupported ground facts revision")
         result.update(
-            ground_status="VERIFIED", ground_reason=None,
-            ground_elevation_m=facts["elevation_m"], ground_facts=facts,
+            ground_status=status, ground_reason=None if status == "VERIFIED" else "STATION_GROUND_POINT_UNPROVEN",
+            ground_elevation_m=facts["elevation_m"] if status == "VERIFIED" else None, ground_facts=facts,
             ground_audit={key: claim.get(key) for key in audit_keys},
         )
         if bridge_audit is not None:

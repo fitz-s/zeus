@@ -17551,3 +17551,35 @@ deadline may bound only optional native work and the availability probe); native
 has a retention owner before it is written; optional persistence runs under its own
 deadline or off the track's in_flight slot; custody admission is reviewed as the new
 row-admission gate it is.
+
+## 2026-10-06 MPMG/ZSQD BOUNDED station height (operator mandate 2026-10-05)
+
+Defect: Panama City (MPMG) and Qingdao (ZSQD) had no forecast_posteriors after
+2026-09-30T23:06Z; every OM9 seed blocked `OM9_STATION_GROUND_PROOF_UNPROVEN`.
+Census (rg + read): the station ground point feeds only the OM9 guard's elevation
+predicates (|grid-station| > 250 m; mountain/valley > 100 m) and identity equality
+checks. The live OM9 product is provider-downscaled (`default_90m_dem`), so the grid
+representativeness loader returns NOT_APPLICABLE_DOWNSCALED and ground never enters
+sigma or q. The point value was a proxy; the domain predicate is the guard verdict.
+
+Disposition: point ground stays UNPROVEN (no ARP/old-airport/nearby substitution).
+A separate registry key `station_height_bound` (kind
+`synoptic_wrh_awc_station_height_bound_v1`, revision `station_height_bound_v1`,
+ground status `BOUNDED`) binds the hull of the heights the station's own two current
+records publish at displayed precision: the WRH settlement-page Synoptic record
+(whole ft; ZSQD 33 ft at old Liuting, MPMG 43 ft 3.7 km off) and the committed AWC
+METAR record (whole m per AWC data-API schema; ZSQD 2, MPMG 6). Hulls: ZSQD
+[1.5, 10.2108] m, MPMG [5.5, 13.2588] m. Every elevation predicate must hold over the
+whole hull; a straddle blocks. Only the AWC METAR site is the reference coordinate.
+Bodies captured read-only by `scripts/capture_synoptic_wrh_station_ground.py`; the
+shared AWC body is not re-fetched. A ground proof always outranks a bound.
+
+SCOPE: these two ICAOs' OM9 elevation predicates. DRAIN: fresh capture of both
+bodies plus the normal archive before seeds. RESET: a changed published height is a
+new facts identity (queue frontier, HWM, dependency payload); an unreadable archived
+body blocks UNPROVEN as before. VERIFIED stations: guard reasons, dependency payload,
+provider geometry identity, shape hash and target applicability identity are byte-
+identical against an untouched tree; only the whole-registry audit hash differs, as
+for any registry edit. Read-only dry run (run 2026-10-05T12Z, target 2026-10-06):
+Qingdao high/low and Panama City high guard PASS, worst |grid-h| 17.5 m / 36.5 m.
+Tests: tests/test_om9_bounded_station_ground.py.

@@ -472,7 +472,7 @@ def archive_station_ground_evidence(
         decision = datetime.now(UTC)
         station = runtime_station_geometry_for_city(city, effective_at=decision)
         facts, audit = station.get("ground_facts"), station.get("ground_audit")
-        if station.get("ground_status") != "VERIFIED" or not isinstance(facts, Mapping) or not isinstance(audit, Mapping):
+        if station.get("ground_status") not in ("VERIFIED", "BOUNDED") or not isinstance(facts, Mapping) or not isinstance(audit, Mapping):
             continue
         source_kind, station_id = str(facts["source_kind"]), str(facts["station_id"])
         from src.config import DUAL_BODY_GROUND_SOURCE_KINDS
@@ -870,6 +870,11 @@ def station_ground_target_coverage(evidence: object, *, decision_at: object,
         if frozen is None:
             raise ValueError("target geometry evidence is not possessed")
         result.update(station_id=frozen["station_id"], facts_identity=frozen["facts_identity"])
+        # status is target applicability of possessed evidence. A height-bound
+        # entity names its ground type so it never reads as point ground.
+        from src.config import station_ground_status
+        if station_ground_status(frozen["facts"]) == "BOUNDED":
+            result["ground_status"] = "BOUNDED"
         result.update(status="VERIFIED", reason=None)
         if frozen["source_kind"] == OSCAR_WMD_SOURCE_KIND:
             conn = _connect_read_only(Path(frozen["forecast_db"]), deadline_monotonic=deadline)
