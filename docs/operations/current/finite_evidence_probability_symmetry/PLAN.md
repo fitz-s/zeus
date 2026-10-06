@@ -19278,3 +19278,28 @@ a scalar runtime selector; no arbitrary physical helper is exempted.
 No registry waiver or source/q/loader changes, AST/diff-check pass. The actual
 whole CLI was not run; release qualification and upstream213 stay OPEN until
 ROOT reviews this exact checkpoint and authorizes the next actual gate.
+
+ROOT/XY BEFOREEDIT three named corrections to692 only: finite formatter
+selection through existing local returns or known container fields; invalidate
+trusted physical-type alias on any foreign import; predicate writes use the
+direct protected status/suffix grammar with exact report provenance retained.
+Only checker/test/PLAN, no general purity model or metadata hard-block. Original
+692163P does not cover these leaks and is not final approval. Add actual mixed
+return/field/import and If/While/Match status antibodies, then one focused
+epoch and freeze before whole CLI. Peer/source/raw/config remain unchanged.
+
+Three named review corrections: original692 actual6F1.851s (two formatter
+choices, one foreign import, three If/While/Match status writes), XML
+/tmp/zeus-sink-review-three-red.xml SHA256
+228f427f11f15ca731367df339dac6129ed605b75d9a24dd8a90df6476e23336.
+Final170P9.411s,0F/E/S (prior163 plus7 precise tests), XML
+/tmp/zeus-sink-review-three-focused.xml SHA256
+4870fa0096c9482013af253b8da9419200eabe951961ca742219df4b97926f1c.
+Known formatter names, own lexical returns and literal container projections
+reuse local protected-write checks; unresolved choices are not presumed pure.
+Foreign import/rebind invalidates physical-type identity. Branch store names
+use the same direct status/suffix grammar, keeping exact reviewed report
+provenance and ordinary structured report fields out of scalar control claims.
+No prior expectation was changed in this correction batch. No whole CLI,
+source/q/loader change or live operation; AST/diff-check pass, gate still OPEN
+pending exact independent review and authorized actual CLI.

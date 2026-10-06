@@ -348,6 +348,12 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                     for alias in node.names if alias.name == 'hashlib'}
     json_mutations = set()
     for node in nodes:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if not (isinstance(node, ast.ImportFrom)
+                        and node.module == 'src.contracts.settlement_semantics'
+                        and alias.name == 'SettlementSemantics'):
+                    physical_semantics.discard(alias.asname or alias.name)
         targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(
             node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) else []
         for target in targets:
@@ -452,14 +458,44 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     call_active = set()
     opaque_calls = set()
 
+    def callable_choices(expr, path=(), seen=frozenset()):
+        # Finite existing AST sources only; unresolved choices remain coverage
+        # unknown, never a claim that a dynamic formatter is pure.
+        if expr is None or (expr, path) in seen:
+            return set()
+        seen = seen | {(expr, path)}
+        if isinstance(expr, ast.Name):
+            name = root(expr.id)
+            if not path and name in functions:
+                return {functions[name]}
+            return set().union(*(callable_choices(item, path, seen)
+                for prefix, item in assignments.get(name, ()) if not prefix),
+                *(callable_choices(item, path[len(prefix):], seen)
+                for prefix, item in writes.get(name, ()) if path[:len(prefix)] == prefix))
+        if isinstance(expr, ast.Subscript) and isinstance(expr.slice, ast.Constant):
+            return callable_choices(expr.value, (expr.slice.value,) + path, seen)
+        if isinstance(expr, ast.Attribute):
+            return callable_choices(expr.value, (expr.attr,) + path, seen)
+        if isinstance(expr, ast.Dict) and path:
+            return set().union(*(callable_choices(item, path[1:], seen)
+                for key, item in zip(expr.keys, expr.values, strict=True)
+                if isinstance(key, ast.Constant) and key.value == path[0]))
+        if isinstance(expr, (ast.Tuple, ast.List)) and path and isinstance(path[0], int):
+            return (callable_choices(expr.elts[path[0]], path[1:], seen)
+                    if 0 <= path[0] < len(expr.elts) else set())
+        if isinstance(expr, ast.Call):
+            name = root(_call_name(expr.func))
+            return set().union(*(callable_choices(item, path, seen) for item in returns.get(name, ())))
+        if isinstance(expr, ast.IfExp):
+            return callable_choices(expr.body, path, seen) | callable_choices(expr.orelse, path, seen)
+        return set()
+
     def formatting_effects(node, bindings, paths):
         # Reuse local function write checks, not a purity claim about hooks.
         hooks = []
         for kw in node.keywords:
             if kw.arg in {'default', 'object_hook', 'object_pairs_hook', 'cls'}:
-                hook = functions.get(root(_call_name(kw.value)))
-                if hook is not None:
-                    hooks.append((hook, paths))
+                hooks.extend((hook, paths) for hook in callable_choices(kw.value))
                 if kw.arg == 'default' and isinstance(kw.value, ast.Name) and root(kw.value.id) == 'str':
                     for path in paths:
                         if formatted_object in path:
@@ -717,7 +753,16 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                     and isinstance(child.value, ast.Call)
                     and root(_call_name(child.value.func)) in physical_semantics)
                 if not physical_assignment and isinstance(child, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr, ast.Dict, ast.Call)):
-                    mutated |= _mutated_controls(child, {}, controls=branch_controls)
+                    fields = set(branch_controls)
+                    targets = child.targets if isinstance(child, ast.Assign) else [child.target] if isinstance(
+                        child, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) else []
+                    for target in targets:
+                        field = getattr(target, '_control_field', target.id) if isinstance(target, ast.Name) else (
+                            target.attr if isinstance(target, ast.Attribute) else target.slice.value
+                            if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) else '')
+                        if is_control(str(field)) and getattr(child, '_source_use_hash', None) not in report_status:
+                            fields.add(str(field).lower())
+                    mutated |= _mutated_controls(child, {}, controls=fields)
                 if isinstance(child, ast.Call):
                     helper = functions.get(root(_call_name(child.func)))
                     if helper is not None and helper not in seen_helpers:

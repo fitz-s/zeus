@@ -298,6 +298,41 @@ def test_unknown_or_formatting_dependency_at_protected_sink_still_rejects(source
     assert _alternate_control_violations(source)
 
 
+@pytest.mark.parametrize('selector', ['pick()', "hooks['default']"])
+def test_known_formatter_selection_does_not_hide_protected_write(selector):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = ("import json\ndef evil(value):\n global runtime\n runtime=value['report']\n return '2'\n"
+              "def pick():\n return evil\nhooks={'default':evil}\n")
+    source += "result=json.dumps({'report':'diagnostic'},default=" + selector + ")\n"
+    assert _alternate_control_violations(source)
+
+
+def test_foreign_import_cannot_keep_trusted_physical_type_identity():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = ("from src.contracts.settlement_semantics import SettlementSemantics\n"
+              "from plugin import SettlementSemantics\nif 'diagnostic':\n"
+              " semantics=SettlementSemantics('forecast_preimage',precision=1)\n")
+    assert _alternate_control_violations(source)
+
+
+@pytest.mark.parametrize('source', [
+    "if opaque('diagnostic'):\n status='enabled'\n",
+    "while opaque('diagnostic'):\n command_status='SUBMIT_ACKED'\n",
+    "match opaque('diagnostic'):\n case _:\n  execution_status='enabled'\n",
+])
+def test_unknown_predicate_protects_status_suffix_writes(source):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(source)
+
+
+def test_known_formatter_return_and_field_clean_report_stays_coverage_only():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = ("import json\ndef report(value):\n return '2'\ndef pick():\n return report\n"
+              "hooks={'default':report}\nresult=json.dumps({'report':'diagnostic'},default=pick())\n"
+              "result=json.dumps({'report':'diagnostic'},default=hooks['default'])\n")
+    assert _alternate_control_violations(source) == []
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",
