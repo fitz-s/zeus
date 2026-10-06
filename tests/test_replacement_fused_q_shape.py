@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-19
+# Last reused or audited: 2026-10-06
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md
 """Current-evidence predictive-shape authority antibodies."""
 from __future__ import annotations
@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import math
 import statistics
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,21 @@ from src.data.replacement_forecast_cycle_policy import (
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     current_evidence_shape_semantics_mismatch,
 )
+
+
+def _math_shape_has_live_authority(shape):
+    """Invoke the live gate with a real scoped request, not missing arguments.
+
+    These tests construct math/static metadata, not original native bodies.
+    Normal collector/public-reader positives live in the materializer tests.
+    """
+    request = SimpleNamespace(city="Shanghai", target_date="2026-07-11",
+        temperature_metric="high", computed_at="2026-07-10T21:00:00+00:00",
+        anchor_artifact_id=None, openmeteo_precision_guard=None)
+    with sqlite3.connect(":memory:") as conn:
+        return mod._fusion_current_evidence_shape_has_live_authority(
+            SimpleNamespace(current_evidence_shape=shape.as_payload()),
+            request=request, conn=conn)
 
 
 def test_frozen_scheme_requires_two_current_provider_families() -> None:
@@ -186,9 +202,7 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
     assert shape.predictive_sigma_c == pytest.approx(0.4085217065969294)
     # Numerical shape construction is useful offline, but geometry-free math
     # alone is never a live probability witness.
-    assert mod._fusion_current_evidence_shape_has_live_authority(
-        SimpleNamespace(current_evidence_shape=shape.as_payload())
-    ) is False
+    assert _math_shape_has_live_authority(shape) is False
 
     from tests.test_replacement_forecast_materializer import _fixture_ens_surface_provenance
 
@@ -210,9 +224,8 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
     )
     assert certified.predictive_sigma_c == shape.predictive_sigma_c
     assert certified.shape_hash != shape.shape_hash
-    assert mod._fusion_current_evidence_shape_has_live_authority(
-        SimpleNamespace(current_evidence_shape=certified.as_payload())
-    ) is True
+    # Static geometry metadata alone is not a native-original role witness.
+    assert _math_shape_has_live_authority(certified) is False
 
 
 def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement() -> None:
@@ -254,9 +267,7 @@ def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement() -> No
         == STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
     )
     assert shape.between_cohort_status == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
-    assert mod._fusion_current_evidence_shape_has_live_authority(
-        SimpleNamespace(current_evidence_shape=shape.as_payload())
-    ) is False
+    assert _math_shape_has_live_authority(shape) is False
 
 
 def _shape_for_cycle_gate(

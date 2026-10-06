@@ -1600,7 +1600,12 @@ def _insert_platt_model(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM platt_models WHERE model_key = 'platt-world-1'")
     conn.execute(
         """
-        INSERT INTO platt_models VALUES (
+        INSERT INTO platt_models (
+            model_key, temperature_metric, cluster, season, data_version,
+            input_space, param_A, param_B, param_C, bootstrap_params_json,
+            n_samples, brier_insample, fitted_at, is_active, authority,
+            cycle, source_id, horizon_profile, recorded_at
+        ) VALUES (
             'platt-world-1', 'high', 'Chicago', 'MAM',
             'tigge_mx2t6_local_calendar_day_max',
             'width_normalized_density',
@@ -1715,7 +1720,7 @@ def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():
     assert edli_trade_score_gate(event) is True
 
 
-def _normal_native_final_intent_case(tmp_path, monkeypatch, metric):
+def _normal_native_final_intent_case(tmp_path, monkeypatch, metric, *, before_receipt=None):
     """Real scheduled originals/public q, then the normal mean-selected receipt.
 
     Reuse only the existing private source/book harnesses. No qualifier, READY
@@ -1734,6 +1739,8 @@ def _normal_native_final_intent_case(tmp_path, monkeypatch, metric):
             received_at=decision_time.isoformat(), restrict_to_families={
                 (city.name, request.target_date.isoformat(), metric)})
         assert len(events) == 1
+        if before_receipt is not None:
+            before_receipt(conn=conn, event=events[0], bundle=bundle, decision_time=decision_time)
         receipts = _normal_cash_matrix(conn=conn, city=city, request=request,
             bundle=bundle, decision_time=decision_time, monkeypatch=monkeypatch)
         receipt = receipts["baseline"]
@@ -1752,7 +1759,7 @@ def _normal_native_final_intent_case(tmp_path, monkeypatch, metric):
             next(source)
             stack.callback(lambda source=source: next(source, None))
         return normal._normal_native_originals_public_case(
-            tmp_path, monkeypatch, metric, full_y_ready=final_intent)
+            tmp_path, monkeypatch, metric, full_y_ready=final_intent, original_cassette=True)
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
@@ -1837,70 +1844,67 @@ def test_runtime_receipt_legacy_row_only_fixture_cannot_authorize_entry_or_held(
         conn.close()
 
 
-def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
+@pytest.mark.parametrize("metric", ("high", "low"))
+def test_runtime_receipt_does_not_fit_platt_models(tmp_path, monkeypatch, metric):
     def _forbid_runtime_fit(*_args, **_kwargs):
         raise AssertionError("receipt path must not call get_calibrator/runtime fit")
 
     monkeypatch.setattr("src.calibration.manager.get_calibrator", _forbid_runtime_fit)
 
-    event = _bound_replacement_forecast_event()
-    receipt = _receipt(event, _trade_conn_with_live_replacement_taker_snapshot())
+    # This is a runtime fitting antibody, not a Chicago/Fahrenheit or calendar
+    # assertion. The real London H/L originals are admitted independently,
+    # and the spy remains installed through actual global receipt production.
+    event, receipt, bundle, selected_q, decision_time = _normal_native_final_intent_case(
+        tmp_path, monkeypatch, metric)
 
     assert receipt.proof_accepted is True
+    assert receipt.q_live == pytest.approx(selected_q)
+    assert receipt.decision_proof_bundle.calibration.payload["posterior_id"] == bundle.posterior_id
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
     assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
 
 
-def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
-    event = _replacement_forecast_event()
-    receipt = _receipt(event, _trade_conn_with_live_replacement_taker_snapshot(), decision_time=DECISION_TIME)
+def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt(tmp_path, monkeypatch):
+    event, receipt, bundle, selected_q, _ = _normal_native_final_intent_case(tmp_path, monkeypatch, "high")
+    trigger_payload = json.loads(event.payload_json)
+    assert "q" not in trigger_payload and "token_id" not in trigger_payload
 
     assert receipt.proof_accepted is True
-    assert receipt.token_id == "yes-1"
+    assert receipt.token_id
     assert receipt.q_live is not None
-    assert receipt.q_live > 0.60
+    assert receipt.q_live == pytest.approx(selected_q)
     assert receipt.trade_score is not None
-    assert receipt.fdr_hypothesis_count == 4
+    assert receipt.fdr_hypothesis_count == 2 * len(bundle.q)
     assert receipt.kelly_execution_price_type == "ExecutionPrice"
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_legacy_platt_materialization_time_does_not_affect_replacement_live_certificate():
-    event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_taker_snapshot()
-    conn.execute(
-        """
-        UPDATE platt_models
-        SET recorded_at = '2026-05-24T08:13:00+00:00',
-            fitted_at = '2026-05-24T08:13:00+00:00'
-        WHERE model_key = 'platt-world-1'
-        """
-    )
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+def test_legacy_platt_materialization_time_does_not_affect_replacement_live_certificate(tmp_path, monkeypatch):
+    def future_legacy_fit(*, conn, decision_time, **_):
+        _insert_platt_model(conn)
+        future = (decision_time + timedelta(seconds=1)).isoformat()
+        conn.execute("UPDATE platt_models SET recorded_at=?, fitted_at=? WHERE model_key='platt-world-1'", (future, future))
+    _, receipt, bundle, _, decision_time = _normal_native_final_intent_case(
+        tmp_path, monkeypatch, "high", before_receipt=future_legacy_fit)
     assert receipt.proof_accepted is True
     assert receipt.decision_proof_bundle is not None
     calibration = receipt.decision_proof_bundle.calibration
-    assert calibration.payload["posterior_id"] == 9001
+    assert calibration.payload["posterior_id"] == bundle.posterior_id
     assert calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
     assert "platt" not in calibration.payload["calibrator_model_key"]
-    assert calibration.clock.source_available_at.isoformat() == "2026-05-24T08:12:00+00:00"
+    assert calibration.clock.source_available_at == decision_time
 
 
-def test_legacy_platt_training_cutoff_after_decision_cannot_poison_replacement_live_certificate():
-    event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_taker_snapshot()
-    conn.execute("ALTER TABLE platt_models ADD COLUMN training_cutoff TEXT")
-    conn.execute(
-        """
-        UPDATE platt_models
-        SET training_cutoff = '2026-05-24T08:13:00+00:00'
-        WHERE model_key = 'platt-world-1'
-        """
-    )
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+def test_legacy_platt_training_cutoff_after_decision_cannot_poison_replacement_live_certificate(tmp_path, monkeypatch):
+    def future_training(*, conn, decision_time, **_):
+        _insert_platt_model(conn)
+        if "training_cutoff" not in {row[1] for row in conn.execute("PRAGMA table_info(platt_models)")}:
+            conn.execute("ALTER TABLE platt_models ADD COLUMN training_cutoff TEXT")
+        conn.execute("UPDATE platt_models SET training_cutoff=? WHERE model_key='platt-world-1'",
+            ((decision_time + timedelta(seconds=1)).isoformat(),))
+    _, receipt, _, _, _ = _normal_native_final_intent_case(
+        tmp_path, monkeypatch, "high", before_receipt=future_training)
 
     assert receipt.proof_accepted is True
     assert receipt.decision_proof_bundle is not None
@@ -1908,16 +1912,18 @@ def test_legacy_platt_training_cutoff_after_decision_cannot_poison_replacement_l
     assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
 
 
-def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
-    event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_taker_snapshot()
-    conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:11:00+00:00'")
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+def test_market_topology_certificate_uses_topology_row_clock_not_event_clock(tmp_path, monkeypatch):
+    topology_clock = []
+    def captured_topology(*, conn, decision_time, **_):
+        at = decision_time - timedelta(minutes=1)
+        topology_clock.append(at)
+        conn.execute("UPDATE market_events SET created_at=?", (at.isoformat(),))
+    event, receipt, _, _, _ = _normal_native_final_intent_case(
+        tmp_path, monkeypatch, "high", before_receipt=captured_topology)
 
     assert receipt.decision_proof_bundle is not None
-    assert receipt.decision_proof_bundle.market_topology.clock.source_available_at.isoformat() == "2026-05-24T08:11:00+00:00"
-    assert receipt.decision_proof_bundle.family_closure.clock.source_available_at.isoformat() == "2026-05-24T08:11:00+00:00"
+    assert receipt.decision_proof_bundle.market_topology.clock.source_available_at == topology_clock[0]
+    assert receipt.decision_proof_bundle.family_closure.clock.source_available_at == topology_clock[0]
     assert receipt.decision_proof_bundle.market_topology.clock.source_available_at.isoformat() != event.available_at
 
 
@@ -1938,13 +1944,11 @@ def test_topology_persisted_after_decision_blocks_certificate():
     assert "max_parent_source_available_at after decision_time" in (result.failures[0].reason_detail or "")
 
 
-def test_topology_clock_missing_blocks_certificate():
-    event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_taker_snapshot()
-    conn.execute("UPDATE market_events SET created_at = NULL")
-
+def test_topology_clock_missing_blocks_certificate(tmp_path, monkeypatch):
+    def missing_clock(*, conn, **_):
+        conn.execute("UPDATE market_events SET created_at=NULL")
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
-        _receipt(event, conn, decision_time=DECISION_TIME)
+        _normal_native_final_intent_case(tmp_path, monkeypatch, "high", before_receipt=missing_clock)
 
 
 def test_latest_snapshot_rows_exclude_future_captured_rows_without_freshness_gate():
@@ -2093,17 +2097,14 @@ def test_adapter_source_truth_status_comes_from_forecast_authority():
     assert receipt.decision_proof_bundle.source_truth.payload["derived_from_reader_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
 
 
-def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(monkeypatch):
+def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(tmp_path, monkeypatch):
     import src.engine.event_reactor_adapter as event_reactor_adapter
     monkeypatch.setattr(
         event_reactor_adapter,
         "_family_rank_reversed_at_recapture",
         lambda **_: False,
     )
-    event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_taker_snapshot()
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+    _, receipt, _, _, _ = _normal_native_final_intent_case(tmp_path, monkeypatch, "high")
 
     assert receipt.decision_proof_bundle is not None
     forecast_payload = receipt.decision_proof_bundle.forecast_authority.payload

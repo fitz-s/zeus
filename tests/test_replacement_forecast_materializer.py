@@ -1108,9 +1108,12 @@ def test_normal_HKO_X_only_without_independent_Y_originals(tmp_path, monkeypatch
         missing_full_y=True, city_name="Hong Kong", producer_only=True)
 
 
+_NORMAL_ORIGINAL_HTTP_CASSETTES = {}
+
+
 def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missing_full_y=False,
                                        city_name="London", producer_only=False, google_resume=False,
-                                       full_y_ready=None):
+                                       full_y_ready=None, original_cassette=False):
     import eccodes as ec
     import numpy as np
     from types import SimpleNamespace
@@ -1120,6 +1123,13 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
     from src.config import runtime_coordinate_manifest_json, runtime_cities_by_name
     from src.data import ecmwf_open_data as native
     from src.data.replacement_forecast_source_run_identity import coordinate_bound_data_version
+
+    # All static originals in this harness are staged explicitly below. Any
+    # unexpected missing-static branch must fail before the spawn worker can
+    # create its own real requests.Session (parent HTTP fakes do not inherit).
+    def forbidden_surface_transport(*_args, **_kwargs):
+        raise AssertionError("normal original fixture attempted unstaged surface HTTP")
+    monkeypatch.setattr(native, "_fetch_surface_audit_bytes", forbidden_surface_transport)
 
     # Exact synthetic source fields, before original body/index/capture: all
     # 51 members have matched 2t/mn/mx=11C, so straddling intervals are 11..11
@@ -1149,6 +1159,59 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
             values = np.full(len(values), 273.15 + value)
         return set_values(gid, values)
     monkeypatch.setattr(ec, "codes_set_values", original_temperature_values)
+    if original_cassette:
+        # Reuse only immutable encoded HTTP entities, not capture receipts,
+        # proof clocks, canonical rows, decoded qualification, q or READY.
+        # The existing normal collector creates all of those independently.
+        from types import MappingProxyType
+        from tests import test_ecmwf_open_data_collect_cycle as transport
+        original_transport = transport._native_temperature_transport_fixture
+        def cassette_transport(directory, *, fault=None, land_mask=False, steps=(0, 3), hour=0):
+            if fault is not None or land_mask:
+                return original_transport(directory, fault=fault, land_mask=land_mask, steps=steps, hour=hour)
+            key = (city_name, missing_full_y, tuple(steps), hour, "IEEE2-role-originals-v1")
+            if key not in _NORMAL_ORIGINAL_HTTP_CASSETTES:
+                run, _, generated, _ = original_transport(directory, steps=steps, hour=hour)
+                entities = {}
+                for step in steps:
+                    for stream, kind in (("oper", "fc"), ("enfo", "ef")):
+                        url = (f"https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{run:%Y%m%d}/"
+                            f"{run:%H}z/ifs/0p25/{stream}/{run:%Y%m%d%H}0000-{step}h-{stream}-{kind}.grib2")
+                        index_url = url[:-6] + ".index"
+                        index = generated.get(index_url).content
+                        rows = [json.loads(line) for line in index.splitlines()]
+                        end = max(row["_offset"] + row["_length"] for row in rows) - 1
+                        entities[index_url] = index
+                        entities[url] = generated.get(url, headers={"Range": f"bytes=0-{end}"}).content
+                _NORMAL_ORIGINAL_HTTP_CASSETTES[key] = (run, MappingProxyType(entities))
+            run, entities = _NORMAL_ORIGINAL_HTTP_CASSETTES[key]
+            calls = []
+            class Response:
+                _native_body_complete = True
+                def __init__(self, body, status, headers):
+                    self.body, self.status_code, self.headers = body, status, headers
+                @property
+                def content(self): return self.body
+                def raise_for_status(self): pass
+                def iter_content(self, chunk_size):
+                    for offset in range(0, len(self.body), chunk_size):
+                        yield self.body[offset:offset + chunk_size]
+                def close(self): pass
+            class Session:
+                def get(self, url, **kwargs):
+                    calls.append((url, kwargs))
+                    entity = entities[url]  # Unknown URL fails; never network.
+                    if url.endswith(".index"):
+                        return Response(entity, 200, {"Content-Length": str(len(entity))})
+                    start, end = map(int, kwargs["headers"]["Range"][6:].split("-"))
+                    return Response(entity[start:end + 1], 206, {
+                        "Content-Range": f"bytes {start}-{end}/{len(entity)}",
+                        "Content-Length": str(end - start + 1)})
+                def close(self): pass
+            output = directory / "packet"
+            output.mkdir(exist_ok=True)
+            return run, output, Session(), calls
+        monkeypatch.setattr(transport, "_native_temperature_transport_fixture", cassette_transport)
     s = _normal_native_http(tmp_path, monkeypatch, steps=tuple(range(0, 37, 3)), hour=12)
     if google_resume:
         # Reuse the actual legacy canonical DDL, not an UPDATE of clock rows.
@@ -1169,8 +1232,9 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
     from src import config
     from src.state import db as state_db
     from src.data import replacement_forecast_production as production
-    ledgers = config.STATE_DIR / ("custody-ledgers-" + metric)
-    ledgers.mkdir()
+    # Each normal capture owns independent canonical ledgers, even when a
+    # parameterized caller invokes this harness twice in one private state.
+    ledgers = Path(tempfile.mkdtemp(prefix="custody-ledgers-" + metric + "-", dir=config.STATE_DIR))
     world_path, trade_path = ledgers / "zeus-world.db", ledgers / "zeus_trades.db"
     for path, initialize in ((world_path, state_db.init_schema_world_only),
                              (trade_path, state_db.init_schema_trade_only)):

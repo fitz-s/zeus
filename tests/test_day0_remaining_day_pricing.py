@@ -350,9 +350,9 @@ def test_kma_invalid_evidence_cannot_replace_current_temperature(damage):
         state = read_day0_current_temperature_state(
             conn=conn, city=city, target_date="2026-09-22", decision_time=cutoff,
         )
-        assert state is not None
-        assert state.value_native == 29.0
-        assert state.observed_at.hour == 4
+        # A malformed selected KMA witness cannot fall back to an older spot.
+        # The legal/correction twin above proves actual KMA availability.
+        assert state is None
     finally:
         conn.close()
 
@@ -2434,8 +2434,12 @@ def test_attached_world_witness_keeps_producer_and_held_paths_identical(
 
     request = SimpleNamespace(
         city="NYC",
+        city_timezone="America/New_York",
         target_date=target_date,
         computed_at=decision_time.isoformat(),
+        day0_observed_extreme_c=25.6,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_unit="F",
         day0_observed_extreme_observation_time="2026-06-10T19:00:00+00:00",
     )
     producer_values, _sigma, _cutoff = materializer._day0_noaa_future_vector_members(
@@ -2454,6 +2458,9 @@ def test_attached_world_witness_keeps_producer_and_held_paths_identical(
         observation_time=held_state[1],
         current_temp_c=(held_state[0] - 32.0) * 5.0 / 9.0,
         metric=metric,
+        # No complete-prefix witness exists in this spot-only fixture. Both
+        # consumers retain the unresolved target-local day from 04:00Z.
+        unresolved_window_start=datetime(2026, 6, 10, 4, tzinfo=UTC),
     )
     assert held_values == pytest.approx(producer_values)
     forecast.close()
@@ -2493,7 +2500,8 @@ def test_producer_carrier_members_equal_consumer_members_on_real_munich_bundle(
     The producer kept both DWD paths for LOW while every consumer collapsed
     them to one provider, so the replay compared four persisted members with
     three current ones.  Producer members must equal the consumer's for both
-    metrics, and the replay must accept its own persisted vector.
+    metrics. This is a provider-collapse unit boundary on the reported half-day
+    bundle, not a native-role/public-READY qualification claim.
     """
     import src.data.day0_hourly_vectors as hourly
     import src.data.replacement_forecast_materializer as materializer
@@ -2543,61 +2551,36 @@ def test_producer_carrier_members_equal_consumer_members_on_real_munich_bundle(
     forecast = sqlite3.connect(":memory:")
     forecast.execute("ATTACH DATABASE ? AS world", (str(world_path),))
 
-    def conditional_high_shape(**kwargs):
-        # The 51-member ENS half is out of scope; its provider half is the
-        # same one-path-per-provider collapse both sides must reproduce.
-        state = kwargs["current_state"]
-        centers, _ = hourly.remaining_day_extremes_c_with_current_state(
-            hourly.day0_hourly_provider_representatives(
-                list(kwargs.get("provider_vectors") or vectors)
-            ),
-            target_date=target_date, decision_time=decision_time, metric="high",
-            current_state=state, settlement_unit="C",
-            fallback_window_start=state.observed_at,
-        )
-        return SimpleNamespace(
-            provider_centers_c=tuple(centers), identity="shape", witness={},
-            extra_sigma_c=0.5,
-        )
-
-    monkeypatch.setattr(hourly, "day0_conditional_high_shape", conditional_high_shape)
+    window = datetime(2026, 9, 28, 9, 50, tzinfo=UTC)
+    # Explicit provider-only window; do not manufacture a complete prefix or
+    # native ENS role to qualify these historical partial-day paths.
+    monkeypatch.setattr(materializer, "_day0_measurement_domain_start", lambda *_args, **_kwargs: window)
     request = SimpleNamespace(
         city="Munich",
         city_timezone="Europe/Berlin",
         target_date=target_date,
         computed_at=decision_time.isoformat(),
+        day0_observed_extreme_c=20.0,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_unit="C",
         day0_observed_extreme_observation_time="2026-09-28T09:50:00+00:00",
     )
-    producer, *_rest = materializer._day0_noaa_carrier_future_members(
-        forecast, request, metric=metric,
-        fusion=SimpleNamespace(
-            used_models=("ecmwf_ifs", "icon_d2"), predictive_sigma_c=2.681048413410214,
-        ),
-    )
-    monkeypatch.setattr(era, "_day0_current_vector_witness", lambda **_kwargs: {})
-    monkeypatch.setattr(
-        era, "_validate_day0_causal_bundle_successor", lambda **_kwargs: None
-    )
-    monkeypatch.setattr(
-        era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ()
-    )
-    payload = {"metric": metric, "observation_time": "2026-09-28T09:50:00+00:00"}
-    consumer = era._day0_remaining_day_members(
-        payload=payload,
-        family=SimpleNamespace(city="Munich", target_date=target_date, metric=metric),
-        unit="C",
-        decision_time=decision_time,
-        world_conn=forecast,
-        forecast_conn=forecast,
-    )
+    producer, *_rest = materializer._day0_noaa_future_vector_members(forecast, request, metric=metric)
+    state = hourly.read_day0_current_temperature_state(conn=forecast,
+        city=runtime_cities_by_name()["Munich"], target_date=target_date, decision_time=decision_time)
+    representatives = hourly.day0_hourly_provider_representatives(vectors)
+    consumer, _ = era._remaining_day_extremes_c_with_current_state_evidence(
+        representatives, target_date=target_date, decision_time=decision_time,
+        observation_time=state.observed_at, current_temp_c=state.value_native,
+        metric=metric, unresolved_window_start=window)
     forecast.close()
     assert consumer is not None
-    assert payload["_edli_day0_provider_representative_models"] == [
+    assert [vector.model for vector in representatives] == [
         "icon_d2", "ecmwf_ifs", "ukmo_global_deterministic_10km",
     ]
     # Same content, same representation: exact, not tolerance.
     assert np.array_equal(
-        np.sort(np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"])),
+        np.sort(np.asarray(consumer)),
         np.sort(np.asarray(producer)),
     )
     if metric == "low":
@@ -2969,14 +2952,8 @@ def _verify_native_width_public_day0_preparation(tmp_path, monkeypatch, metric, 
     from src.events.opportunity_event import make_opportunity_event
     from src.data import day0_hourly_vectors as hourly
     from src.data import ecmwf_open_data as native_source
-    # This case needs the actual original replay after canonical decoding.
-    # Observe the real retention plan but retain private bytes; do not replace
-    # physical/clock admission with a shape stub.
-    retention_plans = []
-    def retain_private_originals(plan):
-        retention_plans.append(plan)
-        return {"status": "PRIVATE_ORIGINALS_RETAINED_FOR_READBACK"}
-    monkeypatch.setattr(native_source, "_apply_decoded_open_data_raw_retention", retain_private_originals)
+    # Normal zero-grace retention deletes aggregates; the owning CAS retains
+    # exact role originals for replay. No private no-delete seam is needed.
 
     # Rewrite the synthetic temperature messages before their original bytes,
     # indexes and capture receipts are created. LSM/phi are not temperature.
@@ -3025,7 +3002,6 @@ def _verify_native_width_public_day0_preparation(tmp_path, monkeypatch, metric, 
         point = provenance["bayes_precision_fusion"]["current_evidence_shape"]["native_point_model"]
         assert len(point["member_points_c"]) == 51
         assert set(point["member_points_c"]) == {atom_c}
-        assert retention_plans
         assert era._day0_uses_native_role_contract_metadata(payload)
         normal = make_opportunity_event(event_type="DAY0_EXTREME_UPDATED", entity_key=event.entity_key,
             source="private-original-atom", observed_at=event.observed_at, available_at=event.available_at,
@@ -3080,7 +3056,7 @@ def _verify_native_width_public_day0_preparation(tmp_path, monkeypatch, metric, 
     next(surface)
     try:
         with pytest.raises(AtomVerified):
-            fixtures.test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkeypatch, metric)
+            fixtures._normal_native_originals_public_case(tmp_path, monkeypatch, metric, original_cassette=True)
     finally:
         surface.close()
         native.close()
@@ -4439,8 +4415,13 @@ def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
         )
     request = SimpleNamespace(
         city="Taipei",
+        city_timezone="Asia/Taipei",
         target_date="2026-08-31",
         computed_at="2026-08-31T02:57:00+00:00",
+        day0_observed_extreme_c=None,
+        day0_observed_extreme_source="cwa_township",
+        day0_observed_extreme_unit="C",
+        day0_observed_extreme_observation_time="2026-08-31T02:57:00+00:00",
     )
     fusion = SimpleNamespace(
         used_models=("ecmwf_ifs", "cwa_township"),
@@ -4450,6 +4431,16 @@ def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
         },
     )
 
+    # This raw-ID unit fixture has no hourly/native originals. Its unspied
+    # domain rebuild must remain unavailable, not authorize a live carrier.
+    with pytest.raises(ValueError, match="DAY0_DOMAIN_PROVIDER_REBUILD_MISMATCH"):
+        materializer._day0_noaa_carrier_future_members(conn, request, metric="high", fusion=fusion)
+    station_inputs = []
+    unit_domain = {"Y": {"test_only": "station-raw-identity-boundary"}}
+    def station_identity_boundary(_conn, _request, *, metric, future, station_evidence):
+        station_inputs.append((metric, future, tuple(station_evidence)))
+        return unit_domain
+    monkeypatch.setattr(materializer, "_day0_measurement_domain_shapes", station_identity_boundary)
     future, sigma, cutoff, evidence, conditional_shape = (
         materializer._day0_noaa_carrier_future_members(
             conn,
@@ -4460,20 +4451,12 @@ def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
     )
 
     assert future == (31.0, 32.0)
-    assert conditional_shape is None, "typed final-daily station law remains independent"
+    assert conditional_shape is unit_domain
     assert tuple(item["forecast_value_c"] for item in evidence) == (33.0,)
-    from src.config import runtime_cities_by_name
-    from src.signal.ensemble_signal import sigma_instrument_for_city
-
-    center_sigma = float(np.std(np.asarray((*future, 33.0)), ddof=0))
-    instrument_sigma = float(
-        sigma_instrument_for_city(runtime_cities_by_name()["Taipei"])
-        .to("C")
-        .value
-    )
-    assert sigma == pytest.approx(
-        np.sqrt(max(1.4**2 - center_sigma**2 - instrument_sigma**2, 0.0))
-    )
+    assert station_inputs == [("high", future, evidence)]
+    # Native-role components own process noise; the legacy extra-width slot
+    # must not subtract parameter spread and add noise for a second time.
+    assert sigma == 0.0
     assert cutoff == "2026-08-31T02:57:00+00:00"
     assert evidence == (
         {

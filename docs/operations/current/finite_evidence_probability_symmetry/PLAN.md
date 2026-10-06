@@ -19601,3 +19601,43 @@ LOW-only markets with the opposite track finishing first, original tuple
 immutability and final GC recovery. Do not call retained bytes live-grade
 evidence or alter action q. Current q fixture epoch stays locked; final
 affected parent proof follows the separately frozen source repair.
+
+### Bounded native-qualified fixture batch — BEFORE EDIT
+
+ROOT authorized an isolated child based on 34e7ac0e926b716766f9d9c76ab18e5c58c739dc.
+Owned existing tests: tests/engine/test_event_reactor_no_bypass.py,
+tests/test_day0_remaining_day_pricing.py, tests/test_replacement_fused_q_shape.py,
+and only the shared _normal_native_originals_public_case seam in
+tests/test_replacement_forecast_materializer.py. Production src/scripts remain
+unchanged. Native owns the separate integration common fixture and only imports
+this helper. Raw GRIB/index/static cassette reuse may contain immutable bytes,
+never canonical DB, q, READY or computed certificates; every case retains its
+own source/capture/write clocks, ledger and normal qualification. Preserve city,
+calendar, metric, unit, runtime-fit spies, FDR/Kelly and execution laws. Invalid
+KMA evidence remains unavailable; geometry-free math remains non-live. Remove
+only the obsolete private no-delete retention spy, because normal CAS retention
+now preserves original replay. Verify representative positive/negative twins
+before the related full-module checks; failures remain named gaps, not passes.
+
+Representative evidence in the child: 32P2.51s (context/KMA legal and invalid
+twins/NYC full-day window/Munich explicitly provider-only collapse/Taipei
+unspied domain refusal plus station-ID unit boundary/fused math nonauthority),
+XML /tmp/zeus-context-fixed.eE8j1B/contexts.xml sha256
+838a81e50f9da46206de3b65db4e9e5b56035104b190de4fba599dc569a992aa.
+Normal real retention atom/positive H-L 4P203.69s, XML
+/tmp/zeus-atom-real-retention.iSN40W/atom.xml sha256
+fdd2f6e88236ff5741fa2c63e78fde9b597e406baf9a4ef5e6f2cbd6ad4c4432.
+Generic FSR/legacy-fit clocks/source-authority receipt 4P145.55s, XML
+/tmp/zeus-native-receipt-context.sBbAOH/receipts.xml sha256
+7764ce5bb31d450c40375a854886b48f528ccce4f34f28532efbeb0fe8082c7a.
+Actual native no-Platt H/L and row-only rejection passed in the preceding
+22P1F77.28s representative run; its sole failure was the subsequently fixed
+Taipei provider-domain mismatch, not runtime fitting. This is not a full-module
+PASS. Topology-clock normal-source positive/missing-clock negative 2P67.47s.
+London is used only for generic receipt/clock/FDR identity assertions; existing
+Chicago/Fahrenheit/calendar and portfolio-specific cases have not been
+relabelled. Immutable HTTP cassette default is off and caches encoded entities
+only. Unexpected spawned ECMWF surface transport fails before worker creation;
+loopback model-surface captures and the normal original index/range validators
+remain actual. Production src/scripts diff is empty. Broader module and native-
+owned integration common-fixture gates remain open pending the final batch.
