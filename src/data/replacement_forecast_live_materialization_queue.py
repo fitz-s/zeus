@@ -2962,8 +2962,20 @@ def _is_current_capital_protection_timeout_retry(
 
 def _is_own_clock_station_input_revision(
     payload: Mapping[str, object],
+    *,
+    now_utc: datetime | None = None,
+    local_today_cache: dict[str, date | None] | None = None,
 ) -> bool:
-    """Return whether fresh station evidence should use the one-second q lane."""
+    """Return whether fresh station evidence should use the one-second q lane.
+
+    The domain fact is a new source-issued Day0 observation for the city's
+    current local day, whatever the provider: a current-temperature state
+    revision (typed against the city's admitted channels and the target's local
+    day) or a ``day0_observation_advanced`` extreme, each under a valid Day0
+    conditioning identity. A past local day or an unknown city/timezone proves
+    nothing and keeps its generic tier. HKO/CWA keep their provider-keyed
+    clauses unchanged.
+    """
 
     sources = payload.get("input_revision_sources")
     revision_sources = (
@@ -2984,7 +2996,50 @@ def _is_own_clock_station_input_revision(
         and _CURRENT_TEMPERATURE_IDENTITY_KEY in revision_sources
         and isinstance(payload.get(_CURRENT_TEMPERATURE_IDENTITY_KEY), Mapping)
         and _day0_conditioning_identity_key(payload) is not None
+    ) or _is_current_local_day_observation_revision(
+        payload,
+        now_utc=now_utc,
+        local_today_cache=local_today_cache,
     )
+
+
+def _is_current_local_day_observation_revision(
+    payload: Mapping[str, object],
+    *,
+    now_utc: datetime | None,
+    local_today_cache: dict[str, date | None] | None,
+) -> bool:
+    """A source-issued Day0 observation revision for the city's own today."""
+
+    sources = payload.get("input_revision_sources")
+    city = str(payload.get("city") or "").strip()
+    target_date = str(payload.get("target_date") or "").strip()
+    current_state = payload.get(_CURRENT_TEMPERATURE_IDENTITY_KEY)
+    observation_advanced = (
+        str(payload.get("upgrade_trigger") or "").strip()
+        == "day0_observation_advanced"
+        and bool(str(payload.get("day0_observed_extreme_source") or "").strip())
+    )
+    if not (
+        observation_advanced
+        or (
+            isinstance(sources, (list, tuple))
+            and _CURRENT_TEMPERATURE_IDENTITY_KEY in sources
+            and _typed_day0_current_state(
+                current_state, city=city, target_date=target_date
+            ) is not None
+        )
+    ) or _day0_conditioning_identity_key(payload) is None:
+        return False
+    cache = {} if local_today_cache is None else local_today_cache
+    if city not in cache:
+        cache[city] = _city_local_today(
+            city, now_utc or datetime.now(timezone.utc)
+        )
+    try:
+        return cache[city] == date.fromisoformat(target_date)
+    except ValueError:
+        return False
 
 
 def _city_local_today(city_name: str, now_utc: datetime) -> date | None:
@@ -3155,6 +3210,11 @@ def _is_near_dated_target_day(
 # pre-existing tier, including the money-risk/global-scope overlaps, is left
 # exactly where it is.
 _NEAR_DATED_TIER_LEAD = 0.25
+
+# A source-issued own-clock station revision outranks generic compute; the claim
+# interleave below uses the same constant to recognize the tier it must not let
+# monopolize a whole claim.
+_OWN_CLOCK_STATION_REVISION_TIER = -9.0
 
 
 def _cycle_advance_seed_priority_map(
@@ -3423,7 +3483,9 @@ def _cycle_advance_seed_priority_map(
                 current_probability_debt=current_probability_debt,
             )
             own_clock_station_revision = _is_own_clock_station_input_revision(
-                payload
+                payload,
+                now_utc=priority_now,
+                local_today_cache=local_today_by_city,
             )
             if priority_names is not None and (
                 fam_scope in current_money_risk
@@ -3500,7 +3562,7 @@ def _cycle_advance_seed_priority_map(
                 # ordinary queued compute. It remains behind exposed-capital
                 # Day0 work/retries above, but precedes generic global and
                 # first-posterior debt so information lead survives backlog.
-                priority_tier = min(priority_tier, -9.0)
+                priority_tier = min(priority_tier, _OWN_CLOCK_STATION_REVISION_TIER)
             priority[name] = (priority_tier, request_time)
     return priority
 
@@ -5265,6 +5327,7 @@ def _build_request_claim_read_plan(
                 current_money_risk=current_money_risk or frozenset(),
                 current_global_scope=current_global_scope or frozenset(),
                 limit=limit,
+                priority=priority,
             )
         )
     selected = tuple(claimable[:limit])
@@ -7345,8 +7408,20 @@ def _interleave_current_priority_request_files(
     current_money_risk: frozenset[tuple[str, str, str]],
     current_global_scope: frozenset[tuple[str, str, str]],
     limit: int,
+    priority: Mapping[str, tuple[float, str]] | None = None,
 ) -> tuple[Path, ...]:
-    """Reserve one request slot for non-held q while protecting held capital."""
+    """Reserve one request slot for non-held q while protecting held capital.
+
+    With ``priority`` it also keeps the own-clock station tier from owning the
+    whole claim. SCOPE: the last slot of a claim of at least two whose every
+    request is in the own-clock tier. DRAIN: that slot goes to the first
+    waiting request below the tier, so older priority-lane work advances on
+    every run in which own-clock arrivals alone would have filled the claim.
+    RESET: any request outside the own-clock tier (capital tiers included)
+    already inside the first ``limit``, or none waiting. A single-slot claim
+    stays whole: reserving its only slot would starve Day0 revisions outright.
+    A held family is never the displaced slot.
+    """
 
     ordered = tuple(paths)
     if limit < 2:
@@ -7392,15 +7467,47 @@ def _interleave_current_priority_request_files(
         ),
         None,
     )
-    if held is None or global_path is None:
+    if held is not None and global_path is not None:
+        head = (
+            (held, global_path, expansion_path)
+            if limit >= 3 and expansion_path is not None
+            else (held, global_path)
+        )
+        selected = set(head)
+        ordered = (*head, *(path for path in ordered if path not in selected))
+    if priority is None:
         return ordered
-    head = (
-        (held, global_path, expansion_path)
-        if limit >= 3 and expansion_path is not None
-        else (held, global_path)
+
+    def tier(path: Path) -> float:
+        return priority.get(path.name, (1, ""))[0]
+
+    window = ordered[:limit]
+    if not window or any(
+        tier(path) != _OWN_CLOCK_STATION_REVISION_TIER for path in window
+    ):
+        return ordered
+    displaced = next(
+        (
+            path
+            for path in reversed(window)
+            if tier(path) == _OWN_CLOCK_STATION_REVISION_TIER
+            and _request_family_scope(payloads.get(path)) not in current_money_risk
+        ),
+        None,
     )
-    selected = set(head)
-    return (*head, *(path for path in ordered if path not in selected))
+    reserved = next(
+        (
+            path
+            for path in ordered[limit:]
+            if tier(path) > _OWN_CLOCK_STATION_REVISION_TIER
+        ),
+        None,
+    )
+    if displaced is None or reserved is None:
+        return ordered
+    kept = [path for path in window if path != displaced]
+    rest = [path for path in ordered[limit:] if path != reserved]
+    return (*kept, reserved, displaced, *rest)
 
 
 def _read_day0_enqueue_ownership_cursor(cursor_path: Path) -> str | None:
@@ -8699,6 +8806,7 @@ def _claim_replacement_forecast_live_materialization_queue_locked(
                 current_money_risk=current_money_risk or frozenset(),
                 current_global_scope=current_global_scope or frozenset(),
                 limit=limit,
+                priority=priority,
             )
         )
     selected = tuple(claimable[:limit])

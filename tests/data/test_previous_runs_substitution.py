@@ -1,6 +1,6 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-10-03
-# Lifecycle: created=2026-06-11; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused or audited: 2026-10-06
+# Lifecycle: created=2026-06-11; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Preserve serving substitution and exact typed queue drain/reset.
 # Reuse: Run for current serving, materialization queue, or typed block evidence.
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
@@ -43,7 +43,7 @@ import sys
 import time
 import threading
 import types
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -7378,3 +7378,399 @@ def test_current_ensemble_hwm_uses_the_materializer_source_and_window_scope(metr
         ) == datetime.fromisoformat("2026-09-14T06:00:00+00:00")
     finally:
         conn.close()
+
+
+# --- Own-clock tier is the domain predicate, not a provider prefix (2026-10-06) ---
+# A source-issued current-temperature / Day0 observation revision for the city's
+# own local day is newer causal truth whatever its provider; HKO/CWA keep their
+# provider-keyed clauses byte-identical.
+
+_STATION_NOW = datetime(2026, 10, 6, 3, 0, tzinfo=timezone.utc)
+_STATION_DAYS = {  # label -> (target_date, observation time on that local day)
+    "past": ("2026-10-05", "2026-10-05T02:00:00+00:00"),
+    "today": ("2026-10-06", "2026-10-06T02:00:00+00:00"),
+    "d1": ("2026-10-07", "2026-10-07T02:00:00+00:00"),
+}
+_STATION_PROVIDERS = {  # provider -> (city, current-state source, Day0 extreme source)
+    "aviationweather_metar": ("Shenzhen", "aviationweather_metar", "aviationweather_metar"),
+    "wu": ("Taipei", "wu_icao_history", "wu_api+same_station_fast_tail"),
+    "noaa_wrh": ("Shenzhen", "noaa_wrh_zgsz", "noaa_wrh_zgsz"),
+    "ogimet": ("Shenzhen", "ogimet_metar_zgsz", "ogimet_metar_zgsz"),
+    "hko": ("Hong Kong", "hko_current_1min_mean", "hko_hourly_accumulator"),
+    "cwa": ("Taipei", "cwa_current_temperature", "cwa_hourly_accumulator"),
+}
+
+
+def _station_revision(
+    city, target_date, observed_at, state_source, day0_source,
+    *, metric="high", trigger="instrument_set_expansion", identity=True,
+    cycle="2026-10-05T18:00:00+00:00", computed_at="2026-10-06T02:50:00+00:00",
+):
+    payload = {
+        **_minimal_seed(upgrade=False),
+        "city": city, "target_date": target_date, "temperature_metric": metric,
+        "source_cycle_time": cycle, "computed_at": computed_at,
+        "upgrade_trigger": trigger,
+        "input_revision_sources": ["day0_current_temperature_state"],
+        "day0_current_temperature_state": {
+            "source": state_source, "observed_at_utc": observed_at, "value_native": 23.0,
+        },
+    }
+    if identity:
+        payload.update({
+            "day0_observed_extreme_source": day0_source,
+            "day0_observed_extreme_observation_time": observed_at,
+            "day0_observed_extreme_c": 24.0, "day0_observed_extreme_unit": "C",
+            "day0_observed_extreme_sample_count": 12,
+        })
+    return payload
+
+
+def _legacy_own_clock_predicate(payload):
+    """The provider-prefix predicate as of d7246286a, kept to pin HKO/CWA parity."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    sources = payload.get("input_revision_sources")
+    revision_sources = sources if isinstance(sources, (list, tuple)) else ()
+    day0_source = str(payload.get("day0_observed_extreme_source") or "").strip()
+    return any(
+        str(s).strip().startswith(("hko_", "cwa_")) for s in revision_sources
+    ) or (
+        str(payload.get("upgrade_trigger") or "").strip() == "day0_observation_advanced"
+        and day0_source.startswith(("hko_", "cwa_"))
+    ) or (
+        day0_source.startswith(("hko_", "cwa_"))
+        and "day0_current_temperature_state" in revision_sources
+        and isinstance(payload.get("day0_current_temperature_state"), dict)
+        and queue_mod._day0_conditioning_identity_key(payload) is not None
+    )
+
+
+def _quiet_station_queue(monkeypatch, queue_mod, *, debt=frozenset()):
+    monkeypatch.setattr(queue_mod, "_current_money_risk_families", lambda: frozenset())
+    monkeypatch.setattr(
+        queue_mod, "_current_global_auction_scope_families", lambda *_a, **_k: frozenset()
+    )
+    monkeypatch.setattr(queue_mod, "_current_probability_debt_families", lambda **_k: debt)
+    monkeypatch.setattr(queue_mod, "_city_local_today", lambda _city, _now: date(2026, 10, 6))
+
+
+@pytest.mark.parametrize("day", tuple(_STATION_DAYS))
+@pytest.mark.parametrize("provider", tuple(_STATION_PROVIDERS))
+def test_own_clock_tier_follows_current_local_day_not_provider(provider, day):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    city, state_source, day0_source = _STATION_PROVIDERS[provider]
+    target_date, observed_at = _STATION_DAYS[day]
+    payload = _station_revision(city, target_date, observed_at, state_source, day0_source)
+    got = queue_mod._is_own_clock_station_input_revision(payload, now_utc=_STATION_NOW)
+    if provider in ("hko", "cwa"):
+        # Provider-keyed clauses are untouched: byte-identical on every local day.
+        assert got is True
+        assert got == _legacy_own_clock_predicate(payload)
+    else:
+        assert not _legacy_own_clock_predicate(payload)
+        assert got is (day == "today")
+
+
+@pytest.mark.parametrize("provider", ("aviationweather_metar", "wu", "noaa_wrh", "ogimet"))
+def test_day0_observation_advanced_with_identity_is_own_clock_only_today(provider):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    city, _state_source, day0_source = _STATION_PROVIDERS[provider]
+    for day, expected in (("past", False), ("today", True), ("d1", False)):
+        target_date, observed_at = _STATION_DAYS[day]
+        payload = _station_revision(
+            city, target_date, observed_at, "unused", day0_source,
+            trigger="day0_observation_advanced",
+        )
+        payload.pop("input_revision_sources")
+        payload.pop("day0_current_temperature_state")
+        assert queue_mod._is_own_clock_station_input_revision(
+            payload, now_utc=_STATION_NOW
+        ) is expected, day
+
+
+@pytest.mark.parametrize("invalid", (
+    "no_identity", "unadmitted_channel", "no_revision_source", "string_state",
+    "unknown_city", "wrong_trigger_no_state", "bad_target_date",
+))
+def test_unqualified_current_state_revision_keeps_generic_tier(invalid):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    target_date, observed_at = _STATION_DAYS["today"]
+    payload = _station_revision(
+        "Shenzhen", target_date, observed_at, "aviationweather_metar", "aviationweather_metar",
+    )
+    if invalid == "no_identity":
+        payload = _station_revision(
+            "Shenzhen", target_date, observed_at, "aviationweather_metar",
+            "aviationweather_metar", identity=False,
+        )
+    elif invalid == "unadmitted_channel":  # a WU channel is not a Shenzhen (noaa) channel
+        payload["day0_current_temperature_state"]["source"] = "wu_icao_history"
+    elif invalid == "no_revision_source":
+        payload["input_revision_sources"] = ["ecmwf_ifs"]
+    elif invalid == "string_state":
+        payload["day0_current_temperature_state"] = "aviationweather_metar"
+    elif invalid == "unknown_city":
+        payload["city"] = "Atlantis"
+    elif invalid == "wrong_trigger_no_state":
+        payload.pop("day0_current_temperature_state")
+        payload["upgrade_trigger"] = "newer_cycle_ingested"
+    elif invalid == "bad_target_date":
+        payload["target_date"] = "not-a-date"
+    assert not queue_mod._is_own_clock_station_input_revision(payload, now_utc=_STATION_NOW)
+
+
+def test_metar_revision_for_today_outranks_cycle_advance_for_next_day(tmp_path, monkeypatch):
+    """The Shenzhen D0 METAR print no longer waits behind the 18Z D+1 backlog."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    _quiet_station_queue(monkeypatch, queue_mod)
+    backlog = {}
+    for index, city in enumerate(("Amsterdam", "Atlanta", "Austin", "Chicago", "Dallas", "Denver")):
+        path = request_dir / f"{city}.2026-10-07.high.cycle-advance.json"
+        backlog[path] = {
+            **_minimal_seed(upgrade=False), "city": city, "target_date": "2026-10-07",
+            "temperature_metric": "high", "source_cycle_time": "2026-10-05T18:00:00+00:00",
+            "computed_at": f"2026-10-06T02:0{index}:00+00:00",
+            "upgrade_trigger": "newer_cycle_ingested",
+        }
+    metar_path = request_dir / "Shenzhen.2026-10-06.high.station-input-revision.json"
+    target_date, observed_at = _STATION_DAYS["today"]
+    payloads = {
+        **backlog,
+        metar_path: _station_revision(
+            "Shenzhen", target_date, observed_at, "aviationweather_metar", "aviationweather_metar",
+        ),
+    }
+    for path, payload in payloads.items():  # backlog is older on disk; revision arrives last
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        time.sleep(0.01)
+    priority_names: set[str] = set()
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None, tuple(payloads), payloads, now_utc=_STATION_NOW,
+        current_money_risk=frozenset(), current_global_scope=frozenset(),
+        priority_names=priority_names,
+    )
+    assert priority[metar_path.name][0] == -9.0
+    assert all(priority[path.name][0] > -9.0 for path in backlog)
+    assert metar_path.name in priority_names
+
+    for limit in (1, 3):
+        plan = queue_mod._build_request_claim_read_plan(
+            request_path=request_dir, processed_path=tmp_path / "processed",
+            failed_path=tmp_path / "failed", forecast_db=None, limit=limit,
+            lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+        )
+        assert plan.claim.selected_files[0] == metar_path
+
+
+def test_past_local_day_metar_revision_gets_no_own_clock_tier(tmp_path, monkeypatch):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    _quiet_station_queue(monkeypatch, queue_mod)
+    target_date, observed_at = _STATION_DAYS["past"]
+    path = tmp_path / "Shenzhen.2026-10-05.high.station-input-revision.json"
+    payload = _station_revision(
+        "Shenzhen", target_date, observed_at, "aviationweather_metar", "aviationweather_metar",
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None, (path,), {path: payload}, now_utc=_STATION_NOW,
+        current_money_risk=frozenset(), current_global_scope=frozenset(),
+    )
+    assert priority[path.name][0] > -9.0
+
+
+def test_higher_tiers_stay_ahead_of_the_domain_own_clock_tier(tmp_path, monkeypatch):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    target_date, observed_at = _STATION_DAYS["today"]
+    debt_scope = frozenset({("Atlanta", target_date, "high"), ("Austin", target_date, "high")})
+    _quiet_station_queue(monkeypatch, queue_mod, debt=debt_scope)
+    debt = _station_revision(
+        "Atlanta", target_date, observed_at, "aviationweather_metar", "aviationweather_metar",
+    )
+    retry = _station_revision(
+        "Austin", target_date, observed_at, "aviationweather_metar",
+        "aviationweather_metar", trigger="day0_observation_advanced",
+    )
+    plain = _station_revision(
+        "Shenzhen", target_date, observed_at, "aviationweather_metar", "aviationweather_metar",
+    )
+    debt_path = tmp_path / "Atlanta.2026-10-06.high.station-input-revision.json"
+    retry_path = tmp_path / "Austin.2026-10-06.high.enqueue.timeout-retry-1-1.json"
+    plain_path = tmp_path / "Shenzhen.2026-10-06.high.station-input-revision.json"
+    payloads = {debt_path: debt, retry_path: retry, plain_path: plain}
+    for path, payload in payloads.items():
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        None, tuple(payloads), payloads, now_utc=_STATION_NOW,
+        current_money_risk=debt_scope, current_global_scope=frozenset(),
+    )
+    assert priority[debt_path.name][0] == -11.0
+    assert priority[retry_path.name][0] == -10.0
+    assert priority[plain_path.name][0] == -9.0
+
+
+def test_metar_revision_newest_observation_supersedes_older_in_family(tmp_path, monkeypatch):
+    """Within the own-clock tier the family keeps its newest observation's bytes."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    _quiet_station_queue(monkeypatch, queue_mod)
+    older_path = request_dir / "Shenzhen.2026-10-06.high.station-input-revision.a.json"
+    newer_path = request_dir / "Shenzhen.2026-10-06.high.station-input-revision.b.json"
+    for path, observed_at, value in (
+        (older_path, "2026-10-06T01:00:00+00:00", 21.0),
+        (newer_path, "2026-10-06T02:00:00+00:00", 23.0),
+    ):
+        payload = _station_revision(
+            "Shenzhen", "2026-10-06", observed_at, "aviationweather_metar",
+            "aviationweather_metar",
+        )
+        payload["day0_current_temperature_state"]["value_native"] = value
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    plan = queue_mod._build_request_claim_read_plan(
+        request_path=request_dir, processed_path=tmp_path / "processed",
+        failed_path=tmp_path / "failed", forecast_db=None, limit=1,
+        lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+    assert [(item.path, item.superseded_by) for item in plan.superseded] == [
+        (older_path, newer_path.name)
+    ]
+    assert plan.claim.selected_files == (newer_path,)
+
+
+# --- Own-clock tier must not own a whole claim (reserved slot) ---------------
+# Priority claims lease `limit` requests per run.  If own-clock arrivals alone
+# would fill them, the last slot goes to the first request outside the tier, so
+# D+1/D+2 work advances on every run instead of waiting for a lull.
+
+def _slot_world(tmp_path, tiers):
+    """tiers: ordered list of (name, tier).  Returns (paths, payloads, priority)."""
+    paths, payloads, priority = [], {}, {}
+    for index, (name, tier) in enumerate(tiers):
+        path = tmp_path / name
+        path.write_text("{}", encoding="utf-8")
+        paths.append(path)
+        payloads[path] = {"city": name.split(".")[0], "target_date": "2026-10-06", "temperature_metric": "high"}
+        priority[name] = (tier, f"{index:04d}")
+    return paths, payloads, priority
+
+
+def _interleave(queue_mod, paths, payloads, priority, *, limit, held=frozenset(), glob=frozenset()):
+    return queue_mod._interleave_current_priority_request_files(
+        paths, payloads, current_money_risk=held, current_global_scope=glob, limit=limit, priority=priority,
+    )
+
+
+def test_reserved_slot_goes_to_first_non_own_clock_when_claim_would_be_all_own_clock(tmp_path):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    paths, payloads, priority = _slot_world(tmp_path, [
+        ("A.own.json", -9.0), ("B.own.json", -9.0), ("C.own.json", -9.0), ("D.own.json", -9.0),
+        ("E.plain.json", -3.0), ("F.plain.json", 1.75),
+    ])
+    ordered = _interleave(queue_mod, paths, payloads, priority, limit=3)
+    assert [p.name for p in ordered[:3]] == ["A.own.json", "B.own.json", "E.plain.json"]
+    assert {p.name for p in ordered} == {p.name for p in paths}
+    assert [p.name for p in ordered[3:]] == ["C.own.json", "D.own.json", "F.plain.json"]
+
+
+def test_reserved_slot_is_inert_when_claim_already_has_a_non_own_clock_request(tmp_path):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    paths, payloads, priority = _slot_world(tmp_path, [
+        ("A.own.json", -9.0), ("B.plain.json", -3.0), ("C.own.json", -9.0), ("D.own.json", -9.0),
+        ("E.plain.json", 1.75),
+    ])
+    without = _interleave(queue_mod, paths, payloads, None, limit=3)
+    with_slot = _interleave(queue_mod, paths, payloads, priority, limit=3)
+    assert with_slot == without
+    assert queue_mod._interleave_current_priority_request_files(
+        paths, payloads, current_money_risk=frozenset(), current_global_scope=frozenset(), limit=3,
+    ) == without
+
+
+def test_reserved_slot_needs_a_waiting_non_own_clock_request(tmp_path):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    paths, payloads, priority = _slot_world(tmp_path, [(f"{c}.own.json", -9.0) for c in "ABCDE"])
+    assert _interleave(queue_mod, paths, payloads, priority, limit=3) == tuple(paths)
+
+
+def test_single_slot_claim_is_never_reserved_so_day0_cannot_be_starved(tmp_path):
+    """limit 1: reserving its only slot would starve own-clock revisions, so it is not applied."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    paths, payloads, priority = _slot_world(tmp_path, [
+        ("A.own.json", -9.0), ("B.own.json", -9.0), ("C.plain.json", -3.0),
+    ])
+    assert _interleave(queue_mod, paths, payloads, priority, limit=1) == tuple(paths)
+    assert _interleave(queue_mod, paths, payloads, priority, limit=0) == tuple(paths)
+
+
+def test_reserved_slot_never_displaces_a_capital_tier_or_held_family(tmp_path):
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    held = frozenset({("Held", "2026-10-06", "high")})
+    paths, payloads, priority = _slot_world(tmp_path, [
+        ("Held.own.json", -9.0), ("B.own.json", -9.0), ("C.own.json", -9.0), ("D.plain.json", -3.0),
+    ])
+    ordered = _interleave(queue_mod, paths, payloads, priority, limit=3, held=held)
+    window = [p.name for p in ordered[:3]]
+    assert "Held.own.json" in window
+    assert "D.plain.json" in window
+    # a window holding a tier above -9 is untouched: capital work owns its slots
+    paths, payloads, priority = _slot_world(tmp_path, [
+        ("A.debt.json", -11.0), ("B.own.json", -9.0), ("C.own.json", -9.0), ("D.plain.json", -3.0),
+    ])
+    ordered = _interleave(queue_mod, paths, payloads, priority, limit=3)
+    assert [p.name for p in ordered[:3]] == ["A.debt.json", "B.own.json", "C.own.json"]
+    assert ordered == tuple(paths)
+
+
+def test_reserved_slot_is_wired_into_the_real_claim_planner(tmp_path, monkeypatch):
+    """Five fresh own-clock revisions and one D+1 request: limit 3 claims two revisions plus the D+1."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    _quiet_station_queue(monkeypatch, queue_mod)
+    # A D+1 request reaches the priority lane only through its auction scope.
+    monkeypatch.setattr(
+        queue_mod, "_current_global_auction_scope_families",
+        lambda *_a, **_k: frozenset({("Amsterdam", "2026-10-07", "high")}),
+    )
+    target_date, observed_at = _STATION_DAYS["today"]
+    own = []
+    for index, city in enumerate(("Shenzhen", "Jeddah", "Lucknow", "Wuhan", "Guangzhou")):
+        path = request_dir / f"{city}.2026-10-06.high.station-input-revision.json"
+        path.write_text(json.dumps(_station_revision(
+            city, target_date, observed_at, "aviationweather_metar", "aviationweather_metar",
+        )), encoding="utf-8")
+        own.append(path)
+        time.sleep(0.01)
+    d1_path = request_dir / "Amsterdam.2026-10-07.high.cycle-advance.json"
+    d1_path.write_text(json.dumps({
+        **_minimal_seed(upgrade=False), "city": "Amsterdam", "target_date": "2026-10-07",
+        "temperature_metric": "high", "source_cycle_time": "2026-10-05T18:00:00+00:00",
+        "computed_at": "2026-10-06T02:00:00+00:00", "upgrade_trigger": "newer_cycle_ingested",
+    }), encoding="utf-8")
+    plan = queue_mod._build_request_claim_read_plan(
+        request_path=request_dir, processed_path=tmp_path / "processed", failed_path=tmp_path / "failed",
+        forecast_db=None, limit=3, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+    assert d1_path in plan.claim.selected_files
+    assert sum(1 for path in plan.claim.selected_files if path in own) == 2
+    single = queue_mod._build_request_claim_read_plan(
+        request_path=request_dir, processed_path=tmp_path / "processed", failed_path=tmp_path / "failed",
+        forecast_db=None, limit=1, lane=queue_mod.MATERIALIZATION_LANE_PRIORITY,
+    )
+    assert single.claim.selected_files[0] in own
