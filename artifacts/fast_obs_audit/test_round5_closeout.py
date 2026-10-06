@@ -224,6 +224,120 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(none['residual_counts'],{'KMA_EVENT_NO_EXACT_POSTERIOR_READY':1})
     def test_wrong_sql_identifier_rejected(self):
         with self.assertRaises(ValueError):a.identifier('x; DROP TABLE y')
+    def test_boundary_crossing_completion_counted_then_censored(self):
+        r=observation();ref=a.observation_ref(r);b=a.millis(r['fetched_at_utc']);end=b+1000
+        es=[dict(stage='SOURCE_COMMITTED',observation_ref=ref,world_committed_at_ms=b+500,recorded_at_ms=b+500),
+            dict(stage='POSTERIOR_READY',observation_ref=ref,posterior_identity_hash='q',posterior_ready_at_ms=end+5000,recorded_at_ms=end+5000),
+            dict(stage='Q_SERVED',posterior_identity_hash='q',q_served_at_ms=end+6000,recorded_at_ms=end+6000)]
+        done=a.trace_distributions([r],copy.deepcopy(es),[],cohort_end_ms=end,follow_until_ms=end+7200000)
+        self.assertEqual(done['hops']['world_to_posterior']['n'],1);self.assertEqual(done['hops']['world_to_posterior']['p50_ms'],end+4500-b)
+        self.assertEqual(done['hops']['receipt_to_first_valid_q']['p50_ms'],end+6000-b)
+        self.assertEqual(done['censored']['world_to_posterior']['n'],0)
+        cut=a.trace_distributions([r],copy.deepcopy(es),[],cohort_end_ms=end,follow_until_ms=end+3000)
+        self.assertEqual(cut['hops']['world_to_posterior']['n'],0);self.assertEqual(cut['censored']['world_to_posterior']['n'],1)
+        self.assertEqual(cut['censored']['world_to_posterior']['outstanding_age_at_follow_until']['p50_ms'],end+3000-(b+500))
+        self.assertEqual(cut['hops']['receipt_to_world']['n'],1)
+        self.assertEqual(cut['censored_source_revisions_without_lineage']['n'],1)
+        self.assertEqual(cut['censored_source_revisions_without_lineage']['outstanding_age_from_receipt_at_follow_until']['p50_ms'],end+3000-b)
+        self.assertEqual(done['censored_source_revisions_without_lineage']['n'],0)
+        # A canonical ACK before follow_until whose trace witness lands after it stays censored, and is counted as such.
+        acked=es+[dict(stage='VENUE_ACK_OBSERVED',q_version='q',command_id='c',event_id='ack',recorded_at_ms=end+9000)]
+        ack=[dict(event_id='ack',command_id='c',event_type='SUBMIT_ACKED',occurred_at=a.datetime.fromtimestamp((end+7000)/1000,a.UTC).isoformat())]
+        late=a.trace_distributions([r],copy.deepcopy(acked),ack,cohort_end_ms=end,follow_until_ms=end+8000)
+        self.assertEqual(late['hops']['q_to_ack']['n'],0);self.assertEqual(late['censored']['q_to_ack']['n'],1)
+        self.assertEqual(late['ack_trace_witness'],{'canonical_acks_read':1,'with_venue_ack_observed_trace':0})
+        self.assertEqual(a.trace_distributions([r],copy.deepcopy(acked),ack,cohort_end_ms=end,follow_until_ms=end+10000)['hops']['q_to_ack']['p50_ms'],1000)
+        # Censored is not superseded: with no posterior rows read, the disposition says no family reads this city.
+        later=a.trace_distributions([r],copy.deepcopy(es),[],cohort_end_ms=end,follow_until_ms=end+3000,posteriors=[],zones={'Tokyo':'Asia/Tokyo'})
+        self.assertEqual(later['print_disposition_counts'],{'OUTSIDE_SCOPE':1})
+    def test_fan_out_counts_revisions_and_lineages(self):
+        p1=observation();p2=observation(id=2,value_native=21.,fetched_at_utc='2026-10-05T08:03:00Z');p3=observation(id=3,value_native=22.,fetched_at_utc='2026-10-05T08:04:00Z')
+        es=[]
+        for row,hashes in ((p1,('h1','h2','h2')),(p2,('h3',)),(p3,())):
+            ref=a.observation_ref(row);b=a.millis(row['fetched_at_utc'])
+            es.append(dict(stage='SOURCE_COMMITTED',observation_ref=ref,world_committed_at_ms=b+1,recorded_at_ms=b+1))
+            es+=[dict(stage='POSTERIOR_READY',observation_ref=ref,posterior_identity_hash=h,posterior_ready_at_ms=b+10+i,recorded_at_ms=b+10+i) for i,h in enumerate(hashes)]
+        fan=a.trace_distributions([p1,p2,p3],es,[])['fan_out']['WORLD_PRINT']
+        self.assertEqual(fan['source_revisions_with_lineage'],2);self.assertEqual(fan['posterior_lineages'],3)
+        self.assertEqual(fan['lineages_per_source_revision'],{'1':1,'2':1})
+    def test_absent_ready_is_not_supersession(self):
+        zones={'Tokyo':'Asia/Tokyo'};p=observation();ref=a.observation_ref(p);b=a.millis(p['fetched_at_utc'])
+        newer=observation(id=2,value_native=21.,fetched_at_utc='2026-10-05T08:12:00Z');older=observation(id=0,value_native=19.,fetched_at_utc='2026-10-05T07:52:00Z')
+        es=[dict(stage='SOURCE_COMMITTED',observation_ref=ref,world_committed_at_ms=b+100,recorded_at_ms=b+100)]
+        def post(pid,print_id,cut,date='2026-10-05'):
+            return dict(posterior_id=pid,posterior_identity_hash='h%d'%pid,city='Tokyo',target_date=date,temperature_metric='high',
+                computed_at=a.datetime.fromtimestamp(cut/1000,a.UTC).isoformat(),day0_current_temperature_input_ref=json.dumps({'print_id':print_id}))
+        def disposition(posts):
+            r=a.trace_distributions([p],copy.deepcopy(es),[],posteriors=posts,prints=[newer,older],zones=zones,follow_until_ms=b+3600000)
+            self.assertEqual(r['residual_counts']['NO_EXACT_REVISION_POSTERIOR_READY'],1)
+            return r['print_dispositions'][0]
+        # A newer print merely existing is not supersession; nor is a family reader that consumed an older revision.
+        self.assertEqual(disposition([post(9,0,b+600000)])['disposition'],'UNEXPLAINED')
+        # The newer print consumed by a reader whose cut precedes this commit could not have seen this print.
+        self.assertEqual(disposition([post(9,2,b+99)])['disposition'],'PENDING')
+        # The newer print consumed for another family date is not this family's successor.
+        self.assertEqual(disposition([post(9,2,b+600000,'2026-10-06')])['disposition'],'OUTSIDE_SCOPE')
+        hit=disposition([post(9,2,b+600000)])
+        self.assertEqual((hit['disposition'],hit['successor_print_id'],hit['consuming_posterior_id']),('SUPERSEDED_BY',2,9))
+        self.assertEqual(disposition([post(9,1,b+600000)])['disposition'],'CONSUMED_NO_EXACT_READY_EVENT')
+        self.assertEqual(a.trace_distributions([p],copy.deepcopy(es),[])['print_dispositions'][0]['disposition'],'POSTERIOR_SIDECAR_UNAVAILABLE')
+        # A cut equal to the commit millisecond does not prove the reader had this print.
+        self.assertEqual(disposition([post(9,2,b+100)])['disposition'],'PENDING')
+        # An earlier observation reader, then a later reader with no observation input: not PENDING.
+        mixed=disposition([post(9,0,b+50),dict(post(10,0,b+700000),day0_current_temperature_input_ref=None)])
+        self.assertEqual((mixed['disposition'],mixed['later_family_inputs']),('UNEXPLAINED',{'NO_OBSERVATION_INPUT':1}))
+        # A higher rowid the reader ranks lower (a delayed older report) is not a successor.
+        stale=observation(id=4,value_native=18.,publish_ts_utc='2026-10-05T07:40:00Z',fetched_at_utc='2026-10-05T08:12:00Z')
+        r=a.trace_distributions([p],copy.deepcopy(es),[],posteriors=[post(9,4,b+600000)],prints=[stale],zones=zones)['print_dispositions'][0]
+        self.assertEqual((r['disposition'],r['later_family_inputs']),('UNEXPLAINED',{'jma_amedas_temperature':1}))
+        self.assertNotIn('successor_print_id',r)
+        # The reader kept an earlier revision that outranks this late arrival: named, not superseded.
+        ahead=observation(id=0,value_native=19.,publish_ts_utc='2026-10-05T08:10:00Z',fetched_at_utc='2026-10-05T08:01:00Z')
+        r=a.trace_distributions([p],copy.deepcopy(es),[],posteriors=[post(9,0,b+600000)],prints=[ahead],zones=zones)['print_dispositions'][0]
+        self.assertEqual((r['disposition'],r['reason'],r['outranking_print_id']),('UNEXPLAINED','OUTRANKED_BY_EARLIER_REVISION',0))
+        # A METAR the reader cannot date has no family: never classified by publication date.
+        metar=observation(source_channel='aviationweather_metar',raw_report='METAR RJTT AUTO 20/12')
+        mref=a.observation_ref(metar)
+        r=a.trace_distributions([metar],[dict(stage='SOURCE_COMMITTED',observation_ref=mref,world_committed_at_ms=b+100,recorded_at_ms=b+100)],[],
+            posteriors=[post(9,2,b+600000)],prints=[newer],zones=zones)['print_dispositions'][0]
+        self.assertEqual((r['disposition'],r['reason']),('UNEXPLAINED','READER_CLOCK_UNRESOLVED'))
+    def test_wake_received_after_first_q_counts_only_unconditionally(self):
+        r=observation();ref=a.observation_ref(r);b=a.millis(r['fetched_at_utc'])
+        es=[dict(stage='SOURCE_COMMITTED',observation_ref=ref,world_committed_at_ms=b+1,recorded_at_ms=b+1),
+            dict(stage='POSTERIOR_READY',observation_ref=ref,posterior_identity_hash='q',readiness_id='r',posterior_ready_at_ms=b+10,recorded_at_ms=b+10),
+            dict(stage='WAKE_PUBLISHED',wake_id='w1',posterior_identity_hash='q',wake_published_at_ms=b+11,recorded_at_ms=b+11),
+            dict(stage='Q_SERVED',posterior_identity_hash='q',q_served_at_ms=b+20,recorded_at_ms=b+20),
+            dict(stage='WAKE_RECEIVED',wake_id='w1',wake_received_at_ms=b+25,recorded_at_ms=b+25),
+            dict(stage='WAKE_PUBLISHED',wake_id='w2',posterior_identity_hash='z',wake_published_at_ms=b+30,recorded_at_ms=b+30),
+            dict(stage='WAKE_PUBLISHED',wake_id='w3',posterior_identity_hash='z',wake_published_at_ms=b+5000,recorded_at_ms=b+5000),
+            dict(stage='WAKE_RECEIVED',wake_id='w9',wake_received_at_ms=b+40,recorded_at_ms=b+40)]
+        rep=a.trace_distributions([r],es,[],cohort_end_ms=b+1000,follow_until_ms=b+9000)
+        self.assertEqual(rep['hops']['posterior_to_wake_before_first_q']['n'],0);self.assertEqual(rep['hops']['posterior_to_wake']['n'],0)
+        self.assertEqual(rep['residual_counts']['WAKE_RECEIPT_IDENTITY_OR_CLOCK_MISSING'],1)
+        self.assertEqual(rep['hops']['wake_published_to_received']['n'],1);self.assertEqual(rep['hops']['wake_published_to_received']['p50_ms'],14)
+        self.assertEqual(rep['wake_transport'],{'published_in_cohort':2,'received':2,'intersect':1,'published_after_cohort_end':1,'received_without_read_publication':1})
+        self.assertEqual(rep['censored']['wake_published_to_received']['n'],1)
+        self.assertEqual(rep['censored']['wake_published_to_received']['outstanding_age_at_follow_until']['p50_ms'],9000-30)
+    def test_negative_input_cut_ordering_is_counted_not_dropped(self):
+        rows=[observation(),observation(id=2,value_native=21.,fetched_at_utc='2026-10-05T08:03:00Z')];es=[];posts=[]
+        for row,h,lag in ((rows[0],'h1',-400),(rows[1],'h2',300)):
+            ref=a.observation_ref(row);b=a.millis(row['fetched_at_utc'])
+            es+=[dict(stage='SOURCE_COMMITTED',observation_ref=ref,world_committed_at_ms=b+1000,recorded_at_ms=b+1000),
+                dict(stage='POSTERIOR_READY',observation_ref=ref,posterior_identity_hash=h,posterior_ready_at_ms=b+5000,recorded_at_ms=b+5000)]
+            posts.append(dict(posterior_id=len(posts)+1,posterior_identity_hash=h,city='Tokyo',target_date='2026-10-05',temperature_metric='high',
+                computed_at=a.datetime.fromtimestamp((b+1000+lag)/1000,a.UTC).isoformat()))
+        d=a.trace_distributions(rows,es,[],posteriors=posts)['computed_at_decomposition']
+        self.assertEqual(d['lineages'],2)
+        self.assertEqual(d['world_commit_to_effective_input_cut']['n'],2);self.assertEqual(d['world_commit_to_effective_input_cut']['negative'],1)
+        self.assertEqual(d['world_commit_to_effective_input_cut']['min_ms'],-400)
+        self.assertEqual(d['effective_input_cut_to_ready']['max_ms'],4400);self.assertEqual(d['effective_input_cut_to_ready']['negative'],0)
+        self.assertEqual(d['ordering_violations'],{'cut_before_receipt':0,'cut_before_world_commit':1,'ready_before_cut':0})
+    def test_recorded_at_bisection_selects_publication_not_computed_at(self):
+        c=sqlite3.connect(':memory:');c.execute('CREATE TABLE forecast_posteriors(posterior_id INTEGER PRIMARY KEY,computed_at TEXT,recorded_at TEXT)')
+        c.executemany('INSERT INTO forecast_posteriors VALUES(?,?,?)',[(10,'2026-10-05T07:00:00Z','2026-10-05 07:59:59'),
+            (11,'2026-10-05T06:00:00Z','2026-10-05 08:00:00'),(13,'2026-10-05T08:30:00Z','2026-10-05 08:59:59'),(14,'2026-10-05T08:31:00Z','2026-10-05 09:00:00')])
+        lo,hi=a.first_posterior_at(c,a.instant('2026-10-05T08:00:00Z')),a.first_posterior_at(c,a.instant('2026-10-05T09:00:00Z'))
+        self.assertEqual((lo,hi),(11,14));self.assertEqual(a.first_posterior_at(c,a.instant('2026-10-06T00:00:00Z')),15);c.close()
 
 
 if __name__=='__main__':unittest.main(verbosity=2)
