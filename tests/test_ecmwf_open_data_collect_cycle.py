@@ -668,6 +668,117 @@ def test_normal_native_fast_503_uses_configured_google_originals(configured_nati
     assert result["qualification_status"] == "UNKNOWN"
 
 
+@pytest.mark.parametrize("casing", ("lower", "mixed", "upper"))
+def test_normal_native_google_range_header_case_preserves_originals(configured_native_pool, casing):
+    from requests.structures import CaseInsensitiveDict
+    s = configured_native_pool
+    get = s.session.get
+    def original_headers(url, **kwargs):
+        response = get(url, **kwargs)
+        if "Range" in kwargs.get("headers", {}):
+            names = {"lower": str.lower, "mixed": str.swapcase, "upper": str.upper}
+            response.headers = CaseInsensitiveDict({names[casing](k): v for k, v in response.headers.items()})
+        return response
+    s.session.get = original_headers
+    result = s.poll()
+    assert result["status"] == "AVAILABLE" and result["observed_count"] == 102, result
+    manifest = Path(result["manifest_path"])
+    saved = json.loads(manifest.read_bytes())["messages"][0]
+    body = Path(saved["path"])
+    proof_path = body.with_suffix(".grib2.proof.json")
+    proof = json.loads(proof_path.read_bytes())
+    assert any(k != k.title() for k in proof["range_http"]["headers"])
+    source_before = dict(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (result["source_run_id"],)).fetchone())
+    before = (body.read_bytes(), proof_path.read_bytes(), manifest.read_bytes())
+    inputs_dir = body.parent / "private-scope"; inputs_dir.mkdir()
+    inputs = _native_temperature_knots_fixture(inputs_dir, steps=(0, 3))
+    scope = _native_source_scope(s.conn, SimpleNamespace(source_run_id=result["source_run_id"]), manifest, inputs)
+    assert scope.status == "AVAILABLE" and len(scope.native_knots) == 102, scope
+    s.calls.clear(); s.hosts.clear()
+    assert s.poll()["status"] == "AVAILABLE" and s.calls == [] and s.hosts == []
+    assert (body.read_bytes(), proof_path.read_bytes(), manifest.read_bytes()) == before
+    source_after = dict(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (result["source_run_id"],)).fetchone())
+    # Inventory revalidation updates recorded_at, never original possession.
+    assert {k for k in source_before if source_before[k] != source_after[k]} <= {"recorded_at"}
+
+
+@pytest.mark.parametrize("field,fault", (("Content-Range", "duplicate"), ("Content-Length", "duplicate"),
+    ("Content-Range", "missing"), ("Content-Length", "missing"), ("Content-Range", "mismatch"),
+    ("Content-Length", "mismatch"), ("Content-Range", "badvalue"), ("Content-Length", "badvalue"),
+    ("headers", "nullcontainer"), ("headers", "listcontainer"), ("headers", "scalarcontainer")))
+def test_normal_native_range_singletons_are_strict_and_reset(tmp_path, monkeypatch, field, fault):
+    s = _normal_native_http(tmp_path, monkeypatch)
+    try:
+        first = s.module.collect_native_temperature_source(**s.args)
+        assert first["status"] == "AVAILABLE", first
+        manifest = Path(first["manifest_path"])
+        saved = json.loads(manifest.read_bytes())["messages"][0]
+        body = Path(saved["path"])
+        proof_path = body.with_suffix(".grib2.proof.json")
+        original = proof_path.read_bytes()
+        before = (body.read_bytes(), manifest.read_bytes(),
+            tuple(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (first["source_run_id"],)).fetchone()))
+        proof = json.loads(original); headers = proof["range_http"]["headers"]
+        if field == "headers":
+            proof["range_http"]["headers"] = {"nullcontainer": None, "listcontainer": [], "scalarcontainer": 7}[fault]
+        elif fault == "duplicate":
+            headers[field.lower()] = headers[field]
+        elif fault == "missing":
+            del headers[field]
+        elif fault == "mismatch":
+            headers[field] = "bytes 1-2/3" if field == "Content-Range" else "1"
+        else:
+            headers[field] = [] if field == "Content-Range" else None
+        proof_path.write_text(json.dumps(proof))
+        s.calls.clear()
+        refused = s.module.collect_native_temperature_source(**s.args)
+        assert refused["status"] == "UNKNOWN" and refused["reason"] == "NATIVE_2T_RANGE_RECEIPT_INVALID", refused
+        assert s.calls == [] and refused["qualification_status"] == "UNKNOWN"
+        inputs_dir = tmp_path / "invalid-range-scope"; inputs_dir.mkdir()
+        inputs = _native_temperature_knots_fixture(inputs_dir, steps=(0, 3))
+        args = (s.conn, SimpleNamespace(source_run_id=first["source_run_id"]), manifest, inputs)
+        assert _native_source_scope(*args).status == "UNKNOWN"
+        assert (body.read_bytes(), manifest.read_bytes(),
+            tuple(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (first["source_run_id"],)).fetchone())) == before
+        proof_path.write_bytes(original)
+        assert _native_source_scope(*args).status == "AVAILABLE"
+        assert s.module.collect_native_temperature_source(**s.args)["status"] == "AVAILABLE" and s.calls == []
+        assert proof_path.read_bytes() == original
+    finally:
+        s.conn.close()
+
+
+def test_normal_native_google_lowercase_stage_resumes_without_remint(configured_native_pool, monkeypatch):
+    from requests.structures import CaseInsensitiveDict
+    s = configured_native_pool
+    get = s.session.get
+    def lowercase_response(url, **kwargs):
+        response = get(url, **kwargs)
+        if "Range" in kwargs.get("headers", {}):
+            response.headers = CaseInsensitiveDict({k.lower(): v for k, v in response.headers.items()})
+        return response
+    s.session.get = lowercase_response
+    with monkeypatch.context() as crash:
+        def interrupted(*args, **kwargs):
+            raise OSError("PRIVATE_PUBLICATION_INTERRUPTED")
+        crash.setattr(s.module, "_promote_native_mirror_part", interrupted)
+        failed = s.poll()
+        assert failed["status"] == "UNKNOWN" and failed["reason"] == "PRIVATE_PUBLICATION_INTERRUPTED"
+    stage = s.cache / f".mirror-{s.module._resume_source_namespace('google')}.partial"
+    original = stage / "step000-member00.grib2"
+    proof_path = original.with_suffix(".grib2.proof.json")
+    before = (original.read_bytes(), proof_path.read_bytes())
+    proof = json.loads(before[1])
+    assert "content-range" in proof["range_http"]["headers"]
+    s.calls.clear()
+    complete = s.poll()
+    assert complete["status"] == "AVAILABLE" and complete["observed_count"] == 102, complete
+    assert not any(url == proof["source_url"] and "Range" in args.get("headers", {}) for url, args in s.calls)
+    published = s.cache / original.name
+    assert (published.read_bytes(), published.with_suffix(".grib2.proof.json").read_bytes()) == before
+    assert (original.read_bytes(), proof_path.read_bytes()) == before
+
+
 @pytest.mark.parametrize("interrupted", (False, True), ids=("mixed_receipts", "restart_stage"))
 def test_normal_native_partial_index_entity_accepts_new_http_receipt_without_remint(configured_native_pool, monkeypatch, tmp_path, interrupted):
     """Same index bytes have distinct, truthful immutable acquisition receipts."""

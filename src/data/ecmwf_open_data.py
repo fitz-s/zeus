@@ -206,14 +206,29 @@ def _read_native_temperature_record(path: Path, run: datetime, *,
         raise ValueError("NATIVE_2T_SOURCE_HOST_INVALID")
     if proof["range_http"].get("status") != 206:
         raise ValueError("NATIVE_2T_RANGE_NOT_206")
-    headers = proof["range_http"]["headers"]
-    span = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", headers["Content-Range"])
+    original_headers = proof["range_http"]["headers"]
+    if type(original_headers) is not dict:
+        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
+    # HTTP names are case-insensitive; original proof bytes remain untouched.
+    # Reject repeated singleton names before any case-folding can hide them.
+    headers = {}
+    for name, value in original_headers.items():
+        if type(name) is not str or type(value) is not str:
+            raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
+        key = name.lower()
+        if key in {"content-range", "content-length"}:
+            if key in headers:
+                raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
+            headers[key] = value
+    if headers.keys() != {"content-range", "content-length"}:
+        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
+    span = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", headers["content-range"])
     if not span:
         raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
     start, end, total = map(int, span.groups())
     if (not 0 <= start <= proof["source_index_offset"]
             or end < proof["source_index_offset"] + len(raw) - 1 or end >= total
-            or int(headers["Content-Length"]) != end - start + 1):
+            or int(headers["content-length"]) != end - start + 1):
         raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
     index_path = path.parent / proof["index_path"]
     if not index_path.resolve().is_relative_to(path.parent.resolve()):
