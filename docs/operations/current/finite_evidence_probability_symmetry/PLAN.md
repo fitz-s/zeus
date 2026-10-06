@@ -19061,3 +19061,28 @@ and causal source cut; no mock READY, AST rewrite, production source edit or
 fabricated clock/anchor may stand in for qualification. SCOPE this private
 cash integration; DRAIN actual normal producer; RESET four cash relationships
 and identity/clock negatives under the same valid public certificate.
+
+Independent review blocks the previous single-live freeze: keyword actuals
+were bound for helper return analysis but only positional Name actuals received
+callee field mutations. Actual `mutate(p=bag,value='diagnostic')` then
+`runtime=bag['value']` returns no finding; positional twin rejects. ROOT
+authorizes the one binding/writeback seam in check_single_live_semantics.py
+and its existing test: positional/keyword/keyword-only and alias actuals must
+share mutation destinations; literal Attribute/Subscript prefixes must retain
+their path, unresolved actuals must not silently discard control effects.
+No owner/callee waiver or expanded interpreter is permitted. SCOPE these
+actual bindings; DRAIN corrected projection; RESET clean selected fields pass
+while all keyword, alias and unknown-destination control twins reject.
+The previous actual rc0 remains a result from the vulnerable epoch, not final
+gate approval. Source/q/wealth and every frozen producer clock stay unchanged.
+
+ROOT also authorizes the existing semantic classifier/registry/test trio for
+three exact loader rejection reasons, not lifecycle states: deploy_live.py
+PROBABILITY_UPGRADE_CODE_IDENTITY_UNKNOWN and check_live_restart_preflight.py
+PROBABILITY_UPGRADE_CURRENT_INPUT_ROLE_UNKNOWN / PROBABILITY_UPGRADE_HELD_SCOPE_UNKNOWN.
+Actual merged classifier rc2 records only these three unregistered objects in
+/tmp/zeus-recovery-current-semantic-classification.json. Declare only their
+exact owner and diagnostic structural use (false/reason return or reason field
+write); same token in state/status/Enum/SQL CHECK still fails. No source,
+probability or upgrade gate is relaxed. All five existing code/test paths plus
+the shared money_path_objects registry retain their scoped ownership.
