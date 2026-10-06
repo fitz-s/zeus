@@ -1929,6 +1929,8 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     SCOPE: exact normal run/active city/date/metric/full-Y transport debt.
     DRAIN: existing scheduler alternates its mandatory terminal journal and an
     independently named native attempt journal, including HTTP503/defer/partial.
+    Within each active/future priority layer, never-attempted scopes precede
+    least-recent attempts, so an exhausted failed scope cannot monopolize turns.
     RESET: a validated required subset, an expired target or a new legal run;
     no manifest-newest equality, in-memory turn latch or mandatory-status rewrite.
     A crash after native RUNNING still gives the next tick back to mandatory.
@@ -1953,7 +1955,7 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     attempt = [mandatory["job_run_id"], mandatory["started_at"], mandatory["lock_acquired_at"], mandatory["finished_at"]]
     job_name = "forecast_live_native_2t_" + track
     previous = conn.execute("SELECT meta_json FROM job_run WHERE job_name=? AND source_id=? "
-        "AND track='2t_instant_native_knots' ORDER BY started_at DESC LIMIT 1",
+        "AND track='2t_instant_native_knots' ORDER BY started_at DESC,rowid DESC LIMIT 1",
         (job_name, "ecmwf_open_data")).fetchone()
     if previous is not None:
         try:
@@ -1961,21 +1963,33 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
                 return None
         except (TypeError, ValueError):
             pass
-    for plan in _native_temperature_transport_plans(conn, now_utc=now_utc, full_y_only=True):
+    candidates = []
+    for order, plan in enumerate(_native_temperature_transport_plans(conn, now_utc=now_utc, full_y_only=True)):
         if plan["run"] >= identity["scheduled_for"] or not any(target[3] == "full_Y" for target in plan["targets"]):
             continue
+        scope = {"run": plan["run"].isoformat(), "targets": plan["targets"], "required_steps": plan["steps"]}
+        scope_json = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+        scope_hash = hashlib.sha256(scope_json.encode()).hexdigest()
+        receipt = conn.execute("SELECT rowid,started_at FROM job_run WHERE job_run_id=? AND job_name=? "
+            "AND source_id='ecmwf_open_data' AND track='2t_instant_native_knots' AND scheduled_for=? "
+            "AND release_calendar_key=? AND expected_scope_json=?",
+            (job_name + ":" + scope_hash, job_name, plan["run"].isoformat(),
+             "ecmwf_open_data:native_2t:" + scope_hash, scope_json)).fetchone()
+        started = _parse_utc_timestamp(receipt["started_at"]) if receipt else None
+        rank = (plan["future"], started is not None, started or datetime.min.replace(tzinfo=timezone.utc),
+            receipt["rowid"] if receipt else 0, order)
+        candidates.append((rank, plan, scope, scope_hash))
+    for _, plan, scope, scope_hash in sorted(candidates, key=lambda candidate: candidate[0]):
         # Expired admission permits only a complete, verified original cache
         # read. It cannot issue HTTP or turn nonempty bytes into qualification.
         cached = collect_native_temperature_source(conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
             cycle_deadline_monotonic=time.monotonic(), _priority=plan["priority"])
         if cached["status"] == "AVAILABLE":
             continue
-        scope = {"run": plan["run"].isoformat(), "targets": plan["targets"], "required_steps": plan["steps"]}
-        scope_hash = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         journal = dict(job_run_id=job_name + ":" + scope_hash, job_name=job_name, plane="forecast",
             scheduled_for=plan["run"], source_id="ecmwf_open_data", track="2t_instant_native_knots",
             release_calendar_key="ecmwf_open_data:native_2t:" + scope_hash,
-            started_at=now_utc, expected_scope_json=scope)
+            started_at=_utcnow(), expected_scope_json=scope)
         meta = {"mandatory_attempt": attempt, "qualification_status": "UNKNOWN"}
         write_job_run(conn, **journal, status="RUNNING", meta_json=meta)
         conn.commit()  # FORECAST owner; native inventory owns its own transaction.

@@ -488,7 +488,7 @@ def test_normal_native_single_metric_market_preserves_sibling_raw_priority(norma
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
-@pytest.mark.parametrize("turn", ("inflight", "partial", "503"))
+@pytest.mark.parametrize("turn", ("inflight", "partial", "503", "rival503"))
 def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path, monkeypatch, track, turn):
     from types import SimpleNamespace
     from src.data import ecmwf_open_data as source, job_lock
@@ -504,7 +504,8 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
 
     steps = tuple(range(12, 37, 3))
     s = _normal_native_http(tmp_path, monkeypatch, steps=steps, hour=12)
-    now, latest = s.run + timedelta(hours=13), s.run + timedelta(hours=6)
+    now = s.run + timedelta(hours=13)
+    latest = s.run + timedelta(hours=12 if turn == "rival503" else 6)
     latest_identities = {}
     manifest_json = runtime_coordinate_manifest_json()
     for source_track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
@@ -543,6 +544,58 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
         daemon._write_job_run(s.conn, identity=current, status="RUNNING", now_utc=now,
             started_at=now, result={"status": "running"})
     s.conn.commit()
+    if turn == "rival503":
+        # A separate active Paris full-Y scope from 18 sorts before London's
+        # 12 scope. Neither scope is removed when the first provider is 503.
+        from src.data.forecast_target_contract import compute_target_local_day_window_utc, required_period_end_steps
+        import ecmwf.opendata
+        rival = s.run + timedelta(hours=6)
+        window = compute_target_local_day_window_utc(city_timezone="Europe/Paris", target_local_date=day)
+        ends = list(required_period_end_steps(source_cycle_time=rival,
+            target_window_start_utc=window.start_utc, target_window_end_utc=window.end_utc, period_hours=3))
+        future_window = compute_target_local_day_window_utc(city_timezone="Europe/Paris", target_local_date=day + timedelta(days=1))
+        future_ends = list(required_period_end_steps(source_cycle_time=rival,
+            target_window_start_utc=future_window.start_utc, target_window_end_utc=future_window.end_utc, period_hours=3))
+        for rival_track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
+            identity = {**latest_identities[rival_track], "scheduled_for": rival}
+            run_id = daemon._expected_source_run_id(identity)
+            write_source_run(s.conn, source_run_id=run_id, source_id="ecmwf_open_data", track=rival_track + "_short_horizon",
+                release_calendar_key=identity["release_calendar_key"], source_cycle_time=rival,
+                status="SUCCESS", completeness_status="COMPLETE", expected_steps_json=ends + future_ends,
+                observed_steps_json=ends + future_ends, data_version=identity["data_version"])
+            daemon._write_job_run(s.conn, identity=identity, status="SUCCESS", now_utc=now,
+                result={"status": "ok", "source_run_id": run_id, "snapshots_inserted": 1})
+            write_source_run_coverage(s.conn, coverage_id="private-y18-" + metric, source_run_id=run_id,
+                source_id="ecmwf_open_data", track=rival_track + "_short_horizon", city="Paris", city_timezone="Europe/Paris",
+                release_calendar_key=identity["release_calendar_key"], city_id="fixture-paris",
+                physical_quantity=metric + "_extreme", observation_field=metric,
+                expected_members=51, observed_members=51, source_transport="private_fake_http", computed_at=now,
+                expires_at=window.end_utc, target_local_date=day, temperature_metric=metric,
+                target_window_start_utc=window.start_utc, target_window_end_utc=window.end_utc,
+                expected_steps_json=ends, observed_steps_json=ends, completeness_status="COMPLETE",
+                readiness_status="LIVE_ELIGIBLE", data_version=identity["data_version"])
+            s.conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) VALUES(?,?,?,?,?,?)",
+                ("private-y18-" + metric, "Paris", day.isoformat(), metric, "private-paris-" + metric, "20"))
+            write_source_run_coverage(s.conn, coverage_id="private-future-y18-" + metric, source_run_id=run_id,
+                source_id="ecmwf_open_data", track=rival_track + "_short_horizon", city="Paris", city_timezone="Europe/Paris",
+                release_calendar_key=identity["release_calendar_key"], city_id="fixture-paris",
+                physical_quantity=metric + "_extreme", observation_field=metric,
+                expected_members=51, observed_members=51, source_transport="private_fake_http", computed_at=now,
+                expires_at=future_window.end_utc, target_local_date=day + timedelta(days=1), temperature_metric=metric,
+                target_window_start_utc=future_window.start_utc, target_window_end_utc=future_window.end_utc,
+                expected_steps_json=future_ends, observed_steps_json=future_ends, completeness_status="COMPLETE",
+                readiness_status="LIVE_ELIGIBLE", data_version=identity["data_version"])
+            s.conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) VALUES(?,?,?,?,?,?)",
+                ("private-future-y18-" + metric, "Paris", (day + timedelta(days=1)).isoformat(), metric, "private-future-paris-" + metric, "20"))
+        s.conn.commit()
+        client = ecmwf.opendata.Client
+        class RoutedClient(client):
+            def _get_urls(self, **kwargs):
+                result = super()._get_urls(**kwargs)
+                if kwargs["time"] == 18:
+                    result.urls = [url.replace("/12z/", "/18z/").replace(f"{s.run:%Y%m%d%H}", f"{rival:%Y%m%d%H}") for url in result.urls]
+                return result
+        monkeypatch.setattr(ecmwf.opendata, "Client", RoutedClient)
     def connection(**kwargs):
         conn = sqlite3.connect(tmp_path / "normal-forecasts.db")
         conn.row_factory = sqlite3.Row
@@ -555,10 +608,44 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
     monkeypatch.setattr(daemon, "_held_revision_migration_identity", lambda *args, **kwargs: None)
     monkeypatch.setattr(daemon, "_committed_held_opendata_wake", lambda *args, **kwargs: None)
     monkeypatch.setattr(source, "_resolve_opendata_paths", lambda: s.paths)
+    if turn == "rival503":
+        import hashlib
+        from src.state.job_run_repo import write_job_run
+        plans = daemon._native_temperature_transport_plans(s.conn, now_utc=now, full_y_only=True)
+        assert [(plan["run"].hour, plan["future"]) for plan in plans] == [(18, False), (12, False), (18, True)]
+        old_plan = plans[1]
+        scope = {"run": old_plan["run"].isoformat(), "targets": old_plan["targets"], "required_steps": old_plan["steps"]}
+        scope_hash = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        # The first tranche chooses never-attempted active 18 over this older
+        # receipt. After 18 fails, least-recent active 12 must beat untouched
+        # future 18. Fresh SQLite connections on each dispatcher tick restore
+        # this history; there is no process-local cursor.
+        job_name = "forecast_live_native_2t_" + track
+        write_job_run(s.conn, job_run_id=job_name + ":" + scope_hash, job_name=job_name, plane="forecast",
+            scheduled_for=old_plan["run"], source_id="ecmwf_open_data", track="2t_instant_native_knots",
+            release_calendar_key="ecmwf_open_data:native_2t:" + scope_hash,
+            started_at=now - timedelta(hours=1), status="RUNNING" if track == "mx2t6_high" else "PARTIAL",
+            expected_scope_json=scope, meta_json={"qualification_status": "UNKNOWN", "mandatory_attempt": []})
+        s.conn.commit()
+    class CaptureClock(datetime):
+        @classmethod
+        def now(cls, tz=None): return utc_clock[0].astimezone(tz or timezone.utc)
+    monkeypatch.setattr(source, "datetime", CaptureClock)
     clock, expired, spent = [100.], [False], [False]
+    rival_http = []
     monkeypatch.setattr(daemon.time, "monotonic", lambda: clock[0])
     get = s.session.get
     def private_get(url, **kwargs):
+        if turn == "rival503":
+            if "/18z/" in url:
+                rival_http.append(url)
+                assert url.endswith(".index") and kwargs["timeout"] <= 59.
+                clock[0] += kwargs["timeout"]  # The one attempted scope spends the entire original cut.
+                fixture_url = url.replace("/18z/", "/12z/").replace(f"{rival:%Y%m%d%H}", f"{s.run:%Y%m%d%H}")
+                response = get(fixture_url.replace("-3h-", "-12h-"), **kwargs)
+                response.status_code = 503
+                return response
+            return get(url, **kwargs)
         if expired[0] and turn != "503" and not spent[0] and url.endswith(".index"):
             spent[0] = True
             clock[0] += 1.
@@ -624,7 +711,11 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
         if turn != "inflight":
             first_mandatory = tick()
             assert first_mandatory["status"] == "failed" and len(mandatory_calls) == 1
-            assert first_mandatory["native_temperature_source"]["status"] == "DEFERRED"
+            if turn == "rival503":
+                assert first_mandatory["native_temperature_source"]["status"] == "DRAINED"
+                assert all(result["status"] == "DEFERRED" for result in first_mandatory["native_temperature_source"]["runs"])
+            else:
+                assert first_mandatory["native_temperature_source"]["status"] == "DEFERRED"
             assert s.calls == []
             clock[0] += 60.
             utc_clock[0] += timedelta(seconds=60)
@@ -632,23 +723,29 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
             if turn == "inflight" else nullcontext((True, None)))
         with context as (acquired, _):
             assert acquired
+            before_turn = clock[0]
             first = tick()
             native = first["native_temperature_source"]
             assert first["status"] == ("skipped_lock_held" if turn == "inflight" else "native_temperature_optional_turn"), first
-            if turn == "503":
+            if turn in {"503", "rival503"}:
                 assert native["status"] == "DEFERRED" and "503" in native["reason"], native
+                if turn == "rival503":
+                    assert clock[0] == before_turn + 59.
+                    assert len(rival_http) == len(s.calls) == 1
+                    assert native["transport_run_utc"] == rival.isoformat()
                 original = None
             else:
                 assert native["status"] == "INCOMPLETE" and native["observed_count"] == 1, native
                 original = json.loads(Path(native["manifest_path"]).read_bytes())["messages"][0]
             if turn != "inflight":
-                journal = s.conn.execute("SELECT * FROM job_run WHERE track='2t_instant_native_knots'").fetchone()
-                assert journal["status"] == ("FAILED" if turn == "503" else "PARTIAL")
+                journal = s.conn.execute("SELECT * FROM job_run WHERE track='2t_instant_native_knots' ORDER BY started_at DESC LIMIT 1").fetchone()
+                assert journal["status"] == ("FAILED" if turn in {"503", "rival503"} else "PARTIAL")
                 assert journal["rows_written"] == 0  # Native bodies are not mandatory forecast rows.
                 metadata = json.loads(journal["meta_json"])
                 assert metadata["collector_status"] == native["status"]
+                expected_city = "Paris" if turn == "rival503" else "London"
                 assert json.loads(journal["expected_scope_json"])["targets"] == [
-                    ["London", day.isoformat(), "high", "full_Y"], ["London", day.isoformat(), "low", "full_Y"]]
+                    [expected_city, day.isoformat(), "high", "full_Y"], [expected_city, day.isoformat(), "low", "full_Y"]]
                 assert len(mandatory_calls) == 1
                 before = len(s.calls)
                 mandatory_again = tick()
@@ -660,6 +757,11 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
             second = tick()
             complete = second["native_temperature_source"]
             assert complete["status"] == "AVAILABLE" and complete["observed_count"] == 459, complete
+            if turn == "rival503":
+                assert complete["transport_run_utc"] == s.run.isoformat()
+                assert len(rival_http) == 1  # Second tranche did not restart the exhausted scope.
+                assert dict(s.conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (journal["job_run_id"],)).fetchone()) == dict(journal)
+                assert s.conn.execute("SELECT COUNT(*) FROM job_run WHERE track='2t_instant_native_knots'").fetchone()[0] == 2
             if original:
                 assert json.loads(Path(complete["manifest_path"]).read_bytes())["messages"][0] == original
             if turn != "inflight":
