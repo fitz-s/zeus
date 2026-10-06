@@ -19581,3 +19581,23 @@ genuine changed values, unit/run/role or unknown evidence remain refused.
 Preserve the actual original RED and exact restored H/L controls. This source
 epoch requires affected final-parent evidence; current q child fixture tests
 do not claim to cover the new production comparison.
+
+### Opposite-track original custody during normal concurrent capture — BEFORE EDIT
+
+ROOT assigned the held leaf sole writer ownership of
+src/data/ecmwf_open_data.py and existing
+tests/test_ecmwf_open_data_collect_cycle.py for this keeper repair; native
+retains the separate numeric-conversion sources/integration fixture. Actual
+normal HIGH/LOW scheduling with a HIGH-only market lets LOW finish first;
+per-track GC then drops its 459 paired originals before the counterpart
+snapshot exists. Native future publication also precedes that snapshot.
+Retain storage-only opposite originals for the same city/date, same-run
+candidate even in that ordering. Keep existing finite-age/two-cycle and
+exact-reference limits; no new TTL, global pin, or probability qualification.
+SCOPE: the incomplete counterpart custody cohort. DRAIN: normal collector
+and final normal GC. RESET: terminal/nonparticipating cohorts or completed
+reference/finite-cycle conditions reclaim normally. Test HIGH-only and
+LOW-only markets with the opposite track finishing first, original tuple
+immutability and final GC recovery. Do not call retained bytes live-grade
+evidence or alter action q. Current q fixture epoch stays locked; final
+affected parent proof follows the separately frozen source repair.
