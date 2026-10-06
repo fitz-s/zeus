@@ -18,7 +18,7 @@ import pytest
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
-@pytest.mark.parametrize("fault", (None, "wrong_hash", "future_clock", "wrong_header", "expired", "fast503", "fullcut", "partialcut"))
+@pytest.mark.parametrize("fault", (None, "wrong_hash", "future_clock", "wrong_header", "expired", "fast503", "fullcut", "partialcut", "fair_debts"))
 def test_normal_journaled_paired_original_restoration_keeps_old_clocks(normal_native_poll, tmp_path, monkeypatch, track, fault):
     """Normal wrapper restores actual original bodies without re-ingesting truth."""
     import hashlib
@@ -28,6 +28,18 @@ def test_normal_journaled_paired_original_restoration_keeps_old_clocks(normal_na
     from scripts import extract_open_ens_localday as decoder
     from tests.test_ingest_grib_source_run_context import _tiny_native_grib
     s = normal_native_poll
+    if fault == "fair_debts":
+        class ClockType(type):
+            def __instancecheck__(cls, value): return isinstance(value, datetime)
+        class CaptureClock(datetime, metaclass=ClockType):
+            @classmethod
+            def now(cls, tz=None): return s.now.astimezone(tz or timezone.utc)
+        monkeypatch.setattr(s.module, "datetime", CaptureClock)
+    if fault != "fair_debts":
+        # This antibody targets paired debt; acquire native originals through
+        # the normal producer first, so a paired-only turn is the only debt.
+        initial = s.daemon._run_journaled_opendata_track_if_due(track)["native_temperature_source"]
+        assert initial["status"] == "AVAILABLE", initial
     metric = "high" if track == "mx2t6_high" else "low"
     folder = tmp_path / "paired-capture"; folder.mkdir()
     original, _, _, _ = _tiny_native_grib(folder, track, issue=s.run, horizon=24)
@@ -56,7 +68,7 @@ def test_normal_journaled_paired_original_restoration_keeps_old_clocks(normal_na
     missing = captures[0]
     missing_path = s.module._role_message_path(s.paths.raw_root, missing["raw_message_sha256"])
     missing_path.unlink()
-    if fault == "partialcut":
+    if fault in {"partialcut", "fair_debts"}:
         second_missing=captures[1]
         second_path=s.module._role_message_path(s.paths.raw_root,second_missing["raw_message_sha256"])
         second_path.unlink()
@@ -77,9 +89,10 @@ def test_normal_journaled_paired_original_restoration_keeps_old_clocks(normal_na
     snapshot_before = tuple(s.conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=?", (run_id,)).fetchone())
     old_get = s.session.get
     mirrors=[];clock=[100.]
-    if fault in {"fast503","fullcut","partialcut"}:
+    if fault in {"fast503","fullcut","partialcut","fair_debts"}:
         monkeypatch.setattr(s.module,"_DOWNLOAD_SOURCES",("aws","google"))
         monkeypatch.setattr(s.module.time,"monotonic",lambda:clock[0])
+    native_ranges = [0]
     def get(url, **kwargs):
         google="storage.googleapis.com" in url
         if fault in {"fast503","fullcut","partialcut"}:
@@ -96,7 +109,12 @@ def test_normal_journaled_paired_original_restoration_keeps_old_clocks(normal_na
                 *(json.dumps(v).encode() for v in index_rows.get(url,[]))])+b"\n"
             return type(response)(body,200,{"Content-Length":str(len(body))})
         offset,end=map(int,kwargs["headers"]["Range"][6:].split("-"))
-        if (url,offset) not in ranges: return old_get(url,**kwargs)
+        if (url,offset) not in ranges:
+            if fault == "fair_debts":
+                native_ranges[0] += 1
+                if native_ranges[0] == 2:
+                    clock[0] = s.session._zeus_deadline
+            return old_get(url,**kwargs)
         s.calls.append((url,kwargs))
         prototype=old_get(url[:-6]+".index")
         if fault == "partialcut" and clock[0] == 100.: clock[0]=s.session._zeus_deadline
@@ -118,6 +136,70 @@ def test_normal_journaled_paired_original_restoration_keeps_old_clocks(normal_na
     # The normal dispatcher recomputes its own strong transport plan. Keep the
     # sibling market out of this exact restoration case, not its mandatory job.
     s.conn.execute("DELETE FROM market_events WHERE temperature_metric!=?",(metric,));s.conn.commit()
+    if fault == "fair_debts":
+        from concurrent.futures import Future
+        ordinary_calls = []
+        ordinary = s.daemon._run_opendata_track_if_due
+        def ordinary_checked(*args, **kwargs):
+            ordinary_calls.append(args[0])
+            return ordinary(*args, **kwargs)
+        monkeypatch.setattr(s.daemon, "_run_opendata_track_if_due", ordinary_checked)
+        class ImmediateExecutor:
+            def submit(self, fn, selected_track):
+                future = Future()
+                try: future.set_result(fn(selected_track))
+                except Exception as exc: future.set_exception(exc)
+                return future
+        def poll():
+            sibling = "mn2t6_low" if track == "mx2t6_high" else "mx2t6_high"
+            inflight = {sibling: Future()}  # Normal sibling already has work.
+            report = s.daemon._dispatch_due_opendata_tracks(_executor=ImmediateExecutor(), _inflight=inflight)
+            assert report[sibling]["status"] == "in_flight"
+            return inflight[track].result()["native_temperature_source"]
+        mandatory_before = tuple(s.conn.execute("SELECT * FROM job_run WHERE source_run_id=?", (run_id,)).fetchone())
+        first = poll()
+        assert not missing_path.exists() and not second_path.exists(), "first native turn was spent restoring paired debt"
+        assert first["transport_kind"] == "native", first
+        assert first["status"] == "INCOMPLETE" and first["observed_count"] == 1
+        assert clock[0] == 159. and s.session._zeus_deadline == 159.
+        assert not any(int(k["headers"]["Range"][6:].split("-")[0]) >= 1000000
+            for _, k in s.calls if "Range" in k.get("headers", {}))
+        retained = next(Path(first["manifest_path"]).parent.glob("step*-member*.grib2"))
+        retained_before = (retained.read_bytes(), retained.with_suffix(".grib2.proof.json").read_bytes(), retained.stat().st_mtime_ns)
+        assert json.loads(retained_before[1])["source_fetched_at"] == s.now.isoformat()
+        receipt = s.conn.execute("SELECT meta_json FROM job_run WHERE job_name=?", ("forecast_live_native_2t_"+track,)).fetchone()
+        assert json.loads(receipt[0])["transport_kind"] == "native"
+        # Simulate a process loss after its durable native RUNNING receipt.
+        # This diagnostic fault cannot upgrade the real PARTIAL source/body.
+        s.conn.execute("UPDATE job_run SET status='RUNNING',finished_at=NULL WHERE job_name=?",
+            ("forecast_live_native_2t_"+track,))
+        s.conn.commit()
+        # Reopened normal connections and cleared dispatcher state must resume
+        # the persisted phase, not begin again with an in-memory native latch.
+        s.daemon._OPENDATA_SAFE_CYCLE_FUTURES.clear()
+        clock[0] = 200.; call_start = len(s.calls)
+        second = poll()
+        assert second["transport_kind"] == "paired", second
+        assert second["paired_originals"]["status"] == "AVAILABLE"
+        assert second["paired_originals"]["restored_count"] == 2
+        assert s.session._zeus_deadline == 259.
+        assert missing_path.exists() and second_path.exists()
+        assert all(int(k["headers"]["Range"][6:].split("-")[0]) >= 1000000
+            for _, k in s.calls[call_start:] if "Range" in k.get("headers", {}))
+        clock[0] = 300.
+        third = poll()
+        assert third["transport_kind"] == "native" and third["status"] == "AVAILABLE", third
+        assert third["qualification_status"] == "UNKNOWN" and third["available_at"] is None
+        assert s.session._zeus_deadline == 359. and ordinary_calls == []
+        assert (retained.read_bytes(), retained.with_suffix(".grib2.proof.json").read_bytes(), retained.stat().st_mtime_ns) == retained_before
+        call_count = len(s.calls); clock[0] = 400.
+        fourth = poll()
+        assert fourth["status"] == "AVAILABLE" and len(s.calls) == call_count
+        assert ordinary_calls == [track]  # Complete debt returns to ordinary mandatory admission.
+        assert tuple(s.conn.execute("SELECT * FROM job_run WHERE source_run_id=?", (run_id,)).fetchone()) == mandatory_before
+        assert tuple(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (run_id,)).fetchone()) == before
+        assert tuple(s.conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=?", (run_id,)).fetchone()) == snapshot_before
+        return
     if fault == "expired":
         plan=s.daemon._native_temperature_transport_plans(s.conn,now_utc=s.now)[0]
         result=s.module.restore_paired_role_originals(s.conn,plan=plan,decision_at=s.now,
@@ -196,6 +278,7 @@ def normal_native_poll(tmp_path, monkeypatch, request):
             expected_steps_json=list(supplied[1:]), observed_steps_json=list(supplied[1:]),
             fetch_started_at=now, fetch_finished_at=now, data_version=identity["data_version"])
         daemon._write_job_run(s.conn, identity=identity, status="SUCCESS", now_utc=now,
+            started_at=now, lock_acquired_at=now,
             result={"status": "ok", "source_run_id": run_id, "snapshots_inserted": 1})
         for future in (False, True):
             start = s.run.replace(hour=0) + timedelta(days=int(future))
@@ -560,7 +643,7 @@ def test_normal_native_actual_journaled_entry_drains_blocked_y_current_day(norma
     assert s.calls == []
 
 
-@pytest.mark.parametrize("debt", ("running", "missing_raw", "other_run", "paused", "expired", "unknown_scope"))
+@pytest.mark.parametrize("debt", ("running", "missing_raw", "other_run", "paused", "expired", "expired_before_start", "unknown_scope"))
 def test_normal_native_poll_mandatory_debt_never_spends_optional_http(normal_native_poll, monkeypatch, debt):
     s = normal_native_poll
     low = s.identities["mn2t6_low"]
@@ -575,19 +658,45 @@ def test_normal_native_poll_mandatory_debt_never_spends_optional_http(normal_nat
     elif debt == "paused":
         monkeypatch.setattr(s.daemon, "_is_source_paused", lambda _: True)
     elif debt == "expired":
-        original = s.daemon._commit_opendata_result_and_wake
-        def commit(conn, result):
-            out = original(conn, result)
+        # SUCCESS fair admission intentionally precedes the ordinary commit.
+        # Expire at its real transport boundary, not an unreached callback.
+        original = s.module._NativeDeadlineSession
+        def session():
             monkeypatch.setattr(s.daemon.time, "monotonic", lambda: 10**10)
-            return out
-        monkeypatch.setattr(s.daemon, "_commit_opendata_result_and_wake", commit)
+            return original()
+        monkeypatch.setattr(s.module, "_NativeDeadlineSession", session)
+    elif debt == "expired_before_start":
+        original = s.daemon._utcnow
+        ticks = [0]
+        def utcnow():
+            ticks[0] += 1
+            if ticks[0] == 2:  # Exact optional journal's real start timestamp.
+                monkeypatch.setattr(s.daemon.time, "monotonic", lambda: 10**10)
+            return original()
+        monkeypatch.setattr(s.daemon, "_utcnow", utcnow)
     else:
         s.conn.execute("UPDATE source_run_coverage SET expected_steps_json='[]'")
     s.conn.commit()
     result = s.daemon._run_journaled_opendata_track_if_due("mx2t6_high")
-    assert result["native_temperature_source"]["status"] == "DEFERRED"
     assert s.calls == []
     assert s.conn.execute("SELECT COUNT(*) FROM source_run WHERE track='2t_instant_native_knots'").fetchone()[0] == 0
+    assert result["native_temperature_source"]["status"] == "DEFERRED"
+
+
+def test_normal_success_non_deadline_native_corruption_remains_unknown(normal_native_poll):
+    s = normal_native_poll
+    first = s.daemon._run_journaled_opendata_track_if_due("mx2t6_high")["native_temperature_source"]
+    assert first["status"] == "AVAILABLE", first
+    cache = Path(first["manifest_path"]).parent
+    part = next(cache.glob("step*-member*.grib2"))
+    original = part.read_bytes()
+    source_before = tuple(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (first["source_run_id"],)).fetchone())
+    part.write_bytes(b"broken private GRIB original")
+    s.calls.clear()
+    result = s.daemon._run_journaled_opendata_track_if_due("mx2t6_high")["native_temperature_source"]
+    assert result["status"] == "UNKNOWN" and result["reason"] != "STEP_DEADLINE_EXCEEDED", result
+    assert s.calls == [] and part.read_bytes() != original
+    assert tuple(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (first["source_run_id"],)).fetchone()) == source_before
 
 
 def test_normal_mandatory_work_commits_after_poll_cut_without_borrowing_it(normal_native_poll, monkeypatch):

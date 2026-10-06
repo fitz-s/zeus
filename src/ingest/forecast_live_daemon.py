@@ -1928,9 +1928,9 @@ def _drain_native_temperature_source(conn, *, now_utc: datetime, deadline_monoto
 
 
 def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadline_monotonic: float) -> dict | None:
-    """Give a legal prior Y one bounded turn between real mandatory attempts.
+    """Drain source debt fairly without borrowing another poll's budget.
 
-    SCOPE: exact normal run/active city/date/metric/full-Y transport debt.
+    SCOPE: exact normal run/current coordinate city/date/metric transport debt.
     DRAIN: existing scheduler alternates its mandatory terminal journal and an
     independently named native attempt journal, including HTTP503/defer/partial.
     Within each active/future priority layer, never-attempted scopes precede
@@ -1938,6 +1938,10 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     RESET: a validated required subset, an expired target or a new legal run;
     no manifest-newest equality, in-memory turn latch or mandatory-status rewrite.
     A crash after native RUNNING still gives the next tick back to mandatory.
+    For an already SUCCESSful mandatory run, native and paired transport debt
+    alternate by the exact scope's durable phase receipt, including RUNNING.
+    One phase consumes this poll's original cut; incomplete inventory is not
+    role qualification, and a paired turn cannot mint a native SUCCESS.
     """
     from src.data.ecmwf_open_data import collect_native_temperature_source, restore_paired_role_originals
     from src.data.release_calendar import FetchDecision
@@ -1947,8 +1951,9 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     if identity["decision"] is not FetchDecision.FETCH_ALLOWED or _is_source_paused(str(identity["source_id"])):
         return None
     mandatory = conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (_job_run_id(identity),)).fetchone()
-    if mandatory is None or mandatory["status"] not in {"FAILED", "PARTIAL"}:
+    if mandatory is None or mandatory["status"] not in {"FAILED", "PARTIAL", "SUCCESS"}:
         return None
+    completed_mandatory = mandatory["status"] == "SUCCESS"
     acquired, finished = (_parse_utc_timestamp(mandatory[field]) for field in ("lock_acquired_at", "finished_at"))
     if (acquired is None or finished is None or finished < acquired
             or mandatory["scheduled_for"] != identity["scheduled_for"].isoformat()
@@ -1961,20 +1966,22 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     previous = conn.execute("SELECT meta_json FROM job_run WHERE job_name=? AND source_id=? "
         "AND track='2t_instant_native_knots' ORDER BY started_at DESC,rowid DESC LIMIT 1",
         (job_name, "ecmwf_open_data")).fetchone()
-    if previous is not None:
+    if previous is not None and not completed_mandatory:
         try:
             if json.loads(previous["meta_json"]).get("mandatory_attempt") == attempt:
                 return None
         except (TypeError, ValueError):
             pass
     candidates = []
-    for order, plan in enumerate(_native_temperature_transport_plans(conn, now_utc=now_utc, full_y_only=True)):
-        if plan["run"] >= identity["scheduled_for"] or not any(target[3] == "full_Y" for target in plan["targets"]):
+    for order, plan in enumerate(_native_temperature_transport_plans(conn, now_utc=now_utc,
+            full_y_only=not completed_mandatory)):
+        if (plan["run"] > identity["scheduled_for"] or (not completed_mandatory
+                and (plan["run"] == identity["scheduled_for"] or not any(target[3] == "full_Y" for target in plan["targets"])))):
             continue
         scope = {"run": plan["run"].isoformat(), "targets": plan["targets"], "required_steps": plan["steps"]}
         scope_json = json.dumps(scope, sort_keys=True, separators=(",", ":"))
         scope_hash = hashlib.sha256(scope_json.encode()).hexdigest()
-        receipt = conn.execute("SELECT rowid,started_at FROM job_run WHERE job_run_id=? AND job_name=? "
+        receipt = conn.execute("SELECT rowid,started_at,meta_json FROM job_run WHERE job_run_id=? AND job_name=? "
             "AND source_id='ecmwf_open_data' AND track='2t_instant_native_knots' AND scheduled_for=? "
             "AND release_calendar_key=? AND expected_scope_json=?",
             (job_name + ":" + scope_hash, job_name, plan["run"].isoformat(),
@@ -1982,8 +1989,8 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
         started = _parse_utc_timestamp(receipt["started_at"]) if receipt else None
         rank = (plan["future"], started is not None, started or datetime.min.replace(tzinfo=timezone.utc),
             receipt["rowid"] if receipt else 0, order)
-        candidates.append((rank, plan, scope, scope_hash))
-    for _, plan, scope, scope_hash in sorted(candidates, key=lambda candidate: candidate[0]):
+        candidates.append((rank, plan, scope, scope_hash, receipt))
+    for _, plan, scope, scope_hash, receipt in sorted(candidates, key=lambda candidate: candidate[0]):
         # Expired admission permits only a complete, verified original cache
         # read. It cannot issue HTTP or turn nonempty bytes into qualification.
         cached = collect_native_temperature_source(conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
@@ -1992,28 +1999,55 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
             deadline_monotonic=time.monotonic())
         if cached["status"] == "AVAILABLE" and paired_cache["status"] == "AVAILABLE":
             continue
+        transport_kind = None
+        if completed_mandatory:
+            previous_kind = None
+            if receipt is not None:
+                try:
+                    previous_kind = json.loads(receipt["meta_json"]).get("transport_kind")
+                except (TypeError, ValueError):
+                    pass
+            transport_kind = "paired" if previous_kind == "native" else "native"
+            if cached["status"] == "AVAILABLE":
+                transport_kind = "paired"
+            elif paired_cache["status"] == "AVAILABLE":
+                transport_kind = "native"
         journal = dict(job_run_id=job_name + ":" + scope_hash, job_name=job_name, plane="forecast",
             scheduled_for=plan["run"], source_id="ecmwf_open_data", track="2t_instant_native_knots",
             release_calendar_key="ecmwf_open_data:native_2t:" + scope_hash,
             started_at=_utcnow(), expected_scope_json=scope)
         meta = {"mandatory_attempt": attempt, "qualification_status": "UNKNOWN"}
+        if transport_kind is not None:
+            meta["transport_kind"] = transport_kind
         write_job_run(conn, **journal, status="RUNNING", meta_json=meta)
         conn.commit()  # FORECAST owner; native inventory owns its own transaction.
         try:
-            paired = restore_paired_role_originals(conn, plan=plan, decision_at=now_utc,
-                deadline_monotonic=deadline_monotonic)
-            result = collect_native_temperature_source(conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
+            paired = paired_cache if transport_kind == "native" else restore_paired_role_originals(
+                conn, plan=plan, decision_at=now_utc, deadline_monotonic=deadline_monotonic)
+            result = cached if transport_kind == "paired" else collect_native_temperature_source(
+                conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
                 cycle_deadline_monotonic=deadline_monotonic, _priority=plan["priority"])
             result = {**result, "paired_originals": paired}
+            if transport_kind is not None:
+                result["transport_kind"] = transport_kind
         except Exception as exc:  # Optional failure is not mandatory failure.
             result = {"status": "DEFERRED", "qualification_status": "UNKNOWN", "reason": str(exc)}
+        collector_status = result["status"]
+        if collector_status == "UNKNOWN" and result.get("reason") == "STEP_DEADLINE_EXCEEDED":
+            # Scheduling debt only: preserve the raw inventory verdict, reason
+            # and all canonical evidence; no other UNKNOWN is transport expiry.
+            result = {**result, "status": "DEFERRED", "collector_status": collector_status}
         status = {"AVAILABLE": "SUCCESS", "INCOMPLETE": "PARTIAL"}.get(result["status"], "FAILED")
+        if completed_mandatory and status == "SUCCESS" and result.get("paired_originals", {}).get("status") != "AVAILABLE":
+            status = "PARTIAL"
         write_job_run(conn, **journal, status=status, finished_at=_utcnow(),
             source_run_id=result.get("source_run_id"), reason_code=result.get("reason"),
             affected_scope_json={"observed_count": result.get("observed_count", 0)},
-            meta_json={**meta, "collector_status": result["status"]})
+            meta_json={**meta, "collector_status": collector_status,
+                "paired_status": result.get("paired_originals", {}).get("status")})
         conn.commit()
-        return {"status": "native_temperature_optional_turn", "source": "ecmwf_open_data", "track": track,
+        return {"status": "current_cycle_already_journaled" if completed_mandatory else "native_temperature_optional_turn",
+            "source": "ecmwf_open_data", "track": track,
             "mandatory_job_run_id": mandatory["job_run_id"], "mandatory_status": mandatory["status"],
             "native_temperature_source": {**result, "transport_run_utc": plan["run"].isoformat()}}
     return None
