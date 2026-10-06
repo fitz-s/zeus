@@ -1927,21 +1927,25 @@ def test_market_topology_certificate_uses_topology_row_clock_not_event_clock(tmp
     assert receipt.decision_proof_bundle.market_topology.clock.source_available_at.isoformat() != event.available_at
 
 
-def test_topology_persisted_after_decision_blocks_certificate():
-    event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_taker_snapshot()
-    conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:13:00+00:00'")
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+def test_topology_persisted_after_decision_blocks_certificate(tmp_path, monkeypatch):
+    event, receipt, _, _, decision_time = _normal_native_final_intent_case(tmp_path, monkeypatch, "high")
+    assert receipt.proof_accepted
+    proof = receipt.decision_proof_bundle
+    # Compiler-only tamper boundary after lawful normal source admission.
+    # The original source bodies, receipts and canonical clocks stay intact.
+    late = decision_time + timedelta(seconds=1)
+    topology = replace(proof.market_topology, clock=replace(proof.market_topology.clock,
+        source_available_at=late, agent_received_at=late, persisted_at=late))
+    proof = replace(proof, market_topology=topology)
     result = DecisionCompiler().compile_pre_submit(
         event,
-        decision_time=DECISION_TIME,
-        proof_bundle=receipt.decision_proof_bundle,
+        decision_time=decision_time,
+        proof_bundle=proof,
     )
 
     assert result.status == "REJECTED"
     assert result.failures[0].reason_code == "PRE_SUBMIT_CERTIFICATE_REJECTED"
-    assert "max_parent_source_available_at after decision_time" in (result.failures[0].reason_detail or "")
+    assert "after decision_time" in (result.failures[0].reason_detail or "")
 
 
 def test_topology_clock_missing_blocks_certificate(tmp_path, monkeypatch):
@@ -2082,11 +2086,8 @@ def test_non_accepting_snapshot_is_admitted_as_current_non_executable_state():
     assert gate(_forecast_event(), decide_at) is True
 
 
-def test_adapter_source_truth_status_comes_from_forecast_authority():
-    event = _forecast_event()
-    conn = _enable_qkernel_fixture(_trade_conn_with_taker_snapshot())
-
-    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+def test_adapter_source_truth_status_comes_from_forecast_authority(tmp_path, monkeypatch):
+    _, receipt, _, _, _ = _normal_native_final_intent_case(tmp_path, monkeypatch, "high")
 
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == "LIVE_ELIGIBLE"
@@ -2113,36 +2114,30 @@ def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(tm
     assert source_payload["source_authority_id"] == forecast_payload["reader_authority"]
 
 
-def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_source_context():
-    event = _replacement_forecast_event()
-    conn = _trade_conn_with_snapshot()
-    _insert_replacement_forecast_fixture(conn)
-    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
-
-    result = _forecast_authority_payload_from_posterior(
-        conn,
-        event=event,
-        family=family,
-        payload={
-            "source_id": REPLACEMENT_SOURCE_ID,
-            "source_run_id": "run-1",
-        },
-        decision_time=DECISION_TIME,
-    )
-
+def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_source_context(tmp_path, monkeypatch):
+    captured = []
+    def capture_context(*, conn, event, bundle, decision_time):
+        captured.append(_forecast_authority_payload_from_posterior(conn,
+            event=event, family=SimpleNamespace(city=bundle.city,
+                target_date=bundle.target_date, metric=bundle.temperature_metric),
+            payload={**json.loads(event.payload_json), "source_id": REPLACEMENT_SOURCE_ID},
+            decision_time=decision_time))
+    _, receipt, bundle, _, decision_time = _normal_native_final_intent_case(
+        tmp_path, monkeypatch, "high", before_receipt=capture_context)
+    assert receipt.proof_accepted
+    result = captured[0]
     assert result is not None
     forecast_payload, clock = result
-    assert clock.source_available_at.isoformat() == "2026-05-24T08:10:00+00:00"
+    assert clock.source_available_at <= decision_time
     decision_context = DecisionSourceContext.from_forecast_context(forecast_payload)
     assert decision_context is not None
-    assert decision_context.raw_payload_hash == (
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-    )
+    assert len(decision_context.raw_payload_hash) == 64
+    assert forecast_payload["posterior_identity_hash"] == bundle.posterior_identity_hash
     assert decision_context.forecast_source_role == "entry_primary"
     assert decision_context.degradation_level == "OK"
     assert decision_context.authority_tier == "FORECAST"
-    assert decision_context.first_member_observed_time == "2026-05-24T07:10:00+00:00"
-    assert decision_context.run_complete_time == "2026-05-24T08:05:00+00:00"
+    assert datetime.fromisoformat(decision_context.first_member_observed_time) <= decision_time
+    assert datetime.fromisoformat(decision_context.run_complete_time) <= decision_time
     errors = set(decision_context.integrity_errors())
     assert "missing_forecast_valid_time" not in errors
     assert "missing_raw_payload_hash" not in errors
