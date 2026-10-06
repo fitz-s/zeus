@@ -466,6 +466,30 @@ def test_physical_constructor_setattr_alias_revokes_identity_trust():
     assert _alternate_control_violations(source)
 
 
+@pytest.mark.parametrize('physical', [
+    'physical(current_state=state)\n',
+    "payload={'current_state':state.identity()}\nseed(day0_current_temperature_state=payload)\n",
+    "sigma=physical(state)\nif sigma is not None:\n semantics=SettlementSemantics.for_city(city)\n",
+    "if state.value_native>10:\n semantics=SettlementSemantics.for_city(city)\n",
+])
+def test_temperature_type_is_not_an_alternate_dependency_in_physical_paths(physical):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = 'from src.contracts.settlement_semantics import SettlementSemantics\n'
+    assert _alternate_control_violations(source + _TEMPERATURE_READER_SOURCE + physical) == []
+
+
+@pytest.mark.parametrize('sink', [
+    'mode=physical(state)\n', 'runtime=state.identity()\n',
+    'command.state=state\n', "setattr(command,'status',state)\n",
+    "if opaque('diagnostic'):\n mode='live'\n",
+    "while opaque('diagnostic'):\n lane='live'\n",
+    "match opaque('diagnostic'):\n case _:\n  runtime='live'\n",
+])
+def test_temperature_channel_does_not_weaken_actual_selector_dependencies(sink):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(_TEMPERATURE_READER_SOURCE + sink)
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",

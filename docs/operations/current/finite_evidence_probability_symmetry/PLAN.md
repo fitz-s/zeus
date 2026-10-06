@@ -19476,6 +19476,28 @@ money-state checks. Own checker/tests/money registry and PLAN, no production
 source, CLI or new finding exemptions. cd6 actual CLI remains rc1/10 findings;
 typed binding review has two Important findings until the new antibodies pass.
 
+ROOT BEFOREEDIT after8096: separate temperature TYPE paths from actual DIAG
+dependencies at three local transfer boundaries. Type-only physical parameters,
+identity evidence and fixed temperature projections do not create opaque DIAG;
+actual selector bindings still reject typed evidence, and real DIAG dependency
+paths remain untouched. No ten-statement exemptions, source change or purity
+claim. Keep hooks, mutation, reflection/rebinding and real predicate controls.
+Focused old203 plus the new type-channel controls once; no whole CLI until
+independent acceptance. Existing cd6 rc1/10 findings remain evidence, not PASS.
+
+Type-channel antibodies before repair:4F/7P1.74s
+(/tmp/zeus-type-channel-red.xml): three clean physical routes falsely rejected
+and direct typed status setter missed. First transfer repair:213P/1F12.38s
+(/tmp/zeus-type-channel-final.xml), leaving that named setter. Reusing the direct
+selector check for literal setter values closed it; final214P12.34s0F/E/S
+(/tmp/zeus-type-channel-final-green.xml) includes former203 and11 new cases.
+Temperature marker paths are a separate channel: opaque physical transfer may
+retain TYPE but creates UNKNOWN only for actual DIAG dependencies; fixed frozen
+temperature fields consume TYPE while preserving DIAG. Identity still carries
+TYPE and explicit scalar selectors reject it. No callee-purity claim, previous
+expectation change, registry waiver or production-source change. AST2/diff pass.
+No whole CLI in this slice; cd6's ten findings are not yet final-gate refuted.
+
 Bounded binding/protocol repair actual RED10F2.50s before implementation
 (/tmp/zeus-binding-protocol-cd6-red.xml): annotated/augmented constant writes,
 direct/alias reader setattr, physical constructor alias setattr, and five

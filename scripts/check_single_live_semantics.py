@@ -400,6 +400,13 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     encoded_bytes = '__encoded_json_bytes__'
     hash_state = '__stdlib_sha256_state__'
     formatted_object = '__nonprimitive_formatted_value__'
+    temperature_markers = {'__temperature_witness__', '__temperature_identity__'}
+
+    def temperature_paths(paths):
+        return {path for path in paths if any(part in temperature_markers for part in path)}
+
+    def diagnostic_paths(paths):
+        return paths - temperature_paths(paths)
     rebound_str = any(
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == 'str'
         or isinstance(node, (ast.Import, ast.ImportFrom)) and any(
@@ -655,8 +662,14 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             result = project(value(node.value, bindings), key, node)
         elif isinstance(node, ast.Attribute):
             receiver = value(node.value, bindings)
-            result = ({('*',)} if receiver else set()) if node.attr in {
-                'encode', 'sha256', 'hexdigest'} else project(receiver, node.attr, node)
+            if temperature_paths(receiver):
+                # Fixed frozen evidence fields consume TYPE, never DIAG.
+                result = diagnostic_paths(receiver)
+                if node.attr not in {'value_native', 'observed_at', 'source', 'input_ref'}:
+                    result |= temperature_paths(receiver)
+            else:
+                result = ({('*',)} if receiver else set()) if node.attr in {
+                    'encode', 'sha256', 'hexdigest'} else project(receiver, node.attr, node)
         elif isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)) and len(node.generators) == 1:
             generator = node.generators[0]
             iterable = value(generator.iter, bindings)
@@ -804,7 +817,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                     # object's __str__ is a primitive-data operation.
                     result.add((formatted_object, name))
             elif name in temperature_readers:
-                result = join([*arguments, *keywords.values()]) | {('__temperature_witness__',), (formatted_object, 'Day0CurrentTemperatureState')}
+                result = join([*arguments, *keywords.values()]) | {('__temperature_witness__',)}
             elif (isinstance(node.func, ast.Attribute) and node.func.attr == 'identity'
                   and temperature_kind(node.func.value) == 'object'):
                 result = value(node.func.value, bindings) | {('__temperature_identity__',)}
@@ -815,7 +828,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             else:
                 inputs = join([*arguments, *keywords.values(), value(node.func, bindings)])
                 if inputs:
-                    result = {('*',)}
+                    result = temperature_paths(inputs)
+                    if diagnostic_paths(inputs):
+                        result |= {('*',)}
                     opaque_calls.add(node)
         else:
             result = join([value(child, bindings) for child in ast.iter_child_nodes(node)])
@@ -829,11 +844,18 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     def reject(name, expr, bindings, node):
         if name == 'capture_status' and isinstance(expr, ast.Name) and root(expr.id) in qualified_grades:
             return
-        if name in {'current_path_state', 'provider_current_state'} and temperature_kind(expr) in {'identity', 'provider'}:
+        all_paths = value(expr, bindings) if is_control(name) else set()
+        if (name in {'current_path_state', 'provider_current_state'}
+                and temperature_kind(expr) in {'identity', 'provider'} and not diagnostic_paths(all_paths)):
             return
-        if is_control(name) and temperature_kind(expr):
+        physical_fields = {'state', 'current_state', 'current_temperature_state',
+            'day0_current_temperature_state', 'current_path_state', 'provider_current_state'}
+        explicit_state = name == 'state' and isinstance(node, (ast.Assign, ast.AnnAssign)) and any(
+            isinstance(target, (ast.Attribute, ast.Subscript))
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]))
+        if temperature_paths(all_paths) and (is_control(name) and name not in physical_fields or explicit_state):
             out.add(f"physical evidence used as runtime selector {name!r} at line {node.lineno}")
-        paths = value(expr, bindings) if is_control(name) else set()
+        paths = diagnostic_paths(all_paths)
         statement = node
         while not isinstance(statement, ast.stmt) and statement in parents:
             statement = parents[statement]
@@ -854,7 +876,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             controlled.append((node.subject, [item for case in node.cases for item in case.body]))
             controlled.extend((case.guard, case.body) for case in node.cases if case.guard is not None)
         for predicate, branches in controlled:
-            if not any(not path or path[0] == '*' for path in value(predicate, bindings)):
+            if not any(not path or path[0] == '*' for path in diagnostic_paths(value(predicate, bindings))):
                 continue
             pending = list(branches)
             seen_helpers = set()
@@ -900,7 +922,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 name = getattr(target, '_control_field', target.id) if isinstance(target, ast.Name) else (
                     target.attr if isinstance(target, ast.Attribute) else target.slice.value
                     if isinstance(target, ast.Subscript) and isinstance(target.slice, ast.Constant) else '')
-                if not physical_binding(target, node.value) and not source_grade_assignment(node):
+                if (not physical_binding(target, node.value) or diagnostic_paths(value(node.value, bindings))) and not source_grade_assignment(node):
                     reject(str(name), node.value, bindings, node)
         elif isinstance(node, ast.Dict):
             for key, expr in zip(node.keys, node.values, strict=True):
@@ -916,6 +938,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
         elif isinstance(node, ast.Call):
             for kw in node.keywords:
                 reject(kw.arg or '', kw.value, bindings, node)
+            if (_call_name(node.func) == 'setattr' and len(node.args) >= 3
+                    and isinstance(node.args[1], ast.Constant)):
+                reject(str(node.args[1].value), node.args[2], bindings, node)
             if isinstance(node.func, ast.Attribute) and node.func.attr == 'add_argument':
                 options = [arg.value for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
                 if any(option.lstrip('-').replace('-', '_') in controls for option in options):
