@@ -19811,3 +19811,24 @@ not a rerun or PASS claim for that whole module. Only the connector and upgrade
 function changed in production; other script AST and the shared trade scope
 remain exact3c6. Independent review, new static-input proof and the separate
 source-debt slice remain prerequisites before a new exact-tip landing/load.
+
+The separate source-debt repair is now approved and integrated from exact
+4fcfed4e3a3270f6dddb6a53aeb383aae9f0b8b1 as 400ae4f401123dbc247ec13a65b385c6f9e826f7.
+Only forecast_live_daemon and its existing test changed; their SHA256 values
+are 1b78481e48bc1d44528ad8153f40df88f56f3bd99dc821f51095d8e909bd5c4a
+and 98c783a050ce010f96e600c437edd22556769a830c442ae745e0d334ee88c580.
+The real original counterexample failed (1F4.132s, XMLc7f140bb...), final
+7 controls passed (7P16.710s, XML1f3874a0...). Earlier guard output was 44P1F;
+its obsolete expired-fault callback was corrected by the actual expiry controls.
+49 unique controls are cross-epoch, not one whole-module pass. Independent
+review approved both this debt slice and the loader-owner 2fbd slice.
+
+Freeze code and this receipt before one actual merged CLI, final HEAD ancestry
+secret scan, classifier/changed-surface checks and the decisive H/L fair-debt
+controls. Earlier 741 money/reactor passes stay at 3c6's unchanged money source
+and test dependencies; they do not prove the new scheduler, loader or live
+consumption. No repeated 49/48/741 suites or all-53/1223 same-tip pass claim.
+The live 3c6 PRESTOP refusal still preserves old MAIN; successful source jobs,
+stored partial bodies and these private controls do not establish actual new
+51-member native role qualification or v7/v35 consumer readiness. Root must
+accept the final exact tip and runtime source-grade proof before a new restart.
