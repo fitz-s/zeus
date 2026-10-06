@@ -19950,3 +19950,38 @@ delta classifier/changed-surface checks and lower/duplicate/stage merged nodes.
 Unchanged earlier gate receipts retain their exact epoch and limited dependency
 scope; they do not establish new v7/v35 runtime consumption. No push or loader
 retry is authorized before ROOT accepts the precise checked tip.
+
+### Unreleased-current prior-source fairness — BEFORE EDIT
+
+The registered2041 loader refused before STOP:13 current scopes contain10
+NOT_LIVE_GRADE and2 expired certificates, with Istanbul final-daily qualified.
+MAIN9870 remained alive and the restart CAS released. New source actors are
+PID-bound2041; this is not a new MAIN or v7/v35 consumption receipt.
+
+The bounded23:20:56 source investigation found current18 FETCH_ALLOWED with
+mandatory788/787 SKIPPED_NOT_RELEASED and source_run_id NULL. The fair terminal
+gate excludes that status. Legitimate held full-Y00 plans are priorityTrue,
+but ordinary prior drainage spends the unchanged59s cut in12 ->06 ->00 order;
+an individual complete12 X subset does not skip the whole12 union debt. This
+is verified head-of-line delay, not evidence of a permanent lock. Austin's
+23:10:33 seed reached a normal request at23:10:50, but no later exact-family
+worker completion was established; its old21:17 posterior is not new proof.
+
+ROOT assigns native sole child ownership of src/ingest/forecast_live_daemon.py
+and tests/test_forecast_live_daemon.py, rebased from2041. SCOPE only this frame's
+exact current identity after a real not-released probe and every existing
+mandatory retry opportunity. DRAIN allow the existing durable-LRU fair prior
+plan, one native/paired phase under the original absolute59s cut and shared4RPS.
+RESET a released/unknown probe or exhausted cut returns to the original
+mandatory path; wrapper handling of the optional-turn receipt must prevent a
+second ordinary phase. Preserve FAILED/PARTIAL one-attempt semantics, strict
+prior full-Y selection, raw/job status and all source/body/proof/first clocks.
+Do not borrow old12 SUCCESS or re-label current18 as qualified.
+
+Require normal dispatcher H/L prior00 original-part progress across turns and
+restart, released-current and consumed-budget twins, and mandatory failure
+guards. Held independently reviews the frozen2path slice. Integrator freezes
+the final PLAN before one final CLI/HEAD ancestry secret and narrow impacted
+checks. No source GET, seed/wake, push or loader retry is authorized by this
+implementation scope; raw123, private e95 config, peer work and quarantined
+stale-index-lock evidence remain preserved.
