@@ -18697,3 +18697,78 @@ This is old-contract consumption restored, not qualified native/v7-v35 success.
 Raw123, peer edits/recovery refs and config absence remain preserved. This
 task is unresolved pending human-coordinated scope/authority/base disposition;
 no new implementation or blind reintroduction of the reverted package starts.
+
+### 2026-10-06 authorized recovery BEFOREEDIT: native possession to current q
+
+The human has now explicitly authorized investigating the rollback and then
+restoring the correct mainline. ROOT approves a reversible, scoped candidate
+on fresh origin/live5dc34c4cd4df21aaa94fd1a93f3b767f8fa7a272 (recheck on use),
+not a blind revert of790 or replay of its26-file package. Preserve c2b6/5dc
+finished-Day0 hint acknowledgements, main/reactor_wake and every peer edit.
+Preserve d2d73ca6 as a recovery ref, the123 untracked original files and all
+existing source/review branches. No live source/config edit, forced collection,
+seed/wake, SQL update, push or restart is authorized by this preparation.
+
+Approved parent solewriter production scope, exactly nine paths:
+src/data/ecmwf_open_data.py; src/data/day0_hourly_vectors.py;
+src/data/replacement_forecast_materializer.py;
+src/data/replacement_forecast_bundle_reader.py;
+src/data/replacement_forecast_cycle_policy.py; src/ingest/forecast_live_daemon.py;
+src/events/day0_authority.py; src/engine/event_reactor_adapter.py;
+scripts/extract_open_ens_localday.py. Approved existing tests, exactly five:
+tests/test_ecmwf_open_data_collect_cycle.py; tests/test_forecast_live_daemon.py;
+tests/test_day0_remaining_day_pricing.py;
+tests/test_replacement_forecast_materializer.py;
+tests/engine/test_event_reactor_no_bypass.py. Restore the approved a577 role/
+point/confidence/consumer dependency graph and740 configured-mirror behavior
+only through these explicit paths, retaining current peer semantics. Existing
+typed-ingest fixtures are read-only reuse, not another writer scope. No law is
+weakened and no old v6/v34 certificate is relabelled as v7/v35.
+
+Decisive current evidence is not every-city inference: HK Oct6 full_Y12 covers
+Oct5T16Z throughOct6T16Z, required steps3..30 every3h,51 members:510 records.
+Its actual scheduled source manifest has only2 records, (0,3) and (12,3),
+shaad18158f6d35b041893e9917fdfa2261a0d6664ecd937394f0154a06857faec9.
+The owning scope reader returns NATIVE_2T_MEMBER_STEP_SET_INCOMPLETE, not an
+issued-NULL, station-equivalence or latest-X pin failure. The original two
+body hashes and first-possession clocks must survive normal cross-poll resume.
+Native512/102 or separate kernel tests are not substitutes for the actual
+required510-role-to-public-consumer closure. The earlier ID confusion was a
+diagnostic relation mistake (posterior_id versus snapshot_id), not DB replacement;
+held actual FORECAST FDs and canonical path/inode independently refuted it.
+
+A second reproduced product defect is admitted in the hourly role clock gate:
+snapshot.available_at is aware ISO, but ensemble_snapshots.recorded_at is
+TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, documented SQLite UTC without offset.
+For actual HK H1406544/L1406460, the original aware-versus-naive comparison
+raises TypeError and is folded into generic shape unavailability. Add only a
+canonical recorded-at UTC adapter at primary/paired/final-max reads. Provider,
+source and static naive clocks remain invalid; no missing-clock=now, first-clock
+remint or blanket UTC guess. Real default SQLite write-clock H/L tests must
+cover valid/aware-equivalent, malformed/missing/future-recorded and late original
+dependency cases. Prior private aware-ISO SQL clock hooks concealed this bug.
+
+Recovery graph and required proof: configured normal collector/mirror resume ->
+canonical original510 member-step inventory preserving retained hashes/clocks ->
+physical static/run/grid/member/quantity/unit and strict PIT role qualification ->
+existing normal seed/request materialization at v7/v35 -> persisted public ENTRY,
+held redecision and JIT point/confidence identities. Add one same-epoch Google
+resume-to-public closure rather than splice separate COMPLETE and consumer tests;
+wrong-run/grid/late dependencies still reject. SCOPE is city/date/metric/role and
+exact immutable original parts. DRAIN is the existing fair normal collector and
+seed/materialization cadence. RESET is restored qualified required parts/current
+semantic certificate, not newest replica timestamp, forced recollection or old-q
+fallback. HK live native readiness remains unproved until ordinary live receipts.
+
+Existing independent mathematical/source reviews remain valid only for their
+frozen byte scopes; they are not new-base runtime or CI passes. Recheck the
+restored public closure, clock change, money-path/release required gates and
+affected current peer interfaces; classify exact baseline failures separately.
+Generic custody, HKO daily entity capture and timing side slices are not restored
+in this primary graph yet and remain unfinished user-task work. A genuinely
+required body seam must be named and separately authorized, not silently added.
+The independent loader owner prepares source-qualification-before-STOP proof in
+its own approved scope; parent does not edit deploy/preflight/smoke. Existing
+code-first warm permits old-v6 fresh/degraded handover, so boot/rc0 is not role
+or probability success. No source-only temporary release or bypass is permitted.
+ROOT must approve the final exact candidate and loading gates before landing.
