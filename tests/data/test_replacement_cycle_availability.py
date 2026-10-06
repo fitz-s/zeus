@@ -1310,7 +1310,14 @@ def test_residual_anchor_commit_publishes_scoped_cold_start_seed_transport(
     )
     monkeypatch.setattr(prod, "_recover_held_common_cycle_anchors_if_needed", lambda *_a, **_k: None)
     monkeypatch.setattr(prod, "_ingest_station_forecasts_if_due", lambda _cfg: None)
-    monkeypatch.setattr(prod, "_current_target_anchor_gap_count", lambda *_a, **_k: 1)
+    import src.data.replacement_cycle_availability as availability
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(availability, "resolve_provider_anchor_cycle_availability",
+                        lambda *_a, **_k: ())
+    monkeypatch.setattr(availability, "newest_complete_cycle",
+                        lambda _rows: datetime(2026, 9, 22, 6, tzinfo=timezone.utc))
+    monkeypatch.setattr(prod, "_current_target_anchor_row_gaps", lambda *_a, **_k: (scope,))
     reports = iter(
         (
             {
@@ -1371,6 +1378,7 @@ def test_residual_anchor_commit_publishes_scoped_cold_start_seed_transport(
     ]
 
     calls.clear()
+    monkeypatch.setattr(ingest_main, "_ANCHOR_RESIDUAL_NEXT_MONOTONIC", 0.0)
     second = ingest_main._replacement_availability_poll_tick.__wrapped__()
     assert calls == []
     assert second["source_clock_anchor_residual_download"]["committed_family_count"] == 0

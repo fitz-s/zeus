@@ -1591,6 +1591,11 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
     )
 
     monkeypatch.setattr(ingest_main, "_ANCHOR_RESIDUAL_NEXT_MONOTONIC", 0.0)
+    import src.data.replacement_cycle_availability as availability
+
+    monkeypatch.setattr(availability, "resolve_provider_anchor_cycle_availability",
+                        lambda *_a, **_k: call_order.append("anchor_probe") or ())
+    monkeypatch.setattr(availability, "newest_complete_cycle", lambda _rows: None)
 
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
     ingest_main._replacement_availability_poll_tick.__wrapped__()
@@ -1601,7 +1606,8 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
     assert result["source_clock_updated_sources"] == []
     assert result["maintenance_status"] == "REPLACEMENT_MAINTENANCE_DECOUPLED"
     # One exact-cycle residual scan; proven coverage rests the next tick.
-    residual = ["current_targets"] if source_status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE" else []
+    # No provable anchor cycle: no download, and the drain rests one interval.
+    residual = ["anchor_probe"] if source_status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE" else []
     assert probe_kwargs == [{"advance_cursor": False}] * 2
     assert call_order == ["probe", *residual, "probe"]
 
@@ -1643,13 +1649,23 @@ def test_replacement_availability_drains_exact_cycle_anchor_residual_on_priority
         lambda **_kwargs: _NoChange(),
     )
 
+    from datetime import datetime, timezone
+
     scope = ("London", "2026-08-23", "high")
+    gaps = tuple(("City%03d" % index, "2026-08-23", "high") for index in range(204))
+    import src.data.replacement_cycle_availability as availability
+
+    monkeypatch.setattr(availability, "resolve_provider_anchor_cycle_availability",
+                        lambda *_a, **_k: ())
+    monkeypatch.setattr(availability, "newest_complete_cycle",
+                        lambda _rows: datetime(2026, 8, 21, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(prod, "_current_target_anchor_row_gaps",
+                        lambda *_a, **_k: (scope, *gaps))
 
     def _download(_cfg, **kwargs):
         calls.append(("download", kwargs))
         return {
             "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
-            "missing_scope_count": 205,
             "written_manifest_count": 10,
             "committed_families": (scope,),
         }
@@ -1689,6 +1705,7 @@ def test_replacement_availability_drains_exact_cycle_anchor_residual_on_priority
     assert calls[0][0] == "download"
     assert calls[0][1]["quota_priority"] is True
     assert 0.0 < calls[0][1]["max_wall_clock_seconds"] <= 10.0
+    assert calls[0][1]["required_scopes"] == (scope, *gaps)[:ingest_main._ANCHOR_RESIDUAL_SCOPE_BATCH]
     assert calls[1:] == [
         ("fusion", {"scopes": (scope,), "changed_sources": ("ecmwf_ifs",)}),
         ("cycle", {"scopes": (scope,)}),

@@ -98,6 +98,9 @@ _REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
 _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 _REPLACEMENT_HELD_PARTITION_FIRST = "critical"
 _ANCHOR_RESIDUAL_NEXT_MONOTONIC = 0.0
+# One residual drain pass downloads at most one provider location batch of
+# row-less families, nearest target dates first; the next poll takes the rest.
+_ANCHOR_RESIDUAL_SCOPE_BATCH = 24
 _BROAD_RESEED_LOCK = threading.Lock()
 _BROAD_RESEED_CONDITION = threading.Condition(_BROAD_RESEED_LOCK)
 _BROAD_RESEED_ACTIVE: dict[str, Any] | None = None
@@ -4719,16 +4722,54 @@ def _replacement_availability_poll_tick():
             and time.monotonic() >= _ANCHOR_RESIDUAL_NEXT_MONOTONIC
         ):
             try:
-                _stage_started = time.monotonic()
-                residual_report = _download_current_targets(
-                    max_wall_clock_seconds=min(
-                        10.0,
-                        _replacement_current_target_poll_timeout_seconds(
-                            _replacement_availability_poll_seconds()
-                        ),
-                    ),
-                    quota_priority=True,
+                from src.data.replacement_cycle_availability import (  # noqa: PLC0415
+                    newest_complete_cycle,
+                    resolve_provider_anchor_cycle_availability,
                 )
+                from src.data.replacement_forecast_production import (  # noqa: PLC0415
+                    _current_target_anchor_row_gaps,
+                )
+
+                _stage_started = time.monotonic()
+                residual_budget_s = min(
+                    10.0,
+                    _replacement_current_target_poll_timeout_seconds(
+                        _replacement_availability_poll_seconds()
+                    ),
+                )
+                residual_deadline = _stage_started + residual_budget_s
+                residual_cycle = newest_complete_cycle(
+                    resolve_provider_anchor_cycle_availability(
+                        datetime.now(timezone.utc),
+                        deadline_monotonic=residual_deadline,
+                    )
+                )
+                # A family with no row at the provider's cycle is the debt nothing
+                # can serve; one indexed read names it, so the full exact-cycle
+                # proof (one statement chain per market family) runs only on it.
+                row_gaps = (
+                    _current_target_anchor_row_gaps(
+                        Path(str(cfg["forecast_db"])),
+                        residual_cycle,
+                        decision_time=datetime.now(timezone.utc),
+                        deadline_monotonic=residual_deadline,
+                    )
+                    if residual_cycle is not None and cfg.get("forecast_db") is not None
+                    else ()
+                )
+                residual_report = (
+                    _download_current_targets(
+                        max_wall_clock_seconds=max(
+                            0.0, residual_deadline - time.monotonic()
+                        ),
+                        required_scopes=row_gaps[:_ANCHOR_RESIDUAL_SCOPE_BATCH],
+                        quota_priority=True,
+                    )
+                    if row_gaps
+                    else {"status": "CURRENT_TARGETS_ALREADY_COVERED", "missing_scope_count": 0}
+                )
+                if isinstance(residual_report, dict) and row_gaps:
+                    residual_report["missing_scope_count"] = len(row_gaps)
                 _log_slow_stage("anchor_residual_download", _stage_started)
                 if isinstance(residual_report, dict):
                     report["anchor_missing_scope_count"] = residual_report.get(

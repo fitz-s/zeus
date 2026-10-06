@@ -4395,6 +4395,92 @@ def _per_leg_downloaded_cycle(forecast_db: Path, source_id: str) -> datetime | N
         return None
 
 
+def _current_target_anchor_row_gaps(
+    forecast_db: Path,
+    cycle: datetime,
+    *,
+    decision_time: datetime,
+    deadline_monotonic: float,
+) -> tuple[tuple[str, str, str], ...]:
+    """Current market families with no anchor row at ``cycle``, nearest target first.
+
+    One statement returning one row, with no progress handler: in the ingest
+    daemon every fetched row and every handler callback waits a GIL switch
+    interval behind busy sibling threads, which turned the 376-row key read plus
+    per-family proof chain into a >10 s preflight. A family that has a row but
+    lacks its proof is left to the full exact-cycle preflight.
+    """
+    from src.config import cities_by_name  # noqa: PLC0415
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        HIGH_DATA_VERSION,
+        LOW_DATA_VERSION,
+        PRODUCT_ID,
+        SOURCE_ID,
+    )
+    from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
+        _default_min_target_date,
+    )
+    from src.engine.time_context import has_city_local_day_ended  # noqa: PLC0415
+    from src.state.db import _connect_read_only  # noqa: PLC0415
+
+    conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
+    try:
+        (encoded,) = conn.execute(
+            """
+            SELECT json_group_array(json_array(city, target_date, metric)) FROM (
+                SELECT city, target_date, temperature_metric AS metric
+                FROM market_events
+                WHERE city IN (SELECT DISTINCT city FROM market_events)
+                  AND token_id IS NOT NULL AND token_id != ''
+                  AND range_label IS NOT NULL AND range_label != ''
+                  AND temperature_metric IN ('high', 'low')
+                  AND target_date >= ?
+                EXCEPT
+                SELECT json_extract(artifact_metadata_json, '$.city'),
+                       json_extract(artifact_metadata_json, '$.target_date'),
+                       CASE data_version WHEN ? THEN 'high' ELSE 'low' END
+                FROM raw_forecast_artifacts
+                WHERE source_id = ? AND product_id = ?
+                  AND data_version IN (?, ?) AND source_cycle_time = ?
+            )
+            """,
+            (
+                _default_min_target_date(decision_time),
+                HIGH_DATA_VERSION,
+                SOURCE_ID,
+                PRODUCT_ID,
+                HIGH_DATA_VERSION,
+                LOW_DATA_VERSION,
+                cycle.astimezone(timezone.utc).isoformat(),
+            ),
+        ).fetchone()
+    finally:
+        conn.close()
+    _check_source_preflight_deadline(deadline_monotonic)
+
+    def servable(city_name: str, target_date: str) -> bool:
+        # A run that starts inside the target's local day cannot cover it; that
+        # family is served by an older anchor, not by this cycle's debt.
+        city = cities_by_name.get(city_name)
+        return (
+            city is not None
+            and not has_city_local_day_ended(target_date, str(city.timezone), decision_time)
+            and _source_cycle_can_cover_local_decision_window(
+                cycle=cycle, target_date=target_date,
+                timezone_name=str(city.timezone), decision_time=decision_time,
+            )
+        )
+
+    return tuple(sorted(
+        (
+            (str(city), str(target_date), str(metric))
+            for city, target_date, metric in json.loads(encoded or "[]")
+            if servable(str(city), str(target_date))
+        ),
+        key=lambda scope: (scope[1], scope[0], scope[2]),
+    ))
+
+
 def _current_target_anchor_gap_count(
     forecast_db: Path,
     cycle: datetime,

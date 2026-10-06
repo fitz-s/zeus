@@ -4679,3 +4679,58 @@ def test_commit_timeout_keeps_certified_families_and_seals_no_uncommitted_transp
     )
     assert _anchor_rows() == {"2026-06-10", "2026-06-11"}
     assert _sealed_dates() == {"2026-06-10", "2026-06-11"}
+
+
+def test_anchor_row_gaps_name_rowless_market_families_nearest_first(tmp_path) -> None:
+    """The residual drain's gap set: market families with no anchor row at the
+    provider cycle, nearest target first. A family whose local day began before
+    the run cannot be served by it and is not this cycle's debt."""
+    import src.data.replacement_forecast_production as prod
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        HIGH_DATA_VERSION, LOW_DATA_VERSION, PRODUCT_ID, SOURCE_ID,
+    )
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    cycle = (now - timedelta(hours=1)).replace(minute=0, second=0)
+    day1 = (now + timedelta(days=1)).date().isoformat()
+    day2 = (now + timedelta(days=2)).date().isoformat()
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    conn.execute(
+        "CREATE TABLE market_events(city TEXT,target_date TEXT,"
+        "temperature_metric TEXT,token_id TEXT,range_label TEXT)"
+    )
+    for city, target_date, metric in (
+        ("London", day2, "high"), ("London", day2, "low"),
+        ("Dallas", day1, "high"), ("Dallas", day1, "low"),
+    ):
+        conn.execute("INSERT INTO market_events VALUES(?,?,?,?,?)",
+                     (city, target_date, metric, "token", "range"))
+    conn.execute("INSERT INTO market_events VALUES(?,?,?,?,?)",
+                 ("Paris", day1, "high", "", "range"))
+    for version, city, target_date, at in (
+        (LOW_DATA_VERSION, "London", day2, cycle),
+        (HIGH_DATA_VERSION, "Dallas", day1, cycle - timedelta(hours=6)),
+    ):
+        conn.execute(
+            "INSERT INTO raw_forecast_artifacts (source_id, product_id, data_version,"
+            " source_cycle_time, source_available_at, captured_at, artifact_path, sha256,"
+            " byte_size, artifact_metadata_json) VALUES (?,?,?,?,?,?,'/tmp/x',?,1,?)",
+            (SOURCE_ID, PRODUCT_ID, version, at.isoformat(), at.isoformat(), at.isoformat(),
+             f"{city}{version}", json.dumps({"city": city, "target_date": target_date})),
+        )
+    conn.commit()
+    conn.close()
+
+    gaps = prod._current_target_anchor_row_gaps(
+        db, cycle, decision_time=now, deadline_monotonic=time.monotonic() + 30,
+    )
+
+    # London low has its row; Dallas high's row is an older cycle; Paris has no
+    # tradeable token.
+    assert gaps == (
+        ("Dallas", day1, "high"),
+        ("Dallas", day1, "low"),
+        ("London", day2, "high"),
+    )
