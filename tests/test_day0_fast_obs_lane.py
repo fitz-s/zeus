@@ -4446,6 +4446,46 @@ class TestMutexNoHttpSplit:
 
         assert proved_due == set(names)
 
+    def test_hourly_refresh_probe_isolates_one_city_fact_refusal(
+        self, monkeypatch, tmp_path
+    ):
+        """One city's refused Day0 fact leaves every other city's verdict.
+
+        2026-10-06 03Z: two RKSI reports with different temperatures for one
+        observation time made Seoul's fact read raise KmaObservationConflict,
+        the probe aborted unproved on every pass, and Day0 ENS carriers stopped
+        refreshing fleet-wide (24 HIGH families without probability).
+        """
+        import src.data.replacement_forecast_current_target_plan as target_plan
+        from src.data.day0_fast_obs import KmaObservationConflict
+        from src.events import reactor as reactor_module
+
+        names = ["Paris", "Seoul", "Tokyo"]
+        cities, _db_path, _clock, _reads = self._install_probe_universe(
+            monkeypatch, tmp_path, names, slow_per_city_s=0.0,
+        )
+
+        def fact(_conn, *, city, temperature_metric, decision_time, **_kw):
+            if city == "Seoul":
+                raise KmaObservationConflict("conflicting observations: RKSI")
+            if temperature_metric != "high":
+                return None
+            return {"observation_time": (decision_time - timedelta(minutes=5)).isoformat()}
+
+        monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", fact)
+        now = datetime.now(UTC)
+
+        probe = reactor_module._edli_day0_hourly_refresh_due_families(
+            cities=cities, decision_time=now,
+        )
+
+        target_date = now.date().isoformat()
+        assert probe.proved is True
+        assert probe.cities_scanned == 3
+        assert probe.refresh_due_families == frozenset(
+            (name, target_date, "high") for name in ("Paris", "Tokyo")
+        )
+
     def test_hourly_refresh_probe_stale_capture_skips_strict_reads(
         self, monkeypatch, tmp_path
     ):

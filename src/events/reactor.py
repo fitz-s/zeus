@@ -6394,13 +6394,30 @@ def _edli_day0_hourly_refresh_due_families(
                 )
             for metric in ("high", "low"):
                 check_deadline()
-                fact = _latest_authorized_day0_fact(
-                    fact_conn,
-                    city=city_name,
-                    target_date=target_date,
-                    temperature_metric=metric,
-                    decision_time=now,
-                )
+                try:
+                    fact = _latest_authorized_day0_fact(
+                        fact_conn,
+                        city=city_name,
+                        target_date=target_date,
+                        temperature_metric=metric,
+                        decision_time=now,
+                    )
+                except ValueError as exc:
+                    # One city's refused fact (e.g. two RKSI reports with
+                    # different temperatures for one observation time) leaves
+                    # only that family unscheduled. Raising it ended the whole
+                    # scan, so every city lost its due verdict and the ENS
+                    # carrier refresh for the fleet stopped (2026-10-06 03Z).
+                    logging.getLogger("zeus.events.reactor").warning(
+                        "DAY0_HOURLY_PROBE_FACT_UNAVAILABLE city=%s target=%s "
+                        "metric=%s exc=%s: %s",
+                        city_name,
+                        target_date,
+                        metric,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    continue
                 if fact is None:
                     continue
                 try:
