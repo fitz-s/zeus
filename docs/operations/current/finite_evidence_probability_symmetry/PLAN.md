@@ -19123,3 +19123,19 @@ merged4 controls pass2.03s. Cash's fourth file and whole money-path gate remain
 open. Full candidate secrets, remote CI and actual native/current q consumption
 are not asserted. The123 raw originals, recovery refs and same-hash private
 settings are preserved; no push/live FF/reload or production request occurred.
+
+ROOT-approved BEFOREEDIT, rollback c9ba65b531a38aabfb8fa3036507a0aef66a52c3:
+only the existing single-live checker/test transfer rules may change. Actual
+mat4447 metadata DIAGNOSTIC_ONLY_NON_ACTION enters known variant fields; the
+checker incorrectly prepends a wildcard to known dictionary unpack at431–434,
+then collapses the remaining structure at JSON524–526. A separate simple
+comprehension unions iterable siblings instead of binding its element.
+The three bounded corrections are known dict-unpack field preservation,
+trusted standard JSON known-structure roundtrip projection (custom default/
+cls/hooks/overrides and unknown raw remain conservative), and isolated simple
+comprehension element/body/guard evaluation. No general JSON/SQLite evaluator,
+physical-semantics waiver, source/q edit or206-use whitelist is authorized.
+SCOPE these three transfers; DRAIN one focused and one actual CLI epoch;
+RESET clean selected numeric fields pass while diagnostic selected fields,
+hooks/opaque use, alias mutation, keyword writes and control predicates refuse.
+If large findings remain, stop and report them rather than grow the design.
