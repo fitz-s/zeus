@@ -627,11 +627,11 @@ def _max_downloaded_current_target_cycle(
     from src.state.db import _connect_read_only  # noqa: PLC0415
 
     try:
+        # One covering-index statement with no progress handler: sqlite runs a
+        # single step without the GIL, while a Python handler re-takes it every
+        # 1,000 VM steps (~400 times here), which inside the ingest daemon alone
+        # outlasted the anchor slice's budget.
         conn = _connect_read_only(Path(forecast_db), deadline_monotonic=deadline_monotonic)
-        if deadline_monotonic is not None:
-            conn.set_progress_handler(
-                lambda: int(time.monotonic() >= deadline_monotonic), 1000
-            )
         try:
             maxes: list[datetime] = []
             for sid in _CURRENT_TARGET_ARTIFACT_SOURCE_IDS:
@@ -4417,12 +4417,13 @@ def _current_target_anchor_row_gaps(
         PRODUCT_ID,
         SOURCE_ID,
     )
-    from src.data.replacement_forecast_current_target_plan import (  # noqa: PLC0415
-        _default_min_target_date,
-    )
     from src.engine.time_context import has_city_local_day_ended  # noqa: PLC0415
     from src.state.db import _connect_read_only  # noqa: PLC0415
 
+    # The SQL floor is one UTC day back (no city's open local day is older); the
+    # local-day filter below drops what has ended. One city snapshot, because
+    # each runtime-city lookup re-stats cities.json.
+    cities = dict(cities_by_name.items())
     conn = _connect_read_only(forecast_db, deadline_monotonic=deadline_monotonic)
     try:
         (encoded,) = conn.execute(
@@ -4445,7 +4446,7 @@ def _current_target_anchor_row_gaps(
             )
             """,
             (
-                _default_min_target_date(decision_time),
+                (decision_time.astimezone(timezone.utc) - timedelta(days=1)).date().isoformat(),
                 HIGH_DATA_VERSION,
                 SOURCE_ID,
                 PRODUCT_ID,
@@ -4461,7 +4462,7 @@ def _current_target_anchor_row_gaps(
     def servable(city_name: str, target_date: str) -> bool:
         # A run that starts inside the target's local day cannot cover it; that
         # family is served by an older anchor, not by this cycle's debt.
-        city = cities_by_name.get(city_name)
+        city = cities.get(city_name)
         return (
             city is not None
             and not has_city_local_day_ended(target_date, str(city.timezone), decision_time)
