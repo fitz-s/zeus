@@ -1590,21 +1590,28 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
         lambda cfg: {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 0, "advances_detected": 0},
     )
 
+    monkeypatch.setattr(ingest_main, "_ANCHOR_RESIDUAL_NEXT_MONOTONIC", 0.0)
+
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    ingest_main._replacement_availability_poll_tick.__wrapped__()
 
     assert result["status"] == expected_status
     assert result["source_clock_status"] == source_status
     assert ingest_main._classify_result(result)[0] is expected_failed
     assert result["source_clock_updated_sources"] == []
     assert result["maintenance_status"] == "REPLACEMENT_MAINTENANCE_DECOUPLED"
-    assert current_target_calls == []
-    assert probe_kwargs == [{"advance_cursor": False}]
-    assert call_order == ["probe"]
+    # One exact-cycle residual scan; proven coverage rests the next tick.
+    residual = ["current_targets"] if source_status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE" else []
+    assert probe_kwargs == [{"advance_cursor": False}] * 2
+    assert call_order == ["probe", *residual, "probe"]
 
 
 def test_replacement_availability_drains_exact_cycle_anchor_residual_on_priority_lane(
     monkeypatch, tmp_path
 ) -> None:
+    """A no-change probe freezes no source run (source_runs covers changed
+    models only). The residual drain read its cycle from there, so on 10-06 it
+    counted 0 gaps for 5 h while 184 market families lacked the current anchor."""
     import src.data.replacement_forecast_production as prod
     import src.data.source_clock_update_probe as source_clock_probe
     import src.ingest_main as ingest_main
@@ -1618,11 +1625,7 @@ def test_replacement_availability_drains_exact_cycle_anchor_residual_on_priority
                 "updated_sources": [],
                 "affected_cities": [],
                 "error": None,
-                "source_runs": {
-                    "ecmwf_ifs": {
-                        "initialisation_time": "2026-08-21T12:00:00+00:00"
-                    }
-                },
+                "source_runs": {},
             }
 
     calls: list[tuple[str, dict[str, object]]] = []
@@ -1639,13 +1642,16 @@ def test_replacement_availability_drains_exact_cycle_anchor_residual_on_priority
         "probe_openmeteo_source_clock_updates",
         lambda **_kwargs: _NoChange(),
     )
-    monkeypatch.setattr(prod, "_current_target_anchor_gap_count", lambda *_args: 205)
+
+    scope = ("London", "2026-08-23", "high")
 
     def _download(_cfg, **kwargs):
         calls.append(("download", kwargs))
         return {
             "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+            "missing_scope_count": 205,
             "written_manifest_count": 10,
+            "committed_families": (scope,),
         }
 
     monkeypatch.setattr(
@@ -1673,22 +1679,19 @@ def test_replacement_availability_drains_exact_cycle_anchor_residual_on_priority
         or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 10},
     )
 
+    monkeypatch.setattr(ingest_main, "_ANCHOR_RESIDUAL_NEXT_MONOTONIC", 0.0)
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
 
     assert result["anchor_missing_scope_count"] == 205
-    assert result["source_clock_anchor_residual_download"] == {
-        "status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
-        "fusion_upgrade_status": "FUSION_UPGRADE_TRIGGER",
-        "fusion_upgrade_seeds_enqueued": 10,
-        "cycle_advance_status": "CYCLE_ADVANCE_TRIGGER",
-        "cycle_advance_seeds_enqueued": 10,
-    }
+    residual = result["source_clock_anchor_residual_download"]
+    assert residual["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
+    assert residual["committed_family_count"] == 1
     assert calls[0][0] == "download"
     assert calls[0][1]["quota_priority"] is True
-    assert 0.0 < calls[0][1]["max_wall_clock_seconds"] <= 20.0
+    assert 0.0 < calls[0][1]["max_wall_clock_seconds"] <= 10.0
     assert calls[1:] == [
-        ("fusion", {"changed_sources": ("ecmwf_ifs",)}),
-        ("cycle", {}),
+        ("fusion", {"scopes": (scope,), "changed_sources": ("ecmwf_ifs",)}),
+        ("cycle", {"scopes": (scope,)}),
     ]
 
 

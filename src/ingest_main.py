@@ -97,6 +97,7 @@ _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
 _REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
 _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 _REPLACEMENT_HELD_PARTITION_FIRST = "critical"
+_ANCHOR_RESIDUAL_NEXT_MONOTONIC = 0.0
 _BROAD_RESEED_LOCK = threading.Lock()
 _BROAD_RESEED_CONDITION = threading.Condition(_BROAD_RESEED_LOCK)
 _BROAD_RESEED_ACTIVE: dict[str, Any] | None = None
@@ -4705,60 +4706,50 @@ def _replacement_availability_poll_tick():
         }
         # The source cursor can advance after a bounded first anchor wave, while
         # exact-cycle target manifests still have residual gaps. Global source
-        # high-water is therefore never completion evidence. Keep the no-change
-        # tick network-light when coverage is complete, but drain a proven gap on
-        # the reserved source-clock quota lane.
-        if source_clock_status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE":
+        # high-water is therefore never completion evidence. The downloader's own
+        # exact-cycle preflight proves the gap set (a covered market returns
+        # without fetching), so every no-change tick drains a residual gap on the
+        # reserved source-clock quota lane. A no-change probe carries no frozen
+        # source run, so this drain must not wait for one. Proven-complete
+        # coverage rests the exact-cycle scan for one maintenance interval; a
+        # newly listed market waits at most that long.
+        global _ANCHOR_RESIDUAL_NEXT_MONOTONIC
+        if (
+            source_clock_status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
+            and time.monotonic() >= _ANCHOR_RESIDUAL_NEXT_MONOTONIC
+        ):
             try:
-                from src.data.replacement_forecast_production import (  # noqa: PLC0415
-                    _current_target_anchor_gap_count,
+                _stage_started = time.monotonic()
+                residual_report = _download_current_targets(
+                    max_wall_clock_seconds=min(
+                        10.0,
+                        _replacement_current_target_poll_timeout_seconds(
+                            _replacement_availability_poll_seconds()
+                        ),
+                    ),
+                    quota_priority=True,
                 )
-
-                source_runs = source_clock_payload.get("source_runs")
-                ecmwf_run = (
-                    source_runs.get("ecmwf_ifs")
-                    if isinstance(source_runs, dict)
-                    else None
-                )
-                residual_cycle_raw = (
-                    ecmwf_run.get("initialisation_time")
-                    if isinstance(ecmwf_run, dict)
-                    else None
-                )
-                try:
-                    residual_cycle = datetime.fromisoformat(
-                        str(residual_cycle_raw).replace("Z", "+00:00")
+                _log_slow_stage("anchor_residual_download", _stage_started)
+                if isinstance(residual_report, dict):
+                    report["anchor_missing_scope_count"] = residual_report.get(
+                        "missing_scope_count"
                     )
-                    if residual_cycle.tzinfo is None:
-                        residual_cycle = residual_cycle.replace(tzinfo=timezone.utc)
-                    residual_cycle = residual_cycle.astimezone(timezone.utc)
-                except (TypeError, ValueError):
-                    residual_cycle = None
-                residual_gap_count = (
-                    _current_target_anchor_gap_count(
-                        Path(str(cfg["forecast_db"])),
-                        residual_cycle,
+                covered = isinstance(residual_report, dict) and residual_report.get(
+                    "status"
+                ) in {"CURRENT_TARGETS_ALREADY_COVERED", "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"}
+                if covered:
+                    _ANCHOR_RESIDUAL_NEXT_MONOTONIC = time.monotonic() + max(
+                        60.0, float(_replacement_availability_poll_seconds())
                     )
-                    if residual_cycle is not None and cfg.get("forecast_db") is not None
-                    else 0
-                )
-                report["anchor_missing_scope_count"] = residual_gap_count
-                if residual_gap_count is None or residual_gap_count > 0:
-                    residual_report = _download_current_targets(quota_priority=True)
-                    committed_scopes = (
-                        _committed_anchor_scopes(residual_report)
-                        if isinstance(residual_report, dict)
-                        else ()
-                    )
+                elif isinstance(residual_report, dict):
+                    committed_scopes = _committed_anchor_scopes(residual_report)
                     if committed_scopes:
                         _attach_reseed_reports(
                             residual_report,
                             scopes=committed_scopes,
                             changed_sources=("ecmwf_ifs",),
                         )
-                    elif isinstance(residual_report, dict) and int(
-                        residual_report.get("written_manifest_count") or 0
-                    ) > 0:
+                    elif int(residual_report.get("written_manifest_count") or 0) > 0:
                         residual_report["anchor_receipt_unusable_for_seed"] = True
                     compact = _compact_replacement_current_target_report(
                         residual_report

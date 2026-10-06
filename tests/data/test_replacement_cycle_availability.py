@@ -1361,6 +1361,7 @@ def test_residual_anchor_commit_publishes_scoped_cold_start_seed_transport(
         or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1},
     )
 
+    monkeypatch.setattr(ingest_main, "_ANCHOR_RESIDUAL_NEXT_MONOTONIC", 0.0)
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
 
     assert result["source_clock_anchor_residual_download"]["committed_family_count"] == 1

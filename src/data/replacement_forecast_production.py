@@ -1159,6 +1159,7 @@ def _download_replacement_forecast_current_targets_slice(
                 else downloaded_cycle.isoformat()
             ),
             "target_count": len(required_scopes),
+            "missing_scope_count": 0,
             "written_manifest_count": 0,
         }
         if structurally_unservable_critical_scopes:
@@ -1183,6 +1184,7 @@ def _download_replacement_forecast_current_targets_slice(
             "downloaded_cycle": None if downloaded_cycle is None else downloaded_cycle.isoformat(),
             "timeboxed_incomplete": True,
             "unattempted_target_count": len(required_scopes),
+            "missing_scope_count": len(required_scopes),
             "max_wall_clock_seconds": max_wall_clock_seconds,
         }
     cycle = available_cycle
@@ -1247,6 +1249,7 @@ def _download_replacement_forecast_current_targets_slice(
     # their existing cleanup paths.
     if broad_scope_acquisition and not bool(result.get("timeboxed_incomplete")):
         _close_current_target_bucket_pool(cycle)
+    result["missing_scope_count"] = len(required_scopes)
     result.setdefault("available_cycle", available_cycle.isoformat())
     result.setdefault(
         "downloaded_cycle",
