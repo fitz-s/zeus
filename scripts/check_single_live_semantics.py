@@ -357,6 +357,16 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 and node.args and isinstance(node.args[0], ast.Name)):
             json_mutations.add(node.args[0].id)
     encoded_json = '__encoded_json_value__'
+    formatted_object = '__nonprimitive_formatted_value__'
+    rebound_str = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == 'str'
+        or isinstance(node, (ast.Import, ast.ImportFrom)) and any(
+            (alias.asname or alias.name) == 'str' for alias in node.names)
+        or isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == 'str'
+        or isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store) and node.attr == 'str'
+        or isinstance(node, ast.Call) and _call_name(node.func) == 'setattr' and len(node.args) > 1
+            and isinstance(node.args[1], ast.Constant) and node.args[1].value == 'str'
+        for node in nodes)
     assignments = {}
     writes = {}
     aliases = {}
@@ -542,11 +552,15 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 call_active.remove(fn)
             elif (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
                   and root(node.func.value.id) in json_modules and node.func.attr in {'dumps', 'loads'}
-                  and len(node.args) == 1 and all(kw.arg in {'sort_keys', 'separators', 'indent',
-                      'ensure_ascii', 'allow_nan', 'check_circular', 'strict'}
-                      and isinstance(kw.value, (ast.Constant, ast.Tuple)) for kw in node.keywords)):
+                  and len(node.args) == 1 and all(
+                      kw.arg in {'sort_keys', 'separators', 'indent', 'ensure_ascii',
+                          'allow_nan', 'check_circular', 'strict'}
+                      and isinstance(kw.value, (ast.Constant, ast.Tuple))
+                      or node.func.attr == 'dumps' and kw.arg == 'default' and not rebound_str
+                          and isinstance(kw.value, ast.Name) and root(kw.value.id) == 'str'
+                      for kw in node.keywords)):
                 paths = arguments[0]
-                if node.func.attr == 'dumps' and all(path and path[0] != '*' for path in paths):
+                if node.func.attr == 'dumps' and all(path and '*' not in path and formatted_object not in path for path in paths):
                     result = {(encoded_json,) + path for path in paths}
                 elif node.func.attr == 'loads' and all(path and path[0] == encoded_json for path in paths):
                     result = {path[1:] for path in paths}
@@ -575,6 +589,10 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 result = arguments[0].copy() if name == 'replace' and arguments else set()
                 result |= join([{(key,) + path for path in arg} if key is not None else arg
                                 for key, arg in keywords.items()])
+                if name in classes and join([*arguments, *keywords.values()]):
+                    # Known fields do not prove that serializing a custom
+                    # object's __str__ is a primitive-data operation.
+                    result.add((formatted_object,))
             elif name in {'str', 'float', 'int', 'bool', 'bytes', 'len', 'repr', 'list', 'tuple'}:
                 result = join(arguments)
             elif isinstance(node.func, ast.Attribute) and node.func.attr in {'upper', 'lower', 'strip', 'copy'}:

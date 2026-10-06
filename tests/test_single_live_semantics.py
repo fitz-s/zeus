@@ -191,6 +191,27 @@ def test_structure_transfers_do_not_exempt_control_unknown_or_hooks(source):
     assert _alternate_control_violations(source)
 
 
+def test_builtin_str_json_metadata_preserves_primitive_clock_and_center():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    base = ("import json\nr={'report':'diagnostic','mu':20.,'clock':'2026-10-06T01:00:00+00:00'}\n"
+            "parsed=json.loads(json.dumps(r,default=str))\n")
+    assert _alternate_control_violations(base + "mu=sqrt(parsed['mu'])\nclock=fromisoformat(parsed['clock'])\n") == []
+    assert _alternate_control_violations(base + "mode=parsed['report']\n")
+
+
+@pytest.mark.parametrize('source', [
+    "import json\nr={'report':'diagnostic'}\nparsed=json.loads(json.dumps(r,default=evil))\n",
+    "import json\nstr=evil\nr={'report':'diagnostic'}\nparsed=json.loads(json.dumps(r,default=str))\n",
+    "import json\nclass str:\n pass\nr={'report':'diagnostic'}\nparsed=json.loads(json.dumps(r,default=str))\n",
+    "import json\nclass Box:\n def __init__(self,label):\n  self.label=label\n def __str__(self):\n  global runtime\n  runtime=self.label\n  return '20'\nbox=Box('diagnostic')\nresult=json.dumps({'box':box},default=str)\n",
+    "import json\nclass Box:\n def __str__(self):\n  global mode\n  mode=self.label\n  return '20'\nbox=Box(label='diagnostic')\nresult=json.dumps({'box':box},default=str)\n",
+    "import json\nobj=unknown_object('diagnostic')\nresult=json.dumps({'obj':obj},default=str)\n",
+])
+def test_builtin_str_json_does_not_prove_hook_or_object_effects(source):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(source)
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",

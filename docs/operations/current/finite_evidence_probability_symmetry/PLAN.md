@@ -19172,3 +19172,30 @@ report rejection, evil hook/custom __str__/unknown object negatives and original
 134 controls. Run the one full CLI only if those pass and the actual first
 JSON path no longer collapses; otherwise microtrace and stop. No source/q,
 loader, money law, additional registry declaration or live action changes.
+
+Builtin-str bounded checkpoint: focused141P9.62s, XML
+/tmp/zeus-single-live-builtin-str-micro-and-regression.xml SHA256
+762a23101d73134d77983915104b90083775b7acca8647e92e3d3fa11adb3c7e.
+Primitive metadata µ/clock survives default=str roundtrip; selecting report as
+mode refuses. Rebound str/json, evil hooks, unknown tagged objects and tagged
+custom __str__ effects remain refused. No class method is interpreted or
+whole helper exempted; tagged nonprimitive formatting cannot be proved safe.
+Actual in-memory mat444 trace now preserves the original known field as
+('__encoded_json_value__','parameter_confidence_role'), but other call contexts
+already contain unknown leaves such as ('current_evidence_shape_hash','*').
+Those were not discarded or treated as ordinary known fields.
+The single full CLI still returned1,213 findings, real136.57s/user129.82s/sys4.95s:
+same owner counts191 materializer/15 fit/3 native/2 global/1 migration/1 trace.
+Original log /tmp/zeus-single-live-builtin-str-cli.txt SHA256
+734f128d78c18347cca10d6f66b023f1152685bc9ccad19c4dc4db8b4db9b5d5.
+This does not close the actual gate. STOP further rules/whole CLI, no unknown
+leaf/JSON/helper waiver, awaiting the next bounded disposition. Source/q,
+loader and registry are frozen; no production changes or operations occurred.
+
+The independently approved cash/helper53b commit was picked normally as
+913ace9c249e8a0b12a39dd2f939c538f29c5892, after already integrated ad0.
+The complete required parent money-path suite on that peer6fa-dependent epoch
+passed255 unique tests,0 failures/errors/skips,54.25s (two NumPy warnings).
+Original XML /tmp/zeus-restored-parent-money-final.xml records this actual run,
+not a reuse of the child255 proof. No source/math/risk law was changed to pass.
+The static single-live required gate remains the blocker; no release/load claim.
