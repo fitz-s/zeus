@@ -428,11 +428,45 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             name = aliases[name]
         return name
 
+    key_writes = {}
+    key_literals = {}
+    key_mutations = set(trusted_setattr_mutations)
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            key_writes[node.id] = key_writes.get(node.id, 0) + 1
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            key_literals[node.targets[0].id] = node.value.value
+        invalid = []
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            invalid.extend(getattr(alias, '_binding_name', alias.asname or alias.name) for alias in node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            invalid.append(node.name)
+        elif isinstance(node, ast.arg):
+            invalid.append(node.arg)
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) else []
+        for target in targets:
+            if isinstance(target, (ast.Attribute, ast.Subscript)):
+                base = target
+                while isinstance(base, (ast.Attribute, ast.Subscript)):
+                    base = base.value
+                if isinstance(base, ast.Name):
+                    invalid.append(base.id)
+                    key_mutations.add(base.id)
+        for name in invalid:
+            key_writes[name] = key_writes.get(name, 0) + 1
+    literal_keys = {name: text for name, text in key_literals.items()
+                    if key_writes.get(name) == 1 and name not in trusted_setattr_mutations}
+
+    def field_key(node):
+        if isinstance(node, ast.Constant):
+            return node.value
+        return literal_keys.get(node.id, '*') if isinstance(node, ast.Name) else '*'
+
     def location(node):
         path = []
         while isinstance(node, (ast.Subscript, ast.Attribute)):
             key = (node.attr if isinstance(node, ast.Attribute) else
-                   node.slice.value if isinstance(node.slice, ast.Constant) else '*')
+                   field_key(node.slice))
             path.insert(0, key)
             node = node.value
         return (node.id, tuple(path)) if isinstance(node, ast.Name) else (None, ())
@@ -457,6 +491,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                     a, b = root(target.id), root(node.value.id)
                     if a != b:
                         aliases[a] = b
+    mutated_key_roots = {root(name) for name in key_mutations}
+    literal_keys = {name: text for name, text in literal_keys.items()
+                    if root(name) not in mutated_key_roots}
     for node in nodes:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(
             node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) else []
@@ -658,7 +695,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             result = join([{(index,) + item for item in value(expr, bindings)}
                            for index, expr in enumerate(node.elts)])
         elif isinstance(node, ast.Subscript):
-            key = node.slice.value if isinstance(node.slice, ast.Constant) else '*'
+            key = field_key(node.slice)
             result = project(value(node.value, bindings), key, node)
         elif isinstance(node, ast.Attribute):
             receiver = value(node.value, bindings)
@@ -791,7 +828,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                     result = {('*',)}
                     opaque_calls.add(node)
             elif isinstance(node.func, ast.Attribute) and node.func.attr == 'get':
-                key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else '*'
+                key = field_key(node.args[0]) if node.args else '*'
                 result = project(value(node.func.value, bindings), key, node)
                 result |= arguments[1] if len(arguments) > 1 else set()
             elif name == 'getattr' and len(node.args) >= 2:
@@ -891,7 +928,11 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                     continue
                 physical_assignment = (isinstance(child, (ast.Assign, ast.AnnAssign))
                     and isinstance(child.value, ast.Call)
-                    and root(_call_name(child.value.func)) in physical_semantics)
+                    and (root(_call_name(child.value.func)) in physical_semantics
+                         or isinstance(child.value.func, ast.Attribute)
+                         and child.value.func.attr == 'for_city'
+                         and isinstance(child.value.func.value, ast.Name)
+                         and root(child.value.func.value.id) in physical_semantics))
                 if isinstance(child, (ast.Assign, ast.AnnAssign)):
                     targets = child.targets if isinstance(child, ast.Assign) else [child.target]
                     physical_assignment |= bool(targets) and all(physical_binding(target, child.value) for target in targets)

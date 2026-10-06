@@ -19507,6 +19507,25 @@ physical keyword expansion. Final218P11.88s0F/E/S on identical bytes
 AST2/diff pass; no registry/source changes or CLI. Await named independent
 closure before the next whole-gate run; previous214 was not an approval.
 
+ROOT BEFOREEDIT two reproduced local gaps only: canonical SettlementSemantics
+for_city under the same immutable import/mutation identity as its constructor;
+get(Name) projects only a single literal-string definition with no other binding
+or receiver mutation. Unknown/dynamic/rebound keys retain wildcard dependency.
+No wrapper purity, statement exemption, production source or schema changes.
+Focused218 plus new identity/projection negatives, then freeze for XY before
+any whole CLI. e5 actual gate rc1/3 findings remains the prior raw evidence.
+
+Actual two capability RED2F/12P1.66s (/tmp/zeus-for-city-name-key-red.xml).
+Canonical for_city now uses the existing trusted receiver identity; foreign,
+method and callable mutation lose eligibility. Literal-name read/write field
+projection uses one original string assignment only, with all other binding
+writes and receiver/alias mutation invalidating it. Dynamic key stays wildcard.
+First232P12.01s preceded the final alias receiver-mutation guard; final233P
+11.82s0F/E/S (/tmp/zeus-for-city-name-key-final-strict.xml) covers that guard
+and all prior218 on final bytes. AST2/diff pass, no expectation changes or
+source/registry edits. This does not presume the whole CLI's three findings
+closed; independent narrow review and a later authorized actual gate are needed.
+
 Bounded binding/protocol repair actual RED10F2.50s before implementation
 (/tmp/zeus-binding-protocol-cd6-red.xml): annotated/augmented constant writes,
 direct/alias reader setattr, physical constructor alias setattr, and five

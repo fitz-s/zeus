@@ -501,6 +501,46 @@ def test_plain_state_setter_matches_direct_receiver_sink(use, blocked):
     assert bool(_alternate_control_violations(_TEMPERATURE_READER_SOURCE + use)) is blocked
 
 
+@pytest.mark.parametrize('change,blocked', [
+    ('', False),
+    ('from plugin import SettlementSemantics\n', True),
+    ('SettlementSemantics=evil\n', True),
+    ("setattr(SettlementSemantics,'__code__',evil)\n", True),
+    ('SettlementSemantics.for_city=evil\n', True),
+])
+def test_canonical_for_city_constructor_keeps_exact_callable_identity(change, blocked):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = 'from src.contracts.settlement_semantics import SettlementSemantics\n' + change
+    source += "if opaque('diagnostic'):\n semantics=SettlementSemantics.for_city(city)\n"
+    assert bool(_alternate_control_violations(source)) is blocked
+
+
+@pytest.mark.parametrize('change,key,blocked', [
+    ('', 'KEY', False),
+    ('', "'report'", True),
+    ("KEY='report'\n", 'KEY', True),
+    ("KEY: str='report'\n", 'KEY', True),
+    ("KEY+='report'\n", 'KEY', True),
+    ('from plugin import KEY\n', 'KEY', True),
+    ("setattr(KEY,'field',evil)\n", 'KEY', True),
+    ("alias=KEY\nsetattr(alias,'field',evil)\n", 'KEY', True),
+    ('', 'opaque_key', True),
+])
+def test_constant_name_projection_requires_single_unmutated_literal(change, key, blocked):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = "KEY='temperature'\n" + change
+    source += "revisions={'temperature':2.0,'report':'diagnostic'}\n"
+    source += 'mode=revisions.get(' + key + ')\n'
+    assert bool(_alternate_control_violations(source)) is blocked
+
+
+def test_literal_key_parameter_shadow_does_not_borrow_global_definition():
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    source = ("KEY='temperature'\nrevisions={'temperature':2.0,'report':'diagnostic'}\n"
+              "def select(KEY):\n mode=revisions.get(KEY)\nselect('report')\n")
+    assert _alternate_control_violations(source)
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",
