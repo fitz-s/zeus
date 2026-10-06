@@ -5268,21 +5268,10 @@ def _reactor_wake_event_state(
         return _ReactorWakeEventState(ready=False, finished=True)
     conn = None
     try:
+        from src.runtime.reactor_wake import event_processing_rows
+
         conn = get_world_connection_read_only()
-        # A plain event_id IN predicate lets SQLite choose the status index and
-        # scan every row for this consumer. Drive the composite key explicitly.
-        requested = ",".join("(?)" for _ in clean_event_ids)
-        rows = conn.execute(
-            f"""
-            WITH requested(event_id) AS (VALUES {requested})
-            SELECT p.event_id, p.processing_status, p.claimed_at
-              FROM requested r
-              LEFT JOIN opportunity_event_processing p
-                ON p.consumer_name = 'edli_reactor_v1'
-               AND p.event_id = r.event_id
-            """,
-            clean_event_ids,
-        ).fetchall()
+        rows = event_processing_rows(conn, clean_event_ids)
     except Exception:
         logger.warning(
             "EDLI wake event-state probe unavailable; running reactor fail-open "
@@ -5365,6 +5354,45 @@ def _reactor_wake_events_ready(
         event_ids,
         decision_time=decision_time,
     ).ready
+
+
+def _finished_day0_wake_covered(
+    wake: object,
+    event_state: _ReactorWakeEventState,
+    resolved: frozenset[tuple[str, str, str]] | None,
+) -> bool:
+    """Take-time ``reactor_wake.day0_hint_finished`` over one trade snapshot.
+
+    SCOPE: one selected Day0 hint whose events are all terminal. DRAIN: the
+    caller acknowledges it at once when no family it names has exposure
+    lacking a held-monitor event since its publish time. RESET: an unreadable
+    trade DB, exposure without that proof or any unfinished event leaves the
+    hint queued for the monitor-before-ack path below.
+    """
+
+    from src.runtime.reactor_wake import HeldMonitorBook, day0_hint_finished
+
+    conn = None
+    try:
+        from src.state.db import get_trade_connection_read_only
+
+        conn = get_trade_connection_read_only()
+        return day0_hint_finished(
+            wake,
+            all_terminal=event_state.all_terminal,
+            all_missing=event_state.all_missing,
+            resolved=resolved,
+            held=HeldMonitorBook(conn),
+        )
+    except Exception:
+        logger.warning(
+            "finished Day0 wake coverage probe unavailable; keeping wake queued",
+            exc_info=True,
+        )
+        return False
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _terminal_day0_cleanup_eligible(queued: object) -> bool:
@@ -7198,6 +7226,33 @@ def _edli_reactor_wake_poll_once() -> bool:
         )
     if wake_event_ids:
         wake_event_state = _reactor_wake_event_state(wake_event_ids)
+        if (
+            day0_wake
+            and wake_event_state.all_terminal
+            and _finished_day0_wake_covered(
+                wake,
+                wake_event_state,
+                _day0_wake_target_families(wake_event_ids),
+            )
+        ):
+            # Every event is terminal and every exposed family it names has a
+            # held monitor since the hint was published: nothing is left for
+            # the rescue/monitor turn below, which a busy monitor claim would
+            # otherwise repeat forever while this finished hint outranks newer
+            # forecast work.
+            if not _acknowledge_edli_reactor_wake_batch(
+                wake,
+                wakes,
+                day0_wake=True,
+            ):
+                return False
+            logger.info(
+                "EDLI reactor retired finished Day0 wake id=%s batch=%d events=%d",
+                wake.wake_id,
+                len(wakes),
+                len(wake_event_ids),
+            )
+            return True
         # Entry-event completion does not satisfy the same fact's held-position
         # redecision. A finished Day0 wake must reach the monitor-before-ack path.
         finished_day0_monitor = day0_wake and wake_event_state.finished

@@ -38,6 +38,10 @@ def _trade_db(path, *positions):
     )
     conn.executemany("INSERT INTO position_current VALUES (?,?,?,?,?)", positions)
     conn.execute(
+        "CREATE TABLE position_events (position_id TEXT, event_type TEXT,"
+        " sequence_no INTEGER, occurred_at TEXT)"
+    )
+    conn.execute(
         "CREATE TABLE venue_commands (command_id TEXT, position_id TEXT, venue_order_id TEXT,"
         " token_id TEXT, snapshot_id TEXT, state TEXT, intent_kind TEXT)"
     )
@@ -683,3 +687,343 @@ def test_retirement_runs_at_most_once_per_interval(monkeypatch):
     clock[0] += reactor_wake.RETIRE_SERVED_WAKES_INTERVAL_S
     poll()
     assert len(calls) == 2
+
+
+# --- finished Day0 hints: events terminal for the reactor + held capital monitored ---
+
+
+def _book_db(path, *positions):
+    """A trade DB whose venue_commands carries ``side``, so an entry-rest probe is exact."""
+
+    _trade_db(path, *positions)
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE venue_commands ADD COLUMN side TEXT")
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _processing(world, *rows):
+    """(event_id, status) rows for edli_reactor_v1 in the real processing schema."""
+
+    from src.state.schema.opportunity_event_processing_schema import CREATE_TABLE_SQL
+
+    conn = sqlite3.connect(world)
+    conn.execute(CREATE_TABLE_SQL)
+    conn.executemany(
+        "INSERT INTO opportunity_event_processing"
+        " (consumer_name, event_id, processing_status, updated_at)"
+        " VALUES ('edli_reactor_v1', ?, ?, '2026-09-29T00:00:00+00:00')",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _monitored(trade, position_id, at):
+    conn = sqlite3.connect(trade)
+    conn.execute(
+        "INSERT INTO position_events SELECT ?, 'MONITOR_REFRESHED',"
+        " COALESCE(MAX(sequence_no), 0) + 1, ? FROM position_events WHERE position_id = ?",
+        (position_id, at.isoformat(), position_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _finished_day0(tmp_path, *, count, family=CURRENT, status="expired"):
+    """``count`` Day0 hints (one event each, all ``status``) plus a forecast wake."""
+
+    path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
+    ids = [f"e-{index}" for index in range(count)]
+    world = _world_db(
+        tmp_path / "world.db",
+        *((event_id, "DAY0_EXTREME_UPDATED", *family) for event_id in ids),
+    )
+    _processing(world, *((event_id, status) for event_id in ids))
+    hints = [
+        _publish(
+            path,
+            "day0_extreme_event_committed",
+            (family,),
+            at=NOW - _dt.timedelta(hours=3, seconds=index),
+            event_ids=(event_id,),
+        )
+        for index, event_id in enumerate(ids)
+    ]
+    forecast = _publish(
+        path,
+        "forecast_posterior_advanced",
+        (family,),
+        at=NOW - _dt.timedelta(hours=1),
+    )
+    return path, world, hints, forecast
+
+
+@pytest.fixture
+def book(tmp_path):
+    return _book_db(tmp_path / "book.db")
+
+
+class _Poll:
+    """The real Day0 poll over real tmp DBs; only monitor dispatch and the cut are stubbed."""
+
+    def __init__(self, main, monkeypatch):
+        import src.state.db as state_db
+
+        self.main = main
+        self.dispatched: list[str] = []
+        self._monkeypatch = monkeypatch
+        self._state_db = state_db
+
+    def bind(self, trade, world):
+        self._monkeypatch.setattr(
+            self.main,
+            "get_world_connection_read_only",
+            lambda: sqlite3.connect(f"file:{world}?mode=ro", uri=True),
+        )
+        self._monkeypatch.setattr(
+            self._state_db,
+            "get_trade_connection_read_only",
+            lambda: sqlite3.connect(f"file:{trade}?mode=ro", uri=True),
+        )
+
+    def once(self):
+        return self.main._edli_reactor_wake_poll_once()
+
+
+@pytest.fixture
+def real_poll(monkeypatch, tmp_path):
+    import src.main as main
+
+    def no_risk_read():
+        raise RuntimeError("test: RiskGuard is not under test")
+
+    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
+    monkeypatch.setattr("src.riskguard.riskguard.get_current_level", no_risk_read)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_paused_forecast_carrier_priority_allowed", lambda **_k: False)
+    monkeypatch.setattr(main, "_edli_event_reactor_cycle", lambda **_k: True)
+    harness = _Poll(main, monkeypatch)
+    monkeypatch.setattr(
+        main,
+        "_dispatch_day0_exit_monitor",
+        lambda wake_id, _families: harness.dispatched.append(wake_id) or True,
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    main._day0_exit_monitor_attempts.clear()
+    yield harness
+    main._edli_initialize_reactor_wake_cursor()
+    main._day0_exit_monitor_attempts.clear()
+
+
+def test_finished_day0_hints_no_longer_outrank_a_forecast_wake(tmp_path, book, real_poll):
+    """N finished Day0 hints (their family unheld) plus one forecast wake: the
+    retire pass drains its share, the take path acknowledges the rest one per
+    selection, and the forecast wake is then what read_reactor_wake returns."""
+
+    path, world, _hints, forecast = _finished_day0(tmp_path, count=5)
+    real_poll.bind(book, world)
+    assert reactor_wake.read_reactor_wake(path=path).reason == "day0_extreme_event_committed"
+
+    assert (
+        reactor_wake.retire_served_wakes(
+            now=NOW, path=path, trade_db=book, world_db=world, limit=2
+        )
+        == 2
+    )
+    assert len(_queued_ids(path)) == 4  # 3 hints + the forecast wake
+
+    for _ in range(3):
+        assert real_poll.once() is True
+    assert _queued_ids(path) == {forecast.wake_id}
+    assert reactor_wake.read_reactor_wake(path=path).wake_id == forecast.wake_id
+    assert real_poll.dispatched == []  # no monitor was owed, none ran
+
+
+@pytest.mark.parametrize("status", ("pending", "processing"))
+def test_day0_hint_with_an_unfinished_event_stays(tmp_path, book, real_poll, status):
+    path, world, hints, _forecast = _finished_day0(tmp_path, count=2)
+    conn = sqlite3.connect(world)
+    conn.execute(
+        "UPDATE opportunity_event_processing SET processing_status = ? WHERE event_id = 'e-0'",
+        (status,),
+    )
+    conn.commit()
+    conn.close()
+    real_poll.bind(book, world)
+
+    assert (
+        reactor_wake.retire_served_wakes(
+            now=NOW, path=path, trade_db=book, world_db=world
+        )
+        == 1
+    )
+    assert hints[0].wake_id in _queued_ids(path)
+    assert hints[1].wake_id not in _queued_ids(path)
+
+    real_poll.once()  # selects the unfinished hint; no ack path may take it
+    assert hints[0].wake_id in _queued_ids(path)
+
+
+def test_finished_day0_hint_for_a_held_family_needs_post_publish_monitor_proof(
+    tmp_path, real_poll
+):
+    trade = _book_db(tmp_path / "held.db", ("p1", "day0_window", *CURRENT))
+    path, world, (hint,), _forecast = _finished_day0(tmp_path, count=1)
+    published = NOW - _dt.timedelta(hours=3)
+    real_poll.bind(trade, world)
+
+    def retire():
+        return reactor_wake.retire_served_wakes(
+            now=NOW, path=path, trade_db=trade, world_db=world
+        )
+
+    assert retire() == 0  # no MONITOR_REFRESHED at all: held capital may be owed this fact
+    _monitored(trade, "p1", published - _dt.timedelta(seconds=1))
+    assert retire() == 0  # one before the publish time covers nothing
+    real_poll.once()  # the take path agrees: it routes to the monitor and never acks
+    assert hint.wake_id in _queued_ids(path)
+    assert real_poll.dispatched == [hint.wake_id]
+
+    _monitored(trade, "p1", published)  # at the publish time is the proof
+    assert retire() == 1
+    assert hint.wake_id not in _queued_ids(path)
+
+
+def test_finished_day0_hint_is_acked_at_take_when_monitor_proof_exists(tmp_path, real_poll):
+    """The take path itself acknowledges a covered hint instead of rescuing."""
+
+    trade = _book_db(tmp_path / "held.db", ("p1", "day0_window", *CURRENT))
+    path, world, _hints, forecast = _finished_day0(tmp_path, count=1)
+    _monitored(trade, "p1", NOW - _dt.timedelta(minutes=5))
+    real_poll.bind(trade, world)
+
+    assert real_poll.once() is True
+    assert _queued_ids(path) == {forecast.wake_id}
+    assert real_poll.dispatched == []
+
+
+def test_an_open_entry_rest_blocks_coverage_only_for_its_own_family(tmp_path):
+    """A resting ENTRY order leaves no monitor event, so it proves nothing."""
+
+    other = ("Austin", "2026-09-30", "high")
+    trade = _book_db(
+        tmp_path / "rest.db", ("p9", "settled", *CURRENT), ("p8", "settled", *other)
+    )
+    conn = sqlite3.connect(trade)
+    conn.execute(
+        "INSERT INTO venue_commands VALUES ('c1', 'p9', 'o1', 'tok', 'snap', 'ACKED', 'ENTRY', 'BUY')"
+    )
+    conn.commit()
+    conn.close()
+    book = reactor_wake.HeldMonitorBook(sqlite3.connect(trade))
+
+    assert not book.covered((CURRENT,), since=NOW)
+    assert book.covered((other,), since=NOW)
+
+
+def test_missing_processing_rows_count_as_terminal(tmp_path, book):
+    """A producer crash leaves ids with no canonical row; the hint is finished."""
+
+    path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
+    world = _world_db(tmp_path / "world.db", ("e-gone", "DAY0_EXTREME_UPDATED", *CURRENT))
+    _processing(world)  # the table exists; no row for any event
+    at = NOW - _dt.timedelta(hours=3)
+    gone = _publish(
+        path, "day0_extreme_event_committed", (CURRENT,), at=at, event_ids=("e-gone",)
+    )
+    # Events no committed row resolves and no processing row names: the declared family speaks.
+    nameless = _publish(
+        path, "day0_extreme_event_committed", (CURRENT,), at=at, event_ids=("e-unknown",)
+    )
+
+    assert (
+        reactor_wake.retire_served_wakes(
+            now=NOW, path=path, trade_db=book, world_db=world
+        )
+        == 2
+    )
+    assert not ({gone.wake_id, nameless.wake_id} & _queued_ids(path))
+
+
+def test_unresolvable_events_with_a_real_terminal_row_stay(tmp_path, book):
+    path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
+    world = _world_db(tmp_path / "world.db")  # no committed event resolves
+    _processing(world, ("e-seen", "processed"))
+    hint = _publish(
+        path,
+        "day0_extreme_event_committed",
+        (CURRENT,),
+        at=NOW - _dt.timedelta(hours=3),
+        event_ids=("e-seen", "e-unknown"),
+    )
+
+    assert (
+        reactor_wake.retire_served_wakes(
+            now=NOW, path=path, trade_db=book, world_db=world
+        )
+        == 0
+    )
+    assert hint.wake_id in _queued_ids(path)
+
+
+def test_a_hint_carrying_a_held_sell_request_is_never_finished_here():
+    wake = reactor_wake.ReactorWake(
+        wake_id="w",
+        published_at=NOW.isoformat(),
+        source="t",
+        reason="day0_extreme_event_committed",
+        event_ids=("e",),
+        forecast_families=(CURRENT,),
+        held_sell_reauction_requests=(object(),),
+    )
+    assert not reactor_wake.day0_hint_finished(
+        wake,
+        all_terminal=True,
+        all_missing=False,
+        resolved=frozenset({CURRENT}),
+        held=None,
+    )
+
+
+def test_event_state_query_drives_the_composite_key_not_a_status_scan(tmp_path):
+    """EXPLAIN QUERY PLAN on the real schema: one primary-key seek per event id,
+    never a SCAN of opportunity_event_processing (a plain IN timed out live)."""
+
+    from src.state.schema import opportunity_event_processing_schema as schema
+
+    conn = sqlite3.connect(tmp_path / "plan.db")
+    conn.execute(schema.CREATE_TABLE_SQL)
+    for index_sql in (
+        schema.CREATE_STATUS_INDEX_SQL,
+        schema.CREATE_PENDING_RETRY_FLOOR_INDEX_SQL,
+        schema.CREATE_STALE_CLAIM_INDEX_SQL,
+    ):
+        conn.execute(index_sql)
+    conn.executemany(
+        "INSERT INTO opportunity_event_processing"
+        " (consumer_name, event_id, processing_status, updated_at)"
+        " VALUES ('edli_reactor_v1', ?, ?, '2026-09-29T00:00:00+00:00')",
+        [(f"e-{n}", "expired" if n % 4 else "processed") for n in range(4000)],
+    )
+    conn.execute("ANALYZE")
+    executed: list[str] = []
+    conn.set_trace_callback(executed.append)
+    rows = reactor_wake.event_processing_rows(conn, ("e-1", "e-2", "e-missing", "e-1"))
+    conn.set_trace_callback(None)
+
+    assert sorted(rows) == [
+        ("e-1", "expired", None),
+        ("e-2", "expired", None),
+        ("e-missing", None, None),
+    ]
+    assert reactor_wake.event_rows_state(rows) == (True, False)
+    select = next(sql for sql in executed if "requested" in sql)
+    details = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + select)]
+    assert not any(d.startswith("SCAN opportunity_event_processing") for d in details)
+    assert any(
+        "SEARCH p USING INDEX sqlite_autoindex_opportunity_event_processing_1"
+        " (consumer_name=? AND event_id=?)" in d
+        for d in details
+    )

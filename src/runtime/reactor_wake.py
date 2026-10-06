@@ -3292,12 +3292,191 @@ def day0_event_families(
     return frozenset(families) or None
 
 
+def event_processing_rows(
+    conn, event_ids: Collection[str]
+) -> list[tuple[str, str | None, str | None]]:
+    """``(event_id, processing_status, claimed_at)`` per requested id for the
+    reactor consumer; a missing processing row has status None.
+
+    A plain ``event_id IN`` lets SQLite pick the status index and scan every
+    row of the consumer (tens of millions live; it times out). Driving from the
+    requested ids keeps this one composite-key seek per id.
+    """
+
+    ids = tuple(
+        dict.fromkeys(
+            event_id
+            for raw_event_id in event_ids
+            if (event_id := str(raw_event_id or "").strip())
+        )
+    )
+    if not ids:
+        return []
+    values = ",".join("(?)" for _ in ids)
+    return [
+        tuple(row)
+        for row in conn.execute(
+            f"""
+            WITH requested(event_id) AS (VALUES {values})
+            SELECT r.event_id, p.processing_status, p.claimed_at
+              FROM requested r
+              LEFT JOIN opportunity_event_processing p
+                ON p.consumer_name = 'edli_reactor_v1'
+               AND p.event_id = r.event_id
+            """,
+            ids,
+        ).fetchall()
+    ]
+
+
+def event_rows_state(
+    rows: Collection[tuple[str, str | None, str | None]],
+) -> tuple[bool, bool]:
+    """``(all_terminal, all_missing)``: no event is pending or processing.
+
+    A missing processing row is terminal: a producer crash or pre-write
+    debounce can leave an id with no canonical row, and replaying that hint can
+    never create work.
+    """
+
+    return (
+        bool(rows)
+        and all(status not in {"pending", "processing"} for _id, status, _at in rows),
+        bool(rows) and all(status is None for _id, status, _at in rows),
+    )
+
+
 def _family(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
     return (
         str(city or "").strip(),
         str(target_date or "").strip(),
         str(metric or "").strip().lower(),
     )
+
+
+def _held_key(city: object, target_date: object, metric: object) -> tuple[str, str, str]:
+    """The family key of ``src.main._day0_wake_requires_exit_monitor``."""
+
+    return (
+        str(city or "").strip().casefold(),
+        str(target_date or "").strip()[:10],
+        str(metric or "").strip().lower(),
+    )
+
+
+def _parse_utc(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (
+        parsed.replace(tzinfo=timezone.utc)
+        if parsed.tzinfo is None
+        else parsed.astimezone(timezone.utc)
+    )
+
+
+class HeldMonitorBook:
+    """One read-only trade snapshot: which held families a monitor has covered.
+
+    Position exposure is ``position_current.phase`` in ``OPEN_EXPOSURE_PHASES``
+    (the law ``src.main._day0_wake_requires_exit_monitor`` applies). A position
+    is covered since an instant when its newest durable ``MONITOR_REFRESHED``
+    event is at or after it; that is the repo's own cadence-coverage fact, and
+    it counts a monitor attempt that completed its canonical write, as the
+    Day0 monitor-before-ack path does. An open ENTRY rest leaves no monitor
+    event, so a rest never proves coverage.
+    """
+
+    def __init__(self, conn) -> None:
+        from src.state.db import OPEN_EXPOSURE_PHASES
+
+        marks = ",".join("?" for _ in OPEN_EXPOSURE_PHASES)
+        rows = conn.execute(
+            f"""
+            SELECT position_id, city, target_date, temperature_metric
+              FROM position_current
+             WHERE phase IN ({marks})
+            """,
+            OPEN_EXPOSURE_PHASES,
+        ).fetchall()
+        self._conn = conn
+        self._rest: dict[tuple[str, str, str], bool] = {}
+        self._monitored: dict[tuple[str, str, str], list[datetime | None]] = {}
+        for position_id, city, target_date, metric in rows:
+            key = _held_key(city, target_date, metric)
+            if not all(key):
+                continue  # an unnamed position names no family
+            latest = conn.execute(
+                """
+                SELECT occurred_at
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'MONITOR_REFRESHED'
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+            self._monitored.setdefault(key, []).append(
+                _parse_utc(latest[0]) if latest is not None else None
+            )
+
+    def _entry_rest(self, key: tuple[str, str, str]) -> bool:
+        if key not in self._rest:
+            from src.execution.day0_hard_fact_exit import _target_family_entry_orders
+
+            orders = _target_family_entry_orders(self._conn, {key})
+            self._rest[key] = orders is None or bool(orders)  # unknown scope exposes
+        return self._rest[key]
+
+    def covered(
+        self, families: Collection[tuple[str, str, str]], *, since: datetime
+    ) -> bool:
+        """True when no family has exposure that lacks a monitor at/after ``since``."""
+
+        keys = {_held_key(*family) for family in families}
+        for key in keys:
+            if any(at is None or at < since for at in self._monitored.get(key, ())):
+                return False
+        return not any(self._entry_rest(key) for key in keys)
+
+
+def day0_hint_finished(
+    wake: ReactorWake,
+    *,
+    all_terminal: bool,
+    all_missing: bool,
+    resolved: frozenset[tuple[str, str, str]] | None,
+    held: HeldMonitorBook,
+) -> bool:
+    """Whether a Day0 hint carries no unfinished work of any owner.
+
+    Its event work is finished when every event is terminal for the reactor
+    consumer (``event_rows_state``); its held-capital work is finished when no
+    family it names has exposure without a monitor at or after its publish
+    time. Families come from the hint and from its resolved events; events that
+    resolve to no family leave only the hint's declared families, and only when
+    no canonical processing row exists for any of them. A hint carrying a held
+    SELL request belongs to that debt and is never finished here.
+    """
+
+    if (
+        wake.reason != DAY0_WAKE_REASON
+        or wake.held_sell_reauction_requests
+        or not wake.event_ids
+        or not all_terminal
+    ):
+        return False
+    declared = frozenset(_family(*raw) for raw in wake.forecast_families)
+    if resolved is None:
+        if not (all_missing and declared):
+            return False
+        families = declared
+    else:
+        families = declared | frozenset(_family(*raw) for raw in resolved)
+    published = _parse_utc(wake.published_at)
+    return published is not None and held.covered(families, since=published)
 
 
 def record_consumed_scope(
@@ -3388,15 +3567,18 @@ def retire_served_wakes(
     world_db: Path | None = None,
     limit: int = RETIRE_SERVED_WAKES_LIMIT,
 ) -> int:
-    """Acknowledge queued hints that ``wake_is_served`` proves unservable.
+    """Acknowledge queued hints that ``wake_is_served`` or
+    ``day0_hint_finished`` proves unservable.
 
     SCOPE: queued ``RETIRABLE_WAKE_REASONS`` wakes only. DRAIN: at most
     ``limit`` oldest served wakes per call, through the single
-    ``acknowledge_reactor_wakes`` path. RESET: bounded by reachability and
-    consumption, not age; every other wake stays queued for the scheduler.
-    Unknown reachability (a trade-DB read failure or an unnamed open family)
-    retires nothing, and a Day0 hint whose events the world DB cannot resolve
-    stays queued.
+    ``acknowledge_reactor_wakes`` path. RESET: bounded by reachability,
+    consumption and finished event/monitor work, not age; every other wake
+    stays queued for the scheduler. Unknown reachability (a trade-DB read
+    failure or an unnamed open family) retires nothing, a Day0 hint whose
+    events the world DB cannot resolve stays queued, and a finished Day0 hint
+    is retired only after the trade DB proves its exposed families were
+    monitored since it was published.
     """
 
     from src.data.forecast_retention import build_reachability
@@ -3415,9 +3597,13 @@ def retire_served_wakes(
 
     world_conn = None
     world_unreadable = False
+    trade_conn = None
+    held_book: HeldMonitorBook | None = None
+    held_unreadable = False
     resolve_deadline = time.monotonic() + RETIRE_SERVED_WAKES_RESOLVE_BUDGET_S
+    resolved_events: dict[tuple[str, ...], frozenset[tuple[str, str, str]] | None] = {}
 
-    def event_families(event_ids):
+    def world():
         nonlocal world_conn, world_unreadable
         if world_unreadable or time.monotonic() > resolve_deadline:
             return None
@@ -3431,10 +3617,65 @@ def retire_served_wakes(
                     from src.data.family_reachability import read_only
 
                     world_conn = read_only(Path(world_db))
-            return day0_event_families(world_conn, event_ids)
         except Exception:  # noqa: BLE001 - an unreadable world keeps every Day0 hint
             world_unreadable = True
             return None
+        return world_conn
+
+    def event_families(event_ids):
+        nonlocal world_unreadable
+        if event_ids not in resolved_events:
+            conn = world()
+            try:
+                resolved_events[event_ids] = (
+                    None if conn is None else day0_event_families(conn, event_ids)
+                )
+            except Exception:  # noqa: BLE001 - an unreadable world keeps every Day0 hint
+                world_unreadable = True
+                resolved_events[event_ids] = None
+        return resolved_events[event_ids]
+
+    def held() -> HeldMonitorBook | None:
+        nonlocal trade_conn, held_book, held_unreadable
+        if held_book is None and not held_unreadable:
+            try:
+                if trade_db is None:
+                    from src.state.db import get_trade_connection_read_only
+
+                    trade_conn = get_trade_connection_read_only()
+                else:
+                    from src.data.family_reachability import read_only
+
+                    trade_conn = read_only(Path(trade_db))
+                held_book = HeldMonitorBook(trade_conn)
+            except Exception:  # noqa: BLE001 - unknown exposure retires no Day0 hint
+                held_unreadable = True
+        return held_book
+
+    def finished(wake: ReactorWake) -> bool:
+        if (
+            wake.reason != DAY0_WAKE_REASON
+            or wake.held_sell_reauction_requests
+            or not wake.event_ids
+        ):
+            return False
+        conn = world()
+        if conn is None:
+            return False
+        try:
+            all_terminal, all_missing = event_rows_state(
+                event_processing_rows(conn, wake.event_ids)
+            )
+            book = held() if all_terminal else None
+            return book is not None and day0_hint_finished(
+                wake,
+                all_terminal=all_terminal,
+                all_missing=all_missing,
+                resolved=event_families(tuple(wake.event_ids)),
+                held=book,
+            )
+        except Exception:  # noqa: BLE001 - an unreadable DB proves nothing finished
+            return False
 
     with _CONSUMED_SCOPE_LOCK:
         for family in [key for key in _CONSUMED_SCOPE if not reachable(key)]:
@@ -3451,11 +3692,12 @@ def retire_served_wakes(
                 reachable=reachable,
                 consumed=consumed,
                 event_families=event_families,
-            ):
+            ) or finished(wake):
                 served.append(wake)
     finally:
-        if world_conn is not None:
-            world_conn.close()
+        for conn in (world_conn, trade_conn):
+            if conn is not None:
+                conn.close()
     if not served or not acknowledge_reactor_wakes(tuple(served), path=path):
         return 0
     return len(served)
