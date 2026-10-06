@@ -1093,7 +1093,7 @@ def test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkey
     from src import config
     from src.state import db as state_db
     from src.data import replacement_forecast_production as production
-    ledgers = tmp_path / "custody-ledgers"
+    ledgers = config.STATE_DIR / ("custody-ledgers-" + metric)
     ledgers.mkdir()
     world_path, trade_path = ledgers / "zeus-world.db", ledgers / "zeus_trades.db"
     for path, initialize in ((world_path, state_db.init_schema_world_only),
@@ -1385,6 +1385,7 @@ def test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkey
             provisional=bool(day0_provenance.get("day0_provisional_observation", {}).get("active")),
             metric=metric, unit="C", decision_time=fixture_clock[0], entry_authority=True)
         family = SimpleNamespace(city=city.name, target_date="2026-10-04", metric=metric,
+            condition_ids=tuple("0x" + f"{index + 101:064x}" for index in range(len(full_request.bins))),
             candidates=[SimpleNamespace(bin=Bin(b.lower_c, b.upper_c, "C", b.bin_id)) for b in full_request.bins])
         event = make_opportunity_event(event_type="DAY0_EXTREME_UPDATED", entity_key=f"{city.name}|2026-10-04|{metric}|{station}",
             source="private-canonical-projection", observed_at=current_at.isoformat(), available_at=fixture_clock[0].isoformat(),
@@ -1444,9 +1445,11 @@ def test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkey
                         (original_provenance, latest.posterior_id))
                     s.conn.commit()
                 assert _seed_already_covered(forecast_db=forecast_db, seed=seed)
-            counterpart_track = decoder.TRACKS["mn2t6_low" if metric == "high" else "mx2t6_high"]
-            counterpart = native._download_output_path(run_date=s.run.date(), run_hour=12,
-                param=counterpart_track.open_data_param, raw_root=paths.raw_root)
+            # The aggregate is already gone. Remove one exact required paired
+            # original from CAS, not a nonexistent assembled transport file.
+            role = json.loads(original_provenance)["day0_measurement_domain_shapes"]["X"]
+            counterpart = native._role_message_path(paths.raw_root,
+                role["paired_interval_originals"][0]["raw_message_sha256"])
             unavailable = counterpart.with_name(counterpart.name + ".private-unavailable")
             counterpart.rename(unavailable)
             try:
@@ -1472,7 +1475,10 @@ def test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkey
                     day0_payload_out=qualified_projection))
             qualified_projection = {**current_projection, **qualified_projection}
             assert era._day0_uses_native_role_contract_metadata(qualified_projection)
-            contract_family = SimpleNamespace(**family.__dict__, bins=[candidate.bin for candidate in family.candidates])
+            contract_family = SimpleNamespace(**{**family.__dict__,
+                "family_id": prepared[0].probability_witness.family_key,
+                "condition_ids": tuple(binding.condition_id for binding in prepared[0].probability_witness.bindings)},
+                bins=[candidate.bin for candidate in family.candidates])
             for key, wrong in (("settlement_unit", "F"), ("metric", "low" if metric == "high" else "high")):
                 invalid_contract = deepcopy(qualified_projection)
                 invalid_contract[key] = wrong
@@ -1481,16 +1487,17 @@ def test_normal_native_originals_admit_independent_full_Y_point(tmp_path, monkey
                         forecast_conn=s.conn, calibration_conn=s.conn, family=contract_family,
                         payload=invalid_contract, decision_time=fixture_clock[0], entry_authority=True)
             if metric == "low":
-                # The real LOW aggregate is boundary-ambiguous at London's
-                # midnight. Only the current, original-bound role may replace
-                # its metadata; an old/missing role still cannot use it.
+                # The retained scalar aggregate is now legal (the original
+                # interval is 11..11), but it cannot replace the current role
+                # authority. Old/missing roles reach the stronger current-
+                # carrier gate and still fail with a named data refusal.
                 for old_role in (None, "prior-revision"):
                     legacy = deepcopy(qualified_projection)
                     if old_role is None:
                         legacy.pop("_edli_day0_measurement_domain_shapes")
                     else:
                         legacy["_edli_day0_measurement_domain_shapes"]["semantics_revision"] = old_role
-                    with pytest.raises(ValueError, match="Day0 base forecast snapshot missing"):
+                    with pytest.raises(ValueError, match="^DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE$"):
                         era._day0_remaining_global_probability_components(current_event,
                             forecast_conn=s.conn, calibration_conn=s.conn, family=contract_family,
                             payload=legacy, decision_time=fixture_clock[0], entry_authority=True)

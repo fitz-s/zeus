@@ -18140,3 +18140,45 @@ Latest origin/live is 1cea70065401dd775bd7aaa5c84b6d99dab78d25, adding only the
 hourly-probe city-refusal isolation and its fast-observation test. The task
 will normally rebase and run those affected controls plus scoped engine6;
 no live checkout change, push or load is authorized by this checkpoint.
+
+Integrated epoch 0a6e9b4a4 verification: actual zero-grace retention deletes the
+assembled originals and exact-message CAS restores the normal materializer,
+persisted public ENTRY/HELD reader, current-state rebuild and primary JIT chain.
+HIGH passed in /tmp/zeus-XY-real-retention-integrated-consumer.xml; LOW passed
+1/1 in 124.21s in /tmp/zeus-XY-real-retention-integrated-consumer-low.xml. The
+LOW historical/missing-role control reaches DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE
+after its complete canonical family contract is supplied; it is not weakened.
+Private namespace and original-field corrections are fixture corrections, not
+production defects. All original clocks, expiry and physical admission remain.
+Engine6 plus peer fast-observation isolation: 93 passed, 6 failed, 4 skipped,
+38.05s (/tmp/zeus-final-peer-engine6.xml). Executable original-source overlay
+at exact origin1cea70065401dd775bd7aaa5c84b6d99dab78d25 repeats the exact six
+nodes and messages (6 failed, 37.82s,
+/tmp/zeus-final-engine6-baseline1cea.xml): closed observation DB, two response
+content omissions, old force_exit API, existing linter22 and three WAL decorators.
+These are pre-existing, not six new regressions or an all-green repo verdict.
+
+### BEFOREEDIT: independent remaining-X normal admission
+
+ROOT approves the named three-source bugfix in materializer, bundle reader and
+cycle policy, existing materializer tests and this authority/PLAN surface. A
+Day0 request currently requires a full-Y shape before its already-authorized
+X-only carrier can be constructed. The decisive counterexample must remove
+only old full-Y12 original custody while preserving a separately captured,
+PIT-valid X18 run, its 51 native points and paired interval original bounds.
+No snapshot status, coverage, source clock or admission gate is manufactured.
+The current v7/v35 typed variant is remaining_X, not a relabeled full_Y Normal:
+its role_center_c and component noise are obtained from owning X provider
+centers/native points (W²+delta², mixture B endogenous), with F means, widths
+and intervals converted to C. Whole-day q uses the existing max/min prefix
+pushforward. Original daily center confidence remains diagnostic/nonacting.
+The complete variant/cut/cohort/original identity must replay as carrier.X;
+only a strong current Day0 carrier can consume it. Missing prefix/carrier,
+bad unit/PIT/role and non-Day0 usage fail named, never global Normal fallback.
+Full-Y admission and fixed-weight global center remain unchanged. Old or
+invalid certificates normally seed/materialize a new identity; no restamp,
+wipe, forced seed, live HTTP/write, push or load. SCOPE is city/date/metric/
+current role/cut; DRAIN is the existing normal seed loop after X originals
+qualify; RESET is exact lawful role/source identity, not latest replica clock.
+New-epoch public H/L, missing-X/non-Day0 rejection, role/unit tamper, coherent
+point/draw/confidence, SQL covered/normal DRAIN and scoped data10 follow freeze.
