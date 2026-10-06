@@ -19161,3 +19161,14 @@ ROOT's stop condition is reached: no additional interpreter/JSON/SQLite model,
 effect enumeration, physical-semantics waiver or repeated whole CLI. Preserve
 this ordinary checkpoint and c9 rollback point for a bounded further decision.
 Actual required single-live gate remains BLOCKED; no push/live FF/load authority.
+
+ROOT-approved next BEFOREEDIT, rollback5c2049859: only the existing checker
+and test may recognize standard JSON default=str when str is the unshadowed
+builtin and the input has known field paths, never wildcard raw structure.
+Unknown/default hooks, rebound json/str and tagged custom-object formatting
+must remain UNKNOWN. No general type/JSON interpreter or additional evidence
+exemptions. First prove primitive metadata µ/clock projection and selected
+report rejection, evil hook/custom __str__/unknown object negatives and original
+134 controls. Run the one full CLI only if those pass and the actual first
+JSON path no longer collapses; otherwise microtrace and stop. No source/q,
+loader, money law, additional registry declaration or live action changes.
