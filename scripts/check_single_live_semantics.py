@@ -853,6 +853,9 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
         explicit_state = name == 'state' and isinstance(node, (ast.Assign, ast.AnnAssign)) and any(
             isinstance(target, (ast.Attribute, ast.Subscript))
             for target in (node.targets if isinstance(node, ast.Assign) else [node.target]))
+        explicit_state |= (name == 'state' and isinstance(node, ast.Call)
+            and _call_name(node.func) == 'setattr' and len(node.args) >= 3
+            and isinstance(node.args[1], ast.Constant) and node.args[1].value == 'state')
         if temperature_paths(all_paths) and (is_control(name) and name not in physical_fields or explicit_state):
             out.add(f"physical evidence used as runtime selector {name!r} at line {node.lineno}")
         paths = diagnostic_paths(all_paths)

@@ -490,6 +490,17 @@ def test_temperature_channel_does_not_weaken_actual_selector_dependencies(sink):
     assert _alternate_control_violations(_TEMPERATURE_READER_SOURCE + sink)
 
 
+@pytest.mark.parametrize('use,blocked', [
+    ("setattr(command,'state',state)\n", True),
+    ('command.state=state\n', True),
+    ('physical(state=state)\n', False),
+    ("setattr(command,'state',opaque('diagnostic'))\n", True),
+])
+def test_plain_state_setter_matches_direct_receiver_sink(use, blocked):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert bool(_alternate_control_violations(_TEMPERATURE_READER_SOURCE + use)) is blocked
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",

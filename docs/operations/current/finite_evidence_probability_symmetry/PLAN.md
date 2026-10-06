@@ -19498,6 +19498,15 @@ TYPE and explicit scalar selectors reject it. No callee-purity claim, previous
 expectation change, registry waiver or production-source change. AST2/diff pass.
 No whole CLI in this slice; cd6's ten findings are not yet final-gate refuted.
 
+ROOT authorized only the last plain-state literal setter twin after457 review.
+Actual1F/3P1.78s showed setter accepted while direct command.state rejected;
+physical state keyword and DIAG setter controls behaved correctly. The direct
+receiver-state condition now also names literal setattr(...,'state',...), no
+physical keyword expansion. Final218P11.88s0F/E/S on identical bytes
+(/tmp/zeus-plain-state-setter-final.xml), including former214 and4 new twins.
+AST2/diff pass; no registry/source changes or CLI. Await named independent
+closure before the next whole-gate run; previous214 was not an approval.
+
 Bounded binding/protocol repair actual RED10F2.50s before implementation
 (/tmp/zeus-binding-protocol-cd6-red.xml): annotated/augmented constant writes,
 direct/alias reader setattr, physical constructor alias setattr, and five
