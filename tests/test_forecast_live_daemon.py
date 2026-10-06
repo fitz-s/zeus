@@ -2,6 +2,8 @@
 # Last reused/audited: 2026-08-22
 # Lifecycle: created=2026-07-30; last_reviewed=2026-08-22; last_reused=2026-08-22
 # Authority basis: operator-directed held SELL terminal-wake hotfix.
+# Purpose: Protect held wake completion and bounded normal native source drainage without starving mandatory ENS.
+# Reuse: Inspect forecast_live_daemon scheduling, scope, immutable source clocks and transport budgets using private fixtures.
 """Held SELL terminal-wake completion antibodies."""
 
 from __future__ import annotations
