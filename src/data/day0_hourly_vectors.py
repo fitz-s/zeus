@@ -527,20 +527,30 @@ def validate_day0_causal_evidence_bundle(
     )
 
 
-#: Metadata that records HOW a capture was fetched, never WHAT it observed, so
-#: two captures of the SAME provider run may differ here and still be the same
-#: evidence. ``endpoint``/``endpoint_mode``/``source_run_authority`` join the
-#: original four because ``_select_day0_run_endpoint`` deliberately falls back
-#: from the run-pinned single-runs endpoint to the standard meta-stamped one
-#: (35ff9a3dc) whenever the freshest run fails its clock precheck or its
-#: response starts after the causal observation boundary. That fallback proves
-#: the SAME run through a different URL: measured 2026-09-18, 28 of that day's
-#: endpoint-mode flips carried an identical ``provider_run_id`` AND
-#: byte-identical values on every shared timestamp, yet the semantic hash
-#: rejected the entry (GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED, the largest
-#: winner-preflight rejection class). Run identity stays enforced by
-#: ``provider_run_id`` and the four ``provider_source_*`` clocks, which are NOT
-#: exempt, so a flip that also advances the run still mismatches.
+#: Metadata that records HOW or WHERE a capture was fetched, never WHAT it
+#: observed, so two captures of the SAME provider run may differ here and still
+#: be the same evidence. ``endpoint``/``endpoint_mode``/``source_run_authority``
+#: join the original four because ``_select_day0_run_endpoint`` deliberately
+#: falls back from the run-pinned single-runs endpoint to the standard
+#: meta-stamped one (35ff9a3dc) whenever the freshest run fails its clock
+#: precheck or its response starts after the causal observation boundary. That
+#: fallback proves the SAME run through a different URL: measured 2026-09-18,
+#: 28 of that day's endpoint-mode flips carried an identical ``provider_run_id``
+#: AND byte-identical values on every shared timestamp, yet the semantic hash
+#: rejected the entry (GLOBAL_ACTUATION_PROBABILITY_USE_DIVERGED).
+#:
+#: ``provider_source_available_at_utc``/``provider_source_modified_at_utc`` are
+#: replica-local clocks: Open-Meteo serves ``meta.json`` from replicas that
+#: disagree on them for the SAME run. Measured 2026-10-05 (Denver ecmwf_ifs),
+#: every capture carried one run identity while ``available_at`` alternated
+#: between two values capture to capture, so the hash read a replica flip as
+#: new evidence (1726 SEMANTIC_META_MISMATCH DAY0_REMAINING_DAY_MEMBERS_
+#: UNAVAILABLE in 7h). They stay validated per row against that row's own
+#: decision bound by ``_day0_canonical_vector_row_snapshot``; they just cannot
+#: decide equivalence between two rows. The run's identity is
+#: ``provider_run_id``, ``provider_source_cycle_time_utc``, ``model_api_id`` and
+#: ``provider``, which are NOT exempt, so a flip that advances the run still
+#: mismatches.
 _DAY0_CAPTURE_EQUIVALENCE_ONLY_META = frozenset(
     {
         "fetch_started_at",
@@ -550,6 +560,8 @@ _DAY0_CAPTURE_EQUIVALENCE_ONLY_META = frozenset(
         "endpoint",
         "endpoint_mode",
         "source_run_authority",
+        "provider_source_available_at_utc",
+        "provider_source_modified_at_utc",
     }
 )
 
@@ -810,8 +822,9 @@ def prove_day0_causal_capture_equivalence(
 
     Both bundles must be self-consistent first.  The expected rows are checked
     against the original cutoff, while current rows are checked against the
-    current decision/target-end bound.  Only capture/fetch clocks and their
-    derived request/source-run IDs may differ; every payload and semantic
+    current decision/target-end bound.  Only capture/fetch clocks, replica-local
+    provider availability/modification clocks and the derived request/source-run
+    IDs may differ; run identity, every payload and every other semantic
     metadata field comes from the canonical rows.
     """
 
