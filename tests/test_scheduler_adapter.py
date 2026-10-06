@@ -1697,11 +1697,15 @@ def test_replacement_availability_drains_exact_cycle_anchor_residual_on_priority
 
     monkeypatch.setattr(ingest_main, "_ANCHOR_RESIDUAL_NEXT_MONOTONIC", 0.0)
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    worker = ingest_main._ANCHOR_RESIDUAL_RESEED_THREAD
+    if worker is not None:
+        worker.join(timeout=5)
 
     assert result["anchor_missing_scope_count"] == 205
     residual = result["source_clock_anchor_residual_download"]
     assert residual["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
     assert residual["committed_family_count"] == 1
+    assert residual["reseed_status"] == "ANCHOR_RESIDUAL_RESEED_STARTED"
     assert calls[0][0] == "download"
     assert calls[0][1]["quota_priority"] is True
     assert 0.0 < calls[0][1]["max_wall_clock_seconds"] <= 10.0
@@ -5204,6 +5208,9 @@ def test_changed_non_anchor_source_still_drains_anchor_residual(monkeypatch) -> 
     monkeypatch.setattr(ingest_main, "_ANCHOR_RESIDUAL_NEXT_MONOTONIC", 0.0)
 
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    worker = ingest_main._ANCHOR_RESIDUAL_RESEED_THREAD
+    if worker is not None:
+        worker.join(timeout=5)
 
     assert result["anchor_missing_scope_count"] == 1
     assert result["source_clock_anchor_residual_download"]["committed_family_count"] == 1

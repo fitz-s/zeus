@@ -43,7 +43,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 logger = logging.getLogger("zeus.ingest")
@@ -101,6 +101,12 @@ _ANCHOR_RESIDUAL_NEXT_MONOTONIC = 0.0
 # One residual drain pass downloads at most one provider location batch of
 # row-less families, nearest target dates first; the next poll takes the rest.
 _ANCHOR_RESIDUAL_SCOPE_BATCH = 24
+# Committed residual families reseed on one background worker: a 25-family
+# fusion/cycle-advance attach measured ~9 min in the daemon and must not hold the
+# 15 s source-clock poll. Families arriving while it runs join the next batch.
+_ANCHOR_RESIDUAL_RESEED_LOCK = threading.Lock()
+_ANCHOR_RESIDUAL_RESEED_PENDING: set[tuple[str, str, str]] = set()
+_ANCHOR_RESIDUAL_RESEED_THREAD: threading.Thread | None = None
 _BROAD_RESEED_LOCK = threading.Lock()
 _BROAD_RESEED_CONDITION = threading.Condition(_BROAD_RESEED_LOCK)
 _BROAD_RESEED_ACTIVE: dict[str, Any] | None = None
@@ -4413,6 +4419,52 @@ def _source_clock_poll_in_flight(fn):
     return wrapped
 
 
+def _defer_anchor_residual_reseed(
+    scopes: tuple[tuple[str, str, str], ...],
+    attach: Callable[..., dict[str, object]],
+) -> str:
+    """Queue committed residual families for one background reseed worker."""
+    global _ANCHOR_RESIDUAL_RESEED_THREAD
+
+    def run() -> None:
+        global _ANCHOR_RESIDUAL_RESEED_THREAD
+        while True:
+            with _ANCHOR_RESIDUAL_RESEED_LOCK:
+                batch = tuple(sorted(_ANCHOR_RESIDUAL_RESEED_PENDING))
+                _ANCHOR_RESIDUAL_RESEED_PENDING.clear()
+                if not batch:
+                    _ANCHOR_RESIDUAL_RESEED_THREAD = None
+                    return
+            started = time.monotonic()
+            report: dict[str, object] = {"committed_families": batch}
+            try:
+                attach(report, scopes=batch, changed_sources=("ecmwf_ifs",))
+            except Exception:  # noqa: BLE001 - cycle-advance scans re-detect the gap
+                logger.exception("anchor residual reseed failed scopes=%d", len(batch))
+                continue
+            logger.info(
+                "anchor residual reseed report: scopes=%d elapsed_s=%.1f "
+                "fusion=%s/%s cycle_advance=%s/%s errors=%s",
+                len(batch),
+                time.monotonic() - started,
+                report.get("fusion_upgrade_status"),
+                report.get("fusion_upgrade_seeds_enqueued"),
+                report.get("cycle_advance_status"),
+                report.get("cycle_advance_seeds_enqueued"),
+                report.get("reseed_errors"),
+            )
+
+    with _ANCHOR_RESIDUAL_RESEED_LOCK:
+        _ANCHOR_RESIDUAL_RESEED_PENDING.update(scopes)
+        if _ANCHOR_RESIDUAL_RESEED_THREAD is not None:
+            return "ANCHOR_RESIDUAL_RESEED_QUEUED"
+        _ANCHOR_RESIDUAL_RESEED_THREAD = threading.Thread(
+            target=run, name="anchor-residual-reseed", daemon=True,
+        )
+        _ANCHOR_RESIDUAL_RESEED_THREAD.start()
+    return "ANCHOR_RESIDUAL_RESEED_STARTED"
+
+
 @_scheduler_job("ingest_replacement_availability_poll")
 @_source_clock_poll_in_flight
 def _replacement_availability_poll_tick():
@@ -4734,16 +4786,16 @@ def _replacement_availability_poll_tick():
                         Path(str(cfg["forecast_db"])),
                         residual_cycle,
                         decision_time=datetime.now(timezone.utc),
-                        deadline_monotonic=residual_deadline,
+                        deadline_monotonic=time.monotonic() + residual_budget_s,
                     )
                     if residual_cycle is not None
                     else ()
                 )
+                # The provider probe and gap read run under contention; the
+                # download gets its own budget instead of their remainder.
                 residual_report = (
                     _download_current_targets(
-                        max_wall_clock_seconds=max(
-                            0.0, residual_deadline - time.monotonic()
-                        ),
+                        max_wall_clock_seconds=residual_budget_s,
                         required_scopes=row_gaps[:_ANCHOR_RESIDUAL_SCOPE_BATCH],
                         quota_priority=True,
                     )
@@ -4767,10 +4819,8 @@ def _replacement_availability_poll_tick():
                 elif isinstance(residual_report, dict):
                     committed_scopes = _committed_anchor_scopes(residual_report)
                     if committed_scopes:
-                        _attach_reseed_reports(
-                            residual_report,
-                            scopes=committed_scopes,
-                            changed_sources=("ecmwf_ifs",),
+                        residual_report["reseed_status"] = _defer_anchor_residual_reseed(
+                            committed_scopes, _attach_reseed_reports,
                         )
                     elif int(residual_report.get("written_manifest_count") or 0) > 0:
                         residual_report["anchor_receipt_unusable_for_seed"] = True
@@ -4778,6 +4828,7 @@ def _replacement_availability_poll_tick():
                         residual_report
                     )
                     if compact is not None:
+                        compact["reseed_status"] = residual_report.get("reseed_status")
                         report["source_clock_anchor_residual_download"] = compact
             except Exception as exc:  # noqa: BLE001 - next poll retries exact gap
                 report["source_clock_anchor_residual_error"] = (

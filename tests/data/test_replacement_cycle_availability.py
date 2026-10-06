@@ -1370,6 +1370,9 @@ def test_residual_anchor_commit_publishes_scoped_cold_start_seed_transport(
 
     monkeypatch.setattr(ingest_main, "_ANCHOR_RESIDUAL_NEXT_MONOTONIC", 0.0)
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
+    worker = ingest_main._ANCHOR_RESIDUAL_RESEED_THREAD
+    if worker is not None:
+        worker.join(timeout=5)
 
     assert result["source_clock_anchor_residual_download"]["committed_family_count"] == 1
     assert calls == [

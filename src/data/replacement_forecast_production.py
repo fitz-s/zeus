@@ -4457,7 +4457,6 @@ def _current_target_anchor_row_gaps(
         ).fetchone()
     finally:
         conn.close()
-    _check_source_preflight_deadline(deadline_monotonic)
 
     def servable(city_name: str, target_date: str) -> bool:
         # A run that starts inside the target's local day cannot cover it; that
