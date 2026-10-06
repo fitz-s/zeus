@@ -35172,7 +35172,7 @@ def _reconcile_passes_short_conn(
         return result
 
     from src.execution.review_work_delivery import reconcile_review_work_items
-    if scope != "live_tick":
+    if scope not in {"live_tick", "boot_fast"}:
         _db_pass("review_work_retry", reconcile_review_work_items, "review_work_retry")
 
     if scope == "boot_fast":
@@ -35301,6 +35301,11 @@ def _reconcile_passes_short_conn(
                     time.monotonic() - boot_started_monotonic,
                     max(0.0, boot_deadline - time.monotonic()),
                 )
+
+        # SCOPE: this boot's review retry shares all other local repair bounds.
+        # DRAIN: retry under the same boot deadline/nonblocking factory, then
+        # scheduled maintenance. RESET: the next invocation re-reads due debt.
+        _boot_db_pass("review_work_retry", reconcile_review_work_items, "review_work_retry")
 
         _boot_db_pass(
             "deterministic_terminal_no_fill_reviews",

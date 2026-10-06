@@ -1596,6 +1596,10 @@ def test_boot_fast_writer_flock_contention_defers_before_scheduler(monkeypatch):
         "default_trade_conn_factory",
         _contended_factory,
     )
+    monkeypatch.setattr(
+        command_recovery.time, "sleep",
+        lambda _delay: pytest.fail("boot review contention must not retry with sleeps"),
+    )
 
     summary = command_recovery.reconcile_unresolved_commands(
         client=MagicMock(),
@@ -1608,9 +1612,145 @@ def test_boot_fast_writer_flock_contention_defers_before_scheduler(monkeypatch):
         for call in calls
     )
     assert summary["boot_fast_deferred"] is True
+    assert summary["boot_fast_defer_reasons"]["review_work_retry"] == (
+        "database_locked_before_scheduler"
+    )
     assert summary["boot_fast_defer_reasons"][
         "missing_filled_entry_execution_fact_repair"
     ] == "database_locked_before_scheduler"
+
+
+def test_boot_fast_default_writer_flock_defers_review_then_retries(monkeypatch):
+    """Actual canonical default factory never blocks boot on a held flock."""
+    import fcntl
+    import os
+    from src.config import validate_test_state_path
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state import db, db_writer_lock
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.review_work_items import open_work_item
+    from src.contracts.review_work_item import ReviewReasonCode
+
+    world_path = validate_test_state_path(db.ZEUS_WORLD_DB_PATH)
+    trade_path = validate_test_state_path(db._zeus_trade_db_path())
+    world_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(world_path) as world:
+        db.init_schema(world)
+    with sqlite3.connect(trade_path) as trade:
+        db.init_schema_trade_only(trade)
+        init_collateral_schema(trade)
+        item = open_work_item(
+            trade, owner_domain="trade", owner_table="position_current",
+            subject_id="boot-flock-review", reason_code=ReviewReasonCode.TIMEOUT_ABSENCE_UNCONFIRMED,
+            authority_revision=1, unbounded=True,
+            now=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        )
+
+    monkeypatch.setattr(
+        command_recovery.time, "sleep",
+        lambda _delay: pytest.fail("boot default flock contention must not sleep"),
+    )
+    monkeypatch.setattr(
+        venue_sync_contract, "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("boot review must not read venue"),
+    )
+    lock_path = db_writer_lock._lock_file_path(world_path, db_writer_lock.WriteClass.LIVE)
+    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    client = MagicMock()
+    started = command_recovery.time.monotonic()
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        summary = command_recovery.reconcile_unresolved_commands(client=client, scope="boot_fast")
+        assert summary["boot_fast_defer_reasons"]["review_work_retry"] == (
+            "database_locked_before_scheduler"
+        )
+        assert command_recovery.time.monotonic() - started < 8.0
+        with sqlite3.connect(trade_path) as trade:
+            assert trade.execute(
+                "SELECT attempt_count,status FROM review_work_items WHERE work_id=?", (item.work_id,),
+            ).fetchone() == (0, "OPEN")
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+    reset = command_recovery.reconcile_unresolved_commands(client=client, scope="boot_fast")
+    assert reset["review_work_retry"]["attempted"] == 1
+    with sqlite3.connect(trade_path) as trade:
+        assert trade.execute(
+            "SELECT attempt_count,status FROM review_work_items WHERE work_id=?", (item.work_id,),
+        ).fetchone() == (1, "OPEN")
+        assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+    assert client.method_calls == []
+
+
+def test_boot_fast_review_sql_budget_rolls_back_and_preserves_order(tmp_path, monkeypatch):
+    """Review shares the original boot deadline; an interrupted write rolls back."""
+    from src.execution import command_recovery, review_work_delivery, venue_sync_contract
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.review_work_items import open_work_item
+    from src.contracts.review_work_item import ReviewReasonCode
+
+    path = tmp_path / "boot-review-budget.db"
+    with sqlite3.connect(path) as seed:
+        init_schema(seed)
+        init_schema_trade_only(seed)
+        init_collateral_schema(seed)
+        item = open_work_item(
+            seed, owner_domain="trade", owner_table="position_current",
+            subject_id="boot-budget-review", reason_code=ReviewReasonCode.TIMEOUT_ABSENCE_UNCONFIRMED,
+            authority_revision=1, unbounded=True,
+            now=(datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+        )
+
+    calls = []
+    real_review = review_work_delivery.reconcile_review_work_items
+    real_monotonic = command_recovery.time.monotonic
+    slow_started = [None]
+
+    def factory(**_kwargs):
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    factory.supports_nonblocking_flocks = True
+
+    def slow_review(conn):
+        calls.append("review")
+        slow_started[0] = real_monotonic()
+        conn.execute("UPDATE review_work_items SET attempt_count=attempt_count+1")
+        conn.execute(
+            "WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x<100000000) "
+            "SELECT max(x) FROM n"
+        ).fetchone()
+        pytest.fail("review SQL must be interrupted by the shared boot deadline")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setenv("ZEUS_BOOT_FAST_RECOVERY_BUDGET_SECONDS", "0.001")
+    with monkeypatch.context() as budget:
+        budget.setattr(command_recovery.time, "monotonic", lambda: (
+            1000.0 if slow_started[0] is None else 1000.0 + real_monotonic() - slow_started[0]
+        ))
+        budget.setattr(review_work_delivery, "reconcile_review_work_items", slow_review)
+        summary = command_recovery.reconcile_unresolved_commands(client=MagicMock(), scope="boot_fast")
+    assert calls == ["review"]
+    assert summary["boot_fast_defer_reasons"]["review_work_retry"] == "budget_exhausted_during_pass"
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT attempt_count,status FROM review_work_items WHERE work_id=?", (item.work_id,),
+        ).fetchone() == (0, "OPEN")
+
+    monkeypatch.setenv("ZEUS_BOOT_FAST_RECOVERY_BUDGET_SECONDS", "8")
+    def record_review(conn):
+        calls.append("review-reset")
+        return real_review(conn)
+    monkeypatch.setattr(review_work_delivery, "reconcile_review_work_items", record_review)
+    monkeypatch.setattr(command_recovery, "reconcile_deterministic_terminal_no_fill_reviews", lambda _conn: (
+        calls.append("deterministic") or {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    ))
+    reset = command_recovery.reconcile_unresolved_commands(client=MagicMock(), scope="boot_fast")
+    assert calls[:3] == ["review", "review-reset", "deterministic"]
+    assert reset["review_work_retry"]["attempted"] == 1
 
 
 def test_boot_fast_write_lease_contention_defers_before_scheduler(monkeypatch):
@@ -1633,6 +1773,10 @@ def test_boot_fast_write_lease_contention_defers_before_scheduler(monkeypatch):
         "default_trade_conn_factory",
         _contended_factory,
     )
+    monkeypatch.setattr(
+        command_recovery.time, "sleep",
+        lambda _delay: pytest.fail("boot review lease contention must not retry with sleeps"),
+    )
 
     summary = command_recovery.reconcile_unresolved_commands(
         client=MagicMock(),
@@ -1640,7 +1784,11 @@ def test_boot_fast_write_lease_contention_defers_before_scheduler(monkeypatch):
     )
 
     assert calls
+    assert all(call == {"blocking": False, "busy_timeout_ms": 0} for call in calls)
     assert summary["boot_fast_deferred"] is True
+    assert summary["boot_fast_defer_reasons"]["review_work_retry"] == (
+        "database_locked_before_scheduler"
+    )
     assert summary["boot_fast_defer_reasons"][
         "missing_filled_entry_execution_fact_repair"
     ] == "database_locked_before_scheduler"
