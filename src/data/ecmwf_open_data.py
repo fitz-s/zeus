@@ -873,9 +873,10 @@ def _role_original_snapshot_references(conn, now_utc: datetime, *, raw_root: Pat
                 found = consume(value, scope) or found
         return found
 
-    # Retain the required transport frontier for upcoming native capture AND
-    # the independently qualified native role. A transport SUCCESS is not a
-    # native qualification; missing new X never authorizes a stale X action.
+    # Storage candidates are not qualified actions. Keep the transport frontier
+    # and the public role selector's finite native-run envelope without decoding
+    # every global field once per city/metric. Only the action reader qualifies
+    # bytes, grid, 51 members and causal possession; missing X permits no fallback.
     frontiers = conn.execute("""SELECT coverage.city, coverage.target_local_date,
             coverage.temperature_metric, coverage.target_window_start_utc,
             coverage.target_window_end_utc, source.source_cycle_time, coverage.source_run_id
@@ -905,23 +906,41 @@ def _role_original_snapshot_references(conn, now_utc: datetime, *, raw_root: Pat
                     (*scope, row[6])))
                 selected.update(transport_ids)
                 try:
-                    from src.config import runtime_cities_by_name
-                    from src.data.day0_hourly_vectors import read_native_measurement_role
-                    native = read_native_measurement_role(conn=conn,
-                        city=runtime_cities_by_name()[scope[0]], target_date=scope[1],
-                        decision_time=now_utc, metric=scope[2],
-                        role="full_Y" if role == "Y" else "remaining_X",
-                        scope_start=start if role == "Y" else now_utc,
-                        # Y is an independent prior-start frontier. X is pinned
-                        # to this current run, not an older native run fallback.
-                        snapshot_id=None if role == "Y" else transport_ids[0],
-                        _paths=_resolve_opendata_paths(source_root=raw_root, environ={}))
-                    selected.add(int(native["native_snapshot_id"]))
-                    selected.update(int(v) for v in native.get("paired_snapshot_ids", ()))
+                    # Match read_native_measurement_role's existing query, not
+                    # a new Y age cutoff: an independent prior-start Y can be
+                    # older than the current X. Partial/unknown bodies remain
+                    # possible storage dependencies, never action permission.
+                    runs = conn.execute("""SELECT source_cycle_time FROM source_run
+                        WHERE source_id='ecmwf_open_data' AND track='2t_instant_native_knots'
+                          AND ingest_mode='SCHEDULED_LIVE' AND origin_mode='SCHEDULED_LIVE'
+                          AND julianday(source_cycle_time)<=julianday(?)
+                        ORDER BY source_cycle_time DESC, source_run_id LIMIT 16""",
+                        ((start if role == "Y" else now_utc).isoformat(),)).fetchall()
+                    if not runs:
+                        raise ValueError("ROLE_RETENTION_NATIVE_CANDIDATES_UNKNOWN")
+                    candidates = conn.execute("""SELECT snapshot_id,provenance_json,
+                            COALESCE(source_available_at,available_at),recorded_at
+                        FROM ensemble_snapshots WHERE snapshot_id IN (
+                            SELECT MAX(snapshot_id) FROM ensemble_snapshots
+                            WHERE city=? AND target_date=? AND temperature_metric=?
+                              AND source_cycle_time IN (""" + ",".join("?" for _ in runs) +
+                        ") GROUP BY source_cycle_time)", (*scope, *(r[0] for r in runs))).fetchall()
+                    if not candidates:
+                        raise ValueError("ROLE_RETENTION_NATIVE_CANDIDATES_UNKNOWN")
+                    selected.update(int(candidate[0]) for candidate in candidates)
+                    for candidate in candidates:
+                        capture = json.loads(candidate[1])["native_capture_receipt"]
+                        point = capture["selected_point"]
+                        if (capture["capture_status"] != "OBSERVED" or not capture["messages"]
+                                or int(point["flat_index"]) < 0
+                                or not all(math.isfinite(float(point[k])) for k in ("lat", "lon"))
+                                or any(datetime.fromisoformat(str(clock)).tzinfo is None
+                                       for clock in candidate[2:])):
+                            raise ValueError("ROLE_RETENTION_NATIVE_CANDIDATES_UNKNOWN")
                 except (OSError, ValueError, TypeError, KeyError, IndexError):
-                    # SCOPE: this exact market family. DRAIN: ordinary native
-                    # capture/proof restoration. RESET: the raw-role reader
-                    # verifies the exact original subset, or the target expires.
+                    # SCOPE: this exact market family. DRAIN: normal capture or
+                    # original metadata restoration. RESET: known finite
+                    # candidates, or target expiry without another consumer.
                     preserve_scope(scope)
                     errors.append("ROLE_RETENTION_NATIVE_FRONTIER_UNKNOWN")
 

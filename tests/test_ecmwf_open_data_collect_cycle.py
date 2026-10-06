@@ -3451,6 +3451,21 @@ def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkey
     import numpy as np
     from tests import test_replacement_forecast_materializer as fixture
     from src.data import ecmwf_open_data as native
+    from src.data import day0_hourly_vectors as hourly
+
+    # Retention owns storage candidates, not probability qualification. The
+    # real collector/extractor/action reader may decode; each refs scan may not.
+    refs_reader = native._role_original_snapshot_references
+    gc_decode_calls = []
+    def metadata_only_refs(*args, **kwargs):
+        def forbidden_decode(*args, **kwargs):
+            gc_decode_calls.append(True)
+            raise RuntimeError("GC_PUBLIC_ROLE_DECODE_FORBIDDEN")
+        with monkeypatch.context() as gc:
+            gc.setattr(hourly, "read_native_measurement_role", forbidden_decode)
+            gc.setattr(ec, "codes_get_values", forbidden_decode)
+            return refs_reader(*args, **kwargs)
+    monkeypatch.setattr(native, "_role_original_snapshot_references", metadata_only_refs)
 
     # Actual original bytes are controlled before transport/index/capture.
     # No capture header, possession, role qualification or width is mocked.
@@ -3466,6 +3481,7 @@ def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkey
     class Verified(BaseException):
         pass
     def check_retained_role(conn, request, **kwargs):
+        assert not gc_decode_calls, "GC must not decode/qualify the full grid"
         shape = shape_reader(conn, request, **kwargs)
         assert shape is not None
         point = shape.native_point_model
@@ -3619,6 +3635,25 @@ def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkey
             assert sweep(next_now)["role_message_deleted_count"] == 0
             assert native._read_role_message_bytes(paths.raw_root, capture) == original
             assert y["interval_snapshot_available_at"] == clocks[0]
+            # Missing candidate geometry is UNKNOWN for this scope, not a
+            # license to erase its possible originals or authorize an action.
+            saved_provenance = conn.execute("SELECT provenance_json FROM ensemble_snapshots WHERE snapshot_id=?",
+                (shape.snapshot_id,)).fetchone()[0]
+            malformed = json.loads(saved_provenance)
+            malformed["native_capture_receipt"].pop("selected_point")
+            conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
+                (json.dumps(malformed), shape.snapshot_id))
+            conn.commit()
+            unknown = native._plan_decoded_open_data_raw_retention(conn, raw_root=paths.raw_root,
+                reference_date=next_now.date(), reference_time=next_now)
+            assert "ROLE_RETENTION_NATIVE_FRONTIER_UNKNOWN" in unknown.role_reference_errors
+            assert capture["raw_message_sha256"] in unknown.live_role_hashes
+            conn.execute("UPDATE ensemble_snapshots SET provenance_json=? WHERE snapshot_id=?",
+                (saved_provenance, shape.snapshot_id))
+            conn.commit()
+            assert "ROLE_RETENTION_NATIVE_FRONTIER_UNKNOWN" not in native._plan_decoded_open_data_raw_retention(
+                conn, raw_root=paths.raw_root, reference_date=next_now.date(), reference_time=next_now).role_reference_errors
+            assert not gc_decode_calls
             sql_clock.close(); world.close(); trade.close()
             raise Verified
         assert sweep(next_now)["role_message_deleted_count"] == 0
