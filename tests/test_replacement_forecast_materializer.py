@@ -1109,11 +1109,74 @@ def test_normal_HKO_X_only_without_independent_Y_originals(tmp_path, monkeypatch
 
 
 _NORMAL_ORIGINAL_HTTP_CASSETTES = {}
+_NORMAL_ORIGINAL_HEADER_DECODE = {}
+
+
+def _immutable_original_header_capture(gid, original, *, instantaneous=False):
+    """Only byte-determined header metadata; no evidence clock or authority."""
+    import copy
+    import eccodes as ec
+    key = (hashlib.sha256(ec.codes_get_message(gid)).hexdigest(), instantaneous)
+    if key in _NORMAL_ORIGINAL_HEADER_DECODE:
+        return copy.deepcopy(_NORMAL_ORIGINAL_HEADER_DECODE[key])
+    capture = original(gid, instantaneous=instantaneous)
+    fields = {"capture_status", "observed_headers", "raw_message_sha256", "raw_message_length", "metadata_sections"}
+    if capture.get("capture_status") == "OBSERVED" and set(capture) == fields:
+        _NORMAL_ORIGINAL_HEADER_DECODE[key] = copy.deepcopy(capture)
+    return capture
+
+
+def test_immutable_original_header_memo_preserves_validation_and_numeric_inputs(tmp_path, monkeypatch):
+    """Changed original SHA misses and remains rejected; clocks/q are not memoized."""
+    from scripts import extract_open_ens_localday as decoder
+    from tests.test_ecmwf_open_data_collect_cycle import _native_temperature_knots_fixture
+    original = decoder._native_message_capture
+    good_dir, bad_dir = tmp_path / "good", tmp_path / "bad"
+    good_dir.mkdir()
+    bad_dir.mkdir()
+    good = _native_temperature_knots_fixture(good_dir)
+    baseline = decoder.decode_open_ens_temperature_knots(**good)
+    assert baseline["decode_status"] == "AVAILABLE"
+    original_calls = []
+    def counted(gid, *, instantaneous=False):
+        original_calls.append(instantaneous)
+        return original(gid, instantaneous=instantaneous)
+    _NORMAL_ORIGINAL_HEADER_DECODE.clear()
+    monkeypatch.setattr(decoder, "_native_message_capture", lambda gid, instantaneous=False:
+        _immutable_original_header_capture(gid, counted, instantaneous=instantaneous))
+    cached = decoder.decode_open_ens_temperature_knots(**good)
+    first_calls = len(original_calls)
+    assert cached == baseline
+    # Independent returned metadata cannot mutate the stored byte projection.
+    cached["messages"][0]["observed_headers"]["units"] = "foreign"
+    assert decoder.decode_open_ens_temperature_knots(**good) == baseline
+    assert len(original_calls) == first_calls
+    # New whole-message bytes with a wrong physical step cannot borrow the
+    # previous metadata. The owning decoder, not a stub qualifier, rejects it.
+    bad = _native_temperature_knots_fixture(bad_dir, fault="step")
+    import eccodes as ec
+    evidence = bad["message_source_evidence"]
+    gid = ec.codes_new_from_message(evidence[max(evidence)]["original_range_bytes"])
+    try:
+        bad_capture = decoder._native_message_capture(gid, instantaneous=True)
+        assert len(original_calls) == first_calls + 1
+        assert bad_capture["observed_headers"]["endStep"] == 7
+        assert bad_capture["raw_message_sha256"] != baseline["messages"][-1]["raw_message_sha256"]
+    finally:
+        ec.codes_release(gid)
+    denied = decoder.decode_open_ens_temperature_knots(**bad)
+    assert denied["decode_status"] == "UNAVAILABLE"
+    assert denied["native_knots"] == []
+    assert decoder.decode_open_ens_temperature_knots(**good) == baseline
+    assert baseline["qualification_status"] == "OFFLINE_ONLY"
+    # This is decoder parity, not a live certificate; normal q is recomputed
+    # from independently replayed roles in every source-qualified case.
 
 
 def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missing_full_y=False,
                                        city_name="London", producer_only=False, google_resume=False,
-                                       full_y_ready=None, original_cassette=False):
+                                       full_y_ready=None, original_cassette=False,
+                                       full_y_public_purposes=None):
     import eccodes as ec
     import numpy as np
     from types import SimpleNamespace
@@ -1160,6 +1223,9 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
         return set_values(gid, values)
     monkeypatch.setattr(ec, "codes_set_values", original_temperature_values)
     if original_cassette:
+        original_capture = decoder._native_message_capture
+        monkeypatch.setattr(decoder, "_native_message_capture", lambda gid, instantaneous=False:
+            _immutable_original_header_capture(gid, original_capture, instantaneous=instantaneous))
         # Reuse only immutable encoded HTTP entities, not capture receipts,
         # proof clocks, canonical rows, decoded qualification, q or READY.
         # The existing normal collector creates all of those independently.
@@ -1542,7 +1608,11 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
             readiness = ReplacementForecastReadinessDecision(readiness_id=cert["readiness_id"], status=cert["status"],
                 reason_codes=tuple(json.loads(cert["reason_codes_json"])), dependency_json=json.loads(cert["dependency_json"]),
                 provenance_json=json.loads(cert["provenance_json"]), expires_at=datetime.fromisoformat(cert["expires_at"]))
-            for purpose in ReplacementForecastAuthorityPurpose:
+            # The default still exercises every public purpose. Generic BUY
+            # probes may explicitly choose ENTRY; the independent H/L contract
+            # controls retain the complete ENTRY/HELD/JIT path.
+            for purpose in (ReplacementForecastAuthorityPurpose if full_y_public_purposes is None
+                            else full_y_public_purposes):
                 served = read_replacement_forecast_bundle(s.conn, baseline_bundle=_BaselineBundle(_Evidence(baseline[0])),
                     readiness=readiness, city=city.name, target_date=request.target_date,
                     temperature_metric=metric, decision_time=cut, current_bin_topology_hash=posterior["bin_topology_hash"],

@@ -19641,3 +19641,64 @@ only. Unexpected spawned ECMWF surface transport fails before worker creation;
 loopback model-surface captures and the normal original index/range validators
 remain actual. Production src/scripts diff is empty. Broader module and native-
 owned integration common-fixture gates remain open pending the final batch.
+
+### Qualified-book fixture seam — BEFORE EDIT
+
+ROOT authorizes one additional existing test path:
+tests/money_path/test_finding_b_free_cash_bound.py, only the private
+_normal_cash_matrix helper's explicit book_inputs=None seam. The default
+positive path remains unchanged. q owns this fifth path; held's completed
+six-test slice and native's integration/trace slice do not overlap it.
+After real source originals, current-role/PIT and public ENTRY qualification,
+change only private authorizing depth/book fields before normal global prepare.
+Prove all-family non-executable books produce no actuation/SDK submit; a single
+bad token cannot win while legal siblings remain eligible for fresh selection.
+Do not alter physical inputs, source clocks, q/carrier, cash, FDR or Kelly law,
+cache READY/q, or use source rejection as a book antibody. The complementary
+quote-unit controls use actual selected-token rows and are explicitly not
+probability/action authority. Each case owns its DB; external networking is
+OS-denied while the controlled local original transport remains enabled.
+The source/scripts delta stays empty. Final full money-path checks must run on
+the merged helper; earlier cash proof is not substituted for that final gate.
+
+### Five-fixture frozen verification receipt
+
+The locked child production tree is 6a8f76cbd20de71f324c6aa5ee9198e8d073150d
+and scripts tree is 8f15784507b0fffda8b52d977e439ace6e064d03, unchanged from
+34e7ac0e926b716766f9d9c76ab18e5c58c739dc. Whole
+tests/engine/test_event_reactor_no_bypass.py ran once: 154 unique P,
+0F/0E/0S/0X, 803.73s. XML
+/tmp/zeus-no-bypass-owned-final.0KA9Jw/module.xml SHA256
+a2b7d4463e58f7f0e678479f7be75d24df41a24a35058318a28bde707f79a174.
+The old depth-column xfail was refuted by the existing selected-token quote
+contract; actual YES/NO, missing/zero depth and wrong-token/direction controls
+now execute without skips. Quote-unit controls are not BUY authority. Actual
+normal full-Y originals/public ENTRY, HELD and JIT and no-runtime-Platt H/L
+remain separate strong positives. Full global book controls use real qualified
+q and INSERT-before-prepare book inputs, preserving append-only captures:
+all books empty cannot act, a bad former winner loses to a legal sibling, and
+missing executable sibling quotes do not erase six-token identity or q mass.
+The new partial successor has zero original members, unknown coverage and no
+cloned body/manifest; the qualified old source and snapshot tuples stay exact.
+Unwired bankroll retains the selected actuation and is refused precisely by
+KELLY_PROOF_MISSING without live wallet fetching, after a valid baseline.
+
+The full-message-SHA/instantaneous header memo caches only the five OBSERVED
+metadata fields, returns independent deep copies and never caches values,
+clocks/proofs, qualification, canonical state, READY or q. Its actual changed-
+step/SHA miss is rejected by the owning decoder, and exact original restoration
+matches uncached decoded numerical inputs (the memo antibody passed in
+/tmp/zeus-no-bypass-final-unfinished.MGApBQ/batch.xml). That batch was 9P/5F;
+the five failures were preserved and diagnosed, not counted as successes.
+The corrected five-node run was 4P/1F before the wallet assertion was aligned
+to the actual current-global rejection; the whole 154-node epoch closes it.
+OS denies external network, allowing controlled loopback surfaces; Fake
+transport and venues retain normal original/schema/PIT/role validation.
+
+Other owned contextual proof remains 32 pricing/fused controls and four
+actual zero-grace H/L atom controls, with exact unchanged test bodies. Two
+pricing cases import the native-owned integration common fixture and remain
+OPEN until that dependency's approved repair. Final common-tip production
+numeric and keeper changes require precise affected-input review/retests;
+this child result is not their proof, a 53-selector PASS, or live readiness.
+The changed cash helper also requires final merged money-path verification.

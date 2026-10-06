@@ -128,7 +128,8 @@ def test_cash_book_capture_preserves_bound_token_identity(wrong_token):
                        for asset in epoch.assets)
 
 
-def _normal_cash_matrix(*, conn, city, request, bundle, decision_time, monkeypatch):
+def _normal_cash_matrix(*, conn, city, request, bundle, decision_time, monkeypatch,
+                        book_inputs=None):
     """The normal committed FSR and immutable London q feed the real receipt."""
     from src.events.triggers.forecast_snapshot_ready import ForecastSnapshotReadyTrigger
     from src.state.db import init_schema_trade_only
@@ -193,8 +194,14 @@ def _normal_cash_matrix(*, conn, city, request, bundle, decision_time, monkeypat
                 row["fee_details"] = json.loads(row.pop("fee_details_json"))
                 row["token_map_raw"] = json.loads(row.pop("token_map_json"))
                 row["orderbook_depth_jsonb"] = row.pop("orderbook_depth_json")
+                if book_inputs is not None:
+                    # Change controlled provider input before the append-only
+                    # canonical capture, never UPDATE a sealed snapshot.
+                    book_inputs(snapshot=row, event=event, markets=markets,
+                                decision_time=decision_time)
                 for key in ("min_tick_size", "min_order_size", "orderbook_top_bid", "orderbook_top_ask"):
-                    row[key] = Decimal(row[key])
+                    if row[key] is not None:
+                        row[key] = Decimal(row[key])
                 row["captured_at"] = decision_time
                 row["freshness_deadline"] = decision_time + timedelta(seconds=180)
                 insert_snapshot(trade, ExecutableMarketSnapshot(**row))
@@ -204,6 +211,8 @@ def _normal_cash_matrix(*, conn, city, request, bundle, decision_time, monkeypat
             get_current_level=lambda: adapter.RiskLevel.GREEN,
             bankroll_usd_provider=lambda: 1000.)
         preparation = live.prepare_global_event(event, decision_time)
+        if book_inputs is not None and preparation.prepared_global_family is None:
+            return {"preparation": preparation}
         assert preparation.prepared_global_family is not None, preparation.reason
         prepared = preparation.prepared_global_family
         tokens = {market["condition_id"]: (market["token_id"], f"private-london-no-{index}")
@@ -214,10 +223,15 @@ def _normal_cash_matrix(*, conn, city, request, bundle, decision_time, monkeypat
         prepared = replace(prepared, probability_witness=probability)
         assert list(probability.yes_point_q) == pytest.approx(list(bundle.q.values()))
         books = _cash_raw_books(trade.execute("SELECT * FROM executable_market_snapshots"))
-        epoch = universe.capture_current_global_book_epoch(
-            trade, probability_witnesses={probability.family_key: probability},
-            get_books=lambda token_ids, **kwargs: {token: books[token] for token in token_ids},
-            clock=lambda: decision_time, max_age=timedelta(seconds=180))
+        try:
+            epoch = universe.capture_current_global_book_epoch(
+                trade, probability_witnesses={probability.family_key: probability},
+                get_books=lambda token_ids, **kwargs: {token: books[token] for token in token_ids},
+                clock=lambda: decision_time, max_age=timedelta(seconds=180))
+        except ValueError as exc:
+            if book_inputs is None:
+                raise
+            return {"book_unavailable_reason": str(exc)}
         from src.data import replacement_forecast_bundle_reader as reader
         monkeypatch.setattr(collateral, "datetime", reader.datetime)
         venue = FakePolymarketVenue(ledger=FakeCollateralLedger(), clock=FakeClock(decision_time))
@@ -252,6 +266,8 @@ def _normal_cash_matrix(*, conn, city, request, bundle, decision_time, monkeypat
                 wealth_witness=wealth, capital_limit_usd=Decimal("5" if name == "small" else "1000"),
                 fractional_kelly_multiplier=Decimal(str(adapter._runtime_kelly_multiplier())),
                 decision_at_utc=decision_time, book_epoch=epoch)
+            if book_inputs is not None and selected.actuation is None:
+                return {"selection": selected}
             assert selected.actuation is not None, selected.decision.no_trade_reason
             assert selected.decision.candidate.execution_mode == "TAKER_LIMIT"
             row_id = _store_global_auction_receipt(trade, selected=selected,
