@@ -107,6 +107,137 @@ def _native_temperature_knots_fixture(tmp_path, *, fault=None, steps=(0, 3, 6), 
         message_source_evidence=evidence)
 
 
+def test_native_original_primitive_is_bounded_immutable_and_decoder_bound(tmp_path, monkeypatch):
+    import eccodes as ec
+    from scripts import extract_open_ens_localday as decoder
+
+    inputs = _native_temperature_knots_fixture(tmp_path, steps=(0,))
+    raw = inputs["message_source_evidence"][0]["original_range_bytes"]
+    decoder._NATIVE_ORIGINAL_DECODE.clear()
+    actual = ec.codes_new_from_message
+    handles = []
+    def counted(body):
+        handles.append(hashlib.sha256(body).hexdigest())
+        return actual(body)
+    monkeypatch.setattr(ec, "codes_new_from_message", counted)
+    first, point = decoder._decode_native_original(raw, flat_indices=(2,), instantaneous=True)
+    assert point[0] == 4 and point[2] == 161 and point[3] == (280.,)
+    gid = actual(raw)
+    try:
+        direct = float(ec.codes_get_elements(gid, "values", [2])[0])
+    finally:
+        ec.codes_release(gid)
+    for unit in ("C", "F"):
+        assert decoder.kelvin_to_native(point[3][0], unit) == decoder.kelvin_to_native(direct, unit)
+    first["observed_headers"]["units"] = "mutated caller"
+    first["metadata_sections"].clear()
+    again, repeated = decoder._decode_native_original(raw, flat_indices=(2,), instantaneous=True)
+    assert repeated == point and again["observed_headers"]["units"] == "K"
+    assert again["metadata_sections"] and len(handles) == 1
+    _, different_cell = decoder._decode_native_original(raw, flat_indices=(0,), instantaneous=True)
+    assert different_cell[3] == (300.,) and len(handles) == 2
+    _, wrong_unit = decoder._decode_native_original(raw, flat_indices=(2,), instantaneous=True, physical_unit="C")
+    assert wrong_unit == ()
+    _, wrong_param = decoder._decode_native_original(raw, flat_indices=(2,), instantaneous=True, parameter_id=228026)
+    assert wrong_param == ()
+    # The same bytes under another getter cannot inherit an earlier result.
+    elements = ec.codes_get_elements
+    monkeypatch.setattr(ec, "codes_get_elements", lambda *args: elements(*args))
+    decoder._decode_native_original(raw, flat_indices=(2,), instantaneous=True)
+    assert len(handles) == 5
+    assert all(isinstance(value[0], str) and isinstance(value[1], tuple)
+               for value in decoder._NATIVE_ORIGINAL_DECODE.values())
+    assert not any(isinstance(part, bytes) for key in decoder._NATIVE_ORIGINAL_DECODE for part in key)
+    decoder._NATIVE_ORIGINAL_DECODE.clear()
+
+
+def test_native_original_primitive_never_memoizes_unknown_or_changed_body(tmp_path, monkeypatch):
+    import eccodes as ec
+    from scripts import extract_open_ens_localday as decoder
+
+    inputs = _native_temperature_knots_fixture(tmp_path, steps=(0,))
+    raw = inputs["message_source_evidence"][0]["original_range_bytes"]
+    decoder._NATIVE_ORIGINAL_DECODE.clear()
+    capture = decoder._native_message_capture
+    calls = []
+    def unknown(*args, **kwargs):
+        calls.append(True)
+        return {"capture_status": "UNKNOWN", "observed_headers": {}}
+    monkeypatch.setattr(decoder, "_native_message_capture", unknown)
+    for instant in (True, True, False):
+        result, point = decoder._decode_native_original(raw, flat_indices=(2,), instantaneous=instant)
+        assert result["capture_status"] == "UNKNOWN" and point == ()
+    assert len(calls) == 3 and not decoder._NATIVE_ORIGINAL_DECODE
+    monkeypatch.setattr(decoder, "_native_message_capture", capture)
+    original, original_point = decoder._decode_native_original(raw, flat_indices=(2,), instantaneous=True)
+    gid = ec.codes_new_from_message(raw)
+    try:
+        ec.codes_set_values(gid, [300., 310., 281., 320.])
+        changed = ec.codes_get_message(gid)
+    finally:
+        ec.codes_release(gid)
+    revised, revised_point = decoder._decode_native_original(changed, flat_indices=(2,), instantaneous=True)
+    assert revised["raw_message_sha256"] != original["raw_message_sha256"]
+    assert original_point[3] == (280.,) and revised_point[3] == (281.,)
+    restored, restored_point = decoder._decode_native_original(raw, flat_indices=(2,), instantaneous=True)
+    assert restored == original and restored_point == original_point
+    gid = ec.codes_new_from_message(raw)
+    try:
+        ec.codes_set(gid, "longitudeOfFirstGridPointInDegrees", .125)
+        different_grid = ec.codes_get_message(gid)
+    finally:
+        ec.codes_release(gid)
+    grid_result, _ = decoder._decode_native_original(different_grid, flat_indices=(2,), instantaneous=True)
+    assert grid_result["raw_message_sha256"] != original["raw_message_sha256"]
+    assert grid_result["observed_headers"]["longitudeOfFirstGridPointInDegrees"] == .125
+    decoder._NATIVE_ORIGINAL_DECODE.clear()
+
+
+def test_native_index_primitive_does_not_cache_binding_clocks_or_line_identity(tmp_path, monkeypatch):
+    from scripts import extract_open_ens_localday as decoder
+
+    inputs = _native_temperature_knots_fixture(tmp_path, steps=(0,))
+    sources = inputs["message_source_evidence"]
+    evidence = dict(sources[0])
+    index = b"".join(item["original_index_bytes"] for item in sources.values())
+    evidence.update(original_index_bytes=index, source_index_sha256=hashlib.sha256(index).hexdigest())
+    raw = evidence["original_range_bytes"]
+    headers = decoder._decode_native_original(raw, instantaneous=True)[0]["observed_headers"]
+    decoder._NATIVE_ORIGINAL_INDEX_DECODE.clear()
+    actual = json.loads
+    reads = []
+    def counted(text, *args, **kwargs):
+        reads.append(True)
+        return actual(text, *args, **kwargs)
+    monkeypatch.setattr(json, "loads", counted)
+    args = dict(param="2t", member=0, step=0, run=inputs["expected_run_utc"])
+    first = decoder._open_ens_source_binding(raw, evidence, headers, **args)
+    first_reads = len(reads)
+    assert first_reads == 52
+    assert decoder._open_ens_source_binding(raw, evidence, headers, **args) == first
+    assert len(reads) == first_reads + 1
+    assert all(isinstance(entry, tuple) and isinstance(entry[3], str)
+               for matrix in decoder._NATIVE_ORIGINAL_INDEX_DECODE.values() for entry in matrix)
+    changed_clock = {**evidence, "source_fetched_at": (datetime.now(timezone.utc)+timedelta(days=1)).isoformat()}
+    with pytest.raises(ValueError, match="ENS_POINT_SOURCE_POSSESSION_CLOCK_INVALID"):
+        decoder._open_ens_source_binding(raw, changed_clock, headers, **args)
+    with pytest.raises(ValueError, match="ENS_POINT_SOURCE_ENVELOPE_MISMATCH"):
+        decoder._open_ens_source_binding(raw, {**evidence, "source_url": "https://data.ecmwf.int/wrong"}, headers, **args)
+    wrong_line = json.dumps({**actual(index.splitlines()[0]), "number": "1"}).encode()
+    wrong_index = wrong_line+b"\n"+b"\n".join(index.splitlines()[1:])+b"\n"
+    wrong = {**evidence, "original_index_bytes": wrong_index,
+        "source_index_sha256": hashlib.sha256(wrong_index).hexdigest(),
+        "source_index_line_sha256": hashlib.sha256(wrong_line).hexdigest()}
+    with pytest.raises(ValueError, match="ENS_POINT_SOURCE_INDEX_IDENTITY_MISMATCH"):
+        decoder._open_ens_source_binding(raw, wrong, headers, **args)
+    duplicate = index+index.splitlines()[0]+b"\n"
+    with pytest.raises(ValueError, match="ENS_POINT_SOURCE_INDEX_AMBIGUOUS"):
+        decoder._open_ens_source_binding(raw, {**evidence, "original_index_bytes": duplicate,
+            "source_index_sha256": hashlib.sha256(duplicate).hexdigest()}, headers, **args)
+    assert decoder._open_ens_source_binding(raw, evidence, headers, **args) == first
+    decoder._NATIVE_ORIGINAL_INDEX_DECODE.clear()
+
+
 def test_native_temperature_knots_real_eccodes_instant_without_extrema_relaxation(tmp_path):
     from scripts import extract_open_ens_localday as extractor
 
@@ -1479,6 +1610,8 @@ def test_native_physical_scope_strict_pit_and_honest_station_unknown(tmp_path, m
         after = _native_source_scope(conn, source, manifest, inputs, decision_at_utc=first + timedelta(microseconds=1), **args)
         assert before.pit_status == "AFTER_DECISION", before
         assert after.pit_status == "AVAILABLE", after
+        rewound = _native_source_scope(conn, source, manifest, inputs, decision_at_utc=first, **args)
+        assert rewound.pit_status == "AFTER_DECISION", rewound
         assert after.physical_dependency_available_at == after.temperature_scope_first_possession_at == first.isoformat()
         assert after.available_at is None and after.qualification_status == "OFFLINE_ONLY"
         witness = after.physical_witness
@@ -1488,6 +1621,48 @@ def test_native_physical_scope_strict_pit_and_honest_station_unknown(tmp_path, m
         point = witness["selected_cities"]["London"]
         assert point["selected_flat_index"] == 2 and point["selected_land_fraction"] == pytest.approx(.8)
         assert [p["raw_phi_m2_s2"] for p in point["four_neighbors"]] == [100., 200., 313.75, 400.]
+    finally:
+        conn.close()
+
+
+def test_native_primitive_warm_scope_rechecks_originals_and_restores_old_clock(tmp_path):
+    from src.data import ecmwf_open_data as module
+    from scripts import extract_open_ens_localday as decoder
+
+    inputs, cache, conn, manifest = _native_source_cache_fixture(tmp_path)
+    try:
+        _physical_static_originals(inputs)
+        source = module.persist_native_temperature_source_run(conn, cache_dir=cache,
+            manifest_path=manifest, expected_run_utc=inputs["expected_run_utc"], product_steps=[0, 3, 6])
+        decision = inputs["expected_run_utc"]+timedelta(hours=1, microseconds=1)
+        args = dict(surface_geopotential_grib_path=inputs["surface_geopotential_grib_path"],
+            surface_geopotential_proof_path=inputs["surface_geopotential_proof_path"],
+            metric="high", decision_at_utc=decision)
+        before = _native_source_scope(conn, source, manifest, inputs, **args)
+        assert before.status == "AVAILABLE" and before.pit_status == "AVAILABLE", before
+        assert decoder._NATIVE_ORIGINAL_DECODE and decoder._NATIVE_ORIGINAL_INDEX_DECODE
+        rows = tuple(tuple(row) for row in conn.execute("SELECT * FROM source_run"))
+        path = cache/"step006-member50.grib2"
+        proof_path = path.with_suffix(".grib2.proof.json")
+        proof = proof_path.read_bytes()
+        index_path = cache/json.loads(proof)["index_path"]
+        originals = {item:item.read_bytes() for item in (path, proof_path, index_path)}
+        for fault in ("body", "index", "clock"):
+            if fault == "body":
+                path.write_bytes(originals[path][:-1]+b"0")
+            elif fault == "index":
+                index_path.write_bytes(b"{}\n")
+            else:
+                changed = json.loads(proof)
+                changed["source_fetched_at"] = (datetime.now(timezone.utc)+timedelta(days=1)).isoformat()
+                proof_path.write_text(json.dumps(changed))
+            refused = _native_source_scope(conn, source, manifest, inputs, **args)
+            assert refused.status == "UNKNOWN" and refused.native_knots == (), (fault, refused)
+            for item, body in originals.items():
+                item.write_bytes(body)
+            reset = _native_source_scope(conn, source, manifest, inputs, **args)
+            assert reset == before, (fault, reset)
+            assert rows == tuple(tuple(row) for row in conn.execute("SELECT * FROM source_run"))
     finally:
         conn.close()
 

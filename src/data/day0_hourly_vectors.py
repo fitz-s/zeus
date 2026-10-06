@@ -1414,44 +1414,45 @@ def read_native_measurement_role(
                             raise ValueError("MEASUREMENT_NATIVE_ORIGINAL_SYMLINK")
                         with source.open("rb") as stream:
                             while (gid := ec.codes_grib_new_from_file(stream)) is not None:
-                                yield gid
+                                try:
+                                    raw = ec.codes_get_message(gid)
+                                finally:
+                                    ec.codes_release(gid)
+                                yield raw
                     else:
                         # Retention replicas preserve the exact captured body.
                         # The canonical receipt/clock and all checks below are
                         # unchanged; a CAS file's mtime conveys no availability.
                         for saved in messages:
-                            yield ec.codes_new_from_message(_read_role_message_bytes(paths.raw_root, saved))
-                for gid in original_messages():
-                    try:
-                        if ec.codes_get(gid, "paramId") != track.paramId:
-                            continue
-                        original = decoder._native_message_capture(gid)
-                        saved = retained.get(str(original.get("raw_message_sha256")))
-                        if saved != original:
-                            continue
-                        h = original["observed_headers"]
-                        member = int(h.get("perturbationNumber", h.get("number", 0)))
-                        start = cycle + timedelta(hours=int(h["startStep"]))
-                        end = cycle + timedelta(hours=int(h["endStep"]))
-                        if not (start < day.end_utc and end > scope_start):
-                            continue
-                        if (int(h["dataDate"]) != int(cycle.strftime("%Y%m%d"))
-                                or int(h["dataTime"]) != cycle.hour * 100
-                                or h["stepType"] != track.step_type or h["units"] != "K"
-                                or ec.codes_get(gid, "generatingProcessIdentifier") != 161
-                                or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
-                                or hashlib.sha256(base64.b64decode(next(s["bytes_base64"]
-                                    for s in original["metadata_sections"] if s["section_number"] == 3))).hexdigest()
-                                != scope.physical_witness["grid_sha256"]):
-                            raise ValueError("MEASUREMENT_NATIVE_INTERVAL_IDENTITY_INVALID")
-                        value = decoder.kelvin_to_native(
-                            float(ec.codes_get_elements(gid, "values", [int(point["flat_index"])])[0]),
-                            cities[0]["unit"])
-                        by_member[member].append((start, end, value))
-                        identities.append(original["raw_message_sha256"])
-                        part_ids[(member, start, end)] = original["raw_message_sha256"]
-                    finally:
-                        ec.codes_release(gid)
+                            yield _read_role_message_bytes(paths.raw_root, saved)
+                for raw in original_messages():
+                    original, decoded = decoder._decode_native_original(raw,
+                        flat_indices=(int(point["flat_index"]),), parameter_id=track.paramId)
+                    h = original["observed_headers"]
+                    if h.get("paramId") != track.paramId:
+                        continue
+                    saved = retained.get(str(original.get("raw_message_sha256")))
+                    if saved != original:
+                        continue
+                    member = int(h.get("perturbationNumber", h.get("number", 0)))
+                    start = cycle + timedelta(hours=int(h["startStep"]))
+                    end = cycle + timedelta(hours=int(h["endStep"]))
+                    if not (start < day.end_utc and end > scope_start):
+                        continue
+                    if (int(h["dataDate"]) != int(cycle.strftime("%Y%m%d"))
+                            or int(h["dataTime"]) != cycle.hour * 100
+                            or h["stepType"] != track.step_type or h["units"] != "K"
+                            or (decoded and decoded[2]) != 161
+                            or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
+                            or hashlib.sha256(base64.b64decode(next(s["bytes_base64"]
+                                for s in original["metadata_sections"] if s["section_number"] == 3))).hexdigest()
+                            != scope.physical_witness["grid_sha256"]):
+                        raise ValueError("MEASUREMENT_NATIVE_INTERVAL_IDENTITY_INVALID")
+                    _, _, _, values = decoded
+                    value = decoder.kelvin_to_native(values[0], cities[0]["unit"])
+                    by_member[member].append((start, end, value))
+                    identities.append(original["raw_message_sha256"])
+                    part_ids[(member, start, end)] = original["raw_message_sha256"]
                 return by_member, identities, part_ids
             track = decoder.TRACKS["mx2t6_high" if metric == "high" else "mn2t6_low"]
             by_member, identities, primary_part_ids = read_intervals(track, capture["messages"])

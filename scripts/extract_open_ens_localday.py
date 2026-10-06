@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Created: 2026-09-22
-# Last reused/audited: 2026-10-04
+# Last reused/audited: 2026-10-06
 # Authority basis: current OpenData source contract; native 3h local-day extrema.
-# Lifecycle: created=2026-09-22; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Lifecycle: created=2026-09-22; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Native ENS extrema JSON and offline 2t knot decode with original byte/point proof; no DB writes.
 # Reuse: Use the collector's explicit coordinate manifest and same-cycle land-mask proof.
 """Decode native ENS windows at settlement coordinates.
@@ -22,6 +22,8 @@ import logging
 import math
 import re
 import sys
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -535,6 +537,73 @@ def _native_message_capture(gid: int, *, instantaneous: bool = False) -> dict[st
     return capture
 
 
+_NATIVE_ORIGINAL_DECODE = OrderedDict()
+_NATIVE_ORIGINAL_INDEX_DECODE = OrderedDict()
+_NATIVE_ORIGINAL_DECODE_LOCK = threading.RLock()
+
+
+def _decode_native_original(raw: bytes, *, flat_indices: tuple[int, ...] = (),
+                            instantaneous: bool = False, physical_unit: str = "K",
+                            parameter_id: int | None = None) -> tuple[dict, tuple]:
+    """Pure bounded original math, never possession, source binding or q.
+
+    Callers must still read/hash originals and prove current receipts, clocks,
+    grid selection and canonical references on every invocation. Cache keys
+    contain no paths or mtime; values contain no full GRIB/grid arrays. Missing
+    evidence cannot be repaired by a hit. Decoder mutation also invalidates it.
+    """
+    import eccodes as ec
+    digest = hashlib.sha256(raw).hexdigest()
+    grid_sha = None
+    offset = 16
+    while offset < len(raw)-4:
+        length = int.from_bytes(raw[offset:offset+4], "big")
+        if length < 5 or offset+length > len(raw)-4:
+            raise ValueError("invalid native metadata section length")
+        if raw[offset+4] == 3:
+            grid_sha = hashlib.sha256(raw[offset:offset+length]).hexdigest()
+        offset += length
+    if grid_sha is None:
+        raise ValueError("native metadata sections incomplete")
+    identity = (_native_message_capture, codes_get, codes_is_defined,
+                codes_get_message, ec.codes_new_from_message,
+                ec.codes_get_elements, ec.codes_get_size, ec.codes_get)
+    key = (digest, len(raw), grid_sha, tuple(flat_indices), instantaneous, physical_unit, parameter_id, identity)
+    header_key = (digest, len(raw), grid_sha, (), instantaneous, physical_unit, None, identity)
+    with _NATIVE_ORIGINAL_DECODE_LOCK:
+        cached = _NATIVE_ORIGINAL_DECODE.get(key)
+        header = _NATIVE_ORIGINAL_DECODE.get(header_key)
+        if cached is not None:
+            _NATIVE_ORIGINAL_DECODE.move_to_end(key)
+            return json.loads(cached[0]), cached[1]
+    gid = ec.codes_new_from_message(raw)
+    try:
+        capture = json.loads(header[0]) if header is not None else _native_message_capture(gid, instantaneous=instantaneous)
+        if capture.get("capture_status") != "OBSERVED":
+            return capture, ()  # UNKNOWN is never memoized.
+        point = ()
+        headers = capture["observed_headers"]
+        if (flat_indices and headers.get("units") == physical_unit
+                and (parameter_id is None or headers.get("paramId") == parameter_id)):
+            size = ec.codes_get_size(gid, "values")
+            missing = float(ec.codes_get(gid, "missingValue"))
+            values = tuple(float(v) for v in ec.codes_get_elements(gid, "values", list(flat_indices)))
+            point = (size, missing, int(ec.codes_get(gid, "generatingProcessIdentifier")), values)
+        serialized = json.dumps(capture, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        with _NATIVE_ORIGINAL_DECODE_LOCK:
+            entries = [(header_key, (serialized, ()))]
+            if not flat_indices or (point and all(math.isfinite(v) and v != point[1] for v in point[3])):
+                entries.append((key, (serialized, point)))
+            for entry, value in entries:
+                _NATIVE_ORIGINAL_DECODE[entry] = value
+                _NATIVE_ORIGINAL_DECODE.move_to_end(entry)
+            while len(_NATIVE_ORIGINAL_DECODE) > 4096:
+                _NATIVE_ORIGINAL_DECODE.popitem(last=False)
+        return json.loads(serialized), point
+    finally:
+        ec.codes_release(gid)
+
+
 def _open_ens_source_binding(raw: bytes, evidence: dict[str, Any], headers: dict[str, Any],
                              *, param: str, member: int, step: int, run: datetime) -> dict[str, Any]:
     """Check supplied original index/range bytes, never a request/metadata echo.
@@ -551,16 +620,35 @@ def _open_ens_source_binding(raw: bytes, evidence: dict[str, Any], headers: dict
     offset, length = evidence["source_index_offset"], evidence["source_index_length"]
     if type(offset) is not int or offset < 0 or type(length) is not int or length != len(raw):
         raise ValueError("ENS_POINT_SOURCE_RANGE_INVALID")
-    matches = []
-    for line in index.splitlines():
-        row = json.loads(line)
-        if row.get("_offset") == offset and row.get("_length") == length:
-            matches.append((line, row))
+    # Only the byte-derived index matrix is shared. All supplied bytes, line
+    # identity, envelope and possession clocks above/below are checked afresh.
+    key = (evidence["source_index_sha256"], len(index), json.loads, json.dumps)
+    with _NATIVE_ORIGINAL_DECODE_LOCK:
+        parsed = _NATIVE_ORIGINAL_INDEX_DECODE.get(key)
+        if parsed is not None:
+            _NATIVE_ORIGINAL_INDEX_DECODE.move_to_end(key)
+    if parsed is None:
+        entries = []
+        for line in index.splitlines():
+            row = json.loads(line)
+            entries.append((row.get("_offset"), row.get("_length"),
+                hashlib.sha256(line).hexdigest(), json.dumps(row, separators=(",", ":"))))
+        parsed = tuple(entries)
+        # Large indexes remain readable but cannot grow retained cache memory.
+        if len(index) <= 262144:
+            with _NATIVE_ORIGINAL_DECODE_LOCK:
+                _NATIVE_ORIGINAL_INDEX_DECODE[key] = parsed
+                _NATIVE_ORIGINAL_INDEX_DECODE.move_to_end(key)
+                while len(_NATIVE_ORIGINAL_INDEX_DECODE) > 128:
+                    _NATIVE_ORIGINAL_INDEX_DECODE.popitem(last=False)
+    matches = [(line_sha, text) for row_offset, row_length, line_sha, text in parsed
+               if row_offset == offset and row_length == length]
     if len(matches) != 1:
         raise ValueError("ENS_POINT_SOURCE_INDEX_AMBIGUOUS")
-    line, row = matches[0]
-    if hashlib.sha256(line).hexdigest() != evidence["source_index_line_sha256"]:
+    line_sha, text = matches[0]
+    if line_sha != evidence["source_index_line_sha256"]:
         raise ValueError("ENS_POINT_SOURCE_INDEX_LINE_MISMATCH")
+    row = json.loads(text)
     stream, file_type, mars_type = ("oper", "fc", "fc") if member == 0 else ("enfo", "ef", "pf")
     if (row.get("param") != param or row.get("levtype") != "sfc" or row.get("class") != "od"
             or str(row.get("date")) != run.strftime("%Y%m%d")

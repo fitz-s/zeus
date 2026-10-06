@@ -162,10 +162,10 @@ def _native_temperature_steps(run: datetime, steps: list[int]) -> list[int]:
     return sorted(steps)
 
 
-def _read_native_temperature_record(path: Path, run: datetime) -> tuple[dict, bytes]:
+def _read_native_temperature_record(path: Path, run: datetime, *,
+        flat_indices: tuple[int, ...] = ()) -> tuple[dict, bytes]:
     """Revalidate retained originals; metadata echoes never replace GRIB sections."""
     import base64
-    import eccodes as ec
     from urllib.parse import urlsplit
     from scripts import extract_open_ens_localday as decoder
 
@@ -217,49 +217,45 @@ def _read_native_temperature_record(path: Path, run: datetime) -> tuple[dict, by
                 or proof.get("qualification_status") != "UNKNOWN"
                 or proof.get("source_issued_at") is not None):
             raise ValueError("NATIVE_2T_ORIGINAL_INDEX_RECEIPT_INVALID")
-    gid = ec.codes_new_from_message(raw)
-    try:
-        capture = decoder._native_message_capture(gid, instantaneous=True)
-        if capture["capture_status"] != "OBSERVED":
-            raise ValueError("NATIVE_2T_CAPTURE_UNKNOWN")
-        h = capture["observed_headers"]
-        sections = {s["section_number"]: base64.b64decode(s["bytes_base64"], validate=True)
-                    for s in capture["metadata_sections"]}
-        s1, s3, s4 = sections[1], sections[3], sections[4]
-        valid = run + timedelta(hours=step)
-        if (h["paramId"] != 167 or h["shortName"] != "2t" or h["units"] != "K"
-                or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
-                or h["stepType"] != "instant" or h["stepUnits"] != 1
-                or h["startStep"] != step or h["endStep"] != step or str(h["stepRange"]) != str(step)
-                or h["centre"] != "ecmf" or h["generatingProcessIdentifier"] != 161
-                or h["dataType"] != ("fc" if member == 0 else "pf")
-                or h.get("number", 0) != member
-                or (h["dataDate"], h["dataTime"]) != (int(run.strftime("%Y%m%d")), run.hour * 100)
-                or (h["validityDate"], h["validityTime"]) != (int(valid.strftime("%Y%m%d")), valid.hour * 100)
-                or raw[6] != 0 or s4[9:11] != b"\x00\x00"
-                or int.from_bytes(s1[5:7], "big") != 98
-                or int.from_bytes(s1[12:14], "big") != run.year
-                or tuple(s1[14:19]) != (run.month, run.day, run.hour, 0, 0)
-                or s1[20] != (1 if member == 0 else 4)
-                or int.from_bytes(s4[7:9], "big") != (0 if member == 0 else 1)
-                or h["productDefinitionTemplateNumber"] != (0 if member == 0 else 1)
-                or s4[13] != 161 or s4[11] != h["typeOfGeneratingProcess"]
-                or h["typeOfGeneratingProcess"] != (2 if member == 0 else 4)
-                or s4[17] != 1 or int.from_bytes(s4[18:22], "big") != step
-                or s4[22] != 103 or s4[23] != 0 or int.from_bytes(s4[24:28], "big") != 2
-                or (member and s4[35] != member)
-                or decoder._open_ens_original_grid(s3) != {k: h[k] for k in decoder._GRID_KEYS}):
-            raise ValueError("NATIVE_2T_ORIGINAL_IDENTITY_MISMATCH")
-        binding = decoder._open_ens_source_binding(raw, {**proof, "original_index_bytes": index,
-            "original_range_bytes": raw}, h, param="2t", member=member, step=step, run=run)
-        return {**binding, "member": member, "step_hours": step, "valid_time_utc": valid.isoformat(),
-            "path": str(path.resolve()), "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
-            "grid_sha256": hashlib.sha256(s3).hexdigest(),
-            "observed_headers": h,
-            "original_section_sha256": {str(n): hashlib.sha256(body).hexdigest() for n, body in sections.items()},
-            "process_type": h["typeOfGeneratingProcess"]}, raw
-    finally:
-        ec.codes_release(gid)
+    capture, _ = decoder._decode_native_original(raw, flat_indices=flat_indices, instantaneous=True)
+    if capture["capture_status"] != "OBSERVED":
+        raise ValueError("NATIVE_2T_CAPTURE_UNKNOWN")
+    h = capture["observed_headers"]
+    sections = {s["section_number"]: base64.b64decode(s["bytes_base64"], validate=True)
+                for s in capture["metadata_sections"]}
+    s1, s3, s4 = sections[1], sections[3], sections[4]
+    valid = run + timedelta(hours=step)
+    if (h["paramId"] != 167 or h["shortName"] != "2t" or h["units"] != "K"
+            or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
+            or h["stepType"] != "instant" or h["stepUnits"] != 1
+            or h["startStep"] != step or h["endStep"] != step or str(h["stepRange"]) != str(step)
+            or h["centre"] != "ecmf" or h["generatingProcessIdentifier"] != 161
+            or h["dataType"] != ("fc" if member == 0 else "pf")
+            or h.get("number", 0) != member
+            or (h["dataDate"], h["dataTime"]) != (int(run.strftime("%Y%m%d")), run.hour * 100)
+            or (h["validityDate"], h["validityTime"]) != (int(valid.strftime("%Y%m%d")), valid.hour * 100)
+            or raw[6] != 0 or s4[9:11] != b"\x00\x00"
+            or int.from_bytes(s1[5:7], "big") != 98
+            or int.from_bytes(s1[12:14], "big") != run.year
+            or tuple(s1[14:19]) != (run.month, run.day, run.hour, 0, 0)
+            or s1[20] != (1 if member == 0 else 4)
+            or int.from_bytes(s4[7:9], "big") != (0 if member == 0 else 1)
+            or h["productDefinitionTemplateNumber"] != (0 if member == 0 else 1)
+            or s4[13] != 161 or s4[11] != h["typeOfGeneratingProcess"]
+            or h["typeOfGeneratingProcess"] != (2 if member == 0 else 4)
+            or s4[17] != 1 or int.from_bytes(s4[18:22], "big") != step
+            or s4[22] != 103 or s4[23] != 0 or int.from_bytes(s4[24:28], "big") != 2
+            or (member and s4[35] != member)
+            or decoder._open_ens_original_grid(s3) != {k: h[k] for k in decoder._GRID_KEYS}):
+        raise ValueError("NATIVE_2T_ORIGINAL_IDENTITY_MISMATCH")
+    binding = decoder._open_ens_source_binding(raw, {**proof, "original_index_bytes": index,
+        "original_range_bytes": raw}, h, param="2t", member=member, step=step, run=run)
+    return {**binding, "member": member, "step_hours": step, "valid_time_utc": valid.isoformat(),
+        "path": str(path.resolve()), "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
+        "grid_sha256": hashlib.sha256(s3).hexdigest(),
+        "observed_headers": h,
+        "original_section_sha256": {str(n): hashlib.sha256(body).hexdigest() for n, body in sections.items()},
+        "process_type": h["typeOfGeneratingProcess"]}, raw
 
 
 def persist_native_temperature_source_run(conn: sqlite3.Connection, *, cache_dir: Path,
@@ -442,16 +438,6 @@ def read_native_temperature_scope(conn: sqlite3.Connection, *, source_run_id: st
                 or decision_at_utc.utcoffset() != timedelta(0)
                 or decision_at_utc > datetime.now(timezone.utc) or metric is None):
             raise ValueError("NATIVE_2T_DECISION_SCOPE_INVALID")
-        originals = []
-        for saved in selected:
-            record, raw = _read_native_temperature_record(Path(saved["path"]), run)
-            if mode == "SCHEDULED_LIVE" and json.loads(Path(saved["path"]).with_suffix(
-                    ".grib2.proof.json").read_bytes()).get("ingest_mode") != mode:
-                raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
-            if record != saved:
-                raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
-            originals.append((saved, raw))
-        temperature_clock = max((s["source_fetched_at"] for s, _ in originals), key=datetime.fromisoformat)
         # Resolve the actual normal collector caches, not an offline/audit HTTP
         # helper. Both mandatory tracks share this product/run/grid inventory.
         if mask_grib_path is None:
@@ -481,25 +467,32 @@ def read_native_temperature_scope(conn: sqlite3.Connection, *, source_run_id: st
         if not explicit_manifest or len({c["city"] for c in explicit_manifest}) != len(explicit_manifest):
             raise ValueError("NATIVE_2T_CITY_SCOPE_INVALID")
         points = decoder._select_land_grid_points(mask["fields"], explicit_manifest, mask["values"].__getitem__)
+        indices = tuple(points[city["city"]]["selected_flat_index"] for city in explicit_manifest)
+        originals = []
+        for saved in selected:
+            record, raw = _read_native_temperature_record(Path(saved["path"]), run, flat_indices=indices)
+            if mode == "SCHEDULED_LIVE" and json.loads(Path(saved["path"]).with_suffix(
+                    ".grib2.proof.json").read_bytes()).get("ingest_mode") != mode:
+                raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
+            if record != saved:
+                raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
+            originals.append((saved, raw))
+        temperature_clock = max((s["source_fetched_at"] for s, _ in originals), key=datetime.fromisoformat)
         knots = []
         for saved, raw in originals:
-            gid = ec.codes_new_from_message(raw)
-            try:
-                values = ec.codes_get_values(gid)
-                if len(values) != mask["fields"]["Ni"] * mask["fields"]["Nj"]:
-                    raise ValueError("NATIVE_2T_VALUES_GRID_INVALID")
-                for city in explicit_manifest:
-                    point = points[city["city"]]
-                    value = float(values[point["selected_flat_index"]])
-                    if not math.isfinite(value) or value == ec.codes_get(gid, "missingValue"):
-                        raise ValueError("NATIVE_2T_SELECTED_VALUE_INVALID")
-                    knots.append({"city": city["city"], "member": saved["member"],
-                        "step_hours": saved["step_hours"], "valid_time_utc": saved["valid_time_utc"],
-                        "value_k": value, "raw_message_sha256": saved["raw_message_sha256"],
-                        "selected_point": point, "lsm_raw_sha256": mask_capture["raw_message_sha256"],
-                        "surface_class": "PURE_LAND" if point["selected_land_fraction"] == 1 else "MIXED_LAND_WATER"})
-            finally:
-                ec.codes_release(gid)
+            _, decoded = decoder._decode_native_original(raw, flat_indices=indices, instantaneous=True)
+            size, missing, _, values = decoded
+            if size != mask["fields"]["Ni"] * mask["fields"]["Nj"]:
+                raise ValueError("NATIVE_2T_VALUES_GRID_INVALID")
+            for city, value in zip(explicit_manifest, values):
+                point = points[city["city"]]
+                if not math.isfinite(value) or value == missing:
+                    raise ValueError("NATIVE_2T_SELECTED_VALUE_INVALID")
+                knots.append({"city": city["city"], "member": saved["member"],
+                    "step_hours": saved["step_hours"], "valid_time_utc": saved["valid_time_utc"],
+                    "value_k": value, "raw_message_sha256": saved["raw_message_sha256"],
+                    "selected_point": point, "lsm_raw_sha256": mask_capture["raw_message_sha256"],
+                    "surface_class": "PURE_LAND" if point["selected_land_fraction"] == 1 else "MIXED_LAND_WATER"})
         static_status, dependency_clock, pit, witness, static_reason = "UNKNOWN", None, "UNKNOWN", None, None
         try:
             phi = decoder.read_native_static_dependency(path=surface_geopotential_grib_path,
