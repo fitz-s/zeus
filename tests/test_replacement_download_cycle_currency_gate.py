@@ -4588,3 +4588,94 @@ def test_one_family_transport_failure_does_not_void_the_batch(tmp_path, monkeypa
     assert result["manifest_count"] == 1
     assert any(row["metric"] == "low" and row["reason"].startswith("OM9_FAMILY_COMMIT_FAILED:")
                for row in result["skipped_cities"])
+
+
+def test_commit_timeout_keeps_certified_families_and_seals_no_uncommitted_transport(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """10-06 00Z: a proof deadline inside the commit loop rolled back the whole
+    batch after every family had already sealed its transport manifest. Each
+    retry carries its own capture clock, so the sealed name refused it with
+    sealed_file_changed forever. A timeout keeps the certified families and
+    seals nothing for a family without a committed row."""
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+
+    def _wave(requests, **_kwargs):
+        captured_at = datetime.now(timezone.utc)
+        return {
+            key: (
+                _anchor_payload(),
+                {"openmeteo_endpoint": "single_runs_api", "run_authority": "run_pinned_single_runs"},
+                captured_at,
+            )
+            for key in requests
+        }
+
+    monkeypatch.setattr(dl, "_fetch_run_pinned_anchor_wave", _wave)
+    calls = {"n": 0}
+
+    def _proof_times_out_second(_conn, original_artifact_id, *_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise TimeoutError("anchor_local_proof:deadline_expired")
+        return original_artifact_id
+
+    monkeypatch.setattr(dl, "write_anchor_local_proof", _proof_times_out_second)
+    output_dir = tmp_path / "raw"
+    kwargs = dict(
+        forecast_db=db,
+        output_dir=output_dir,
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        required_scopes=(
+            ("Dallas", "2026-06-10", "high"),
+            ("Dallas", "2026-06-11", "high"),
+        ),
+    )
+
+    first = dl.download_current_target_raw_inputs(**kwargs)
+
+    def _anchor_rows() -> set[str]:
+        conn = sqlite3.connect(db)
+        try:
+            return {
+                row[0]
+                for row in conn.execute(
+                    "SELECT json_extract(artifact_metadata_json, '$.target_date') "
+                    "FROM raw_forecast_artifacts WHERE data_version = ?",
+                    (dl.OPENMETEO_HIGH_DATA_VERSION,),
+                )
+            }
+        finally:
+            conn.close()
+
+    def _sealed_dates() -> set[str]:
+        return {
+            json.loads(path.read_text())["product_metadata"]["target_date"]
+            for path in output_dir.glob("*.precision-*.manifest.json")
+        }
+
+    assert first["timeboxed_incomplete"] is True
+    assert first["written_manifest_count"] == 1
+    assert _anchor_rows() == {"2026-06-10"}
+    assert _sealed_dates() == {"2026-06-10"}
+
+    second = dl.download_current_target_raw_inputs(**kwargs)
+
+    assert not any(
+        "sealed_file_changed" in str(row.get("reason")) for row in second["skipped_cities"]
+    )
+    assert _anchor_rows() == {"2026-06-10", "2026-06-11"}
+    assert _sealed_dates() == {"2026-06-10", "2026-06-11"}

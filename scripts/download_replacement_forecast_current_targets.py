@@ -2626,8 +2626,12 @@ def download_current_target_raw_inputs(
         # rollback-journal (delete) mode contention (the forecast-DB lock storm).
         conn.execute("BEGIN IMMEDIATE")
     failed_families: set[tuple[str, str, str]] = set()
+    # Sealed transport files are published only after the DB commit. A file
+    # sealed before a rolled-back commit named a row that never existed, and the
+    # next pass's own capture clock then failed sealed_file_changed forever.
+    committed_manifests: list[RawForecastArtifactManifest] = []
     try:
-        for manifest in manifests:
+        for position, manifest in enumerate(manifests):
             # One family's bad proof or transport is that family's skip, never the
             # batch's: a raise used to roll back every certified family in the pass.
             family = (str(manifest.product_metadata.get("city")),
@@ -2690,8 +2694,19 @@ def download_current_target_raw_inputs(
                         conn, artifact_id, manifest, precision_metadata=precision,
                         deadline_monotonic=deadline_monotonic,
                     )]
-                manifest_path = _write_manifest_file(output_dir, manifest)
-                written_manifests.append(str(manifest_path))
+            except TimeoutError:
+                # The pass clock ran out inside this family: drop only this family
+                # and commit every family already certified, instead of letting the
+                # batch rollback discard them all.
+                if conn is not None:
+                    conn.execute("ROLLBACK TO current_target_family")
+                    conn.execute("RELEASE current_target_family")
+                timeboxed_incomplete = True
+                for pending in manifests[position:]:
+                    failed_families.add((str(pending.product_metadata.get("city")),
+                                         str(pending.product_metadata.get("target_date")),
+                                         str(pending.product_metadata.get("metric"))))
+                break
             except ValueError as family_exc:
                 if conn is not None:
                     conn.execute("ROLLBACK TO current_target_family")
@@ -2702,6 +2717,7 @@ def download_current_target_raw_inputs(
                 continue
             if conn is not None:
                 conn.execute("RELEASE current_target_family")
+            committed_manifests.append(manifest)
             db_artifact_ids.extend(family_ids)
             local_proof_artifact_ids.extend(family_proof_ids)
         if conn is not None:
@@ -2713,6 +2729,18 @@ def download_current_target_raw_inputs(
     finally:
         if conn is not None:
             conn.close()
+    for manifest in committed_manifests:
+        try:
+            written_manifests.append(str(_write_manifest_file(output_dir, manifest)))
+        except ValueError as publish_exc:
+            # The row is committed; the coverage check keeps a family whose sealed
+            # transport conflicts uncovered, so it stays named debt, not progress.
+            family = (str(manifest.product_metadata.get("city")),
+                      str(manifest.product_metadata.get("target_date")),
+                      str(manifest.product_metadata.get("metric")))
+            failed_families.add(family)
+            skipped_cities.append({"city": family[0], "target_date": family[1], "metric": family[2],
+                                   "reason": f"OM9_FAMILY_COMMIT_FAILED:{str(publish_exc)[:160]}"})
     manifests = [m for m in manifests if (str(m.product_metadata.get("city")),
                  str(m.product_metadata.get("target_date")),
                  str(m.product_metadata.get("metric"))) not in failed_families]
