@@ -19538,3 +19538,20 @@ unknown-reason count assertion intentionally changes20 to25 for the five exact
 ValueError reasons; no lifecycle exemption or production source change.
 AST3/YAML/diff-check pass; no repeated whole CLI. cd6's rc1/10 findings remain
 open, and the separate type-marker disposition is read-only pending ROOT.
+
+### Optional held-point trace role preservation — BEFORE EDIT
+
+ROOT authorized native leaf in its isolated child to own
+src/engine/event_reactor_adapter.py and src/engine/tier0_auction_corpus.py,
+plus only those two existing architecture/source_rationale.yaml why fields.
+Actual HK normal source/materializer/ENTRY succeeds, but the existing optional
+trace drops identity_inputs.domain_role_shapes during capture/freeze/replay;
+same-builder replay then reports HELD_POINT_TRACE_UNCAPTURED_COMPOSITION.
+Restore only a bounded finite math-role projection with canonical JSON/hash,
+preserving the 16KiB budget, finite grammar and the existing public builder.
+No q/kernel/semrev/source/clock authority changes. SCOPE: exact optional trace
+consumer; DRAIN: each normal capture; RESET: valid original role projection
+replays the same distribution. Missing/invalid/oversize diagnostic data stays
+typed UNAVAILABLE or is dropped, never changes action q or bypasses source
+qualification. Integration fixture remains native-owned; q owns its four
+separate fixture tests and only supplies the shared normal-original helper.
