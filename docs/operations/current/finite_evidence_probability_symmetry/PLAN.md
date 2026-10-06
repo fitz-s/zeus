@@ -19225,3 +19225,24 @@ encoder receiver control and is not the final epoch. SHA256 output is scalar
 dependency-bearing evidence, not a reason to erase diagnostic/unknown paths.
 AST parse and diff-check pass. No whole CLI was run; its prior213 remain OPEN.
 No source/q/loader/registry behavior changed and no live action occurred.
+
+Normal fresh fetch/rebase after digest freeze: origin/live620a0b5f50e9d0dc12563611b08a6b84f3da29dc,
+candidateec73c1e306b71d8624a12caaefda80a2f781db69;26 commits rebased with
+no conflict. Peer84b HKO day0_source_witness forwarding,620a global-model
+city routing and the per-step/async/changed-poll anchor drainage are retained.
+The four production files replacement_cycle_advance_trigger.py,
+source_clock_city_weights.py,replacement_forecast_production.py,ingest_main.py
+are byte-identical to that origin. Four requested peer test nodes expand to
+9P2.18s,0F/E/S, XML /tmp/zeus-peer620a-rebased-controls.xml SHA256
+060674bf58a01203d52e871927afe4016ae02ece2fa5f12c90006ff1fb955354.
+Checker/test digest-freeze hashes remain unchanged;123 raw and e95 private
+settings retained. Earlier money255 proof predates this new peer epoch, not a
+new complete release verdict. Static single-live213 remains OPEN; no push/load.
+
+Next bounded design only, NOT implementation authorization: sink-demanded
+UNKNOWN for protected mode/lane/authority/runtime-state/SQL paths, instead of
+unconditionally requiring every tagged metadata opaque call to prove purity.
+Retain lexical binding, projection, alias/keyword mutation, actual protected
+predicate writes and resolved custom-hook control effects; no whole-helper
+exemption or second-runtime escape. Wait for ROOT's concrete followup before
+changing this rule or running another whole CLI. Source/q/loader stay frozen.
