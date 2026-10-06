@@ -50585,15 +50585,29 @@ def test_held_point_trace_replays_native_math_roles_without_action_authority(met
     np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(corpus.freeze_held_sell_point_trace(legacy_trace)), legacy["q"])
 
 
-def _hko_native_original_cassette(cycle):
+def _normal_native_original_cassette(cycle, *, city_name="Hong Kong", max_step=36,
+                                    temperature_offset_c=0.):
     """Only immutable synthetic ecCodes bytes/indexes; never q, READY or a DB."""
-    if cycle in _HKO_NATIVE_ORIGINAL_CASSETTES:
-        return _HKO_NATIVE_ORIGINAL_CASSETTES[cycle]
+    assert math.isfinite(temperature_offset_c)
+    key = (cycle, city_name, max_step, temperature_offset_c)
+    if key in _HKO_NATIVE_ORIGINAL_CASSETTES:
+        return _HKO_NATIVE_ORIGINAL_CASSETTES[key]
     import eccodes as ec
     from types import MappingProxyType
     from scripts import extract_open_ens_localday as decoder
     sources, indexes, paired = {}, {}, {"high": [], "low": []}
-    for step in range(0, 37, 3):
+    if city_name == "Hong Kong":
+        first_lat, first_lon, last_lat, last_lon = 22.5, 114., 22.25, 114.25
+        zone = ZoneInfo("Asia/Hong_Kong")
+        mask_values, phi_values = [.2, .2, .8, .2], [100., 200., 313.75, 400.]
+    elif city_name == "Chicago":
+        first_lat, first_lon, last_lat, last_lon = 42.25, 271.75, 42., 272.
+        zone = ZoneInfo("America/Chicago")
+        # Model-cell orography is not the station's 204.8m ground evidence.
+        mask_values, phi_values = [.2, .2, .2, .8], [1850., 1860., 1880., 1900.]
+    else:
+        raise ValueError("private native cassette city has no physical profile")
+    for step in range(0, max_step + 1, 3):
         for member in range(51):
             parameters = [(167, "2t")]
             if step:
@@ -50605,8 +50619,8 @@ def _hko_native_original_cassette(cycle):
                 gid = ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
                 try:
                     fields = {"centre": "ecmf", "Ni": 2, "Nj": 2,
-                        "latitudeOfFirstGridPointInDegrees": 22.5, "longitudeOfFirstGridPointInDegrees": 114.,
-                        "latitudeOfLastGridPointInDegrees": 22.25, "longitudeOfLastGridPointInDegrees": 114.25,
+                        "latitudeOfFirstGridPointInDegrees": first_lat, "longitudeOfFirstGridPointInDegrees": first_lon,
+                        "latitudeOfLastGridPointInDegrees": last_lat, "longitudeOfLastGridPointInDegrees": last_lon,
                         "iDirectionIncrementInDegrees": .25, "jDirectionIncrementInDegrees": .25,
                         "scanningMode": 0, "dataDate": int(cycle.strftime("%Y%m%d")), "dataTime": cycle.hour * 100,
                         "productDefinitionTemplateNumber": (11 if member else 8) if name in {"mx2t3", "mn2t3"}
@@ -50622,13 +50636,18 @@ def _hko_native_original_cassette(cycle):
                         ec.codes_set(gid, "endStep", step)
                     else:
                         ec.codes_set(gid, "step", step)
-                    if name == "lsm": values = [.2, .2, .8, .2]
-                    elif name == "z": values = [100., 200., 313.75, 400.]
+                    if name == "lsm": values = mask_values
+                    elif name == "z": values = phi_values
                     else:
-                        hour = (cycle.hour + step + 8) % 24
-                        center = (32. if name == "mx2t3" else 27. if name == "mn2t3"
-                                  else 32. if 12 <= hour <= 18 else 27. if hour <= 6 else 30.)
-                        temperature = 273.15 + center + (member - 25) * .02
+                        hour = (cycle + _dt.timedelta(hours=step)).astimezone(zone).hour
+                        if city_name == "Hong Kong":
+                            center = (32. if name == "mx2t3" else 27. if name == "mn2t3"
+                                      else 32. if 12 <= hour <= 18 else 27. if hour <= 6 else 30.)
+                        else:
+                            center = (22. if name == "mx2t3" else 19.25 if name == "mn2t3"
+                                      else 21. if 12 <= hour <= 18 else 19.5 if hour <= 6 else 20.)
+                        member_step_c = .02 if city_name == "Hong Kong" else .01
+                        temperature = 273.15 + center + (member - 25) * member_step_c + temperature_offset_c
                         values = [temperature] * 4
                     ec.codes_set(gid, "packingType", "grid_ieee")
                     ec.codes_set(gid, "precision", 2)
@@ -50650,11 +50669,12 @@ def _hko_native_original_cassette(cycle):
                     paired["high" if name == "mx2t3" else "low"].append(body)
     packet = (MappingProxyType(sources), MappingProxyType(indexes),
               MappingProxyType({key: b"".join(bodies) for key, bodies in paired.items()}))
-    _HKO_NATIVE_ORIGINAL_CASSETTES[cycle] = packet
+    _HKO_NATIVE_ORIGINAL_CASSETTES[key] = packet
     return packet
 
 
-def _capture_hko_native_originals(tmp_path, monkeypatch, conn, cycle, issued, city):
+def _capture_normal_native_originals(tmp_path, monkeypatch, conn, cycle, issued, city, *,
+                                    target_date=None, temperature_offset_c=0.):
     """Independent normal HTTP capture/collector per case over shared bytes."""
     from pathlib import Path
     import ecmwf.opendata
@@ -50662,7 +50682,17 @@ def _capture_hko_native_originals(tmp_path, monkeypatch, conn, cycle, issued, ci
     from src.data import ecmwf_open_data as native
     from src.config import runtime_coordinate_manifest_json
     from scripts import extract_open_ens_localday as decoder
-    sources, indexes, paired = _hko_native_original_cassette(cycle)
+    if target_date is None:
+        required = list(range(9 if cycle.hour == 6 else 3, 37 if cycle.hour == 6 else 31, 3))
+        max_step = 36
+    else:
+        start = _dt.datetime.combine(target_date, _dt.time.min, ZoneInfo(city.timezone)).astimezone(_dt.timezone.utc)
+        end = _dt.datetime.combine(target_date + _dt.timedelta(days=1), _dt.time.min, ZoneInfo(city.timezone)).astimezone(_dt.timezone.utc)
+        first = max(0, math.floor((start-cycle).total_seconds()/10800)*3)
+        max_step = math.ceil((end-cycle).total_seconds()/10800)*3
+        required = list(range(first, max_step+1, 3))
+    sources, indexes, paired = _normal_native_original_cassette(cycle, city_name=city.name,
+        max_step=max_step, temperature_offset_c=temperature_offset_c)
     requests_seen = []
     class Response:
         _native_body_complete = True
@@ -50706,13 +50736,18 @@ def _capture_hko_native_originals(tmp_path, monkeypatch, conn, cycle, issued, ci
     class Clock(_dt.datetime):
         @classmethod
         def now(cls, tz=None): return clock[0].astimezone(tz or _dt.timezone.utc)
-    paths = native._resolve_opendata_paths(source_root=tmp_path / "hko-normal-source", environ={})
-    monkeypatch.setattr(native, "_resolve_opendata_paths", lambda **kwargs: paths)
+    owning_path_resolver = native._resolve_opendata_paths
+    paths = owning_path_resolver(source_root=tmp_path / (
+        "hko-normal-source" if city.name == "Hong Kong" else "native-ens"), environ={})
+    monkeypatch.setattr(native, "_resolve_opendata_paths", lambda **kwargs:
+        owning_path_resolver(**kwargs) if kwargs.get("source_root") is not None else paths)
     manifest_json = runtime_coordinate_manifest_json()
     manifest_sha = hashlib.sha256(manifest_json.encode()).hexdigest()
-    manifest = tmp_path / "hko-native-coordinates.json"
+    manifest = tmp_path / ("hko-native-coordinates.json" if city.name == "Hong Kong"
+        else "normal-native-coordinates.json")
     manifest.write_text(manifest_json)
     # Source clock is bound before HTTP/INSERT, never updated afterwards.
+    collections = {}
     with monkeypatch.context() as capture:
         def no_spawn(*args, **kwargs):
             raise AssertionError("private native transport must not start a spawned network worker")
@@ -50746,15 +50781,17 @@ def _capture_hko_native_originals(tmp_path, monkeypatch, conn, cycle, issued, ci
                 conn=conn, now_utc=issued, run_date=cycle.date(), run_hour=cycle.hour,
                 _paths=paths, grid_surface_source_evidence=sample["grid_surface_evidence"])
             assert collected["status"] == "ok", collected
+            collections[track] = collected
             clock[0] = static_at
         clock[0] = issued
         result = native.collect_native_temperature_source(conn=conn, run_utc=cycle,
-            required_steps=list(range(9 if cycle.hour == 6 else 3, 37 if cycle.hour == 6 else 31, 3)),
+            required_steps=required,
             _paths=paths, _priority=lambda: True,
             cycle_deadline_monotonic=time.monotonic() + 59)
         assert result["status"] == "AVAILABLE", result
         assert requests_seen and all(url in sources or url in indexes for url, _ in requests_seen)
     conn.commit()
+    return collections
 
 
 def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, prior_hour=12,
@@ -50832,7 +50869,7 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     _create_source_run(conn)
     _create_source_run_coverage(conn)
     _create_readiness_state(conn)
-    _capture_hko_native_originals(tmp_path, monkeypatch, conn, cycle, issued, city)
+    _capture_normal_native_originals(tmp_path, monkeypatch, conn, cycle, issued, city)
     baseline = conn.execute("""SELECT * FROM ensemble_snapshots
         WHERE city=? AND target_date=? AND temperature_metric=? AND source_cycle_time=?
         ORDER BY snapshot_id DESC LIMIT 1""",
@@ -51446,7 +51483,7 @@ def test_hko_held_missing_maker_witness_keeps_lawful_taker_ranked_and_jit(
         fixture.conn.close()
 
 
-def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None):
+def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None, native_temperature_offset_c=0.):
     """Ordinary KORD physical writers; controlled forecasts/ENS, not live weather."""
     from dataclasses import replace
     from datetime import date, datetime, timedelta, timezone
@@ -51459,7 +51496,6 @@ def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None):
     from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
     from src.contracts.replacement_pipeline_files import DAY0_OBSERVATION_STATE_ZERO_TARGET_DATE_OBSERVATIONS
     from tests.test_replacement_forecast_materializer import (
-        _fixture_ens_surface_provenance,
         _hko_request_with_owned_anchor, _request,
     )
     from src.data.replacement_forecast_materialization_seed_builder import (
@@ -51469,9 +51505,6 @@ def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None):
     from src.contracts.settlement_semantics import SettlementSemantics
     from src.data import ecmwf_open_data as native
     from src.state.db import init_schema_forecasts, init_schema_world_only
-    from src.config import runtime_coordinate_manifest_json
-    from src.contracts.ensemble_snapshot_provenance import ECMWF_OPENDATA_LOW_DATA_VERSION
-    from tests.test_ingest_grib_source_run_context import _complete_low_window_payload
 
     utc = timezone.utc
     city = runtime_cities_by_name()["Chicago"]
@@ -51496,54 +51529,29 @@ def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None):
     lon = cell["selected_grid_lon"] - 360 if cell["selected_grid_lon"] > 180 else cell["selected_grid_lon"]
     midnight = datetime.combine(target, datetime.min.time(), tzinfo=ZoneInfo(city.timezone))
     assert cycle <= midnight.astimezone(utc)
-    # Controlled native extracted input, not a GRIB download. The ordinary
-    # collector selects the 00Z full run through its real release calendar,
-    # ingests the native windows and writes its own linkage/coverage/readiness.
-    native_payload = _complete_low_window_payload(city.name,city.timezone,str(target),cycle.isoformat())
-    native_grid = json.loads(_fixture_ens_surface_provenance(city_name=city.name,
-        cycle=cycle.isoformat(),selected_coords=(42.0,-88.0),decision_at=native_capture))["grid_surface_evidence"]
-    native_grid["mask_source_fetched_at"] = native_capture.isoformat()
-    manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
-    native_payload.update(data_version=ECMWF_OPENDATA_LOW_DATA_VERSION,
-        generated_at=native_capture.isoformat(),unit="F",members_unit="F",lat=city.lat,lon=city.lon,
-        lead_day=lead,nearest_grid_lat=42.0,nearest_grid_lon=-88.0,
-        local_day_window={"start":midnight.astimezone(utc).isoformat(),
-                          "end":(midnight+timedelta(days=1)).astimezone(utc).isoformat()},
-        manifest_sha256=manifest_sha,manifest_hash=manifest_sha,grid_surface_evidence=native_grid)
-    for index,member in enumerate(native_payload["members"]):
-        inner = 19.0+index*.01
-        member.update(value_native_unit=inner*1.8+32,inner_min_native_unit=inner*1.8+32,
-            boundary_min_native_unit=(inner+1)*1.8+32,boundary_ambiguous=False)
-    native_root = tmp_path/"native-ens"
-    native_dir = native_root/"raw"/"coordinate_manifests"/manifest_sha/"open_ens_mn2t6_localday_min"/"chicago"/"20261001"
-    native_dir.mkdir(parents=True)
-    native_path = native_dir/f"open_ens_mn2t6_localday_min_target_{target}_lead_{lead}.json"
-    native_path.write_text(json.dumps(native_payload),encoding="utf-8")
     builtin = sqlite3.connect(":memory:")
     sql_clock = [native_capture]
     conn.create_function("strftime",2,lambda fmt,value: sql_clock[0].isoformat(timespec="milliseconds")
         if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
-    class NativeClockType(type):
-        def __instancecheck__(cls,value): return isinstance(value,datetime)
-    class NativeClock(datetime,metaclass=NativeClockType):
-        @classmethod
-        def now(cls,tz=None): return native_capture.astimezone(tz or utc)
-    with monkeypatch.context() as ingress:
-        ingress.setattr(native,"datetime",NativeClock)
-        ingress.setattr(native._ingest_grib_module,"_now_utc_iso",lambda:native_capture.isoformat())
-        fetch_decision,release = native._select_cycle_for_track(track="mn2t6_low",now_utc=native_capture)
-        assert fetch_decision is native.FetchDecision.FETCH_ALLOWED
-        assert release["selected_cycle_time"] == cycle
-        assert release["horizon_profile"] == "full"
-        collected = native.collect_open_ens_cycle(track="mn2t6_low",skip_download=True,skip_extract=True,
-            grid_surface_source_evidence=native_grid,conn=conn,now_utc=native_capture,
-            _paths=native._resolve_opendata_paths(source_root=native_root,environ={}))
+    fetch_decision, release = native._select_cycle_for_track(track="mn2t6_low", now_utc=native_capture)
+    assert fetch_decision is native.FetchDecision.FETCH_ALLOWED
+    assert release["selected_cycle_time"] == cycle
+    assert release["horizon_profile"] == "full"
+    collected = _capture_normal_native_originals(tmp_path, monkeypatch, conn, cycle,
+        native_capture, city, target_date=target,
+        temperature_offset_c=native_temperature_offset_c)["mn2t6_low"]
     assert collected["status"] == "ok",collected
-    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=?",
-        (collected["source_run_id"],)).fetchone())
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=? AND city=? AND target_date=? AND temperature_metric='low' ORDER BY snapshot_id DESC LIMIT 1",
+        (collected["source_run_id"], city.name, str(target))).fetchone())
     assert snapshot["source_cycle_time"] == cycle.isoformat(),collected
     assert snapshot["source_transport"] == "ensemble_snapshots_db_reader"
-    assert snapshot["source_release_time"] == release["next_safe_fetch_at"].isoformat()
+    # The extractor's legacy release field carries the GRIB nominal run,
+    # not a provider publication receipt. Calendar permission and actual
+    # possession remain separate; the native issued/publication fields are NULL.
+    assert snapshot["source_release_time"] == cycle.isoformat()
+    assert release["next_safe_fetch_at"] <= native_capture
+    native_inventory = conn.execute("SELECT source_issue_time,source_release_time,source_available_at FROM source_run WHERE track='2t_instant_native_knots'").fetchone()
+    assert tuple(native_inventory) == (None, None, None)
     assert snapshot["source_available_at"] == native_capture.isoformat()
     assert snapshot["local_day_start_utc"] == midnight.astimezone(utc).isoformat()
     producer = conn.execute("SELECT status FROM readiness_state WHERE strategy_key='producer_readiness'").fetchone()
@@ -51628,6 +51636,11 @@ def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None):
         "grid_reason":grid_surface_evidence_reason(snapshot),
         "cycle":snapshot["source_cycle_time"], "available":snapshot["source_available_at"],
         "dataset":snapshot["dataset_id"], "members_unit":snapshot["members_unit"]}
+    from src.data.day0_hourly_vectors import read_native_measurement_role
+    with pytest.raises(ValueError, match="MEASUREMENT_ROLE_NATIVE_POINT_UNAVAILABLE"):
+        read_native_measurement_role(conn=conn, city=city, target_date=str(target),
+            decision_time=native_capture-timedelta(seconds=1), metric="low", role="full_Y",
+            scope_start=midnight.astimezone(utc), snapshot_id=snapshot["snapshot_id"])
     result = materialize_replacement_forecast_live(conn,request)
     assert result.ok, result.reason_codes
     conn.commit()
@@ -51671,7 +51684,7 @@ def _kord_public_bundles(fixture,monkeypatch,*,at):
     return bundles
 
 
-def _kord_causal_fast_inputs(fixture,monkeypatch):
+def _kord_causal_fast_inputs(fixture,monkeypatch,*,statistical_cache_scope=False):
     """Ordinary same-report parsers/ledger and 51-member remaining fetch, not fitted q."""
     from datetime import date,datetime,timedelta,timezone
     from zoneinfo import ZoneInfo
@@ -51687,17 +51700,21 @@ def _kord_causal_fast_inputs(fixture,monkeypatch):
     source = fast.fast_obs_source_for_city(city,fixture.request.target_date)
     assert source is not None and source.station_id == "KORD"
     dates,reports,awc = [],[],[]
+    # Cache controls need statistical LOW support in every bin. A colder
+    # report legitimately proves some bins impossible and is not cacheable.
+    product_f, historical_c, current_c = ((69.8,21.4,20.9) if statistical_cache_scope else (57.2,14.4,13.9))
     # Product 57.2F is 14C; same report's precise T group measures 14.4C.
     # This realistic display/precision pair is not two independent measurements.
     for index in range(fast.FAST_RESIDUAL_MIN_PAIRS):
         time = observed-timedelta(minutes=45,hours=index)
-        report = f"KORD {time:%d%H%M}Z 00000KT 10SM CLR 14/14 A3005 RMK AO2 T01440139"
+        report = (f"KORD {time:%d%H%M}Z 00000KT 10SM CLR {round(historical_c):02d}/{round(current_c):02d} "
+            f"A3005 RMK AO2 T0{round(historical_c*10):03d}0{round(current_c*10):03d}")
         dates.append(time.astimezone(ZoneInfo(city.timezone)).strftime("%Y-%m-%dT%H:%M:%S%z"))
         reports.append(report)
         awc.append({"icaoId":"KORD","obsTime":time.timestamp(),"receiptTime":(time+timedelta(seconds=10)).isoformat(),
-            "temp":14.4,"metarType":"METAR","rawOb":report})
+            "temp":historical_c,"metarType":"METAR","rawOb":report})
     product_body = json.dumps({"STATION":[{"STID":"KORD","OBSERVATIONS":{
-        "date_time":dates,"air_temp_set_1":[57.2]*len(dates),"sea_level_pressure_set_1":[1013.0]*len(dates),
+        "date_time":dates,"air_temp_set_1":[product_f]*len(dates),"sea_level_pressure_set_1":[1013.0]*len(dates),
         "metar_set_1":reports}}]}).encode()
     product = wrh._parse_rows(json.loads(product_body),"KORD")
     parsed_fast = fast.parse_metar_api_payload(json.loads(json.dumps(awc).encode()))
@@ -51713,8 +51730,9 @@ def _kord_causal_fast_inputs(fixture,monkeypatch):
         @classmethod
         def now(cls,tz=None): return writer_at[0].astimezone(tz or timezone.utc)
     current_body = json.dumps([{"icaoId":"KORD","obsTime":observed.timestamp(),
-        "receiptTime":(observed+timedelta(seconds=10)).isoformat(),"temp":13.9,"metarType":"METAR", "rawOb":
-        f"KORD {observed:%d%H%M}Z 00000KT 10SM CLR 14/14 A3005 RMK AO2 T01390139"}]).encode()
+        "receiptTime":(observed+timedelta(seconds=10)).isoformat(),"temp":current_c,"metarType":"METAR", "rawOb":
+        f"KORD {observed:%d%H%M}Z 00000KT 10SM CLR {round(current_c):02d}/{round(current_c):02d} "
+        f"A3005 RMK AO2 T0{round(current_c*10):03d}0{round(current_c*10):03d}"}]).encode()
     fixture.current_reports = tuple(fast.parse_metar_api_payload(json.loads(current_body)))
     with monkeypatch.context() as writer:
         writer.setattr(fast,"datetime",LedgerClock)
@@ -51776,17 +51794,17 @@ def _kord_causal_fast_inputs(fixture,monkeypatch):
                 request_hash=key,endpoint=endpoint,now=vector_capture) == len(rows)
     conn.commit()
     qualified = fast.latest_fast_station_conditioning(conn,city=city.name,target_date=str(fixture.request.target_date),
-        metric="low",decision_time=cut,settlement_extreme_native=57.2,settlement_unit="F")
+        metric="low",decision_time=cut,settlement_extreme_native=product_f,settlement_unit="F")
     assert qualified is not None
-    assert qualified.observed_extreme_c == pytest.approx(13.9)
+    assert qualified.observed_extreme_c == pytest.approx(current_c)
     assert qualified.likelihood.residual_weights_c[0][0] == pytest.approx(-.4)
-    assert qualified.likelihood.settlement_extreme_c == pytest.approx(14.0)
+    assert qualified.likelihood.settlement_extreme_c == pytest.approx((product_f-32.)*5./9.)
     assert qualified.likelihood.matched_pairs == fast.FAST_RESIDUAL_MIN_PAIRS
     original_channels = [tuple(row) for row in conn.execute(
         "SELECT source_channel,unit,value_native,raw_report,fetched_at_utc FROM observation_prints "
         "WHERE raw_report=? ORDER BY source_channel",(reports[0],))]
     assert {(row[0],row[1],row[2]) for row in original_channels} == {
-        ("noaa_wrh_kord","F",57.2),(fast.FAST_OBS_SOURCE_ID,"C",14.4)}
+        ("noaa_wrh_kord","F",product_f),(fast.FAST_OBS_SOURCE_ID,"C",historical_c)}
     assert {row[4] for row in original_channels} == {historical_fetch.isoformat()}
     return cut,qualified
 
@@ -51794,6 +51812,12 @@ def _kord_causal_fast_inputs(fixture,monkeypatch):
 @pytest.fixture
 def _noaa_native_sources(tmp_path,monkeypatch):
     """Whole native static bodies, without the HKO-only registry override."""
+    from scripts import extract_open_ens_localday as decoder
+    original_capture = decoder._native_message_capture
+    header_stats = {"hit": 0, "miss": 0}
+    monkeypatch.setattr(decoder, "_native_message_capture", lambda gid, instantaneous=False:
+        _hko_immutable_native_headers(gid, original_capture, header_stats,
+            instantaneous=instantaneous))
     from tests.test_replacement_forecast_materializer import _hko_native_surfaces,_hko_source_surface
     native = _hko_native_surfaces.__wrapped__(tmp_path,monkeypatch)
     try:
@@ -51817,6 +51841,66 @@ def test_noaa_kord_normal_prior_has_independent_physical_public_authority(tmp_pa
         fixture.builtin.close()
 
 
+def test_noaa_kord_original_F_near_zero_keeps_exact_member_identity(tmp_path,monkeypatch,_noaa_native_sources):
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,
+        native_temperature_offset_c=-17.777777777777814-19.25)
+    try:
+        from src.data.day0_hourly_vectors import read_native_measurement_role
+        day_start = _dt.datetime.combine(fixture.request.target_date,_dt.time.min,
+            ZoneInfo(fixture.city.timezone)).astimezone(_dt.timezone.utc)
+        native = read_native_measurement_role(conn=fixture.conn,city=fixture.city,
+            target_date=str(fixture.request.target_date),decision_time=fixture.cut,
+            metric="low",role="full_Y",scope_start=day_start)
+        stored = fixture.conn.execute("SELECT members_json FROM ensemble_snapshots WHERE snapshot_id=?",
+            (native["native_snapshot_id"],)).fetchone()[0]
+        assert native["member_points_native"] == json.loads(stored)
+        assert len(native["member_points_native"]) == 51
+        assert abs(native["member_points_native"][25]) < 1e-10
+        _kord_public_bundles(fixture,monkeypatch,at=fixture.cut)
+    finally:
+        fixture.conn.close()
+        fixture.builtin.close()
+
+
+@pytest.mark.parametrize("unit,metric", (("C","high"),("C","low"),("F","high"),("F","low")))
+@pytest.mark.parametrize("damage", (None,"different","nan","inf"))
+def test_native_original_point_unit_guard_is_exact_and_finite(monkeypatch,unit,metric,damage):
+    """Numeric comparison only, not synthetic physical or live authority.
+
+    The independently normal-captured KORD/HKO tests exercise the raw/PIT
+    readers. Here only the comparison's output is observed; no probability,
+    readiness, database or action certificate is fabricated.
+    """
+    from scripts import extract_open_ens_localday as decoder
+    from src.data import replacement_forecast_materializer as materializer,day0_hourly_vectors as hourly
+    from tests.test_replacement_forecast_materializer import _request
+    native_values = [decoder.kelvin_to_native(273.15-17.777777777777814+i*.02,unit) for i in range(51)]
+    stored = list(native_values)
+    if damage == "different": stored[25] += .01
+    elif damage == "nan": stored[25] = math.nan
+    elif damage == "inf": stored[25] = math.inf
+    snapshot = SimpleNamespace(snapshot_id=1,source_cycle_time=_request().source_cycle_time.isoformat(),
+        source_available_at=_request().computed_at.isoformat(),members_unit=unit,
+        members_json=json.dumps(stored),member_bounds=None,grid_surface_evidence_revision="numeric-test-only",
+        grid_surface_evidence_identity_hash="numeric-test-only",native_coordinate_compatibility=None)
+    native = {"unit":unit,"member_points_native":native_values,"native_snapshot_id":1}
+    monkeypatch.setattr(materializer,"read_current_evidence_snapshot_identity",lambda *a,**k:snapshot)
+    monkeypatch.setattr(hourly,"read_native_measurement_role",lambda **k:copy.deepcopy(native))
+    observed = []
+    def comparison_result(**kwargs):
+        observed.append(kwargs)
+        return kwargs
+    monkeypatch.setattr(materializer,"_interval_censored_evidence_shape",comparison_result)
+    actual = materializer._read_full_Y_evidence_shape(None,_request(),metric=metric,
+        provider_values_c={},provider_weights={},center_c=0.)
+    if damage is not None:
+        assert actual is None and not observed
+    else:
+        to_c = (lambda value:(value-32.)*5./9.) if unit == "F" else float
+        assert actual["native_point_model"]["member_points_c"] == [to_c(v) for v in stored]
+        assert len(observed) == 1
+
+
 def test_noaa_kord_normal_future_prior_uses_its_actual_target(tmp_path,monkeypatch,_noaa_native_sources):
     fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
     try:
@@ -51824,12 +51908,40 @@ def test_noaa_kord_normal_future_prior_uses_its_actual_target(tmp_path,monkeypat
         assert fixture.request.day0_observation_state is None
         assert fixture.request.source_cycle_time == _dt.datetime(2026,10,1,tzinfo=_dt.timezone.utc)
         _kord_public_bundles(fixture,monkeypatch,at=fixture.cut)
-        row = fixture.conn.execute("SELECT target_date FROM ensemble_snapshots WHERE source_run_id=?",
+        row = fixture.conn.execute("SELECT target_date FROM ensemble_snapshots WHERE source_run_id=? AND city='Chicago' AND target_date='2026-10-02' AND temperature_metric='low'",
             (fixture.request.baseline_source_run_id,)).fetchone()
         assert row[0] == "2026-10-02"
         payload_path = next((tmp_path/"native-ens").rglob("*_target_2026-10-02_lead_1.json"))
         payload = json.loads(payload_path.read_text())
         assert payload["target_date_local"] == "2026-10-02" and payload["lead_day"] == 1
+        from src.data import replacement_forecast_bundle_reader as reader
+        class ClockType(type):
+            def __instancecheck__(cls,value): return isinstance(value,_dt.datetime)
+        class ReaderClock(_dt.datetime,metaclass=ClockType):
+            @classmethod
+            def now(cls,tz=None):
+                return fixture.cut.astimezone(tz) if tz else fixture.cut.replace(tzinfo=None)
+        monkeypatch.setattr(reader,"datetime",ReaderClock)
+        # A real future native certificate is servable but its confidence
+        # enclosure deliberately makes both purposes non-cacheable.
+        from src.events.triggers.forecast_snapshot_ready import ForecastSnapshotReadyTrigger
+        events = ForecastSnapshotReadyTrigger(SimpleNamespace(conn=None)).build_committed_snapshot_events(
+            forecasts_conn=fixture.conn,decision_time=fixture.cut,received_at=fixture.cut.isoformat(),
+            source="global-auction-current-scope",limit=None,
+            restrict_to_families={("Chicago","2026-10-02","low")},
+            phase_filter_exempt_families={("Chicago","2026-10-02","low")})
+        assert len(events) == 1
+        monkeypatch.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",{})
+        namespace = era._global_probability_family_cache_namespace((fixture.conn,),decision_time=fixture.cut)
+        for purpose in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
+            family = era._prepare_current_global_probability_family(events[0],forecast_conn=fixture.conn,
+                topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=fixture.cut,
+                max_age=_dt.timedelta(seconds=30),probability_use=purpose,raw_input_hwm_conn=fixture.conn)
+            assert len(family.candidate_payoff_q_lcb_caps) == 6
+            era._store_global_probability_family_cache(namespace,family_key=family.probability_witness.family_key,
+                event_id=events[0].event_id,family_binding_hash=family.probability_witness.witness_identity,
+                prepared=family,probability_use=purpose)
+            assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
     finally:
         fixture.conn.close()
         fixture.builtin.close()
@@ -51997,10 +52109,32 @@ def test_noaa_kord_fast_public_q_reaches_actual_held_and_jit(tmp_path,monkeypatc
             forecast_conn=fixture.conn,topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=cut)
         assert rebound.probability_witness is witness
         assert rebound.probability_witness.witness_identity == witness.witness_identity
+        # This colder printed LOW rules out the upper bin: its genuine
+        # partial exact-payoff witness must not enter the statistical cache.
+        exact_family = prepared[1]
+        assert exact_family.probability_witness.exact_payoff_witness is not None
+        with monkeypatch.context() as cache_scope:
+            cache_scope.setattr(era,"_GLOBAL_PROBABILITY_FAMILY_CACHE",{})
+            namespace = era._global_probability_family_cache_namespace((fixture.conn,),decision_time=cut)
+            era._store_global_probability_family_cache(namespace,
+                family_key=exact_family.probability_witness.family_key,event_id=event.event_id,
+                family_binding_hash=exact_family.probability_witness.witness_identity,
+                prepared=exact_family,probability_use=era._CurrentProbabilityUse.HELD_MONITOR)
+            assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
         producer_inputs,producer_carrier = kernel_calls[0]
         assert len(kernel_calls) >= 5  # Producer, three real lanes and submit rebind.
+        def source_bound_identity(inputs):
+            primitive = deepcopy(inputs)
+            for key in ("future_extremes_c", "final_extreme_centers_c", "bin_bounds_c"):
+                primitive[key] = json.loads(json.dumps(primitive[key]))
+            # Only decision anchors are excluded by the owning economic hash.
+            # All role, raw hash, source clock and observation fields remain.
+            for key in ("decision_time_utc", "probability_cutoff_utc"):
+                if key in primitive["identity_inputs"]:
+                    assert primitive["identity_inputs"].pop(key) == cut.isoformat()
+            return primitive
         for inputs,carrier in kernel_calls:
-            assert inputs == producer_inputs
+            assert source_bound_identity(inputs) == source_bound_identity(producer_inputs)
             assert carrier["content_identity"] == producer_carrier["content_identity"]
             np.testing.assert_array_equal(carrier["q"],producer_carrier["q"])
             np.testing.assert_array_equal(carrier["samples"],producer_carrier["samples"])
@@ -52212,7 +52346,7 @@ def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_pat
                     WHERE selection_epoch_identity=? AND candidate_id=? LIMIT 1""",
                     (actual_selected.actuation.selection_epoch_identity,winner.candidate_id)).fetchone()
                 if native is not None:
-                    assert native == (winner.token_id,selected_point)
+                    assert tuple(native) == (winner.token_id,selected_point)
                 else:
                     mode = trade.execute("SELECT mode FROM decision_log WHERE rowid=?",(row[5],)).fetchone()[0]
                     assert mode == "global_single_order_auction_delta"
@@ -52374,7 +52508,7 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         new_cycle = fixture.request.source_cycle_time+_dt.timedelta(hours=6)
         new_capture = decision+_dt.timedelta(minutes=2)
         fixture.sql_clock[0] = new_capture
-        _capture_hko_native_originals(tmp_path, monkeypatch, fixture.conn, new_cycle, new_capture, fixture.city)
+        _capture_normal_native_originals(tmp_path, monkeypatch, fixture.conn, new_cycle, new_capture, fixture.city)
         new_snapshot = fixture.conn.execute("""SELECT * FROM ensemble_snapshots
             WHERE city='Hong Kong' AND target_date='2026-09-30'
               AND temperature_metric=? AND source_cycle_time=? ORDER BY snapshot_id DESC LIMIT 1""",
@@ -52902,14 +53036,47 @@ def test_partial_current_replay_reads_the_cohort_at_the_frozen_tau(tmp_path,monk
         fixture.conn.close()
 
 
+def _kord_current_fast_cache_event(fixture, monkeypatch):
+    """Actual current-Day0 capture and public event; no cached q or verdict."""
+    from src.data import day0_fast_obs as fast, replacement_forecast_materializer as materializer
+    from src.events.opportunity_event import OpportunityEvent
+    _install_empty_gamma_transport(monkeypatch)
+    cut, conditioning = _kord_causal_fast_inputs(fixture, monkeypatch, statistical_cache_scope=True)
+    request = replace(fixture.request, computed_at=cut, day0_observation_state=None,
+        day0_observed_extreme_c=conditioning.observed_extreme_c,
+        day0_observed_extreme_source=fast.FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+        day0_observed_extreme_observation_time=conditioning.observation_time,
+        day0_observed_extreme_sample_count=conditioning.sample_count,
+        day0_observed_extreme_unit=conditioning.unit)
+    fixture.sql_clock[0] = cut
+    result = materializer.materialize_replacement_forecast_live(fixture.conn, request)
+    assert result.ok, result.reason_codes
+    fixture.conn.commit()
+    fixture.request, fixture.result = request, result
+    row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+        (result.posterior_id,)).fetchone())
+    source = fast.fast_obs_source_for_city(fixture.city, request.target_date)
+    prefetch = fast.FastObsPrefetch(eligible=((fixture.city, source, str(request.target_date)),),
+        reports=fixture.current_reports, freshness_status=fast.FETCH_FRESH, cache_age_s=0.0,
+        decision_time=cut, ledger_reports=fixture.current_reports,
+        station_statuses=(("KORD", fast.FETCH_FRESH, 0.0),))
+    assert fast.Day0FastObsEmitter().emit_prefetched(world_conn=fixture.conn, prefetch=prefetch,
+        received_at=cut.isoformat(), persist_ledger=False) > 0
+    captured = dict(fixture.conn.execute("SELECT * FROM opportunity_events "
+        "WHERE event_type='DAY0_EXTREME_UPDATED' AND json_extract(payload_json,'$.metric')='low' "
+        "ORDER BY rowid DESC LIMIT 1").fetchone())
+    return row, cut, OpportunityEvent(**{key: captured[key] for key in OpportunityEvent.__dataclass_fields__})
+
+
 @pytest.mark.parametrize("action",("BUY","SELL"))
 @pytest.mark.parametrize("fault",("recorded_row_deleted","inplace_body_same_mtime","consumed_read_locked"))
-def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeypatch,fault,action,_noaa_native_sources):
+def test_actual_consumed_proof_refusal_evicts_held_cache_and_refuses_entry(tmp_path,monkeypatch,fault,action,_noaa_native_sources):
     """Round-4: a lost consumed proof refused the winner at preflight
     (BATCH_BLOCKED ...consumed_proof_unverifiable) but evicted nothing, so the
     next prepare_event/prepare_held_event reissued the dead posterior from the
-    family cache until max_age. The actual receipt's reason now evicts both
-    lanes, for a BUY (generic receipt core) and for a held SELL
+    family cache until max_age. A real, statistical current-Day0 HELD family
+    now supplies the cacheable axis; ENTRY remains subject to its own caps.
+    The receipt evicts that family for a BUY (generic receipt core) and SELL
     (_submit_current_global_sell, its own GLOBAL_SELL_CURRENT_AUTHORITY_FAILED
     wrapper); a transient consumed-proof read (lock) refuses without eviction.
     """
@@ -52920,31 +53087,16 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
     from src.data import replacement_input_hwm as hwm
     from src.state import db as db_module
     from src.state.db import init_schema_trade_only
-    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch)
     ro = trade = restore_body = None
     try:
-        at = fixture.cut
+        row, at, event = _kord_current_fast_cache_event(fixture, monkeypatch)
         class ClockType(type):
             def __instancecheck__(cls, value): return isinstance(value,_dt.datetime)
         class ReaderClock(_dt.datetime,metaclass=ClockType):
             @classmethod
             def now(cls,tz=None): return at.astimezone(tz) if tz else at.replace(tzinfo=None)
         monkeypatch.setattr(reader,"datetime",ReaderClock)
-        row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
-            (fixture.result.posterior_id,)).fetchone())
-        payload = asdict(ForecastSnapshotReadyPayload(city="Chicago",target_date="2026-10-02",metric="low",
-            source_id="replacement_0_1",source_run_id=row["posterior_identity_hash"],
-            cycle=fixture.request.source_cycle_time.isoformat(),track="replacement_0_1_openmeteo_bayes_fusion",
-            snapshot_id=f"posterior-{row['posterior_id']}",snapshot_hash=row["posterior_identity_hash"],
-            captured_at=at.isoformat(),available_at=at.isoformat(),required_fields_present=True,
-            required_steps_present=True,member_count=51,min_members_floor=51,completeness_status="COMPLETE",
-            required_steps=[],observed_steps=[],expected_members=51,source_run_status="COMPLETE",
-            source_run_completeness_status="COMPLETE",coverage_completeness_status="COMPLETE",
-            coverage_readiness_status="LIVE_ELIGIBLE"))
-        payload["city_timezone"] = fixture.city.timezone
-        event = make_opportunity_event(event_type="EDLI_REDECISION_PENDING",entity_key="Chicago|2026-10-02|low",
-            source="consumed-proof-eviction",observed_at=at.isoformat(),available_at=at.isoformat(),
-            received_at=at.isoformat(),payload=payload,causal_snapshot_id=f"posterior-{row['posterior_id']}")
         def read_only():
             conn = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
             conn.row_factory = sqlite3.Row
@@ -52968,7 +53120,8 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
                 executor_submit=lambda *a,**k: pytest.fail("executor must never run"),
             ).process_global_batch((event,),at)
         callbacks = hooks[-1]
-        assert era._global_probability_refresh_family_keys((event,)) == frozenset()
+        assert era._global_probability_refresh_family_keys((event,)) == frozenset({
+            era.weather_family_id(city="Chicago",target_date=str(fixture.request.target_date),metric="low")})
         def clear_memos():
             hwm.clear_consumed_proof_memo()
             reader._LIVE_GRADE_MEMO.clear()
@@ -52977,6 +53130,10 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
         held = callbacks["prepare_held_event"](event,at)
         assert entry.prepared_global_family is not None, entry.reason
         assert held.prepared_global_family is not None, held.reason
+        # Current FAST may itself be uncapped; future full-Y remains the
+        # independent native-confidence/no-cache negative below.
+        assert not held.prepared_global_family.candidate_payoff_q_lcb_caps
+        assert held.prepared_global_family.probability_witness.exact_payoff_witness is None
         if action == "BUY":
             witness = entry.prepared_global_family.probability_witness
             tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
@@ -53007,13 +53164,13 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
             assert healthy.status == "STABLE", healthy
             assert healthy.binding_token.receipt.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
             assert healthy.binding_token.receipt.proof_accepted is True
-            for use in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
+            for use in (era._CurrentProbabilityUse.HELD_MONITOR,):
                 era._store_global_probability_family_cache(
                     inspect.getclosurevars(callbacks["preflight_winner"]).nonlocals["probability_cache_namespace"],
                     family_key=actuation.decision.candidate.family_key,event_id=event.event_id,
                     family_binding_hash="binding",prepared=held.prepared_global_family,probability_use=use)
         cached = dict(era._GLOBAL_PROBABILITY_FAMILY_CACHE)
-        assert {use for _family,use in cached} == {"entry","held_monitor"}
+        assert "held_monitor" in {use for _family,use in cached}
         victim = int(json.loads(row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
             ["icon_global"]["raw_model_forecast_id"])
         if fault == "recorded_row_deleted":
@@ -53064,7 +53221,11 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
                 if evicts:
                     assert served is None, (temperature,lane,replay.reason)
                 else:
-                    assert served is not None and served.posterior_id == row["posterior_id"], (lane,replay.reason)
+                    # A current-Day0 prepare explicitly refreshes both uses.
+                    # Transient preflight failure preserved the cache above;
+                    # it cannot license a fresh verdict while reads stay locked.
+                    assert served is None, (lane,replay.reason)
+                    assert "basis=consumed_physical_proof_read_unavailable:sqlite_error=database is locked" in replay.reason
         assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
     finally:
         if restore_body is not None:
@@ -53129,7 +53290,7 @@ def test_day0_sell_pinned_carrier_refusal_evicts_the_cached_family(tmp_path,monk
         conn.close()
 
 
-def _chicago_between_cohort_posterior(tmp_path,monkeypatch,*,scheme="partial",before_last_materialization=None):
+def _chicago_between_cohort_posterior(tmp_path,monkeypatch,*,scheme="partial",before_last_materialization=None,current_day0=False):
     """The ordinary Chicago future-day LOW producer under a frozen source-clock scheme.
 
     ``partial`` (round-4 shape): ICON+UKMO+IFS+KMA, KMA absent; ICON alone
@@ -53152,7 +53313,8 @@ def _chicago_between_cohort_posterior(tmp_path,monkeypatch,*,scheme="partial",be
     monkeypatch.setenv(weights.ENV_CITY_ONE_SCHEME_PATH,str(scheme_path))
     monkeypatch.setattr(weights,"load_city_one_schemes",
         functools.lru_cache(maxsize=8)(weights.load_city_one_schemes.__wrapped__))
-    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=(
+        _dt.date(2026,10,1) if current_day0 else _dt.date(2026,10,2)))
     first = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
         (fixture.result.posterior_id,)).fetchone())
     for hours, minutes in (((6, 1),) if scheme == "partial" else ((3, 1), (6, 2))):
@@ -53210,7 +53372,8 @@ def _advance_icon_and_rematerialize(fixture,monkeypatch,first,*,hours,minutes,mo
         fetch.setattr(dl,"datetime",CaptureClock); fetch.setattr("src.data.openmeteo_client.fetch",http)
         assert dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=cycle,
             targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name,target_date=first["target_date"],metric="low",
-                latitude=city.lat,longitude=city.lon,timezone_name=city.timezone,lead_days=1)],
+                latitude=city.lat,longitude=city.lon,timezone_name=city.timezone,
+                lead_days=(_dt.date.fromisoformat(first["target_date"])-cycle.date()).days)],
             models=models,frozen_source_runs={model:(cycle,capture) for model in models},
             include_previous_runs=False,prune_after=False)["written_row_count"] == len(models)
     fixture.sql_clock[0] = cut
@@ -53231,7 +53394,7 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
     center) was deleted or changed in place kept PREPARED on ENTRY and HELD, and
     its BUY actuation replay passed. Every recorded serving role is now re-proven,
     so all three refuse with the consumed-proof basis, warm and cold, and the
-    refusal evicts both cached lanes. ``full`` is the ordinary scheme whose
+    refusal evicts the cacheable current-Day0 HELD family. ``full`` is the scheme whose
     between-only row no other check covers (not current, no configured cohort):
     before this change its BUY passed the actuation replay and the authority
     wrapper alike.
@@ -53240,10 +53403,13 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
     from pathlib import Path
     from src.data import replacement_forecast_bundle_reader as reader
     from src.data import replacement_input_hwm as hwm
-    from src.events.triggers.forecast_snapshot_ready import ForecastSnapshotReadyTrigger
     from src.state import db as db_module
     from src.state.db import init_schema_trade_only
-    fixture, row, cut, victim = _chicago_between_cohort_posterior(tmp_path,monkeypatch,scheme=scheme)
+    fixture, row, cut, victim = _chicago_between_cohort_posterior(
+        tmp_path,monkeypatch,scheme=scheme,current_day0=True)
+    row, cut, event = _kord_current_fast_cache_event(fixture, monkeypatch)
+    claims = json.loads(row["provenance_json"])["bayes_precision_fusion"]["source_clock_one_scheme"]
+    assert int(claims["between_cohort_value_serving"]["icon_global"]["raw_model_forecast_id"]) == victim
     ro = trade = restore_body = None
     try:
         class ClockType(type):
@@ -53258,15 +53424,6 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
             conn.execute("PRAGMA query_only=ON")
             return conn
         ro = read_only()
-        public = ForecastSnapshotReadyTrigger(SimpleNamespace(conn=None)).build_committed_snapshot_events(
-            forecasts_conn=ro,decision_time=cut,received_at=cut.isoformat(),source="global-auction-current-scope",
-            limit=None,restrict_to_families={(fixture.city.name,row["target_date"],"low")},
-            phase_filter_exempt_families={(fixture.city.name,row["target_date"],"low")})
-        assert len(public) == 1, public
-        event = make_opportunity_event(event_type="EDLI_REDECISION_PENDING",entity_key=public[0].entity_key,
-            source="between-cohort",observed_at=public[0].observed_at,available_at=public[0].available_at,
-            received_at=cut.isoformat(),payload=json.loads(public[0].payload_json),
-            causal_snapshot_id=public[0].causal_snapshot_id)
         trade = sqlite3.connect(":memory:")
         trade.row_factory = sqlite3.Row
         init_schema_trade_only(trade)
@@ -53292,6 +53449,8 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
         held = callbacks["prepare_held_event"](event,cut)
         assert entry.prepared_global_family.posterior_id == row["posterior_id"], entry.reason
         assert held.prepared_global_family.posterior_id == row["posterior_id"], held.reason
+        assert not held.prepared_global_family.candidate_payoff_q_lcb_caps
+        assert held.prepared_global_family.probability_witness.exact_payoff_witness is None
         if action == "BUY":
             witness = entry.prepared_global_family.probability_witness
             tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
@@ -53322,13 +53481,13 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
             healthy = callbacks["preflight_winner"](winner,actuation,cut,authority)
             assert healthy.status == "STABLE", healthy
             assert healthy.binding_token.receipt.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
-            for use in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
+            for use in (era._CurrentProbabilityUse.HELD_MONITOR,):
                 era._store_global_probability_family_cache(
                     inspect.getclosurevars(callbacks["preflight_winner"]).nonlocals["probability_cache_namespace"],
                     family_key=actuation.decision.candidate.family_key,event_id=event.event_id,
                     family_binding_hash="binding",prepared=held.prepared_global_family,probability_use=use)
         cached = dict(era._GLOBAL_PROBABILITY_FAMILY_CACHE)
-        assert {use for _family,use in cached} == {"entry","held_monitor"}
+        assert "held_monitor" in {use for _family,use in cached}
         if fault == "cohort_row_deleted":
             fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(victim,))
             fixture.conn.commit()
@@ -53369,7 +53528,10 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
                     preflight_only=True,preflight_receipt=None)
             assert receipt.reason.startswith({"BUY":"GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:",
                 "SELL":"GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"}[action]
-                +"GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"+basis), receipt.reason
+                +("GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_PINNED_RAW_INPUT_HWM:"
+                  if action == "SELL" and scheme == "full" else
+                  "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:")
+                +basis), receipt.reason
             result = callbacks["preflight_winner"](winner,actuation,cut,authority)
             assert (result.status,result.reason) == ("BATCH_BLOCKED",receipt.reason), result
             assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
@@ -53801,10 +53963,25 @@ def _held_sell_through_actual_batch(monkeypatch,*,trade,forecast_conn,event,at,c
     return winner,actuation,authority,binding
 
 
+def _install_empty_gamma_transport(monkeypatch):
+    """A normal empty HTTP response, not a topology or probability proof."""
+    # A consumed-proof eviction can independently refresh pending-family
+    # topology through the pooled Gamma client, outside the JIT fake below.
+    # A valid empty response supplies no topology, quote or probability proof.
+    import httpx
+    from src.data import market_scanner
+    def empty_gamma_transport(url, *, params, timeout):
+        assert url == f"{market_scanner.GAMMA_BASE}/events"
+        assert isinstance(params, dict) and set(params) == {"slug"}
+        return httpx.Response(200, json=[], request=httpx.Request("GET", url))
+    monkeypatch.setattr(market_scanner, "_gamma_transport_get", empty_gamma_transport)
+
+
 def _install_held_sell_venue(monkeypatch,*,actuation,bid=".94"):
     """The venue boundary only: Gamma/CLOB market metadata, the raw book and the
     targeted CTF balance, each answering exactly what the selected SELL claims."""
     candidate = actuation.decision.candidate
+    _install_empty_gamma_transport(monkeypatch)
     token = candidate.token_id
     _install_global_jit_market_authority_fetches(monkeypatch,condition_id=candidate.condition_id,
         token_id=token,side="YES",tick=".01",min_order_size="1",fee_rate=0.0)
@@ -54144,10 +54321,20 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
                     timezone_name=fixture.city.timezone,lead_days=0)],models=models,
                 frozen_source_runs={model:(remaining_run,remaining_run+_dt.timedelta(minutes=5)) for model in models},
                 include_previous_runs=False,prune_after=False)
-            assert scoped["written_row_count"] == 0
+            assert scoped["written_row_count"] == len(models)
+        # This setup captured a new remaining-run provider cohort. Those
+        # forecast rows are not observation writes and cannot rewrite the
+        # earlier cohort's immutable clocks, artifact or body identities.
+        old_ids = tuple(row[0] for row in prior_rows)
         assert [tuple(row) for row in fixture.conn.execute(
             "SELECT raw_model_forecast_id,model,metric,source_cycle_time,source_available_at,captured_at,recorded_at,artifact_id,raw_sha256 "
-            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == prior_rows
+            "FROM raw_model_forecasts WHERE raw_model_forecast_id IN ("+
+            ",".join("?" for _ in old_ids)+") ORDER BY raw_model_forecast_id",old_ids)] == prior_rows
+        assert fixture.conn.execute("SELECT COUNT(*) FROM raw_model_forecasts WHERE city=? AND target_date=? AND metric=? AND source_cycle_time=?",
+            (fixture.city.name,"2026-09-30",metric,remaining_run.isoformat())).fetchone()[0] == len(models)
+        forecast_rows_after_setup = [tuple(row) for row in fixture.conn.execute(
+            "SELECT raw_model_forecast_id,model,metric,source_cycle_time,source_available_at,captured_at,recorded_at,artifact_id,raw_sha256 "
+            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
         value = 31.8 if metric == "high" else 25.8
         body = ("Date time,Automatic Weather Station,Air Temperature(degree Celsius)\n"
             f"{observed.astimezone(ZoneInfo('Asia/Hong_Kong')).strftime('%Y%m%d%H%M')},HK Observatory,{value}\n").encode()
@@ -54331,7 +54518,7 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
             assert latest[field] == original[field]
         assert [tuple(row) for row in fixture.conn.execute(
             "SELECT raw_model_forecast_id,model,metric,source_cycle_time,source_available_at,captured_at,recorded_at,artifact_id,raw_sha256 "
-            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == prior_rows
+            "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == forecast_rows_after_setup
         from src.data.replacement_forecast_readiness import latest_replacement_readiness
         readiness = latest_replacement_readiness(fixture.conn,city=fixture.city.name,target_date="2026-09-30",
             temperature_metric=metric,decision_time=written)
@@ -54390,7 +54577,11 @@ def test_hko_normal_kernel_uses_the_producers_instrument_variance(tmp_path, monk
             witness = prepared.probability_witness
             witnesses.append(witness)
             kernel = json.loads(consumed["kernel"])
-            assert kernel["instrument_sigma_c"] == pytest.approx(.1, abs=1e-12)
+            assert kernel["instrument_sigma_c"] == 0.
+            assert kernel["domain_role_shapes"]["unit"] == "C"
+            for role in ("X", "Y"):
+                assert len(kernel["domain_role_shapes"][role]["member_points_native"]) == 51
+                assert len(kernel["domain_role_shapes"][role]["member_interval_bounds_native"]) == 51
             assert kernel["path_error_sigma_c"] == pytest.approx(
                 provenance["day0_remaining_carrier_path_error_sigma_c"], abs=1e-12)
             assert kernel["future_extremes_c"] == provenance["day0_remaining_carrier_future_extremes_c"]
@@ -54408,7 +54599,8 @@ def test_hko_normal_kernel_uses_the_producers_instrument_variance(tmp_path, monk
                 for boundary, weight in inputs["boundary_scenarios"]
             ]
             replay = build_day0_remaining_probability_carrier(**inputs, n_point=1, n_samples=1,
-                identity_inputs={"unit": "C"}, settlement_semantics=SettlementSemantics(**kernel["settlement"]))
+                identity_inputs={"unit": "C", "domain_role_shapes": kernel["domain_role_shapes"]},
+                settlement_semantics=SettlementSemantics(**kernel["settlement"]))
             expected = [producer_q[fixture.conn.execute(
                 "SELECT range_label FROM market_events WHERE condition_id=?", (binding.condition_id,)
             ).fetchone()[0]] for binding in witness.bindings]
@@ -54551,7 +54743,14 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
             indexes = [producer_bounds.index(bound) for bound in consumer_bounds]
             # Clock/source/current state identities are separate from the
             # mathematical kernel and must also match, not merely its hash.
-            assert consumer["identity_inputs"] == producer["identity_inputs"]
+            # The source recipe predates its own posterior row. The public
+            # consumer additionally binds that exact immutable row; every
+            # physical role, body, clock and mathematical field stays equal.
+            expected_identity = copy.deepcopy(producer["identity_inputs"])
+            y_provider = expected_identity["domain_role_shapes"]["Y"]["provider_inputs"][0]
+            assert "posterior_id" not in y_provider
+            y_provider["posterior_id"] = fixture.result.posterior_id
+            assert consumer["identity_inputs"] == expected_identity
             binding = payload["_edli_global_day0_binding"]
             assert binding["observed_extreme_native"] == raw
             assert binding["rounded_value"] == math.trunc(raw)
@@ -54570,14 +54769,14 @@ def test_hko_normal_producer_and_reactor_consume_one_physical_kernel(tmp_path, m
             np.testing.assert_allclose(witness.yes_point_q, expected, rtol=0, atol=1e-12)
             np.testing.assert_allclose(consumer_result["q"], np.asarray(producer_result["q"])[indexes],
                 rtol=0, atol=1e-15)
-            # Ordered bins participate in the draw seed.  An actual shuffled
-            # topology changes that seed, not its physical source kernel. Replay
-            # the same producer inputs in that exact consumer order, rather
-            # than pretending its confidence draws must keep the old seed.
-            ordered_producer = actual_builder(**{**producer,"bin_bounds_c":consumer_bounds})
+            # Ordered bins and the canonical posterior binding participate in
+            # the draw seed, not the physical point law. Reproduce that exact
+            # consumed identity without dropping any source or role witness.
+            ordered_producer = actual_builder(**{**producer,"bin_bounds_c":consumer_bounds,
+                "identity_inputs":expected_identity})
             np.testing.assert_array_equal(consumer_result["samples"], ordered_producer["samples"])
             if not shuffled:
-                np.testing.assert_array_equal(consumer_result["samples"], producer_result["samples"])
+                np.testing.assert_array_equal(consumer_result["q"], producer_result["q"])
             # Early statistical calls possess sourced observations, not the
             # yet-to-be-built complete probability output binding.
             early = {key:value for key,value in payload.items() if key != "_edli_global_day0_binding"}
@@ -54679,7 +54878,8 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
             probability_use=era._CurrentProbabilityUse.HELD_MONITOR, raw_input_hwm_conn=fixture.conn)
         kernel, current_result = calls[-1]
         assert kernel["boundary_scenarios"][0][0] == raw
-        assert kernel["instrument_sigma_c"] == .1
+        assert kernel["instrument_sigma_c"] == 0.
+        assert kernel["identity_inputs"]["domain_role_shapes"]["unit"] == "C"
         current = prepared.probability_witness
         np.testing.assert_array_equal(current.yes_point_q, current_result["q"])
         # The runtime sampler owns its draw sequence. Fixed-action economics
@@ -54724,10 +54924,12 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
                         if min(points)+.001 < net < max(points)-.001:
                             possibilities.append((abs(points[0]-points[1]),binding,bid,points))
                 if not possibilities:
-                    # This LOW fixture's zero unresolved width is clamped on
-                    # both implementations; a sigma-only fix is no action flip.
-                    assert metric == "low" and name == "instrument"
+                    # Current X/Y point laws own independent role widths.
+                    # Changing a legacy common sigma cannot alter their q or
+                    # fixed-action economics, on either metric or token side.
+                    assert name == "instrument"
                     np.testing.assert_array_equal(legacy.yes_point_q,current.yes_point_q)
+                    np.testing.assert_array_equal(result["samples"],current_result["samples"])
                     continue
                 _,binding,bid,points = max(possibilities,key=lambda item:(item[0],
                     -abs(float(item[2]-fee.fee_per_share(item[2]))-sum(item[3])/2)))
@@ -54796,8 +54998,7 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
                 changed.add((name,side))
         assert {("boundary",side) for side in ("YES","NO")} <= changed
         assert {("both",side) for side in ("YES","NO")} <= changed
-        if metric == "high":
-            assert {("instrument",side) for side in ("YES","NO")} <= changed
+        assert not any(name == "instrument" for name, _side in changed)
         record_property("counterfactual_action_law",json.dumps(outcomes,sort_keys=True))
         assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
             (fixture.result.posterior_id,)).fetchone()) == original_row
@@ -54902,37 +55103,35 @@ def test_missing_station_ground_family_keeps_qualified_held_taker_and_resets_nor
     from src.data import station_ground_evidence as ground
     from src.data import replacement_forecast_materializer as materializer
     from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
-    from src.state.db import init_schema_trade_only, init_schema_world_only
+    from src.state.db import init_schema_trade_only
     from src.engine.global_auction_universe import _rebind_probability_witness_tokens
     from tests.test_replacement_forecast_bundle_reader import _shanghai_reader_certificate
-    from tests.test_replacement_forecast_materializer import _TemperatureBin
 
     at = _dt.datetime(2026,10,1,8,15,tzinfo=_dt.timezone.utc)
     healthy = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    from src.data import ecmwf_open_data as native
+    healthy_paths = native._resolve_opendata_paths()
     shanghai = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None,
         computed_at=at,first_compute_at=at-_dt.timedelta(minutes=10))
     affected = next(shanghai)
-    # The reader fixture's broad 'warm' interval is a source component, not
-    # an executable Celsius market. Build a new certificate through the normal
-    # materializer for actual one-degree outcome tokens; keep its old row.
-    affected.request = replace(affected.request,bins=(
-        _TemperatureBin("25C or below",upper_c=25.,center_c=24.),
-        _TemperatureBin("26C",lower_c=26.,upper_c=26.,center_c=26.),
-        _TemperatureBin("27C or above",lower_c=27.,center_c=28.)))
+    affected_paths = native._resolve_opendata_paths()
+    # The source factory already owns a finite executable market partition.
+    # Materialize that exact partition, not an overlapping second market.
+    from src.data.replacement_forecast_materialization_seed_builder import (
+        market_bins_for_replacement_seed, _market_bins_to_celsius,
+    )
+    from src.data.replacement_forecast_materialization_request_builder import _bins_to_temperature_bins
+    from src.contracts.settlement_semantics import SettlementSemantics
+    market_bins = market_bins_for_replacement_seed(affected.conn,city="Shanghai",
+        target_date=str(affected.request.target_date),temperature_metric="high")
+    affected.request = replace(affected.request,bins=_bins_to_temperature_bins(
+        _market_bins_to_celsius(market_bins,settlement_unit="C",
+            rounding_rule=SettlementSemantics.for_city(config.runtime_cities_by_name()["Shanghai"]).rounding_rule)))
     legal = materializer.materialize_replacement_forecast_live(affected.conn,affected.request)
     assert legal.ok,legal.reason_codes
     affected.conn.commit()
     affected.row = dict(affected.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
         (legal.posterior_id,)).fetchone())
-    init_schema_world_only(affected.conn)
-    for index,item in enumerate(affected.request.bins):
-        affected.conn.execute("""INSERT INTO market_events
-            (market_slug,city,target_date,temperature_metric,condition_id,token_id,
-             range_label,range_low,range_high,created_at,recorded_at)
-            VALUES (?,'Shanghai','2026-10-02','high',?,?,?,?,?,?,?)""",
-            (f"isolation-shanghai-{index}","0x"+f"{index+501:064x}",f"shanghai-yes-{index}",
-             item.bin_id,item.lower_c,item.upper_c,at.isoformat(),at.isoformat()))
-    affected.conn.commit()
     # The private Shanghai registry retains all configured rows. Its KORD
     # official input is copied byte-for-byte, never borrowed Shanghai ground.
     claim = json.loads((config.PROJECT_ROOT/"config/station_precise_coords.json").read_text())["Chicago"]["station_ground_proof"]
@@ -54976,7 +55175,12 @@ def test_missing_station_ground_family_keeps_qualified_held_taker_and_resets_nor
             callbacks[name] = captured_hooks[-1]
         def prepare(event,cut,*,held=False):
             name = json.loads(event.payload_json)["city"]
-            return callbacks[name]["prepare_held_event" if held else "prepare_event"](event,cut)
+            # Each factory owns a different private source namespace. Select
+            # its normal resolver path, never a cross-city body or verdict.
+            with monkeypatch.context() as source_namespace:
+                source_namespace.setattr(native,"_resolve_opendata_paths",lambda **kwargs:
+                    healthy_paths if name == "Chicago" else affected_paths)
+                return callbacks[name]["prepare_held_event" if held else "prepare_event"](event,cut)
         for name,event in events.items():
             for held in (False,True):
                 positive = prepare(event,at,held=held)
