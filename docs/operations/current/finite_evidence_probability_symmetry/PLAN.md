@@ -18223,3 +18223,28 @@ provider role/identity and q, reproduce in public ENTRY/HELD/JIT, and reject
 the superseded selected certificate. No source/likelihood/retention gate is
 changed for these controls. Source3 is frozen for independent delta review;
 tests/closeout and current-origin integration remain pending. NOT LOAD READY.
+
+Final current-variant same-fixture H/L proof:2 passed,226.18s,actualexit0,
+/tmp/zeus-HKO-X-only-fresh-body-final-actual-centres.xml. This includes old
+lawful full-Y READY, actual old-Y original loss/not-covered, next normal cut
+creating independent remaining-X READY without rewriting the old certificate;
+then a distinct later RHR source instant31C/HIGH or9C/LOW updates the owning
+current-state-conditioned provider future (not directly the spot as a future
+extreme). Mainshape equals the rebuilt carrier.X; native snapshot/member
+points/bounds/original first-possession and physical clocks remain identical.
+Shape/carrier/posterior identities and actual q change, public ENTRY/HELD
+reproduce, old selected witness is GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED, and
+new primary JIT probability reproduction succeeds. This is probability-boundary
+proof, NOT order submission, market-speed measurement, a complete seed/request
+worker-loop run or actual Hong Kong source readiness.
+The first new-body test assumed future center equals current spot and failed
+only that assertion (2 failed,180.86s,
+/tmp/zeus-HKO-X-only-fresh-body-final.xml). Actual owning future centers are
+28.67915673257188/11.320843267428126 under the unchanged current-innovation
+operator; the final assertion independently uses serialized provider centers'
+mean and their disagreement with original raw ENS20. No production change
+was made to obtain this correction. Source3 remains exactly4bad0c5b1; changed-
+surface freshness/planning checks returnedok/zeroissues. Full F-city public
+consumer positive remains unrun; C/F conversion is explicit and wrong-unit
+admission rejects, not a blanket physical-equivalence verdict. Required checks,
+c41/f4 source followups and current8069 normal rebase remain pending; no load.
