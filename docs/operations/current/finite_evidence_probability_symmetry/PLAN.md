@@ -19738,3 +19738,42 @@ refusal and original-clock restoration. Unknown or invalid inputs cannot borrow
 a cached successful grade. Final CLI, HEAD secret scan and required-gate batch
 wait for this source freeze and the native fixture review; the two pricing-common
 old-fixture prerequisite failures remain recorded, not passes.
+
+### Upgrade proof canonical read ownership — BEFORE EDIT
+
+The registered 3c6 restart returned rc1 after 122.95s at PRESTOP on
+2026-10-06T21:20:54Z: Austin HIGH proof raised `no such column:
+temperature_metric`. MAIN PID9870 was not stopped; the registered loader
+released its own restart guard. Source prerequisites were reloaded normally,
+but that is not a new MAIN or current v7/v35 consumption proof.
+
+Actual mode=ro/query_only reproduction showed the upgrade proof used a
+TRADE-main connection with WORLD then FORECAST attachments. Its bare
+market_events resolved WORLD's archived v1 shell, not the canonical FORECAST
+table (db_table_ownership FORECAST entry334/WORLD legacy entry1022). The
+canonical qualified Austin query succeeds. Merely qualifying that query is
+insufficient: the bare readiness selector also sees TRADE's same-name table,
+and public topology inspection still sees the WORLD market shell.
+
+ROOT authorizes q to change only scripts/check_live_restart_preflight.py and
+tests/test_check_live_restart_preflight.py, plus this existing PLAN. Keep the
+shared TRADE-main connector and held-position scope reader unchanged. Only the
+probability-upgrade read phase gets FORECAST-main plus WORLD, both mode=ro,
+query_only and explicitly closed. Bind exactly the preflight FORECAST_DB and
+WORLD_DB paths, not import-time defaults; the existing state helper cannot take
+these explicit paths, so use a thin equivalent local connection. Select
+main.market_events with city/date/HIGH-or-LOW/held condition binding. Preserve
+world.opportunity_events, all public current-role/body/PIT/source/HWM/context
+gates and the existing final-daily qualification law.
+
+SCOPE is the current upgrade's statistical held family on canonical DB owners.
+DRAIN remains normal source/seed/materialization while old MAIN monitors.
+RESET is a genuinely current canonical public proof, not a legacy same-name
+table or added compatibility column. No DB schema/data migration, ghost drop,
+venue/source request, probability change or live edit is allowed. Private
+bootstrap DDL must reproduce three DBs and colliding TRADE/WORLD shells;
+HIGH/LOW and condition binding, missing canonical/legacy-only refusal, exact
+paths/read-only lifecycle and real normal-producer public H/L positives must
+be checked. Preserve PRESTOP refusal, CAS release and old MAIN monitoring
+controls. A reviewed new tip needs fresh relevant gate/secret proof and ROOT
+authorization before another FF landing or registered restart.
