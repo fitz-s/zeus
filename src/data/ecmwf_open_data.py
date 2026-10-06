@@ -116,6 +116,435 @@ class OpenDataPaths:
     manifest_path: Path
     origin: str
 
+_NATIVE_2T_QUANTITY = "native_2m_temperature_instantaneous_knots"
+_NATIVE_2T_VERSION = "ecmwf_ifs50r1_2t_native_source_v1"
+
+
+@dataclass(frozen=True)
+class NativeTemperatureSource:
+    status: str
+    source_run_id: str | None
+    observed_count: int
+    missing_member_steps: tuple[tuple[int, int], ...]
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class NativeTemperatureScope:
+    status: str
+    native_knots: tuple[dict, ...] = ()
+    available_at: str | None = None
+    temperature_first_possession_at: str | None = None
+    reason: str | None = None
+    quantity_role: str = _NATIVE_2T_QUANTITY
+    temporal_representation: str = "acquired_native_knots"
+    qualification_status: str = "OFFLINE_ONLY"
+    projection_status: str = "NOT_PERFORMED"
+    extrema_status: str = "NOT_COMPUTED"
+    static_validity_status: str = "UNKNOWN"
+    temperature_scope_first_possession_at: str | None = None
+    physical_dependency_available_at: str | None = None
+    pit_status: str = "UNKNOWN"
+    physical_witness: dict | None = None
+    scope_role: str = "remaining_X"
+    temperature_metric: str | None = None
+
+
+def _native_temperature_steps(run: datetime, steps: list[int]) -> list[int]:
+    if (run.tzinfo is None or run.utcoffset() != timedelta(0) or run.hour not in (0, 6, 12, 18)
+            or run.minute or run.second or run.microsecond or run > datetime.now(timezone.utc)):
+        raise ValueError("NATIVE_2T_RUN_INVALID")
+    horizon = 240 if run.hour in (0, 12) else 90
+    if (not steps or len(set(steps)) != len(steps)
+            or any(type(s) is not int or s < 0 or s > horizon
+                   or s % (3 if s <= 144 else 6) for s in steps)):
+        raise ValueError("NATIVE_2T_NATIVE_STEPS_INVALID")
+    return sorted(steps)
+
+
+def _read_native_temperature_record(path: Path, run: datetime) -> tuple[dict, bytes]:
+    """Revalidate retained originals; metadata echoes never replace GRIB sections."""
+    import base64
+    import eccodes as ec
+    from urllib.parse import urlsplit
+    from scripts import extract_open_ens_localday as decoder
+
+    raw = path.read_bytes()
+    proof_path = path.with_suffix(".grib2.proof.json")
+    proof_bytes = proof_path.read_bytes()
+    proof = json.loads(proof_bytes)
+    member, step = proof["member"], proof["step_hours"]
+    if type(member) is not int or not 0 <= member <= 50:
+        raise ValueError("NATIVE_2T_MEMBER_INVALID")
+    _native_temperature_steps(run, [step])
+    if (raw[:4] != b"GRIB" or raw[-4:] != b"7777" or len(raw) < 20 or raw[7] != 2
+            or int.from_bytes(raw[8:16], "big") != len(raw)):
+        raise ValueError("NATIVE_2T_MESSAGE_FRAMING_INVALID")
+    if urlsplit(proof["source_url"]).hostname not in (
+            "data.ecmwf.int", "ecmwf-forecasts.s3.eu-central-1.amazonaws.com"):
+        raise ValueError("NATIVE_2T_SOURCE_HOST_INVALID")
+    if proof["range_http"].get("status") != 206:
+        raise ValueError("NATIVE_2T_RANGE_NOT_206")
+    headers = proof["range_http"]["headers"]
+    span = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", headers["Content-Range"])
+    if not span:
+        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
+    start, end, total = map(int, span.groups())
+    if (not 0 <= start <= proof["source_index_offset"]
+            or end < proof["source_index_offset"] + len(raw) - 1 or end >= total
+            or int(headers["Content-Length"]) != end - start + 1):
+        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
+    index_path = path.parent / proof["index_path"]
+    if not index_path.resolve().is_relative_to(path.parent.resolve()):
+        raise ValueError("NATIVE_2T_INDEX_OUTSIDE_CACHE")
+    index = index_path.read_bytes()
+    if proof.get("ingest_mode") == "SCHEDULED_LIVE":
+        receipt_bytes = index_path.with_suffix(".http.json").read_bytes()
+        receipt = json.loads(receipt_bytes)
+        started = datetime.fromisoformat(receipt["fetch_started_at"])
+        received = datetime.fromisoformat(receipt["source_fetched_at"])
+        fetched = datetime.fromisoformat(proof["source_fetched_at"])
+        if (hashlib.sha256(receipt_bytes).hexdigest() != proof["index_receipt_sha256"]
+                or receipt["source_url"] != proof["source_url"]
+                or receipt["source_index_url"] != proof["source_index_url"]
+                or receipt["http"]["status"] != 200
+                or any(clock.tzinfo is None for clock in (started, received, fetched))
+                or not run <= started <= received <= fetched <= datetime.now(timezone.utc)
+                or proof.get("qualification_status") != "UNKNOWN"
+                or proof.get("source_issued_at") is not None):
+            raise ValueError("NATIVE_2T_ORIGINAL_INDEX_RECEIPT_INVALID")
+    gid = ec.codes_new_from_message(raw)
+    try:
+        capture = decoder._native_message_capture(gid, instantaneous=True)
+        if capture["capture_status"] != "OBSERVED":
+            raise ValueError("NATIVE_2T_CAPTURE_UNKNOWN")
+        h = capture["observed_headers"]
+        sections = {s["section_number"]: base64.b64decode(s["bytes_base64"], validate=True)
+                    for s in capture["metadata_sections"]}
+        s1, s3, s4 = sections[1], sections[3], sections[4]
+        valid = run + timedelta(hours=step)
+        if (h["paramId"] != 167 or h["shortName"] != "2t" or h["units"] != "K"
+                or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
+                or h["stepType"] != "instant" or h["stepUnits"] != 1
+                or h["startStep"] != step or h["endStep"] != step or str(h["stepRange"]) != str(step)
+                or h["centre"] != "ecmf" or h["generatingProcessIdentifier"] != 161
+                or h["dataType"] != ("fc" if member == 0 else "pf")
+                or h.get("number", 0) != member
+                or (h["dataDate"], h["dataTime"]) != (int(run.strftime("%Y%m%d")), run.hour * 100)
+                or (h["validityDate"], h["validityTime"]) != (int(valid.strftime("%Y%m%d")), valid.hour * 100)
+                or raw[6] != 0 or s4[9:11] != b"\x00\x00"
+                or int.from_bytes(s1[5:7], "big") != 98
+                or int.from_bytes(s1[12:14], "big") != run.year
+                or tuple(s1[14:19]) != (run.month, run.day, run.hour, 0, 0)
+                or s1[20] != (1 if member == 0 else 4)
+                or int.from_bytes(s4[7:9], "big") != (0 if member == 0 else 1)
+                or h["productDefinitionTemplateNumber"] != (0 if member == 0 else 1)
+                or s4[13] != 161 or s4[11] != h["typeOfGeneratingProcess"]
+                or h["typeOfGeneratingProcess"] != (2 if member == 0 else 4)
+                or s4[17] != 1 or int.from_bytes(s4[18:22], "big") != step
+                or s4[22] != 103 or s4[23] != 0 or int.from_bytes(s4[24:28], "big") != 2
+                or (member and s4[35] != member)
+                or decoder._open_ens_original_grid(s3) != {k: h[k] for k in decoder._GRID_KEYS}):
+            raise ValueError("NATIVE_2T_ORIGINAL_IDENTITY_MISMATCH")
+        binding = decoder._open_ens_source_binding(raw, {**proof, "original_index_bytes": index,
+            "original_range_bytes": raw}, h, param="2t", member=member, step=step, run=run)
+        return {**binding, "member": member, "step_hours": step, "valid_time_utc": valid.isoformat(),
+            "path": str(path.resolve()), "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
+            "grid_sha256": hashlib.sha256(s3).hexdigest(),
+            "observed_headers": h,
+            "original_section_sha256": {str(n): hashlib.sha256(body).hexdigest() for n, body in sections.items()},
+            "process_type": h["typeOfGeneratingProcess"]}, raw
+    finally:
+        ec.codes_release(gid)
+
+
+def persist_native_temperature_source_run(conn: sqlite3.Connection, *, cache_dir: Path,
+        manifest_path: Path, expected_run_utc: datetime, product_steps: list[int],
+        ingest_mode: str = "ARCHIVE_BACKFILL") -> NativeTemperatureSource:
+    """Source inventory only; caller owns the FORECAST_CLASS transaction.
+
+    No HTTP, schedule, source activation, snapshots, hourly vectors or q writes.
+    SCOPE: stable product/run/original-grid. DRAIN: normal cadence may retain the
+    missing original ranges; this function only inventories them. RESET: exact
+    proofs are rechecked on every call, without renewing retained possession clocks.
+    A product's expected steps may grow, never shrink with a city/cut scope view.
+    """
+    steps = _native_temperature_steps(expected_run_utc, product_steps)
+    if ingest_mode not in {"ARCHIVE_BACKFILL", "SCHEDULED_LIVE"}:
+        raise ValueError("NATIVE_2T_INGEST_ROLE_INVALID")
+    if conn.in_transaction:
+        raise ValueError("NATIVE_2T_REQUIRES_OWN_TRANSACTION")
+    previous_bytes = manifest_path.read_bytes() if manifest_path.exists() else None
+    previous = json.loads(previous_bytes) if previous_bytes else None
+    if previous and previous.get("ingest_mode", "ARCHIVE_BACKFILL") != ingest_mode:
+        raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
+    if previous:
+        previous_row = get_source_run(conn, previous["source_run_id"])
+        if not previous_row or previous_row["manifest_hash"] != hashlib.sha256(previous_bytes).hexdigest():
+            raise ValueError("NATIVE_2T_PREVIOUS_MANIFEST_UNBOUND")
+    old = {(m["member"], m["step_hours"]): m for m in
+           (previous or {}).get("retained_identities", (previous or {}).get("messages", []))}
+    if previous and (previous["run_time_utc"] != expected_run_utc.isoformat()
+                     or not set(previous["product_steps"]).issubset(steps)):
+        raise ValueError("NATIVE_2T_CACHE_RUN_OR_PLAN_CHANGED")
+    records, errors, seen = [], [], set()
+    for path in sorted(cache_dir.glob("step*-member*.grib2")):
+        try:
+            record, _ = _read_native_temperature_record(path, expected_run_utc)
+            if ingest_mode == "SCHEDULED_LIVE":
+                proof = json.loads(path.with_suffix(".grib2.proof.json").read_bytes())
+                if proof.get("ingest_mode") != ingest_mode:
+                    raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
+            key = record["member"], record["step_hours"]
+            if key in seen:
+                raise ValueError("NATIVE_2T_DUPLICATE_MEMBER_STEP")
+            seen.add(key)
+            if key in old and old[key] != record:
+                raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
+            records.append(record)
+        except Exception as exc:
+            errors.append(f"{path.name}:{exc}")
+    if previous:
+        compatible = [m for m in records if m["grid_sha256"] == previous["grid_sha256"]]
+        if len(compatible) != len(records):
+            errors.append("NATIVE_2T_RETAINED_GRID_CHANGED")
+            records = compatible
+    grids = {m["grid_sha256"] for m in records}
+    process_types = {(m["member"] == 0, m["process_type"]) for m in records}
+    if ((len(grids) != 1 and not (previous and not grids))
+            or any(sum(role == other for other, _ in process_types) > 1
+                               for role, _ in process_types)):
+        return NativeTemperatureSource("UNKNOWN", None, len(records), (), "NATIVE_2T_GRID_OR_PROCESS_UNKNOWN")
+    grid = next(iter(grids)) if grids else previous["grid_sha256"]
+    run_id = f"ecmwf_open_data:2t_instant_native_knots:{expected_run_utc:%Y%m%dT%H%MZ}:grid:{grid}:ifs50r1"
+    if ingest_mode == "SCHEDULED_LIVE":
+        run_id += ":origin:scheduled_live"
+    existing = get_source_run(conn, run_id)
+    if existing and (existing["ingest_mode"], existing["origin_mode"]) != (ingest_mode, ingest_mode):
+        raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
+    if existing and previous is None:
+        # Canonical identity outlives a missing file. Restoration must supply
+        # the original bound manifest/proofs, not replace its first clocks.
+        raise ValueError("NATIVE_2T_CANONICAL_MANIFEST_MISSING")
+    if previous and (previous["source_run_id"] != run_id or previous["grid_sha256"] != grid):
+        raise ValueError("NATIVE_2T_CACHE_IDENTITY_CHANGED")
+    wanted = {(m, s) for s in steps for m in range(51)}
+    actual = {(m["member"], m["step_hours"]) for m in records}
+    missing = tuple(sorted(wanted - actual))
+    complete = not missing and not errors and wanted == actual
+    clocks = [m["source_fetched_at"] for m in records]
+    observed_steps = [s for s in steps if {(m, s) for m in range(51)} <= actual]
+    payload = {"version": _NATIVE_2T_VERSION, "quantity_role": _NATIVE_2T_QUANTITY,
+        "source_run_id": run_id, "run_time_utc": expected_run_utc.isoformat(), "grid_sha256": grid,
+        "product_steps": steps, "messages": records, "errors": errors,
+        # Keep original identity anchors even when a later scan finds a missing
+        # or tampered body: repair cannot reset its first-possession clock.
+        "retained_identities": list({**old, **{(m["member"], m["step_hours"]): m for m in records}}.values()),
+        "source_issued_at": None, "source_publication_at": None,
+        "qualification_status": "UNKNOWN" if ingest_mode == "SCHEDULED_LIVE" else "OFFLINE_ONLY"}
+    if ingest_mode == "SCHEDULED_LIVE":
+        payload.update(ingest_mode=ingest_mode,
+            temperature_first_possession_at=max(clocks, key=datetime.fromisoformat) if clocks else None)
+    content = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(content).hexdigest()
+    with conn:
+        write_source_run(conn, source_run_id=run_id, source_id="ecmwf_open_data",
+            track="2t_instant_native_knots", release_calendar_key="ecmwf_open_data",
+            ingest_mode=ingest_mode, origin_mode=ingest_mode,
+            source_cycle_time=expected_run_utc, source_issue_time=None, source_release_time=None,
+            source_available_at=(max(clocks, key=datetime.fromisoformat)
+                if complete and ingest_mode == "ARCHIVE_BACKFILL" else None),
+            status="SUCCESS" if complete else "PARTIAL", completeness_status="COMPLETE" if complete else "PARTIAL",
+            temperature_metric=None, physical_quantity=_NATIVE_2T_QUANTITY, observation_field="2t",
+            valid_time_start=expected_run_utc + timedelta(hours=steps[0]),
+            valid_time_end=expected_run_utc + timedelta(hours=steps[-1]),
+            data_version=_NATIVE_2T_VERSION, expected_members=51,
+            observed_members=len({m["member"] for m in records}), expected_steps_json=steps,
+            observed_steps_json=observed_steps, expected_count=len(wanted), observed_count=len(actual),
+            partial_run=not complete, manifest_hash=digest,
+            raw_payload_hash=hashlib.sha256(json.dumps(sorted(m["raw_message_sha256"] for m in records)).encode()).hexdigest(),
+            reason_code=None if complete else "NATIVE_2T_INCOMPLETE_OR_INVALID_ORIGINAL")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    # DB commits first. Failed publication leaves readback UNKNOWN, not a false ready row.
+    with tempfile.NamedTemporaryFile(dir=manifest_path.parent, delete=False) as handle:
+        temporary = Path(handle.name)
+        try:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            os.replace(temporary, manifest_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return NativeTemperatureSource("AVAILABLE" if complete else "INCOMPLETE", run_id,
+        len(actual), missing, errors[0] if errors else None)
+
+
+def read_native_temperature_scope(conn: sqlite3.Connection, *, source_run_id: str,
+        manifest_path: Path, required_steps: list[int], qualified_prefix_cut_utc: datetime | None,
+        local_day_end_utc: datetime, explicit_manifest: list[dict], mask_grib_path: Path | None = None,
+        mask_proof_path: Path | None = None, surface_geopotential_grib_path: Path | None = None,
+        surface_geopotential_proof_path: Path | None = None, decision_at_utc: datetime | None = None,
+        metric: str | None = None, role: str = "remaining_X", local_day_start_utc: datetime | None = None,
+        _paths: OpenDataPaths | None = None) -> NativeTemperatureScope:
+    """Qualified scope view of immutable originals, never hourly or live q authority.
+
+    SCOPE: supplied qualified prefix cut through local end, with native brackets.
+    DRAIN: supply missing bytes/prefix/static proof through existing source cadence.
+    RESET: revalidate this scope independently; a different city/cut never changes cache identity.
+    ``pit_status`` proves possession of this exact model quantity/scope, not
+    hourly extrema, station equivalence, q authority or provider publication.
+    """
+    import base64
+    import eccodes as ec
+    from scripts import extract_open_ens_localday as decoder
+
+    mode, temperature_clock = None, None
+    try:
+        content = manifest_path.read_bytes()
+        payload = json.loads(content)
+        row = get_source_run(conn, source_run_id)
+        mode = payload.get("ingest_mode", "ARCHIVE_BACKFILL")
+        if (not row or row["manifest_hash"] != hashlib.sha256(content).hexdigest()
+                or payload["source_run_id"] != source_run_id or payload["version"] != _NATIVE_2T_VERSION
+                or row["physical_quantity"] != _NATIVE_2T_QUANTITY or row["temperature_metric"] is not None
+                or row["source_id"] != "ecmwf_open_data" or row["track"] != "2t_instant_native_knots"
+                or row["dataset_id"] != _NATIVE_2T_VERSION or row["source_issue_time"] is not None
+                or row["source_release_time"] is not None
+                or row["expected_count"] != 51 * len(payload["product_steps"])
+                or row["observed_count"] != len(payload["messages"])
+                or row["source_cycle_time"] != payload["run_time_utc"] or payload["errors"]
+                or mode not in {"ARCHIVE_BACKFILL", "SCHEDULED_LIVE"}
+                or (row["ingest_mode"], row["origin_mode"]) != (mode, mode)
+                or payload["qualification_status"] != ("UNKNOWN" if mode == "SCHEDULED_LIVE" else "OFFLINE_ONLY")
+                or (mode == "SCHEDULED_LIVE" and row["source_available_at"] is not None)):
+            raise ValueError("NATIVE_2T_MANIFEST_OR_ROW_INVALID")
+        run = datetime.fromisoformat(payload["run_time_utc"])
+        steps = _native_temperature_steps(run, required_steps)
+        if steps != [s for s in range(steps[0], steps[-1] + 1) if s % (3 if s <= 144 else 6) == 0]:
+            raise ValueError("NATIVE_2T_SCOPE_NATIVE_GRID_GAP")
+        wanted = {(m, s) for s in steps for m in range(51)}
+        selected = [m for m in payload["messages"] if m["step_hours"] in steps]
+        if len(selected) != len(wanted) or {(m["member"], m["step_hours"]) for m in selected} != wanted:
+            return NativeTemperatureScope("INCOMPLETE", reason="NATIVE_2T_MEMBER_STEP_SET_INCOMPLETE",
+                qualification_status=payload["qualification_status"])
+        scope_start = local_day_start_utc if role == "full_Y" else qualified_prefix_cut_utc
+        if (role not in {"remaining_X", "full_Y"} or metric not in {None, "high", "low"}
+                or scope_start is None or scope_start.tzinfo is None
+                or local_day_end_utc.tzinfo is None or not run <= scope_start < local_day_end_utc
+                or run + timedelta(hours=steps[0]) > scope_start
+                or run + timedelta(hours=steps[-1]) < local_day_end_utc):
+            raise ValueError("NATIVE_2T_QUALIFIED_PREFIX_OR_BRACKET_UNKNOWN")
+        if decision_at_utc is not None and (decision_at_utc.tzinfo is None
+                or decision_at_utc.utcoffset() != timedelta(0)
+                or decision_at_utc > datetime.now(timezone.utc) or metric is None):
+            raise ValueError("NATIVE_2T_DECISION_SCOPE_INVALID")
+        originals = []
+        for saved in selected:
+            record, raw = _read_native_temperature_record(Path(saved["path"]), run)
+            if mode == "SCHEDULED_LIVE" and json.loads(Path(saved["path"]).with_suffix(
+                    ".grib2.proof.json").read_bytes()).get("ingest_mode") != mode:
+                raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
+            if record != saved:
+                raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
+            originals.append((saved, raw))
+        temperature_clock = max((s["source_fetched_at"] for s, _ in originals), key=datetime.fromisoformat)
+        # Resolve the actual normal collector caches, not an offline/audit HTTP
+        # helper. Both mandatory tracks share this product/run/grid inventory.
+        if mask_grib_path is None:
+            paths = _paths or _resolve_opendata_paths()
+            directory = _download_output_path(run_date=run.date(), run_hour=run.hour,
+                param="2t", raw_root=paths.raw_root).parent
+            candidates = [directory / f".{track}_{run:%Y%m%d}_{run:%H}z_lsm.grib2" for track in TRACKS]
+            mask_grib_path = next((p for p in candidates if p.exists() and p.with_suffix(".z.grib2").exists()), candidates[0])
+        mask_proof_path = mask_proof_path or mask_grib_path.with_suffix(".proof.json")
+        surface_geopotential_grib_path = surface_geopotential_grib_path or mask_grib_path.with_suffix(".z.grib2")
+        surface_geopotential_proof_path = surface_geopotential_proof_path or surface_geopotential_grib_path.with_suffix(".proof.json")
+        mask = decoder._read_land_mask(mask_grib_path, mask_proof_path)
+        mask_capture = decoder._open_ens_original_surface_capture(mask_grib_path)
+        mask_gid = ec.codes_new_from_message(mask_grib_path.read_bytes())
+        try:
+            if (ec.codes_get(mask_gid, "paramId") != 172 or ec.codes_get(mask_gid, "shortName") != "lsm"
+                    or ec.codes_get(mask_gid, "units") != "(0 - 1)"
+                    or ec.codes_get(mask_gid, "typeOfLevel") != "surface"):
+                raise ValueError("NATIVE_2T_LSM_ORIGINAL_QUANTITY_INVALID")
+        finally:
+            ec.codes_release(mask_gid)
+        s3 = next(base64.b64decode(s["bytes_base64"], validate=True)
+                  for s in mask_capture["metadata_sections"] if s["section_number"] == 3)
+        if (hashlib.sha256(s3).hexdigest() != payload["grid_sha256"]
+                or decoder._open_ens_original_grid(s3) != mask["fields"]):
+            raise ValueError("NATIVE_2T_LSM_ORIGINAL_GRID_MISMATCH")
+        if not explicit_manifest or len({c["city"] for c in explicit_manifest}) != len(explicit_manifest):
+            raise ValueError("NATIVE_2T_CITY_SCOPE_INVALID")
+        points = decoder._select_land_grid_points(mask["fields"], explicit_manifest, mask["values"].__getitem__)
+        knots = []
+        for saved, raw in originals:
+            gid = ec.codes_new_from_message(raw)
+            try:
+                values = ec.codes_get_values(gid)
+                if len(values) != mask["fields"]["Ni"] * mask["fields"]["Nj"]:
+                    raise ValueError("NATIVE_2T_VALUES_GRID_INVALID")
+                for city in explicit_manifest:
+                    point = points[city["city"]]
+                    value = float(values[point["selected_flat_index"]])
+                    if not math.isfinite(value) or value == ec.codes_get(gid, "missingValue"):
+                        raise ValueError("NATIVE_2T_SELECTED_VALUE_INVALID")
+                    knots.append({"city": city["city"], "member": saved["member"],
+                        "step_hours": saved["step_hours"], "valid_time_utc": saved["valid_time_utc"],
+                        "value_k": value, "raw_message_sha256": saved["raw_message_sha256"],
+                        "selected_point": point, "lsm_raw_sha256": mask_capture["raw_message_sha256"],
+                        "surface_class": "PURE_LAND" if point["selected_land_fraction"] == 1 else "MIXED_LAND_WATER"})
+            finally:
+                ec.codes_release(gid)
+        static_status, dependency_clock, pit, witness, static_reason = "UNKNOWN", None, "UNKNOWN", None, None
+        try:
+            phi = decoder.read_native_static_dependency(path=surface_geopotential_grib_path,
+                proof_path=surface_geopotential_proof_path, param="z", run=run, grid_sha256=payload["grid_sha256"])
+            own_index = mask_grib_path.with_suffix(".index.body")
+            land = decoder.read_native_static_dependency(path=mask_grib_path, proof_path=mask_proof_path,
+                param="lsm", run=run, grid_sha256=payload["grid_sha256"],
+                index_path=own_index if own_index.exists() else surface_geopotential_grib_path.with_suffix(".index.body"),
+                index_proof_path=mask_proof_path if own_index.exists() else surface_geopotential_proof_path)
+            for point in points.values():
+                for cell in point["four_neighbors"]:
+                    value = float(phi["values"][cell["flat_index"]])
+                    if not math.isfinite(value) or value == phi["missing_value"]:
+                        raise ValueError("NATIVE_2T_STATIC_PHI_NONFINITE")
+                    cell["raw_phi_m2_s2"] = value
+                point["selected_raw_phi_m2_s2"] = float(phi["values"][point["selected_flat_index"]])
+                point["surface_class"] = "PURE_LAND" if point["selected_land_fraction"] == 1 else "MIXED_LAND_WATER"
+            dependency_clock = max((temperature_clock, land["available_at"], phi["available_at"]), key=datetime.fromisoformat)
+            static_status = "SAME_RUN_OBSERVED"
+            pit = ("AVAILABLE" if decision_at_utc is not None and datetime.fromisoformat(dependency_clock) < decision_at_utc
+                   else "AFTER_DECISION" if decision_at_utc is not None else "UNKNOWN")
+            witness = {"quantity": {"param_id": 167, "units": "K", "height_agl_m": 2, "step_type": "instant"},
+                "run_time_utc": run.isoformat(), "scope_role": role, "temperature_metric": metric,
+                "origin_mode": mode, "source_run_id": source_run_id,
+                "scope_start_utc": scope_start.isoformat(), "scope_end_utc": local_day_end_utc.isoformat(),
+                "grid_sha256": payload["grid_sha256"], "selected_cities": points,
+                "temperature_messages": [s for s, _ in originals],
+                "static_dependencies": [{k: v for k, v in dep.items() if k not in {"values", "fields"}}
+                                        for dep in (land, phi)],
+                "sensor_agl_status": "UNKNOWN", "station_ground_datum_status": "UNKNOWN",
+                "precision_status": "UNKNOWN", "representativeness_status": "UNKNOWN",
+                "station_equivalence_status": "UNKNOWN", "source_issued_at": None}
+        except (ValueError, KeyError, OSError, TypeError) as exc:
+            static_reason = str(exc)
+        return NativeTemperatureScope("AVAILABLE", tuple(knots),
+            temperature_first_possession_at=temperature_clock, reason=static_reason,
+            qualification_status=payload["qualification_status"], static_validity_status=static_status,
+            temperature_scope_first_possession_at=temperature_clock,
+            physical_dependency_available_at=dependency_clock, pit_status=pit, physical_witness=witness,
+            scope_role=role, temperature_metric=metric)
+    except Exception as exc:
+        return NativeTemperatureScope("UNKNOWN", reason=str(exc),
+            temperature_first_possession_at=temperature_clock, temperature_scope_first_possession_at=temperature_clock,
+            qualification_status="UNKNOWN" if mode == "SCHEDULED_LIVE" else "OFFLINE_ONLY",
+            scope_role=role, temperature_metric=metric)
+
+
+
+
 
 def _write_runtime_coordinate_manifest(raw_root: Path, *, manifest_json: str | None = None) -> Path:
     """Bind extraction to the same station locations as current provider forecasts."""
@@ -1127,6 +1556,7 @@ def _resolve_index_parts(
     result: Any,
     *,
     deadline: float | None = None,
+    original_indexes: list[dict] | None = None,
 ) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
     """Resolve ECMWF ``.index`` parts without multiurl's 120-second retry loop."""
 
@@ -1139,6 +1569,7 @@ def _resolve_index_parts(
     for url in result.urls:
         base, _ = os.path.splitext(str(url))
         index_url = f"{base}.index"
+        started = datetime.now(timezone.utc).isoformat() if original_indexes is not None else None
         response = client.session.get(
             index_url,
             stream=True,
@@ -1149,7 +1580,23 @@ def _resolve_index_parts(
             if response.status_code != 200:
                 response.raise_for_status()
             parts: list[tuple[int, int]] = []
-            for raw_line in response.iter_lines():
+            if original_indexes is not None:
+                chunks, size = [], 0
+                for chunk in response.iter_content(chunk_size=65536):
+                    _remaining_step_timeout(deadline)
+                    size += len(chunk)
+                    if size > _RANGE_RESUME_CHUNK_BYTES:
+                        raise ValueError("NATIVE_2T_INDEX_BODY_OVERSIZED")
+                    chunks.append(chunk)
+                body = b"".join(chunks)
+                original_indexes.append({"source_url": str(url), "source_index_url": index_url,
+                    "body": body, "fetch_started_at": started,
+                    "source_fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "http": {"status": response.status_code, "headers": dict(response.headers)}})
+                lines = body.splitlines()
+            else:
+                lines = response.iter_lines()
+            for raw_line in lines:
                 _remaining_step_timeout(deadline)
                 if not raw_line:
                     continue
@@ -1168,7 +1615,8 @@ def _resolve_index_parts(
     return resolved
 
 
-def _read_static_mask_range(session: Any, url: str, offset: int, length: int, *, deadline: float | None = None) -> bytes:
+def _read_static_mask_range(session: Any, url: str, offset: int, length: int, *, deadline: float | None = None,
+                            receipt: dict | None = None) -> bytes:
     """Read exactly one indexed static LSM GRIB message; never the full GRIB."""
     if not 0 <= offset or not 100 <= length <= 1024 * 1024:
         raise ValueError("ENS_LAND_MASK_INDEX_BOUNDS_INVALID")
@@ -1190,6 +1638,9 @@ def _read_static_mask_range(session: Any, url: str, offset: int, length: int, *,
         message = b"".join(chunks)
         if len(message) != length or not message.startswith(b"GRIB") or not message.endswith(b"7777"):
             raise ValueError("ENS_LAND_MASK_MESSAGE_INVALID")
+        if receipt is not None:
+            receipt.update(status=response.status_code, headers=dict(response.headers),
+                           source_fetched_at=datetime.now(timezone.utc).isoformat())
         return message
     finally:
         response.close()
@@ -1201,6 +1652,41 @@ def _fetch_cycle_land_mask(
 ) -> dict[str, object]:
     """Acquire bounded same-cycle IFS control static geometry for ENS extraction."""
     from ecmwf.opendata import Client
+    from scripts.extract_open_ens_localday import _read_land_mask
+
+    proof_path = output_path.with_suffix(".proof.json")
+    cycle = datetime.combine(cycle_date, datetime.min.time(), timezone.utc).replace(hour=cycle_hour)
+    # SCOPE: this exact static run/body. DRAIN: restore its original committed
+    # evidence; RESET: a valid original or an independent new run. Old caches
+    # without indexes remain diagnostic; re-fetching cannot renew their clock.
+    if proof_path.exists():
+        if output_path.is_symlink() or proof_path.is_symlink():
+            raise ValueError("ENS_LAND_MASK_CACHE_SYMLINK")
+        before = output_path.read_bytes(), proof_path.read_bytes()
+        observed = _read_land_mask(output_path, proof_path)
+        proof = observed["proof"]
+        fetched = datetime.fromisoformat(str(proof["source_fetched_at"]))
+        if (proof["source_cycle_time"] != cycle.isoformat() or fetched.tzinfo is None
+                or not cycle <= fetched <= datetime.now(timezone.utc)
+                or proof["source_index_length"] != len(before[0])
+                or (output_path.read_bytes(), proof_path.read_bytes()) != before):
+            raise ValueError("ENS_LAND_MASK_CACHE_ORIGINAL_INVALID")
+        return {**proof, "mask_grid_identity_hash": observed["grid_identity_hash"]}
+    # A body without the final proof marker has no committed possession clock.
+    # Preserve that interrupted publication, then normal bounded acquisition can
+    # drain it. This is not permission to replace a committed invalid original.
+    for orphan in (output_path, output_path.with_suffix(".index.body")):
+        if orphan.exists():
+            if orphan.is_symlink():
+                raise ValueError("ENS_LAND_MASK_CACHE_SYMLINK")
+            digest = hashlib.sha256(orphan.read_bytes()).hexdigest()
+            preserved = orphan.with_name(f"{orphan.name}.uncommitted-{digest}")
+            if preserved.exists():
+                if preserved.read_bytes() != orphan.read_bytes():
+                    raise ValueError("ENS_LAND_MASK_ORPHAN_HASH_CONFLICT")
+                orphan.unlink()
+            else:
+                orphan.rename(preserved)
 
     last_error: Exception | None = None
     for mirror in _DOWNLOAD_SOURCES:
@@ -1213,15 +1699,16 @@ def _fetch_cycle_land_mask(
                 date=int(cycle_date.strftime("%Y%m%d")), time=cycle_hour,
                 stream="oper", type=["fc"], step=[0], param=["lsm"],
             )
-            parts = _resolve_index_parts(client, result, deadline=deadline)
+            originals: list[dict] = []
+            parts = _resolve_index_parts(client, result, deadline=deadline, original_indexes=originals)
             if len(parts) != 1 or len(parts[0][1]) != 1:
                 raise ValueError("ENS_LAND_MASK_INDEX_NOT_SINGLE_MESSAGE")
             url, ((offset, length),) = parts[0]
+            range_receipt: dict = {}
             message = _read_static_mask_range(
-                client.session, url, offset, length, deadline=deadline,
+                client.session, url, offset, length, deadline=deadline, receipt=range_receipt,
             )
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(message)
             proof: dict[str, object] = {
                 "source": "ecmwf_open_data_ifs_oper_fc_step0_lsm",
                 "source_url": url,
@@ -1231,18 +1718,35 @@ def _fetch_cycle_land_mask(
                 ).replace(hour=cycle_hour).isoformat(),
                 "source_index_offset": offset,
                 "source_index_length": length,
-                "source_fetched_at": datetime.now(timezone.utc).isoformat(),
+                "source_fetched_at": range_receipt.pop("source_fetched_at"),
                 "mask_sha256": hashlib.sha256(message).hexdigest(),
+                "source_index_sha256": hashlib.sha256(originals[0]["body"]).hexdigest(),
+                "index_http": originals[0]["http"], "range_http": range_receipt,
+                "index_first_possession_at": originals[0]["source_fetched_at"],
+                "source_issued_at": None,
             }
-            output_path.with_suffix(".proof.json").write_text(
-                json.dumps(proof, sort_keys=True), encoding="utf-8",
-            )
-            from scripts.extract_open_ens_localday import _read_land_mask
-            decoded = _read_land_mask(output_path, output_path.with_suffix(".proof.json"))
+            with tempfile.TemporaryDirectory(prefix=".lsm_capture_", dir=output_path.parent) as temp:
+                staging = Path(temp)
+                body_path, index_path, marker = staging / "lsm.grib2", staging / "index.body", staging / "proof.json"
+                for path, data in ((body_path, message), (index_path, originals[0]["body"]),
+                                   (marker, json.dumps(proof, sort_keys=True).encode())):
+                    with path.open("wb") as handle:
+                        handle.write(data)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                decoded = _read_land_mask(body_path, marker)
+                _remaining_step_timeout(deadline)
+                os.replace(body_path, output_path)
+                os.replace(index_path, output_path.with_suffix(".index.body"))
+                os.replace(marker, proof_path)  # Last publication is the commit marker.
             proof["mask_grid_identity_hash"] = decoded["grid_identity_hash"]
             return proof
         except (OSError, ValueError, requests.RequestException) as exc:
             last_error = exc
+            # A publication failure is drained on the next poll, not retried
+            # through another mirror after bytes have been locally published.
+            if output_path.exists():
+                break
     raise ValueError(f"ENS_LAND_MASK_UNAVAILABLE:{type(last_error).__name__ if last_error else 'NO_MIRROR'}")
 
 
@@ -1276,6 +1780,194 @@ def _native_temperature_index_parts(body: bytes, run: datetime, step: int, *, co
            for a, b in zip(ordered, ordered[1:])):
         raise ValueError("NATIVE_2T_INDEX_RANGES_OVERLAP")
     return ordered
+
+
+_native_temperature_source_lock = threading.Lock()
+
+
+def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: datetime,
+        required_steps: list[int], cycle_deadline_monotonic: float,
+        _priority: Any, _paths: OpenDataPaths | None = None) -> dict:
+    """Drain current target knots on the ordinary scheduler's remaining budget.
+
+    SCOPE: optional native product/run/member-step, never mandatory H/L or q.
+    DRAIN: next normal poll resumes individually proven parts after priority,
+    deadline or HTTP deferral. RESET: singleflight releases in finally; missing
+    parts retry next poll without renewing retained bytes or possession clocks.
+    step0 is a forecast knot, not a prior observation; 3h/6h stays native.
+    """
+    report = {"status": "DEFERRED", "qualification_status": "UNKNOWN",
+        "source_issued_at": None, "available_at": None, "observed_count": 0}
+    if not callable(_priority):
+        return {**report, "reason": "NATIVE_2T_PRIORITY_UNKNOWN"}
+    def admitted():
+        _remaining_step_timeout(cycle_deadline_monotonic)
+        if _priority() is not True:
+            raise ValueError("NATIVE_2T_MANDATORY_PRIORITY")
+        _remaining_step_timeout(cycle_deadline_monotonic)
+    try:
+        steps = _native_temperature_steps(run_utc, required_steps)
+    except (ValueError, requests.Timeout) as exc:
+        return {**report, "reason": str(exc)}
+    if not _native_temperature_source_lock.acquire(blocking=False):
+        return {**report, "reason": "NATIVE_2T_SINGLEFLIGHT_BUSY"}
+    session = None
+    try:
+        paths = _paths or _resolve_opendata_paths()
+        cache = paths.raw_root / "raw" / "ecmwf_open_ens" / "native_2t_scheduled" / f"{run_utc:%Y%m%dT%HZ}"
+        manifest = cache / "source-manifest.json"
+        manifest_bytes = manifest.read_bytes() if manifest.exists() else None
+        previous = json.loads(manifest_bytes) if manifest_bytes is not None else {}
+        anchors = conn.execute("""
+            SELECT source_run_id, manifest_hash, ingest_mode, origin_mode FROM source_run
+             WHERE source_id='ecmwf_open_data' AND track='2t_instant_native_knots'
+               AND source_cycle_time=? AND source_run_id GLOB ?
+        """, (run_utc.isoformat(),
+            f"ecmwf_open_data:2t_instant_native_knots:{run_utc:%Y%m%dT%H%MZ}:*:origin:scheduled_live")).fetchall()
+        # SCOPE: exact run/normal origin. DRAIN: restore the canonical-bound
+        # original manifest and proofs; each poll rechecks them. RESET: a true
+        # hash/clock restoration (or an independent new run) admits work again.
+        # Valid step appends still update the hash after validating the old one.
+        if anchors:
+            if (len(anchors) != 1 or manifest_bytes is None
+                    or hashlib.sha256(manifest_bytes).hexdigest() != anchors[0]["manifest_hash"]
+                    or previous.get("source_run_id") != anchors[0]["source_run_id"]
+                    or previous.get("ingest_mode") != "SCHEDULED_LIVE"
+                    or (anchors[0]["ingest_mode"], anchors[0]["origin_mode"]) != ("SCHEDULED_LIVE", "SCHEDULED_LIVE")):
+                raise ValueError("NATIVE_2T_CANONICAL_MANIFEST_UNBOUND")
+        elif previous:
+            raise ValueError("NATIVE_2T_CANONICAL_MANIFEST_UNBOUND")
+        plan = sorted(set(steps) | set(previous.get("product_steps", [])))
+        # Validate before requesting: unproved old bytes cannot become a first
+        # normal capture, and a tampered identity must not be overwritten.
+        retained = {}
+        for path in sorted(cache.glob("step*-member*.grib2")):
+            record, _ = _read_native_temperature_record(path, run_utc)
+            proof = json.loads(path.with_suffix(".grib2.proof.json").read_bytes())
+            if proof.get("ingest_mode") != "SCHEDULED_LIVE":
+                raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
+            retained[(record["member"], record["step_hours"])] = record
+        old = {(m["member"], m["step_hours"]): m for m in previous.get("retained_identities", [])}
+        if any(key in retained and retained[key] != saved for key, saved in old.items()):
+            raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
+        if any(key not in retained for key in old):
+            # A removed original is repair debt, not permission to mint it again.
+            raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_MISSING")
+        if all((member, step) in retained for step in steps for member in range(51)):
+            source = persist_native_temperature_source_run(conn, cache_dir=cache, manifest_path=manifest,
+                expected_run_utc=run_utc, product_steps=plan, ingest_mode="SCHEDULED_LIVE")
+            # The target subset may be complete while another city's appended
+            # product steps are still PARTIAL. Never upgrade the global row.
+            return {**report, "status": "AVAILABLE" if source.source_run_id else source.status,
+                "source_run_id": source.source_run_id,
+                "observed_count": 51 * len(steps), "missing_count": 0,
+                "inventory_status": source.status, "inventory_observed_count": source.observed_count,
+                "manifest_path": str(manifest), "required_steps": steps, "reason": source.reason}
+        # Queue expiry limits new transport, not readback of already possessed
+        # original evidence. A nonempty or old unproved cache never earns this.
+        try:
+            admitted()
+        except (ValueError, requests.Timeout) as exc:
+            return {**report, "observed_count": len(retained), "reason": str(exc)}
+        from ecmwf.opendata import Client
+        cache.mkdir(parents=True, exist_ok=True)
+        session = _RateLimitedSession()
+        session._zeus_deadline = cycle_deadline_monotonic
+        failure = None
+        try:
+            for step in steps:
+                for control in (True, False):
+                    members = [0] if control else list(range(1, 51))
+                    if all((member, step) in retained for member in members):
+                        continue
+                    admitted()
+                    client = Client(source=_DOWNLOAD_SOURCES[0])
+                    client.session = session
+                    result = client._get_urls(target=str(cache / "unused"), use_index=False,
+                        date=int(run_utc.strftime("%Y%m%d")), time=run_utc.hour,
+                        stream="oper" if control else "enfo", type=["fc" if control else "pf"],
+                        step=[step], param=["2t"])
+                    indexes = []
+                    _resolve_index_parts(client, result, deadline=cycle_deadline_monotonic,
+                        original_indexes=indexes)
+                    if len(indexes) != 1:
+                        raise ValueError("NATIVE_2T_INDEX_ENTITY_AMBIGUOUS")
+                    index = indexes[0]
+                    body = index["body"]
+                    parts = _native_temperature_index_parts(body, run_utc, step, control=control)
+                    digest = hashlib.sha256(body).hexdigest()
+                    entity = hashlib.sha256(index["source_url"].encode() + body).hexdigest()
+                    index_path = cache / f"index-{entity}.body"
+                    if index_path.exists():
+                        if index_path.read_bytes() != body:
+                            raise ValueError("NATIVE_2T_INDEX_ENTITY_CHANGED")
+                    else:
+                        with index_path.open("xb") as handle:
+                            handle.write(body)
+                        with index_path.with_suffix(".http.json").open("x") as handle:
+                            json.dump({k: v for k, v in index.items() if k != "body"}, handle, sort_keys=True)
+                    receipt_sha = hashlib.sha256(index_path.with_suffix(".http.json").read_bytes()).hexdigest()
+                    for part in parts:
+                        key = part["member"], step
+                        if key in retained:
+                            continue
+                        admitted()
+                        offset, length = part["source_index_offset"], part["source_index_length"]
+                        response = session.get(index["source_url"], stream=True,
+                            headers={"Range": f"bytes={offset}-{offset + length - 1}"},
+                            timeout=_remaining_step_timeout(cycle_deadline_monotonic),
+                            verify=getattr(client, "verify", True))
+                        try:
+                            _validate_range_response(response, offset=offset, length=length)
+                            chunks, size = [], 0
+                            for chunk in response.iter_content(chunk_size=65536):
+                                _remaining_step_timeout(cycle_deadline_monotonic)
+                                size += len(chunk)
+                                if size > length:
+                                    raise ValueError("NATIVE_2T_RANGE_OVERSIZED")
+                                chunks.append(chunk)
+                            raw = b"".join(chunks)
+                            if len(raw) != length:
+                                raise ValueError("NATIVE_2T_RANGE_TRUNCATED")
+                            fetched = datetime.now(timezone.utc).isoformat()
+                            proof = {**part, "step_hours": step, "source_url": index["source_url"],
+                                "source_index_url": index["source_index_url"], "index_path": index_path.name,
+                                "source_index_sha256": digest, "raw_message_sha256": hashlib.sha256(raw).hexdigest(),
+                                "index_receipt_sha256": receipt_sha,
+                                "source_fetched_at": fetched, "ingest_mode": "SCHEDULED_LIVE",
+                                "source_issued_at": None, "qualification_status": "UNKNOWN",
+                                "range_http": {"status": response.status_code, "headers": dict(response.headers)}}
+                            path = cache / f"step{step:03d}-member{part['member']:02d}.grib2"
+                            if path.exists() or path.with_suffix(".grib2.proof.json").exists():
+                                raise ValueError("NATIVE_2T_UNBOUND_EXISTING_BYTES")
+                            with path.open("xb") as handle:
+                                handle.write(raw)
+                            with path.with_suffix(".grib2.proof.json").open("x") as handle:
+                                json.dump(proof, handle, sort_keys=True)
+                            record, _ = _read_native_temperature_record(path, run_utc)
+                            if retained and record["grid_sha256"] != next(iter(retained.values()))["grid_sha256"]:
+                                raise ValueError("NATIVE_2T_RETAINED_GRID_CHANGED")
+                            retained[key] = record
+                        finally:
+                            response.close()
+        except (requests.RequestException, ValueError) as exc:
+            failure = str(exc) or type(exc).__name__
+        source = persist_native_temperature_source_run(conn, cache_dir=cache, manifest_path=manifest,
+            expected_run_utc=run_utc, product_steps=plan, ingest_mode="SCHEDULED_LIVE")
+        missing = {(member, step) for step in steps for member in range(51)} - retained.keys()
+        return {**report, "status": ("INCOMPLETE" if missing else "AVAILABLE") if source.source_run_id else "DEFERRED",
+            "source_run_id": source.source_run_id, "observed_count": 51 * len(steps) - len(missing),
+            "missing_count": len(missing), "manifest_path": str(manifest),
+            "inventory_status": source.status, "inventory_observed_count": source.observed_count,
+            "required_steps": steps, "reason": failure or source.reason}
+    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+        return {**report, "status": "UNKNOWN", "reason": str(exc) or type(exc).__name__}
+    finally:
+        try:
+            if session is not None:
+                session.close()
+        finally:
+            _native_temperature_source_lock.release()
 
 
 def _capture_native_temperature_bytes(run: datetime, steps: list[int], output_dir: Path,

@@ -14,6 +14,362 @@ from pathlib import Path
 
 import pytest
 
+@pytest.fixture
+def normal_native_poll(tmp_path, monkeypatch, request):
+    """Real normal wrapper, journals, GRIB and source inventory; fake HTTP only."""
+    from types import SimpleNamespace
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data.release_calendar import FetchDecision
+    from src.data import ecmwf_open_data as source
+    from src.state import db
+    from src.state.source_run_repo import write_source_run
+    from src.state.source_run_coverage_repo import write_source_run_coverage
+    from tests.test_ecmwf_open_data_collect_cycle import _normal_native_http
+
+    hour = getattr(request, "param", 0)
+    wanted = tuple(range(0, 25 - hour, 3))
+    s = _normal_native_http(tmp_path, monkeypatch, steps=wanted, hour=hour)
+    now = s.run + timedelta(hours=1)
+    identities = {}
+    for track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
+        identity = dict(track=track, decision=FetchDecision.FETCH_ALLOWED, scheduled_for=s.run,
+            job_name="private-normal-" + track, source_id="ecmwf_open_data",
+            release_calendar_key="ecmwf_open_data:" + track + ":full_horizon",
+            coordinate_manifest_json="{}", data_version=source.TRACKS[track]["data_version"], metadata={})
+        identities[track] = identity
+        run_id = daemon._expected_source_run_id(identity)
+        write_source_run(s.conn, source_run_id=run_id, source_id="ecmwf_open_data",
+            track=track + "_full_horizon", release_calendar_key=identity["release_calendar_key"],
+            source_cycle_time=s.run, status="SUCCESS", completeness_status="COMPLETE",
+            expected_steps_json=list(wanted[1:]), observed_steps_json=list(wanted[1:]),
+            fetch_started_at=now, fetch_finished_at=now, data_version=identity["data_version"])
+        daemon._write_job_run(s.conn, identity=identity, status="SUCCESS", now_utc=now,
+            result={"status": "ok", "source_run_id": run_id, "snapshots_inserted": 1})
+        for future in (False, True):
+            start = s.run.replace(hour=0) + timedelta(days=int(future))
+            expected = list(range(27 - hour, 49 - hour, 3)) if future else list(wanted[1:])
+            write_source_run_coverage(s.conn, coverage_id=f"private-{metric}-{future}", source_run_id=run_id,
+                source_id="ecmwf_open_data", source_transport="ensemble_snapshots_db_reader",
+                release_calendar_key=identity["release_calendar_key"], track=track + "_full_horizon",
+                city_id="fixture-city", city="London", city_timezone="UTC", target_local_date=start.date(),
+                temperature_metric=metric, physical_quantity=metric + "_extreme", observation_field=metric,
+                data_version=identity["data_version"], expected_members=51, observed_members=51,
+                expected_steps_json=expected, observed_steps_json=expected,
+                target_window_start_utc=start, target_window_end_utc=start + timedelta(days=1),
+                completeness_status="PARTIAL" if metric == "low" else "COMPLETE",
+                readiness_status="BLOCKED" if metric == "low" else "LIVE_ELIGIBLE",
+                reason_code="PRIVATE_INTERVAL_CENSORED_Y" if metric == "low" else None,
+                computed_at=now, expires_at=start + timedelta(days=1))
+            s.conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) "
+                "VALUES(?,?,?,?,?,?)", (f"private-{metric}-{future}", "London", start.date().isoformat(),
+                    metric, "private-token", "point"))
+    s.conn.commit()
+    path = tmp_path / "normal-forecasts.db"
+    def connection(**kwargs):
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        return conn
+    monkeypatch.setattr(db, "get_forecasts_connection", connection)
+    monkeypatch.setattr(daemon, "_forecast_work_identity", lambda track, **kwargs: identities[track])
+    monkeypatch.setattr(daemon, "_is_source_paused", lambda _: False)
+    monkeypatch.setattr(daemon, "_utcnow", lambda: now)
+    monkeypatch.setattr(daemon, "_held_revision_migration_identity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(daemon, "_committed_held_opendata_wake", lambda *args, **kwargs: None)
+    monkeypatch.setattr(source, "_resolve_opendata_paths", lambda: s.paths)
+    yield SimpleNamespace(**vars(s), daemon=daemon, identities=identities, now=now)
+    s.conn.close()
+
+
+@pytest.mark.parametrize("normal_native_poll", (0, 6), indirect=True)
+def test_normal_native_actual_journaled_entry_drains_blocked_y_current_day(normal_native_poll, tmp_path):
+    s = normal_native_poll
+    result = s.daemon._run_journaled_opendata_track_if_due("mx2t6_high")
+    assert result["status"] == "current_cycle_already_journaled"
+    native = result["native_temperature_source"]
+    assert native["status"] == "AVAILABLE", native
+    steps = tuple(range(0, 25 - s.run.hour, 3))
+    assert native["required_steps"] == list(steps)
+    assert native["qualification_status"] == "UNKNOWN"
+    assert len([c for c in s.calls if "Range" in c[1].get("headers", {})]) == 51 * len(steps)
+    from tests.test_ecmwf_open_data_collect_cycle import _native_temperature_knots_fixture, _native_source_scope
+    inputs_dir = tmp_path / "scope"
+    inputs_dir.mkdir()
+    inputs = _native_temperature_knots_fixture(inputs_dir, steps=steps, hour=s.run.hour)
+    from types import SimpleNamespace
+    scope = _native_source_scope(s.conn, SimpleNamespace(source_run_id=native["source_run_id"]),
+        Path(native["manifest_path"]), inputs)
+    assert scope.status == "AVAILABLE", scope
+    assert len(scope.native_knots) == 51 * len(steps)
+    assert scope.qualification_status == "UNKNOWN" and scope.available_at is None
+    before = Path(native["manifest_path"]).read_bytes()
+    s.calls.clear()
+    again = s.daemon._run_journaled_opendata_track_if_due("mn2t6_low")
+    assert again["native_temperature_source"]["source_run_id"] == native["source_run_id"]
+    assert Path(native["manifest_path"]).read_bytes() == before
+    assert s.calls == []
+
+
+@pytest.mark.parametrize("debt", ("running", "missing_raw", "other_run", "paused", "expired", "unknown_scope"))
+def test_normal_native_poll_mandatory_debt_never_spends_optional_http(normal_native_poll, monkeypatch, debt):
+    s = normal_native_poll
+    low = s.identities["mn2t6_low"]
+    run_id = s.daemon._expected_source_run_id(low)
+    if debt == "running":
+        s.conn.execute("UPDATE job_run SET status='RUNNING' WHERE source_run_id=?", (run_id,))
+    elif debt == "missing_raw":
+        s.conn.execute("UPDATE source_run SET observed_steps_json='[3]' WHERE source_run_id=?", (run_id,))
+    elif debt == "other_run":
+        s.conn.execute("UPDATE source_run SET source_cycle_time=? WHERE source_run_id=?",
+            ((s.run - timedelta(hours=6)).isoformat(), run_id))
+    elif debt == "paused":
+        monkeypatch.setattr(s.daemon, "_is_source_paused", lambda _: True)
+    elif debt == "expired":
+        original = s.daemon._commit_opendata_result_and_wake
+        def commit(conn, result):
+            out = original(conn, result)
+            monkeypatch.setattr(s.daemon.time, "monotonic", lambda: 10**10)
+            return out
+        monkeypatch.setattr(s.daemon, "_commit_opendata_result_and_wake", commit)
+    else:
+        s.conn.execute("UPDATE source_run_coverage SET expected_steps_json='[]'")
+    s.conn.commit()
+    result = s.daemon._run_journaled_opendata_track_if_due("mx2t6_high")
+    assert result["native_temperature_source"]["status"] == "DEFERRED"
+    assert s.calls == []
+    assert s.conn.execute("SELECT COUNT(*) FROM source_run WHERE track='2t_instant_native_knots'").fetchone()[0] == 0
+
+
+def test_normal_mandatory_work_commits_after_poll_cut_without_borrowing_it(normal_native_poll, monkeypatch):
+    s = normal_native_poll
+    clock = [100.]
+    monkeypatch.setattr(s.daemon.time, "monotonic", lambda: clock[0])
+    high = s.identities["mx2t6_high"]
+    s.conn.execute("DELETE FROM job_run WHERE job_run_id=?", (s.daemon._job_run_id(high),))
+    s.conn.commit()
+    seen = []
+    def mandatory(**kwargs):
+        seen.append(kwargs)
+        assert "cycle_deadline_monotonic" not in kwargs
+        clock[0] += 180.  # Legal source work is not the scheduler poll cadence.
+        return {"status": "ok", "source_run_id": s.daemon._expected_source_run_id(high),
+            "data_version": high["data_version"], "snapshots_inserted": 1}
+    monkeypatch.setattr(s.module, "collect_open_ens_cycle", mandatory)
+    result = s.daemon._run_journaled_opendata_track_if_due("mx2t6_high")
+    assert seen and clock[0] == 280.
+    row = s.conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (s.daemon._job_run_id(high),)).fetchone()
+    assert row["status"] == "SUCCESS" and row["rows_written"] == 1
+    assert result["native_temperature_source"]["status"] == "DEFERRED"
+    assert s.calls == []
+
+
+@pytest.mark.parametrize("metric,track", (("high", "mx2t6_high"), ("low", "mn2t6_low")))
+def test_normal_native_single_metric_market_preserves_sibling_raw_priority(normal_native_poll, metric, track):
+    s = normal_native_poll
+    s.conn.execute("DELETE FROM market_events WHERE temperature_metric!=?", (metric,))
+    s.conn.commit()
+    result = s.daemon._run_journaled_opendata_track_if_due(track)
+    assert result["native_temperature_source"]["status"] == "AVAILABLE", result
+    assert len([call for call in s.calls if "Range" in call[1].get("headers", {})]) == 459
+    sibling = "mn2t6_low" if track == "mx2t6_high" else "mx2t6_high"
+    source_id = s.daemon._expected_source_run_id(s.identities[sibling])
+    s.conn.execute("UPDATE source_run SET observed_steps_json='[]' WHERE source_run_id=?", (source_id,))
+    s.conn.commit()
+    s.calls.clear()
+    debt = s.daemon._run_journaled_opendata_track_if_due(track)
+    assert debt["native_temperature_source"]["status"] == "DEFERRED"
+    assert s.calls == []
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("turn", ("inflight", "partial", "503"))
+def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path, monkeypatch, track, turn):
+    from types import SimpleNamespace
+    from src.data import ecmwf_open_data as source, job_lock
+    from src.data.release_calendar import FetchDecision
+    from src.ingest import forecast_live_daemon as daemon
+    from src.state import db
+    from src.state.source_run_repo import write_source_run
+    from src.state.source_run_coverage_repo import write_source_run_coverage
+    from tests.test_ecmwf_open_data_collect_cycle import _normal_native_http
+    from contextlib import nullcontext
+
+    steps = tuple(range(12, 37, 3))
+    s = _normal_native_http(tmp_path, monkeypatch, steps=steps, hour=12)
+    now, latest = s.run + timedelta(hours=13), s.run + timedelta(hours=6)
+    latest_identities = {}
+    for source_track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
+        old = dict(track=source_track, decision=FetchDecision.FETCH_ALLOWED, scheduled_for=s.run,
+            job_name="private-normal-" + source_track, source_id="ecmwf_open_data",
+            release_calendar_key="ecmwf_open_data:" + source_track + ":full_horizon",
+            coordinate_manifest_json="{}", data_version=source.TRACKS[source_track]["data_version"], metadata={})
+        run_id = daemon._expected_source_run_id(old)
+        write_source_run(s.conn, source_run_id=run_id, source_id="ecmwf_open_data", track=source_track + "_full_horizon",
+            release_calendar_key=old["release_calendar_key"], source_cycle_time=s.run,
+            status="SUCCESS", completeness_status="COMPLETE", expected_steps_json=list(steps[1:]),
+            observed_steps_json=list(steps[1:]), data_version=old["data_version"])
+        daemon._write_job_run(s.conn, identity=old, status="SUCCESS", now_utc=now,
+            result={"status": "ok", "source_run_id": run_id, "snapshots_inserted": 1})
+        day = (s.run + timedelta(hours=12)).date()
+        start = datetime.combine(day, datetime.min.time(), timezone.utc)
+        write_source_run_coverage(s.conn, coverage_id="private-y12-" + metric, source_run_id=run_id,
+            source_id="ecmwf_open_data", track=source_track + "_full_horizon", city="London", city_timezone="UTC",
+            release_calendar_key=old["release_calendar_key"], city_id="fixture-city",
+            physical_quantity=metric + "_extreme", observation_field=metric,
+            expected_members=51, observed_members=51,
+            source_transport="private_fake_http", computed_at=now, expires_at=start + timedelta(days=1),
+            target_local_date=day, temperature_metric=metric, target_window_start_utc=start,
+            target_window_end_utc=start + timedelta(days=1), expected_steps_json=list(steps[1:]),
+            observed_steps_json=list(steps[1:]), completeness_status="COMPLETE", readiness_status="LIVE_ELIGIBLE",
+            data_version=old["data_version"])
+        s.conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) VALUES(?,?,?,?,?,?)",
+            ("private-y12-" + metric, "London", day.isoformat(), metric, "private-" + metric, "20"))
+        current = {**old, "scheduled_for": latest,
+            "release_calendar_key": "ecmwf_open_data:" + source_track + ":short_horizon"}
+        latest_identities[source_track] = current
+        write_source_run(s.conn, source_run_id=daemon._expected_source_run_id(current), source_id="ecmwf_open_data",
+            track=source_track + "_short_horizon", release_calendar_key=current["release_calendar_key"],
+            source_cycle_time=latest, status="FAILED", completeness_status="MISSING",
+            expected_steps_json=[6, 9], observed_steps_json=[], data_version=current["data_version"])
+        daemon._write_job_run(s.conn, identity=current, status="RUNNING", now_utc=now,
+            started_at=now, result={"status": "running"})
+    s.conn.commit()
+    def connection(**kwargs):
+        conn = sqlite3.connect(tmp_path / "normal-forecasts.db")
+        conn.row_factory = sqlite3.Row
+        return conn
+    monkeypatch.setattr(db, "get_forecasts_connection", connection)
+    utc_clock = [now]
+    monkeypatch.setattr(daemon, "_utcnow", lambda: utc_clock[0])
+    monkeypatch.setattr(daemon, "_forecast_work_identity", lambda track, **kwargs: latest_identities[track])
+    monkeypatch.setattr(daemon, "_is_source_paused", lambda _: False)
+    monkeypatch.setattr(daemon, "_held_revision_migration_identity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(daemon, "_committed_held_opendata_wake", lambda *args, **kwargs: None)
+    monkeypatch.setattr(source, "_resolve_opendata_paths", lambda: s.paths)
+    clock, expired = [100.], [False]
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: clock[0])
+    get = s.session.get
+    def private_get(url, **kwargs):
+        response = get(url, **kwargs)
+        if turn == "503" and not expired[0]:
+            expired[0] = True
+            response.status_code = 503
+            return response
+        if "Range" in kwargs.get("headers", {}) and not expired[0]:
+            expired[0] = True
+            chunks = response.iter_content
+            def finish_part(**options):
+                yield from chunks(**options)
+                clock[0] += 60.
+            response.iter_content = finish_part
+        return response
+    s.session.get = private_get
+    runner = daemon.run_opendata_track
+    locks = tmp_path / "normal-locks"
+    monkeypatch.setattr(daemon, "run_opendata_track", lambda track, **kwargs:
+        runner(track, **{**kwargs, "_locks_dir_override": locks}))
+    mandatory_calls = []
+    def long_mandatory(**kwargs):
+        assert "cycle_deadline_monotonic" not in kwargs
+        mandatory_calls.append(kwargs)
+        clock[0] += 180.
+        utc_clock[0] += timedelta(seconds=180)
+        identity = latest_identities[track]
+        return {"status": "failed", "source_run_status": "FAILED", "source_run_completeness": "MISSING",
+            "source_run_id": daemon._expected_source_run_id(identity), "error": "HTTP503",
+            "data_version": identity["data_version"], "snapshots_inserted": 0}
+    if turn != "inflight":
+        monkeypatch.setattr(source, "collect_open_ens_cycle", long_mandatory)
+        s.conn.execute("DELETE FROM job_run WHERE job_run_id=?", (daemon._job_run_id(latest_identities[track]),))
+        s.conn.commit()
+        # The real normal dispatcher and default safe-poll wrapper remain in
+        # the chain. Only executor timing, release HTTP and weather bodies are
+        # private; neither qualification nor source journal writes are mocked.
+        from concurrent.futures import Future
+        class InlineExecutor:
+            def submit(self, runner, selected):
+                future = Future()
+                try:
+                    future.set_result(runner(selected))
+                except Exception as exc:
+                    future.set_exception(exc)
+                return future
+        sibling = "mn2t6_low" if track == "mx2t6_high" else "mx2t6_high"
+        inflight = {sibling: Future()}
+        probe_cuts = []
+        def private_release_probe(identity, *, poll_deadline_monotonic):
+            probe_cuts.append(poll_deadline_monotonic)
+            return {"status": "released", "source": "private_release_http"}
+        monkeypatch.setattr(daemon, "_probe_newest_opendata_cycle_availability", private_release_probe)
+        def tick():
+            before = clock[0]
+            report = daemon._dispatch_due_opendata_tracks(_executor=InlineExecutor(), _inflight=inflight)
+            assert report[sibling]["status"] == "in_flight"
+            result = inflight[track].result()
+            if result["status"] == "failed":
+                assert probe_cuts[-1] == before + 59.
+            return result
+    else:
+        def tick():
+            return daemon._run_journaled_opendata_track_if_due(track)
+    try:
+        if turn != "inflight":
+            first_mandatory = tick()
+            assert first_mandatory["status"] == "failed" and len(mandatory_calls) == 1
+            assert first_mandatory["native_temperature_source"]["status"] == "DEFERRED"
+            assert s.calls == []
+            clock[0] += 60.
+            utc_clock[0] += timedelta(seconds=60)
+        context = (job_lock.acquire_opendata_track_lock(track, _locks_dir_override=locks)
+            if turn == "inflight" else nullcontext((True, None)))
+        with context as (acquired, _):
+            assert acquired
+            first = tick()
+            native = first["native_temperature_source"]
+            assert first["status"] == ("skipped_lock_held" if turn == "inflight" else "native_temperature_optional_turn"), first
+            if turn == "503":
+                assert native["status"] == "DEFERRED" and "503" in native["reason"], native
+                original = None
+            else:
+                assert native["status"] == "INCOMPLETE" and native["observed_count"] == 1, native
+                original = json.loads(Path(native["manifest_path"]).read_bytes())["messages"][0]
+            if turn != "inflight":
+                journal = s.conn.execute("SELECT * FROM job_run WHERE track='2t_instant_native_knots'").fetchone()
+                assert journal["status"] == ("FAILED" if turn == "503" else "PARTIAL")
+                assert journal["rows_written"] == 0  # Native bodies are not mandatory forecast rows.
+                metadata = json.loads(journal["meta_json"])
+                assert metadata["collector_status"] == native["status"]
+                assert json.loads(journal["expected_scope_json"])["targets"] == [
+                    ["London", day.isoformat(), "high", "full_Y"], ["London", day.isoformat(), "low", "full_Y"]]
+                assert len(mandatory_calls) == 1
+                before = len(s.calls)
+                mandatory_again = tick()
+                assert mandatory_again["status"] == "failed" and len(mandatory_calls) == 2
+                assert len(s.calls) == before
+                assert dict(s.conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (journal["job_run_id"],)).fetchone()) == dict(journal)
+            clock[0] += 60.
+            utc_clock[0] += timedelta(seconds=60)
+            second = tick()
+            complete = second["native_temperature_source"]
+            assert complete["status"] == "AVAILABLE" and complete["observed_count"] == 459, complete
+            if original:
+                assert json.loads(Path(complete["manifest_path"]).read_bytes())["messages"][0] == original
+            if turn != "inflight":
+                assert len(mandatory_calls) == 2
+                s.calls.clear()
+                # Completion resets this target's optional debt; subsequent
+                # normal ticks go back to mandatory, never a perpetual turn.
+                reset = tick()
+                assert reset["status"] == "failed" and len(mandatory_calls) == 3
+                assert s.calls == []
+        rows = s.conn.execute("SELECT source_cycle_time FROM source_run WHERE track='2t_instant_native_knots'").fetchall()
+        assert [row[0] for row in rows] == [s.run.isoformat()]
+        for source_track, identity in latest_identities.items():
+            job = s.conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (daemon._job_run_id(identity),)).fetchone()
+            assert job["status"] == ("FAILED" if turn != "inflight" and source_track == track else "RUNNING")
+            assert job["rows_written"] == 0
+    finally:
+        s.conn.close()
+
 import src.main as main
 from src.runtime import reactor_wake
 
