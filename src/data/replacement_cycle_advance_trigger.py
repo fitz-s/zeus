@@ -2572,6 +2572,7 @@ def enqueue_single_family_cycle_advance_reseed(
     day0_observed_extreme_sample_count: int | None = None,
     day0_observed_extreme_unit: str | None = None,
     day0_observation_state: str | None = None,
+    day0_source_witness: Mapping[str, object] | None = None,
     held_position: bool = False,
     minimum_posterior_computed_at: datetime | None = None,
     deadline_monotonic: float | None = None,
@@ -2707,6 +2708,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 day0_observed_extreme_sample_count = payload.get("day0_observed_extreme_sample_count")
                 day0_observed_extreme_unit = payload.get("day0_observed_extreme_unit")
                 day0_observation_state = payload.get("day0_observation_state")
+                day0_source_witness = payload.get("day0_source_witness")
                 has_day0_evidence = True
         except TimeoutError:
             report["status"] = "DAY0_STATION_RESEED_DEADLINE_EXCEEDED"
@@ -2987,6 +2989,7 @@ def enqueue_single_family_cycle_advance_reseed(
                         ),
                         day0_observed_extreme_unit=day0_observed_extreme_unit,
                         day0_observation_state=day0_observation_state,
+                        day0_source_witness=day0_source_witness,
                         output_path=staged_seed_file,
                         cycle_advance_enqueue_owner=True,
                         deadline_monotonic=deadline_monotonic,
@@ -3249,6 +3252,7 @@ def enqueue_single_family_cycle_advance_reseed(
                 day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
                 day0_observed_extreme_unit=day0_observed_extreme_unit,
                 day0_observation_state=day0_observation_state,
+                day0_source_witness=day0_source_witness,
                 output_path=staged_seed_file,
                 cycle_advance_enqueue_owner=True,
                 deadline_monotonic=deadline_monotonic,
@@ -3376,6 +3380,7 @@ def enqueue_single_family_cycle_advance_reseed(
             day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
             day0_observed_extreme_unit=day0_observed_extreme_unit,
             day0_observation_state=day0_observation_state,
+            day0_source_witness=day0_source_witness,
             output_path=staged_seed_file,
             cycle_advance_enqueue_owner=True,
             deadline_monotonic=deadline_monotonic,
@@ -4023,6 +4028,7 @@ def _build_and_write_advance_seed(
     day0_observed_extreme_sample_count: int | None = None,
     day0_observed_extreme_unit: str | None = None,
     day0_observation_state: str | None = None,
+    day0_source_witness: Mapping[str, object] | None = None,
     output_path: Path | None = None,
     cycle_advance_enqueue_owner: bool = False,
     required_baseline_source_run_id: str | None = None,
@@ -4092,6 +4098,7 @@ def _build_and_write_advance_seed(
         day0_observed_extreme_sample_count=day0_observed_extreme_sample_count,
         day0_observed_extreme_unit=day0_observed_extreme_unit,
         day0_observation_state=day0_observation_state,
+        day0_source_witness=day0_source_witness,
     )
     if not seed_result.ok or seed_result.seed is None:
         return None

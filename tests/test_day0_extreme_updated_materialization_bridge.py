@@ -7615,3 +7615,49 @@ def test_same_cycle_day0_capture_preserves_source_scope_and_deadline(
     assert report["enqueued"] is False
     assert not Path(cfg["forecast_db"]).exists()
     assert not Path(cfg["seed_dir"]).exists()
+
+
+def test_day0_extreme_bridge_carries_hko_source_witness_to_the_seed(
+    tmp_path, monkeypatch
+) -> None:
+    """4fc499647 added day0_source_witness to the Day0 seed payload, but the
+    single-family reseed signature never took it, so every HKO bridge and
+    monitor reseed raised TypeError (7,406 ingest + 530 live failures by
+    2026-10-06) and Hong Kong 10-08 stayed on a 13:30Z posterior."""
+    _prepare_forecast_db(tmp_path)
+    cfg = _queue_config(tmp_path)
+    monkeypatch.setattr(
+        forecast_production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    witness = {"source": "hko_rhrread_spot", "artifact_id": 7}
+    monkeypatch.setattr(
+        seed_discovery,
+        "_day0_observed_extreme_seed_payload",
+        lambda **_kwargs: {
+            **_day0_payload("2026-07-19T05:00:00+00:00"),
+            "day0_source_witness": witness,
+        },
+    )
+    cycle = datetime(2026, 7, 19, 0, tzinfo=UTC)
+    monkeypatch.setattr(cycle_advance, "family_materializable_cycle", lambda *a, **k: (cycle, ()))
+    fake_build_seed, calls = _fake_build_seed_factory()
+    seen: list[object] = []
+
+    def capture(conn, **kwargs):
+        seen.append(kwargs.get("day0_source_witness"))
+        return fake_build_seed(conn, **kwargs)
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", capture)
+
+    report = cycle_advance._materialize_day0_extreme_updated_seed(
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        computed_at=datetime(2026, 7, 19, 5, 1, tzinfo=UTC),
+        held_position=False,
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_FIRST_MATERIALIZATION_ENQUEUED"
+    assert seen == [witness]
