@@ -1,6 +1,6 @@
 # Created: 2026-07-30
-# Last reused/audited: 2026-08-22
-# Lifecycle: created=2026-07-30; last_reviewed=2026-08-22; last_reused=2026-08-22
+# Last reused/audited: 2026-10-06
+# Lifecycle: created=2026-07-30; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Authority basis: operator-directed held SELL terminal-wake hotfix.
 # Purpose: Protect held wake completion and bounded normal native source drainage without starving mandatory ENS.
 # Reuse: Inspect forecast_live_daemon scheduling, scope, immutable source clocks and transport budgets using private fixtures.
@@ -23,6 +23,8 @@ def normal_native_poll(tmp_path, monkeypatch, request):
     from src.ingest import forecast_live_daemon as daemon
     from src.data.release_calendar import FetchDecision
     from src.data import ecmwf_open_data as source
+    from src.config import runtime_coordinate_manifest_json
+    from src.data.forecast_fetch_plan import data_version_for_track
     from src.state import db
     from src.state.source_run_repo import write_source_run
     from src.state.source_run_coverage_repo import write_source_run_coverage
@@ -36,11 +38,12 @@ def normal_native_poll(tmp_path, monkeypatch, request):
     s = _normal_native_http(tmp_path, monkeypatch, steps=supplied, hour=hour)
     now = s.run + timedelta(hours=1)
     identities = {}
+    manifest_json = runtime_coordinate_manifest_json()
     for track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
         identity = dict(track=track, decision=FetchDecision.FETCH_ALLOWED, scheduled_for=s.run,
             job_name="private-normal-" + track, source_id="ecmwf_open_data",
             release_calendar_key="ecmwf_open_data:" + track + ":full_horizon",
-            coordinate_manifest_json="{}", data_version=source.TRACKS[track]["data_version"], metadata={})
+            coordinate_manifest_json=manifest_json, data_version=data_version_for_track(track, manifest_json), metadata={})
         identities[track] = identity
         run_id = daemon._expected_source_run_id(identity)
         write_source_run(s.conn, source_run_id=run_id, source_id="ecmwf_open_data",
@@ -83,6 +86,216 @@ def normal_native_poll(tmp_path, monkeypatch, request):
     monkeypatch.setattr(source, "_resolve_opendata_paths", lambda: s.paths)
     yield SimpleNamespace(**vars(s), daemon=daemon, identities=identities, now=now)
     s.conn.close()
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_normal_dispatch_drains_native_after_real_coordinate_bound_collectors(tmp_path, monkeypatch, track):
+    """Actual H/L collectors write the identity consumed by the normal poll."""
+    import hashlib
+    import eccodes as ec
+    import numpy as np
+    from concurrent.futures import Future
+    from src import config
+    from src.state import db
+    from src.state.source_run_repo import write_source_run
+    from src.state.source_run_coverage_repo import write_source_run_coverage
+    from src.data import ecmwf_open_data as source
+    from src.ingest import forecast_live_daemon as daemon
+    from src.data.forecast_fetch_plan import data_version_for_track
+    from src.data.forecast_target_contract import compute_target_local_day_window_utc, required_period_end_steps
+    from scripts import extract_open_ens_localday as decoder
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+    from tests.test_ecmwf_open_data_collect_cycle import (
+        _normal_native_http, _native_temperature_knots_fixture, _physical_static_originals,
+    )
+
+    s = _normal_native_http(tmp_path, monkeypatch, steps=tuple(range(0, 25, 3)))
+    now = s.run + timedelta(hours=10)
+    monkeypatch.setattr(daemon, "_utcnow", lambda: now)
+    sql_clock = sqlite3.connect(":memory:")
+    s.conn.create_function("strftime", 2, lambda fmt, value:
+        now.isoformat(timespec="milliseconds") if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now")
+        else sql_clock.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
+    class ClockType(type):
+        def __instancecheck__(cls, value): return isinstance(value, datetime)
+    class CaptureClock(datetime, metaclass=ClockType):
+        @classmethod
+        def now(cls, tz=None): return now.astimezone(tz or timezone.utc)
+    monkeypatch.setattr(source, "datetime", CaptureClock)
+    monkeypatch.setattr(source._ingest_grib_module, "_now_utc_iso", lambda: now.isoformat())
+    original_values = ec.codes_set_values
+    def constant_original(gid, values):
+        if ec.codes_get(gid, "paramId") in {167, 228026, 228027}:
+            ec.codes_set(gid, "packingType", "grid_ieee")
+            ec.codes_set(gid, "precision", 2)
+            values = np.full(len(values), 284.15)
+        return original_values(gid, values)
+    monkeypatch.setattr(ec, "codes_set_values", constant_original)
+    manifest_json = config.runtime_coordinate_manifest_json()
+    manifest_sha = hashlib.sha256(manifest_json.encode()).hexdigest()
+    manifest = tmp_path / "current-coordinate-manifest.json"
+    manifest.write_text(manifest_json)
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    static = _native_temperature_knots_fixture(static_dir, steps=(0, 3), hour=0)
+    identities = {}
+    old_ids = []
+    day = compute_target_local_day_window_utc(city_timezone=config.runtime_cities_by_name()["London"].timezone,
+        target_local_date=s.run.date())
+    # Previously journaled old-coordinate coverage stays as historical truth.
+    # It must not occupy setdefault ahead of the real current collectors below.
+    for old_track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
+        frame = json.loads(manifest_json)
+        frame["cities"][0]["lon"] += .001
+        old_manifest = json.dumps(frame, sort_keys=True, separators=(",", ":"))
+        old = daemon._forecast_work_identity_for_cycle(old_track, cycle_time=s.run, now_utc=now)
+        old.update(coordinate_manifest_json=old_manifest,
+            coordinate_manifest_sha=hashlib.sha256(old_manifest.encode()).hexdigest(),
+            data_version=data_version_for_track(old_track, old_manifest))
+        old_id = daemon._expected_source_run_id(old)
+        old_ids.append(old_id)
+        write_source_run(s.conn, source_run_id=old_id, source_id="ecmwf_open_data",
+            track=old_track + "_full_horizon", release_calendar_key=old["release_calendar_key"],
+            source_cycle_time=s.run, status="SUCCESS", completeness_status="COMPLETE",
+            expected_steps_json=source.STEP_HOURS, observed_steps_json=source.STEP_HOURS,
+            data_version=old["data_version"])
+        daemon._write_job_run(s.conn, identity=old, status="SUCCESS", now_utc=now,
+            result={"status": "ok", "source_run_id": old_id, "snapshots_inserted": 1})
+        ends = list(required_period_end_steps(source_cycle_time=s.run,
+            target_window_start_utc=day.start_utc, target_window_end_utc=day.end_utc, period_hours=3))
+        write_source_run_coverage(s.conn, coverage_id="old-coordinate-" + metric, source_run_id=old_id,
+            source_id="ecmwf_open_data", source_transport="ensemble_snapshots_db_reader",
+            release_calendar_key=old["release_calendar_key"], track=old_track + "_full_horizon",
+            city_id="LONDON", city="London", city_timezone=config.runtime_cities_by_name()["London"].timezone,
+            target_local_date=s.run.date(), temperature_metric=metric,
+            physical_quantity=metric + "_extreme", observation_field=metric,
+            data_version=old["data_version"], expected_members=51, observed_members=51,
+            expected_steps_json=ends, observed_steps_json=ends,
+            target_window_start_utc=day.start_utc, target_window_end_utc=day.end_utc,
+            completeness_status="COMPLETE", readiness_status="LIVE_ELIGIBLE", computed_at=now,
+            expires_at=day.end_utc)
+    s.conn.commit()
+    for source_track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
+        folder = tmp_path / source_track
+        folder.mkdir()
+        raw, _, _, _ = _tiny_native_grib(folder, source_track, issue=s.run, horizon=144)
+        definition = decoder.TRACKS[source_track]
+        target = source._download_output_path(run_date=s.run.date(), run_hour=0,
+            param=definition.open_data_param, raw_root=s.paths.raw_root)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        bodies = []
+        with raw.open("rb") as stream:
+            while (gid := ec.codes_grib_new_from_file(stream)) is not None:
+                try:
+                    ec.codes_set(gid, "generatingProcessIdentifier", 161)
+                    bodies.append(ec.codes_get_message(gid))
+                finally:
+                    ec.codes_release(gid)
+        target.write_bytes(b"".join(bodies))
+        mask, phi = _physical_static_originals(static, directory=target.parent, track=source_track)
+        extracted = decoder.extract_open_ens_localday(grib_path=target, track_name=source_track,
+            manifest_path=manifest, cities_filter={"London"},
+            output_root=s.paths.raw_root / "raw/coordinate_manifests" / manifest_sha,
+            mask_grib_path=mask, mask_proof_path=mask.with_suffix(".proof.json"),
+            surface_geopotential_grib_path=phi, surface_geopotential_proof_path=phi.with_suffix(".proof.json"))
+        sample = json.loads(Path(extracted["sample_outputs"][0]).read_text())
+        identity = daemon._forecast_work_identity_for_cycle(source_track, cycle_time=s.run, now_utc=now)
+        identities[source_track] = identity
+        def local_capture(*, track, **kwargs):
+            return source.collect_open_ens_cycle(track=track, **kwargs, skip_download=True,
+                skip_extract=True, conn=s.conn, _paths=s.paths,
+                grid_surface_source_evidence=sample["grid_surface_evidence"])
+        result = daemon.run_opendata_track(source_track, _job_conn=s.conn, _now_utc=now,
+            _identity=identity, _collector=local_capture, _source_paused=lambda _: False,
+            _locks_dir_override=tmp_path / "locks")
+        assert result["status"] == "ok", result
+        row = s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (result["source_run_id"],)).fetchone()
+        assert row["dataset_id"] == data_version_for_track(source_track, manifest_json)
+        assert row["dataset_id"] != source.TRACKS[source_track]["data_version"]
+        assert row["status"] == "SUCCESS" and row["observed_members"] == 51
+        assert set(json.loads(row["expected_steps_json"])) <= set(json.loads(row["observed_steps_json"]))
+        assert s.conn.execute("SELECT status FROM job_run WHERE source_run_id=?", (result["source_run_id"],)).fetchone()[0] == "SUCCESS"
+        s.conn.execute("INSERT INTO market_events(market_slug,city,target_date,temperature_metric,token_id,range_label) VALUES(?,?,?,?,?,?)",
+            ("normal-current-" + metric, "London", s.run.date().isoformat(), metric, "private-" + metric, "11C"))
+        s.conn.commit()
+    assert s.conn.execute("SELECT COUNT(*) FROM source_run WHERE track='2t_instant_native_knots'").fetchone()[0] == 0
+    # The old frame alone is refused. Current rows were not made eligible by
+    # deleting history: both frames coexist throughout the actual dispatch.
+    saved = tuple(s.conn.execute("SELECT coverage_id FROM source_run_coverage WHERE source_run_id NOT IN (?,?)",
+        tuple(old_ids)).fetchall())
+    s.conn.execute("SAVEPOINT old_coordinate_only")
+    s.conn.executemany("DELETE FROM source_run_coverage WHERE coverage_id=?", saved)
+    assert daemon._native_temperature_transport_plans(s.conn, now_utc=now) == []
+    s.conn.execute("ROLLBACK TO old_coordinate_only")
+    s.conn.execute("RELEASE old_coordinate_only")
+    def connection(**kwargs):
+        result = sqlite3.connect(tmp_path / "normal-forecasts.db")
+        result.row_factory = sqlite3.Row
+        return result
+    monkeypatch.setattr(db, "get_forecasts_connection", connection)
+    monkeypatch.setattr(daemon, "_forecast_work_identity", lambda track, **kwargs: identities[track])
+    monkeypatch.setattr(daemon, "_utcnow", lambda: now)
+    monkeypatch.setattr(daemon, "_is_source_paused", lambda _: False)
+    monkeypatch.setattr(daemon, "_held_revision_migration_identity", lambda *args, **kwargs: None)
+    monkeypatch.setattr(daemon, "_committed_held_opendata_wake", lambda *args, **kwargs: None)
+    monkeypatch.setattr(source, "_resolve_opendata_paths", lambda **kwargs: s.paths)
+    class Immediate:
+        def submit(self, fn, *args):
+            future = Future()
+            try: future.set_result(fn(*args))
+            except BaseException as exc: future.set_exception(exc)
+            return future
+    pending = {}
+    daemon._dispatch_due_opendata_tracks(_executor=Immediate(), _inflight=pending)
+    result = pending[track].result()
+    assert result["native_temperature_source"]["status"] == "AVAILABLE", result
+    assert any("Range" in call[1].get("headers", {}) for call in s.calls)
+    assert s.conn.execute("SELECT COUNT(*) FROM source_run WHERE track='2t_instant_native_knots' AND ingest_mode='SCHEDULED_LIVE'").fetchone()[0] == 1
+    assert s.conn.execute("SELECT COUNT(*) FROM source_run_coverage WHERE source_run_id IN (?,?)", tuple(old_ids)).fetchone()[0] == 2
+    s.conn.close()
+    sql_clock.close()
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("debt", ("bare", "old_coordinate", "wrong_metric", "missing_raw_partial",
+    "failed", "unfinished_job", "raw_full_interval_partial"))
+def test_normal_native_coordinate_priority_rejects_bad_identity_and_resets(normal_native_poll, track, debt):
+    from src.data import ecmwf_open_data as source
+    from src.contracts.ensemble_snapshot_provenance import coordinate_bound_data_version
+    s = normal_native_poll
+    identity = s.identities[track]
+    run_id = s.daemon._expected_source_run_id(identity)
+    previous = dict(s.conn.execute("SELECT * FROM source_run WHERE source_run_id=?", (run_id,)).fetchone())
+    job = dict(s.conn.execute("SELECT * FROM job_run WHERE source_run_id=?", (run_id,)).fetchone())
+    if debt in {"bare", "old_coordinate", "wrong_metric"}:
+        version = (source.TRACKS[track]["data_version"] if debt == "bare" else
+            coordinate_bound_data_version(source.TRACKS[track]["data_version"], "0" * 64) if debt == "old_coordinate" else
+            s.identities["mn2t6_low" if track == "mx2t6_high" else "mx2t6_high"]["data_version"])
+        s.conn.execute("UPDATE source_run SET dataset_id=? WHERE source_run_id=?", (version, run_id))
+    elif debt in {"missing_raw_partial", "raw_full_interval_partial"}:
+        s.conn.execute("UPDATE source_run SET status='PARTIAL',completeness_status='PARTIAL',partial_run=1 WHERE source_run_id=?", (run_id,))
+        s.conn.execute("UPDATE job_run SET status='PARTIAL' WHERE source_run_id=?", (run_id,))
+        if debt == "missing_raw_partial":
+            s.conn.execute("UPDATE source_run SET observed_steps_json='[3]' WHERE source_run_id=?", (run_id,))
+    elif debt == "failed":
+        s.conn.execute("UPDATE source_run SET status='FAILED' WHERE source_run_id=?", (run_id,))
+    else:
+        s.conn.execute("UPDATE job_run SET finished_at=NULL WHERE source_run_id=?", (run_id,))
+    s.conn.commit()
+    plans = s.daemon._native_temperature_transport_plans(s.conn, now_utc=s.now)
+    if debt == "raw_full_interval_partial":
+        assert plans and all(plan["priority"]() for plan in plans)
+    else:
+        assert plans == []
+        assert s.calls == []  # A refused plan cannot start optional HTTP.
+    s.conn.execute("UPDATE source_run SET dataset_id=?,status=?,completeness_status=?,partial_run=?,observed_steps_json=? WHERE source_run_id=?",
+        (previous["dataset_id"], previous["status"], previous["completeness_status"], previous["partial_run"], previous["observed_steps_json"], run_id))
+    s.conn.execute("UPDATE job_run SET status=?,finished_at=? WHERE source_run_id=?",
+        (job["status"], job["finished_at"], run_id))
+    s.conn.commit()
+    reset = s.daemon._native_temperature_transport_plans(s.conn, now_utc=s.now)
+    assert reset and all(plan["priority"]() for plan in reset)
+    assert s.calls == []  # Inventory planning itself never acquires source bytes.
 
 
 @pytest.mark.parametrize("normal_native_poll", ({"hour": 0, "future": True},
@@ -281,6 +494,8 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
     from src.data import ecmwf_open_data as source, job_lock
     from src.data.release_calendar import FetchDecision
     from src.ingest import forecast_live_daemon as daemon
+    from src.config import runtime_coordinate_manifest_json
+    from src.data.forecast_fetch_plan import data_version_for_track
     from src.state import db
     from src.state.source_run_repo import write_source_run
     from src.state.source_run_coverage_repo import write_source_run_coverage
@@ -291,11 +506,12 @@ def test_normal_quick_tick_drains_y12_while_x18_is_inflight_and_resumes(tmp_path
     s = _normal_native_http(tmp_path, monkeypatch, steps=steps, hour=12)
     now, latest = s.run + timedelta(hours=13), s.run + timedelta(hours=6)
     latest_identities = {}
+    manifest_json = runtime_coordinate_manifest_json()
     for source_track, metric in (("mx2t6_high", "high"), ("mn2t6_low", "low")):
         old = dict(track=source_track, decision=FetchDecision.FETCH_ALLOWED, scheduled_for=s.run,
             job_name="private-normal-" + source_track, source_id="ecmwf_open_data",
             release_calendar_key="ecmwf_open_data:" + source_track + ":full_horizon",
-            coordinate_manifest_json="{}", data_version=source.TRACKS[source_track]["data_version"], metadata={})
+            coordinate_manifest_json=manifest_json, data_version=data_version_for_track(source_track, manifest_json), metadata={})
         run_id = daemon._expected_source_run_id(old)
         write_source_run(s.conn, source_run_id=run_id, source_id="ecmwf_open_data", track=source_track + "_full_horizon",
             release_calendar_key=old["release_calendar_key"], source_cycle_time=s.run,

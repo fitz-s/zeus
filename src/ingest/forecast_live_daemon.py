@@ -1762,11 +1762,18 @@ def _run_journaled_opendata_track(track: str) -> dict:
 def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only: bool = False) -> list[dict]:
     """Current roles first, then actual verified future full-Y market needs."""
     from src.data.ecmwf_open_data import _native_temperature_steps, TRACKS
+    from src.config import runtime_coordinate_manifest_json
+    from src.data.forecast_fetch_plan import data_version_for_track
     from src.data.forecast_target_contract import compute_target_local_day_window_utc, required_period_end_steps
     from src.state.source_run_repo import get_source_run
 
     if _is_source_paused("ecmwf_open_data"):
         return []
+    # SCOPE: optional transport on this exact current coordinate frame. DRAIN:
+    # ordinary H/L collection writes the owning bound identity; each next poll
+    # recomputes it. RESET: matching raw/job evidence, not a bare/old version.
+    manifest_json = runtime_coordinate_manifest_json()
+    expected_versions = {track: data_version_for_track(track, manifest_json) for track in TRACKS}
     # Coverage supplies required transport steps, not readiness or shape
     # authority. Only actual active local-day markets enter this bounded plan.
     rows = conn.execute("""
@@ -1778,6 +1785,8 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
            AND source.source_id='ecmwf_open_data'
            AND source.status IN ('SUCCESS','PARTIAL')
            AND source.ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP')
+           AND ((source.track IN ('mx2t6_high_full_horizon','mx2t6_high_short_horizon') AND source.dataset_id=?)
+             OR (source.track IN ('mn2t6_low_full_horizon','mn2t6_low_short_horizon') AND source.dataset_id=?))
            AND source.source_cycle_time<=?
            AND coverage.target_window_end_utc>? AND coverage.expires_at>?
            AND (coverage.target_window_start_utc<=? OR
@@ -1787,7 +1796,8 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
                AND market.temperature_metric=coverage.temperature_metric
                AND market.token_id IS NOT NULL AND market.range_label IS NOT NULL)
          ORDER BY source.source_cycle_time DESC, coverage.city, coverage.temperature_metric
-    """, (now_utc.isoformat(), now_utc.isoformat(), now_utc.isoformat(), now_utc.isoformat())).fetchall()
+    """, (expected_versions["mx2t6_high"], expected_versions["mn2t6_low"],
+          now_utc.isoformat(), now_utc.isoformat(), now_utc.isoformat(), now_utc.isoformat())).fetchall()
     by_run = {}
     for row in rows:
         by_run.setdefault(row["native_run_utc"], []).append(row)
@@ -1806,7 +1816,7 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
                     or row["source_id"] != "ecmwf_open_data"
                     or row["track"] not in {track + "_full_horizon", track + "_short_horizon"}
                     or row["ingest_mode"] not in {"SCHEDULED_LIVE", "BOOT_CATCHUP"}
-                    or row["dataset_id"] != TRACKS[track]["data_version"]):
+                    or row["dataset_id"] != expected_versions[track]):
                 return False
             try:
                 expected, observed = json.loads(row["expected_steps_json"]), json.loads(row["observed_steps_json"])
@@ -1840,7 +1850,7 @@ def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only:
             candidates = conn.execute("SELECT source_run_id FROM source_run WHERE source_id='ecmwf_open_data' "
                 "AND source_cycle_time=? AND track IN (?,?) AND dataset_id=? "
                 "AND ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP') AND status IN ('SUCCESS','PARTIAL')",
-                (run.isoformat(), track + "_full_horizon", track + "_short_horizon", TRACKS[track]["data_version"])).fetchall()
+                (run.isoformat(), track + "_full_horizon", track + "_short_horizon", expected_versions[track])).fetchall()
             for candidate in candidates:
                 if mandatory_complete(run, {track: candidate["source_run_id"]}, require_pair=False):
                     sources[track] = candidate["source_run_id"]
