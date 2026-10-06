@@ -18579,3 +18579,27 @@ external acquisition blocker, unlike the prior unsupported inference from
 materialization/current ENTRY-held-JIT restoration remain OPEN. Existing normal
 turns may RESET after exact original parts become available; no source-mirror
 change, extra restart, forced collection or stale-certificate reuse is admitted.
+
+Configured-pool investigation disposition, not source-edit authority: the
+native owner read the registered FORECAST non-secret config
+ZEUS_ECMWF_SOURCES=aws,google; ECMWF_OPENDATA_URLS is not configured and the
+external opendata config file is absent. Mandatory step transport and normal
+LSM transport iterate the configured pool, while current native collection
+uses only _DOWNLOAD_SOURCES[0] through its bounded transport rather than SDK
+multi-replica retries. Thus a later ordinary native turn still begins at AWS;
+the existing pool is not currently honored by that path. The observed HK12
+AWS503 is real; another configured mirror's availability or exact bytes have
+not been tested and cannot be inferred from official replica support.
+
+ROOT authorizes the native owner only to propose a minimal bounded transport
+design and private original-byte counterexample: AWS fast503/GCS success,
+absolute cut preserved, cross-mirror immutable index/body/run/grid/member
+identity and first-possession clocks, and AWS exhausting a turn must not make
+every later normal turn begin at AWS forever. Honor only the existing configured
+pool, without a new source/model or changing live config ordering. No edits
+until ROOT approves exact design/ownership; likely owner source is
+src/data/ecmwf_open_data.py plus its existing collect test, with any needed
+daemon interface reported before widening. No operator reorder, live HTTP,
+source/request/seed rewrite, mirror-source authority shortcut or new q claim
+is authorized. Current loadeda577 and failed/unqualified HK consumer evidence
+above remain the production truth while this private design is investigated.
