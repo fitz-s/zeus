@@ -18603,3 +18603,51 @@ daemon interface reported before widening. No operator reorder, live HTTP,
 source/request/seed rewrite, mirror-source authority shortcut or new q claim
 is authorized. Current loadeda577 and failed/unqualified HK consumer evidence
 above remain the production truth while this private design is investigated.
+
+### BEFOREEDIT: honor existing configured native replica pool
+
+ROOT accepted native-owner actual FULL raw-collector private counterexamples:
+two ordinary polls with AWS fast503 or AWS consuming the entire59-second cut
+both start AWS again and produce zero records rather than trying configured
+Google. An explicit private Google original then fails the native header reader
+with NATIVE_2T_SOURCE_HOST_INVALID, although the existing extractor accepts the
+exact official bucket. These reproduce the configured-pool inconsistency,
+not live Google availability or forecast accuracy.
+
+ROOT authorizes native solewriter only src/data/ecmwf_open_data.py and existing
+tests/test_ecmwf_open_data_collect_cycle.py; q integrator owns this PLAN and
+later exact-delta integration, not either source/test. No daemon/q/kernel/schema
+change, source/model addition or operator reordering of live aws,google is
+authorized. Allow only the exact official Google bucket under the existing
+native original index/range/run/grid/member/quantity/unit proof, not arbitrary
+host/prefix or SDK-origin labels. Fast503 may try the next configured mirror
+inside the original absolute cut; exhausted/crashed attempts use the next
+normal collector turn, never a renewed budget or immediate forced retry.
+
+Use a runtime exact-run diagnostic attempt receipt in the existing raw native
+capture-receipt namespace solely for last-attempt mirror cursor/state. It is
+not a source-issued/publication/availability/first-possession clock, physical
+qualification, global readiness, source_run authority or q dependency. Record
+the selected attempt before transport so crash/full-cut progression survives
+normal restart, including zero SourceRun rows and the unjournaled normal drain
+path. This generated diagnostic artifact is owned by the same source writer,
+scoped to exact native run/configured pool; it is not a new actor/schema or
+evidence source. Its exact relative filename/fields will be supplied by the
+source owner and registered through the existing metadata owner only if
+required; no ad-hoc tracked report or additional writer is introduced.
+
+Cross-mirror partial stages stay isolated. Before appending missing parts,
+fully replay the retained prefix's actual original bytes/SHA/cycle/grid/member
+identity/quantity/unit against the candidate replica. Never overwrite old
+parts, proof, index identity or first clocks. Mismatch/unknown evidence retains
+the originals and emits typed UNKNOWN without splicing revisions; the receipt
+cursor cannot authorize freshness. Static/dependency transport and mandatory
+producer budgets remain unchanged. Real raw-collector antibodies must cover
+fast503->Google original success, full-cut/crash->next normal mirror turn,
+same-byte partial continuation preserving original clocks, mismatched prefix
+refusal and exact-host negatives. SCOPE exact run/member-step/replica-pool;
+DRAIN existing fair normal collector turns; RESET validated missing-part
+append or exact legitimate new scope, not new publisher clocks or config edits.
+After freeze/review/integration, separate ROOT authorization is required for
+normal landing/reload. Live Google acquisition and qualified currentv7/v35
+consumer restoration remain OPEN until normal production receipts prove them.
