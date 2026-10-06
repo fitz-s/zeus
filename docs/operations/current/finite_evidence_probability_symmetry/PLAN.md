@@ -18352,3 +18352,24 @@ HTTP, seed/wake, SQL update, guard reset or extra restart is authorized here.
 The path src/data/ecmwf_source_daemon.py was a dispatch typo, does not exist,
 and must not be created. External NOT_RELEASED/HTTP failures remain separate
 availability constraints after this identity repair.
+
+Third-seam BEFOREEDIT extension, ROOT authorized after independent review:
+the normal collector H/L positive passed2 cases in48.27s after the first two
+comparisons were fixed. The reviewer then reproduced same-cycle coexistence:
+an old coordinate coverage row enters first and sources.setdefault retains
+that track before the lawful current-coordinate row. The exact-current
+mandatory check subsequently yields zero plans; removing only the old row
+yields one. Requiring deletion of historical evidence for RESET violates
+INV-47 even though every individual source qualification remains strict.
+The same native owner may additionally filter the initial coverage selection
+by actual track and exact current coordinate-bound dataset before constructing
+sources or targets. Do not delete old rows, choose global latest, use startswith
+or loosen status/steps/job/PIT. No new file or writer is authorized.
+True coexistence controls retain old rows, reject old-coordinate-only input,
+and produce a current plan when both identities coexist; actual collector
+clocks share one causal fixture frame. Raw-missing/interval-censored PARTIAL
+twins and status/steps negatives preserve their distinct prior verdicts.
+The source/test slice now comprises three identity seams in the same two paths.
+Parent peer127 controls already passed4 cases in2.18s; no repeat is required.
+Source remains unlanded/unloaded pending final ordinary freeze, independent
+review, parent integration and ROOT's separate new-tip landing authorization.
