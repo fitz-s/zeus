@@ -312,6 +312,7 @@ class TestFindOpenEntryRests:
                 venue_order_id TEXT,
                 token_id TEXT,
                 market_id TEXT,
+                side TEXT,
                 created_at TEXT,
                 intent_kind TEXT,
                 state TEXT
@@ -324,8 +325,8 @@ class TestFindOpenEntryRests:
                 local_sequence INTEGER
             );
             INSERT INTO venue_commands (
-                command_id, venue_order_id, token_id, market_id, created_at, intent_kind, state
-            ) VALUES ('c-live-pre-migration', 'v1', 'tok1', 'mkt1', '2026-07-03T21:30:00+00:00', 'ENTRY', 'ACKED');
+                command_id, venue_order_id, token_id, market_id, side, created_at, intent_kind, state
+            ) VALUES ('c-live-pre-migration', 'v1', 'tok1', 'mkt1', 'BUY', '2026-07-03T21:30:00+00:00', 'ENTRY', 'ACKED');
             INSERT INTO venue_order_facts (
                 venue_order_id, command_id, state, matched_size, local_sequence
             ) VALUES ('v1', 'c-live-pre-migration', 'LIVE', '0', 1);
@@ -369,7 +370,7 @@ class TestFindOpenEntryRests:
                 chain_id=137, funder_address="0xfunder", condition_id="cond-x", question_id="q-x",
                 yes_token_id="tok-x", no_token_id="tok-x-no", selected_outcome_token_id="tok-x",
                 outcome_label="YES", side="SELL", price=Decimal("0.50"), size=Decimal("10"), order_type="GTC",
-                post_only=False, tick_size=Decimal("0.01"), min_order_size=Decimal("0.01"), neg_risk=False,
+                post_only=True, tick_size=Decimal("0.01"), min_order_size=Decimal("0.01"), neg_risk=False,
                 fee_details={"source": "test", "token_id": "tok-x", "fee_rate_fraction": 0.0, "fee_rate_bps": 0.0,
                              "fee_rate_source_field": "fee_rate_fraction", "fee_rate_raw_unit": "fraction"},
                 canonical_pre_sign_payload_hash="a" * 64, signed_order=None, signed_order_hash=None,
