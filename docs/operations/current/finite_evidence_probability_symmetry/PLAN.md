@@ -18401,3 +18401,45 @@ or loaded; ROOT must authorize the new exact tip before ordinary FF/restart.
 Post-load proof must show actual normal native source/role evidence and v7/v35
 consumer DRAIN or exact typed refusal; private AVAILABLE, a heartbeat or the
 earlier registered77ac restart cannot substitute for that proof.
+
+ROOT subsequently authorized exactd6eabf217 landing. Ordinary FF push127->d6
+and live-checkout FF succeeded; the sole registered deploy_live.py restart
+live-trading session9488 ended actualrc0. MAIN54723 wrote loaded d6 at
+2026-10-06T07:57:41.934783Z; FORECAST36452/INGEST35474 heartbeat d6, all three
+cwd=/Users/leofitz/zeus. Live config SHA remains
+d7d28bd3bf05a77189ec46e450a6931cc61938ae1a4d019ba8d16848310c25ae;
+canonical WORLD/FORECAST/TRADE inodes425646719/425646839/592058022 remain
+unchanged. Registered preSTOP14held/zero commands/full books had7 probability
+degraded; poststart7fresh/14open/fullbook still had7 degraded, EDLI916302
+candidates107/scope194. Shared recovery reported restart_guard_not_selected;
+the actual read-only selected-guard accessor returnedNone, no manual clear.
+This is successful loading, not successful probability consumption.
+
+Independent postBOOT cut07:59:09: HK HIGH157/LOW1020 still reject
+REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE; Shanghai1653 has
+missingfresh_prob/bounded reseed debt. Denver42ee/7dd have final-daily absorbing
+fresh q0/q1 (not v7/v35 evidence); Mexico106 had already settled07:46:12.
+HK exact latest752689/752691 are still07:18 preBOOT certificates, not new
+current role proof. Native exact PK-prefix reads for Oct5 12Z/18Z and Oct6
+00Z returned no rows at this cut; this is not a whole-table count claim.
+00Z mandatory H/L rows25834/25833 are PARTIAL with51 members only on steps3..33,
+and HTTP503 on36..144. These global missing steps do not prove that every
+HK-specific physical input is unavailable.
+
+Actual owning planner on canonical mode=ro/query_only at08:01:44 has nonempty
+18Z current remaining-X for HKOct6 H/L, and independent12Z full-Y for HKOct6
+H/L. Real native journals763/764 now demonstrate normal transport activation,
+not the old coordinate-mismatch zero-plan gate: observed HIGH08:02:01->02.133
+and LOW08:04:01->05.657 fail on18Z0h-oper-fc.index HTTP503. Their selected
+full-Y targets do not include HK. The full-Y plan order is18Z active63targets
+(no HK), then12Z active29targets (includes HK), then06Z and future18Z.
+Therefore an18Z request failure is not evidence that HK12Z was fetched or
+failed. The existing fair-turn returns after its first attempt regardless of
+failure and starts from the same ordered plans on the next mandatory terminal
+attempt. This is a named first-failed-plan fairness candidate, not yet a new
+implemented repair or complete historical-starvation proof.
+ROOT authorizes only native-owner read-only/private reproduction and a minimal
+existing-ledger fairness proposal; no source edits until separate concrete
+authorization. A simple continue cannot fix exhausted-budget starvation.
+Consumer restoration remains OPEN; no extra restart, HTTP, mirror switch,
+source clock renewal, forced seed/wake/cycle or live SQL mutation occurred.
