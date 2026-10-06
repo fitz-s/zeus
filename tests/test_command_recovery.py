@@ -4279,8 +4279,9 @@ def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
     )
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    client = MagicMock()
     command_recovery._reconcile_passes_short_conn(
-        MagicMock(),
+        client,
         summary,
         "2026-07-14T05:00:00+00:00",
         scope="live_tick",
@@ -4288,12 +4289,12 @@ def test_live_tick_first_apply_contention_skips_remaining_sweep(monkeypatch):
 
     assert apply_attempts == [{"blocking": False, "busy_timeout_ms": 0}]
     assert summary["db_lock_deferred"] is True
-    assert summary["db_lock_deferred_at"] == (
-        "review_required_matched_submit_trade_fact"
-    )
+    assert summary["db_lock_deferred_at"] == "review_work_retry"
     assert summary["db_lock_deferred_count"] == 1
     assert summary["deferred_full_sweep"] is True
     assert summary["scope"] == "live_tick"
+    assert client.method_calls == []
+    assert summary["advanced"] == 0
 
 
 # ---------------------------------------------------------------------------

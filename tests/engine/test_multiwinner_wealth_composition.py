@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import sqlite3
+from dataclasses import replace
 from decimal import Decimal
 
 import numpy as np
@@ -204,8 +205,48 @@ def test_family_joint_never_spends_fixed_fraction_above_kelly_target():
     assert full.targets[0].shares > Decimal("55")
     assert full.targets[0].full_kelly_target_shares == full.targets[0].shares
     assert full.targets[0].full_kelly_target_shares * Decimal("0.03125") < Decimal("5")
-    assert fractional.targets == ()
-    assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
+    target = fractional.targets[0]
+    assert candidate.execution_mode == "TAKER_LIMIT"
+    assert Decimal("0") < target.shares <= target.fractional_kelly_target_shares < Decimal("5")
+    assert target.shares * curve.levels[0].price >= Decimal("1")
+    assert target.standalone_expected_delta_log_wealth > 0
+
+    passive_curve = replace(curve, levels=(BookLevel(price=Decimal("0.779"), size=Decimal("57.5")),))
+    maker = replace(
+        candidate, execution_mode="MAKER_REST", proposal_cost_curve=passive_curve,
+        fill_probability_source="private_math_fixture", rest_deadline_minutes=1,
+    )
+    maker_fractional = solve.plan_family_joint_buy_targets(
+        (maker,), probability_witness=witness, endowment=endowment,
+        capital_limit_by_candidate={candidate_id: Decimal("1450")},
+        fractional_kelly_multiplier=Decimal("0.03125"),
+    )
+    assert solve._single_order_min_buy_shares(maker) == Decimal("5")
+    repaired = maker_fractional.targets[0]
+    assert repaired.shares == Decimal("5")
+    assert repaired.shares <= repaired.full_kelly_target_shares
+    assert repaired.standalone_expected_delta_log_wealth > 0
+    assert maker_fractional.fractional_target_cost_usd <= endowment.portfolio_capital_usd * Decimal("0.03125")
+    assert maker_fractional.fractional_target_cost_usd > Decimal("3")
+    maker_cash_limited = solve.plan_family_joint_buy_targets(
+        (maker,), probability_witness=witness, endowment=endowment,
+        capital_limit_by_candidate={candidate_id: Decimal("3")},
+        fractional_kelly_multiplier=Decimal("0.03125"),
+    )
+    assert maker_cash_limited.targets == ()
+    assert maker_cash_limited.no_trade_reason == "FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED"
+
+    below_cash_curve = replace(curve, levels=(BookLevel(price=Decimal("0.78"), size=Decimal("1.28")),))
+    below_cash = replace(
+        candidate, executable_cost_curve=below_cash_curve,
+        execution_curve_identity=solve.executable_curve_identity(below_cash_curve),
+    )
+    assert solve._single_order_min_buy_shares(below_cash) is None
+    assert solve.plan_family_joint_buy_targets(
+        (below_cash,), probability_witness=witness, endowment=endowment,
+        capital_limit_by_candidate={candidate_id: Decimal("1450")},
+        fractional_kelly_multiplier=Decimal("0.03125"),
+    ).targets == ()
 
 
 def _record_bounded_winner(

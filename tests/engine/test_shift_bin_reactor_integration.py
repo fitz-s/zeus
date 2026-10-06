@@ -639,8 +639,17 @@ def test_post_plan_no_submit_aborts_shift_enter_new_bin_lease():
 
 
 
-def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(monkeypatch):
+@pytest.mark.parametrize("missing_event_index", (False, True))
+def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(monkeypatch, missing_event_index):
     conn = _conn()
+    from src.state.schema.edli_live_order_events_schema import ensure_tables
+
+    # Only this integration needs the startup owner's full aggregate schema.
+    # Other local closure fixtures retain their deliberately minimal tables.
+    conn.execute("DROP TABLE edli_live_order_events")
+    ensure_tables(conn)
+    if missing_event_index:
+        conn.execute("DROP INDEX idx_edli_live_order_events_aggregate")
     lease = sbw.acquire_rebalance_lease(
         conn,
         family_key="live|Tokyo|2026-06-23|high",
@@ -685,6 +694,15 @@ def test_shift_enter_new_bin_final_pending_reread_aborts_entry_submitted_lease(m
 
     def _executor_submit(_final_intent, _command):
         raise AssertionError("executor_submit must not run after final family pending reread")
+
+    if missing_event_index:
+        with pytest.raises(RuntimeError, match="DURABLE_LIVE_CAP_EXPOSURE_SEED_UNAVAILABLE.*no such index"):
+            era.event_bound_live_adapter_from_trade_conn(
+                conn, live_cap_conn=conn, get_current_level=lambda: era.RiskLevel.GREEN,
+                executor_submit=_executor_submit,
+            )
+        assert fr.active_lease_for_family(conn, "live|Tokyo|2026-06-23|high") == lease
+        return
 
     submit = era.event_bound_live_adapter_from_trade_conn(
         conn,

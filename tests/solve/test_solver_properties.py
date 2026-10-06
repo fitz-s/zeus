@@ -1280,9 +1280,13 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
     monkeypatch.setattr(S, "plan_family_joint_buy_targets", reuse_joint_targets)
     original_expected_growth = S._expected_growth_comparison
     forced_delta_by_candidate = {
+        candidate.candidate_id: 0.0005 for candidate in bound_candidates
+    }
+    forced_delta_by_candidate.update({
         "candidate-35-NO": 0.001,
         "candidate-36-NO": 0.001 + 5e-16,
-    }
+    })
+    real_comparisons = {}
 
     def sub_femtoscale_joint_growth(
         score,
@@ -1296,6 +1300,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
             capital_lock_hours=capital_lock_hours,
         )
         candidate_id = score.candidate.candidate_id
+        real_comparisons[candidate_id] = comparison
         expected_delta = forced_delta_by_candidate.get(candidate_id)
         if expected_delta is None:
             return comparison
@@ -1362,6 +1367,18 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         row.rejection_reason != "FAMILY_JOINT_PLAN_NOT_PRIMARY"
         for row in joint_rows.values()
     )
+    # An epsilon advantage between the two NO proposals does not confer side
+    # priority over a genuinely higher posterior-mean YES proposal.
+    assert real_comparisons["candidate-33-YES"].expected_delta_log_wealth > forced_delta_by_candidate["candidate-36-NO"]
+    low_yes_delta = forced_delta_by_candidate.pop("candidate-33-YES")
+    higher_mean = _global_select(
+        bound_candidates, floor="1449.166", ceiling="1449.166",
+        cash="1449.166", cap="1449.166", probability_witnesses={family: witness},
+        family_portfolio_endowment_resolver=lambda _: endowment,
+        fractional_kelly_multiplier="0.03125",
+    )
+    assert higher_mean.candidate.candidate_id == "candidate-33-YES"
+    forced_delta_by_candidate["candidate-33-YES"] = low_yes_delta
     cross_family_sell = _global_sell_candidate(
         candidate_id="cross-family-capital-release-sell",
         family="cross-family-capital-release-sell",

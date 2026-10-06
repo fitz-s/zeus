@@ -1903,6 +1903,7 @@ def test_prune_holds_bulk_lock_for_each_canonical_mutation(
         keep_out=str(tmp_path / "keep.txt"),
         proc_batch=10,
         max_seconds=10.0,
+        max_wal_bytes=1 << 30,
         sleep=0.0,
         vacuum=False,
     )

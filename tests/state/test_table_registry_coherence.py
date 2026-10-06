@@ -131,6 +131,14 @@ EXPECTED_RUNTIME_TRADE_TABLES = frozenset({
 })
 
 EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
+    "day0_receipt_blob",
+    "tier0_auction_cut",
+    "tier0_candidate_set_provenance",
+    "tier0_cut_family",
+    "tier0_family_label",
+    "tier0_family_snapshot",
+    "tier0_family_topology",
+    "venue_fill_cash_facts",
     "_migrations_applied",
     "single_live_cutover_generation",
     "settlement_schema_migrations",  # P1-3 2026-05-19: migration-tracking for ensure_settlement_schema_ready
