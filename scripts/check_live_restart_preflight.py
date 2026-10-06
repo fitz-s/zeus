@@ -4918,11 +4918,17 @@ def _probability_upgrade_current_inputs(conn, *, bundle, city, target_date, metr
     """
     from src.data import day0_hourly_vectors as hourly
     from src.engine.monitor_refresh import _pinned_complete_bundle_matches_current_day0_event
+    from zoneinfo import ZoneInfo
     provenance = bundle.provenance_json
     shapes = provenance.get("day0_measurement_domain_shapes")
+    x = shapes.get("X") if isinstance(shapes, dict) else None
+    if (str(target_date) == now.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+            and not isinstance(x, dict)):
+        # Ordinary full-Y is a legal future-day base, not current Day0
+        # preparation. Normal source/materialization must provide current X.
+        return False, {"reason": "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"}
     if shapes is None:
         return True, {"basis": "ordinary_public_source_grade"}
-    x = shapes.get("X") if isinstance(shapes, dict) else None
     if not isinstance(x, dict) or shapes.get("unit") != city.settlement_unit:
         return False, {"reason": "PROBABILITY_UPGRADE_CURRENT_INPUT_ROLE_UNKNOWN"}
     event = _probability_upgrade_current_day0_event(

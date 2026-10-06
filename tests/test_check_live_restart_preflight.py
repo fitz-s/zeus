@@ -18,6 +18,7 @@ from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -142,6 +143,100 @@ def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeyp
     assert any(item.get("current_input_proof", {}).get("basis") == "qualified_current_inputs" for item in proofs)
 
 
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_upgrade_full_Y_public_local_day_rollover(tmp_path, monkeypatch):
+    """Stop the normal producer at its first full-Y public receipt, before JIT.
+
+    The same real READY remains intrinsically readable over London midnight;
+    that is a rebuild base, not proof of missing current Day0 preparation.
+    """
+    from datetime import date, time
+    from src import config
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.engine import event_reactor_adapter as adapter
+    from tests.test_replacement_forecast_materializer import _normal_native_originals_public_case
+    private_state = Path(tempfile.mkdtemp(prefix="upgrade-rollover-", dir=config.STATE_DIR))
+    monkeypatch.setattr(config, "STATE_DIR", private_state)
+    owning_reader = reader.read_replacement_forecast_bundle
+
+    class FullYChecked(Exception):
+        pass
+
+    def check_full_Y(conn, **kwargs):
+        result = owning_reader(conn, **kwargs)
+        if not result.ok:
+            return result
+        assert result.bundle.provenance_json.get("day0_measurement_domain_shapes") is None
+        city = config.runtime_cities_by_name()[kwargs["city"]]
+        target = str(kwargs["target_date"])
+        midnight = datetime.combine(date.fromisoformat(target), time.min,
+                                    tzinfo=ZoneInfo(city.timezone)).astimezone(timezone.utc)
+        assert midnight.date().isoformat() != target  # BST midnight is previous UTC day.
+        assert kwargs["readiness"].expires_at > midnight
+        previous_readonly = conn.execute("PRAGMA query_only").fetchone()[0]
+        conn.execute("PRAGMA query_only=ON")
+        try:
+            for now, expected in ((midnight - timedelta(seconds=1), True), (midnight, False)):
+                served = owning_reader(conn, **{**kwargs, "decision_time": now})
+                assert served.ok, served.reason_code
+                ok, proof = preflight._probability_upgrade_current_inputs(
+                    conn, bundle=served.bundle, city=city, target_date=target,
+                    metric=kwargs["temperature_metric"], now=now,
+                )
+                if not expected:
+                    payload = {"metric": kwargs["temperature_metric"]}
+                    assert adapter._day0_remaining_day_members(
+                        payload=payload, family=SimpleNamespace(city=city.name, target_date=target),
+                        unit=city.settlement_unit, decision_time=now,
+                        world_conn=conn, forecast_conn=conn,
+                    ) is None
+                    assert payload["_edli_day0_remaining_unavailable_reason"] == "current_temperature_state_unavailable"
+                assert ok is expected, proof
+                if not expected:
+                    assert proof["reason"] == "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"
+        finally:
+            conn.execute(f"PRAGMA query_only={int(previous_readonly)}")
+        raise FullYChecked
+
+    monkeypatch.setattr(reader, "read_replacement_forecast_bundle", check_full_Y)
+    with pytest.raises(FullYChecked):
+        _normal_native_originals_public_case(tmp_path, monkeypatch, "high")
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("city_name,cut,target,expected", (
+    ("London", "2026-10-03T22:59:59+00:00", "2026-10-04", True),
+    ("London", "2026-10-03T23:00:00+00:00", "2026-10-04", False),
+    ("Hong Kong", "2026-10-05T15:59:59+00:00", "2026-10-06", True),
+    ("Hong Kong", "2026-10-05T16:00:00+00:00", "2026-10-06", False),
+))
+def test_upgrade_full_Y_uses_city_local_date(metric, city_name, cut, target, expected):
+    from src.config import runtime_cities_by_name
+    with sqlite3.connect(":memory:") as conn:
+        ok, proof = preflight._probability_upgrade_current_inputs(
+            conn, bundle=SimpleNamespace(provenance_json={}),
+            city=runtime_cities_by_name()[city_name], target_date=target,
+            metric=metric, now=datetime.fromisoformat(cut),
+        )
+    assert ok is expected
+    if not expected:
+        assert proof["reason"] == "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("shapes", ({}, {"unit": "C", "Y": {"role": "full_Y"}}))
+def test_upgrade_day0_missing_X_is_pending(metric, shapes):
+    from src.config import runtime_cities_by_name
+    with sqlite3.connect(":memory:") as conn:
+        ok, proof = preflight._probability_upgrade_current_inputs(
+            conn, bundle=SimpleNamespace(provenance_json={"day0_measurement_domain_shapes": shapes}),
+            city=runtime_cities_by_name()["London"], target_date="2026-10-04",
+            metric=metric, now=datetime.fromisoformat("2026-10-03T23:00:00+00:00"),
+        )
+    assert not ok
+    assert proof["reason"] == "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.parametrize("state", ("source_pending", "mixed_revision", "remaining_X", "full_Y", "prior_complete"))
 def test_upgrade_qualification_public_reader_controls(monkeypatch, metric, state):
@@ -150,8 +245,11 @@ def test_upgrade_qualification_public_reader_controls(monkeypatch, metric, state
     from src.data import replacement_forecast_bundle_reader as reader_mod
     from src.execution import day0_hard_fact_exit as hard_fact
     from src.engine import monitor_refresh as monitor
+    # Ordinary public-selector controls are future-day full-Y fixtures. Actual
+    # Day0 requires current X preparation, proved separately by the producer.
+    target = (datetime.now(timezone.utc) + timedelta(days=1)).date().isoformat()
     row = {"position_id": "held", "phase": "active", "city": "London",
-           "target_date": "2026-10-06", "temperature_metric": metric,
+           "target_date": target, "temperature_metric": metric,
            "condition_id": "condition", "last_monitor_prob": 1.0,
            "last_monitor_market_price": 0.03}
     conn = sqlite3.connect(":memory:")
@@ -159,7 +257,7 @@ def test_upgrade_qualification_public_reader_controls(monkeypatch, metric, state
     conn.execute("CREATE TABLE market_events(city,target_date,temperature_metric,condition_id)")
     conn.execute("INSERT INTO market_events VALUES(?,?,?,?)",
                  (row["city"], row["target_date"], metric, "condition"))
-    event = _persist_upgrade_control_event(conn, metric=metric)
+    event = _persist_upgrade_control_event(conn, metric=metric, payload_changes={"target_date": target})
     observation_time = json.loads(event.payload_json)["observation_time"]
 
     @contextlib.contextmanager
