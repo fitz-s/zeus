@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-09-22; last_reused=2026-09-22
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-09-22
+# Last reused/audited: 2026-10-06
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -49,6 +49,7 @@ SAFETY
 from __future__ import annotations
 
 import argparse
+import ast
 import fcntl
 import json
 import math
@@ -63,6 +64,7 @@ import time
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager, suppress
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -4372,6 +4374,99 @@ def _restore_paused_live_monitoring_after_failed_restart(
     return restored, f"{posture}; deploy entry guard remains armed:\n" + "\n".join(details)
 
 
+def _loaded_probability_code_identity() -> dict[str, str]:
+    payload = _load_json(Path(_require_live_repo()) / "state" / "loaded_sha.json")
+    return {
+        "loaded_sha": str(payload.get("loaded_sha") or payload.get("boot_sha") or ""),
+        "generated_at": str(payload.get("generated_at") or ""),
+    }
+
+
+def _owning_probability_revisions(sha: str) -> dict[str, tuple[str, ...]]:
+    """Read immutable owning declarations, never execute historical Python.
+
+    Day0's existing config selector has finitely many declared revisions. All
+    its branches count: a disk/config guess cannot identify the old process's
+    selected branch. Unknown declarations refuse the transition instead.
+    """
+    result = {}
+    for path, symbol in (
+        ("src/data/replacement_forecast_cycle_policy.py", "CURRENT_EVIDENCE_SEMANTICS_REVISION"),
+        ("src/events/day0_authority.py", "DAY0_PROBABILITY_SEMANTICS_REVISION"),
+    ):
+        source = _git("show", f"{sha}:{path}")
+        if source.returncode:
+            raise ValueError(f"owning revision unavailable: {path}")
+        tree = ast.parse(source.stdout)
+        assignments = {
+            target.id: node.value
+            for node in tree.body if isinstance(node, ast.Assign)
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        functions = {
+            node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+        }
+
+        def declared_values(node: ast.AST, seen: frozenset[str] = frozenset()) -> set[str]:
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value:
+                return {node.value}
+            if isinstance(node, ast.Name) and node.id not in seen and node.id in assignments:
+                return declared_values(assignments[node.id], seen | {node.id})
+            if isinstance(node, ast.IfExp):
+                return declared_values(node.body, seen) | declared_values(node.orelse, seen)
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and not node.args and not node.keywords
+                    and node.func.id in functions and node.func.id not in seen):
+                returns = [item.value for item in ast.walk(functions[node.func.id])
+                           if isinstance(item, ast.Return)]
+                if returns and all(item is not None for item in returns):
+                    return set().union(*(declared_values(item, seen | {node.func.id})
+                                         for item in returns))
+            raise ValueError(f"owning revision is not statically declared: {path}:{symbol}")
+
+        if symbol not in assignments:
+            raise ValueError(f"owning revision missing: {path}:{symbol}")
+        result[symbol] = tuple(sorted(declared_values(assignments[symbol])))
+    return result
+
+
+def _probability_upgrade_pre_stop_gate(
+    *, expected_sha: str, loaded_identity: dict[str, str],
+) -> tuple[bool, str]:
+    """SCOPE: semantic transition + current statistical holdings, not code SHA.
+
+    DRAIN: normal reloaded source actors/seed cadence publish current public
+    proofs while old MAIN monitors. RESET: a subsequent invocation reads those
+    proofs again. No guard/new-MAIN recovery is owned by this read-only check.
+    """
+    if _loaded_probability_code_identity() != loaded_identity:
+        return False, "PROBABILITY_UPGRADE_LOADED_IDENTITY_CHANGED"
+    loaded_sha = loaded_identity["loaded_sha"]
+    if not loaded_sha or head_sha(short=False) != expected_sha:
+        return False, "PROBABILITY_UPGRADE_CODE_IDENTITY_UNKNOWN"
+    if loaded_sha == expected_sha:
+        return True, "probability semantics unchanged: same immutable loaded SHA"
+    try:
+        old = _owning_probability_revisions(loaded_sha)
+        new = _owning_probability_revisions(expected_sha)
+    except (OSError, ValueError, SyntaxError, subprocess.TimeoutExpired) as exc:
+        return False, f"PROBABILITY_UPGRADE_REVISION_UNKNOWN: {exc}"
+    if old == new:
+        return True, "probability semantics unchanged: owning revisions equal"
+    from scripts import check_live_restart_preflight as preflight
+
+    try:
+        with preflight._live_trading_plist_environment_overlay():
+            result = preflight._probability_upgrade_qualification_check()
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        return False, f"PROBABILITY_UPGRADE_PROOF_UNAVAILABLE: {exc}"
+    detail = json.dumps({"old_revisions": old, "expected_revisions": new,
+                         "qualification": asdict(result)}, sort_keys=True, default=str)
+    if _loaded_probability_code_identity() != loaded_identity or head_sha(short=False) != expected_sha:
+        return False, "PROBABILITY_UPGRADE_CODE_IDENTITY_CHANGED"
+    return result.ok, detail
+
+
 def _cmd_restart_locked(args: argparse.Namespace) -> int:
     target = args.daemon
     labels = _restart_labels_for_target(target)
@@ -4409,6 +4504,10 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         else False
     )
     expected_live_sha = head_sha(short=False) if includes_live_trading else ""
+    loaded_probability_identity = (
+        _loaded_probability_code_identity()
+        if includes_live_trading and live_was_loaded_before else {}
+    )
     restart_guard_issued_at = (
         datetime.now(timezone.utc).isoformat() if includes_live_trading else ""
     )
@@ -4485,9 +4584,12 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     if rc_all != 0:
         if includes_live_trading:
             print(
-                "live-trading left stopped because a prerequisite daemon failed to restart",
+                "live-trading not stopped: a prerequisite daemon failed to restart",
                 file=sys.stderr,
             )
+            print(_release_unused_live_restart_guard(
+                labels, expected_sha=expected_live_sha, issued_at=restart_guard_issued_at,
+            ))
         return rc_all
 
     if includes_live_trading:
@@ -4500,9 +4602,12 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             print("REFUSING to restart — live prerequisite code identity is not ready:")
             print(prerequisite_detail)
             print(
-                "live-trading left running with entries paused; fix prerequisite daemon startup before retrying.",
+                "live-trading left running; fix prerequisite daemon startup before retrying.",
                 file=sys.stderr,
             )
+            print(_release_unused_live_restart_guard(
+                labels, expected_sha=expected_live_sha, issued_at=restart_guard_issued_at,
+            ))
             return 1
         print(prerequisite_detail)
 
@@ -4599,7 +4704,22 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                         "failed after the fresh capital handoff",
                         file=sys.stderr,
                     )
+                    print(_release_unused_live_restart_guard(
+                        labels, expected_sha=expected_live_sha, issued_at=restart_guard_issued_at,
+                    ))
                     return 1
+        if live_was_loaded_before:
+            qualification_ok, qualification_detail = _probability_upgrade_pre_stop_gate(
+                expected_sha=expected_live_sha,
+                loaded_identity=loaded_probability_identity,
+            )
+            print(qualification_detail)
+            if not qualification_ok:
+                print("REFUSING to stop live-trading — probability upgrade is not qualified")
+                print(_release_unused_live_restart_guard(
+                    labels, expected_sha=expected_live_sha, issued_at=restart_guard_issued_at,
+                ))
+                return 1
         ok, detail = _stop_label(LIVE_TRADING_LABEL)
         if ok:
             print(detail)

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-30; last_reused=2026-08-30
+# Lifecycle: created=2026-06-18; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-08-30
+# Last reused or audited: 2026-10-06
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import plistlib
 import re
@@ -4884,6 +4885,247 @@ def _open_positions(*, positive_chain_only: bool = True) -> list[Any]:
                 tuple(params),
             )
         )
+
+
+def _probability_upgrade_current_day0_event(conn, *, city, target_date, metric, now):
+    """Rehydrate the same indexed causal WORLD event as normal held monitoring."""
+    from src.events.opportunity_event import OpportunityEvent
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list")}
+    table = "world.opportunity_events" if "world" in attached else "opportunity_events"
+    row = conn.execute(
+        f"""SELECT event_id, event_type, entity_key, source, observed_at,
+                   available_at, received_at, causal_snapshot_id, payload_hash,
+                   idempotency_key, priority, expires_at, payload_json,
+                   schema_version, created_at
+              FROM {table} INDEXED BY idx_opportunity_events_day0_family_extreme
+             WHERE event_type='DAY0_EXTREME_UPDATED'
+               AND json_extract(payload_json, '$.city')=?
+               AND json_extract(payload_json, '$.target_date')=?
+               AND json_extract(payload_json, '$.metric')=?
+               AND available_at<=? AND received_at<=? AND created_at<=?
+             ORDER BY available_at DESC, received_at DESC, event_id DESC LIMIT 1""",
+        (city, target_date, metric, now.isoformat(), now.isoformat(), now.isoformat()),
+    ).fetchone()
+    return OpportunityEvent(**dict(row)) if row is not None else None
+
+
+def _probability_upgrade_current_inputs(conn, *, bundle, city, target_date, metric, now):
+    """Prove normal Day0 rebuild inputs, never recompute or persist a new q.
+
+    Reuse the owning capture-equivalence law. A later fetch/telemetry row is
+    not a semantic change; a changed model/run/geometry/temperature path is.
+    The scalar in the materialized base is not labelled current by this proof.
+    """
+    from src.data import day0_hourly_vectors as hourly
+    from src.engine.monitor_refresh import _pinned_complete_bundle_matches_current_day0_event
+    provenance = bundle.provenance_json
+    shapes = provenance.get("day0_measurement_domain_shapes")
+    if shapes is None:
+        return True, {"basis": "ordinary_public_source_grade"}
+    x = shapes.get("X") if isinstance(shapes, dict) else None
+    if not isinstance(x, dict) or shapes.get("unit") != city.settlement_unit:
+        return False, {"reason": "PROBABILITY_UPGRADE_CURRENT_INPUT_ROLE_UNKNOWN"}
+    event = _probability_upgrade_current_day0_event(
+        conn, city=city.name, target_date=target_date, metric=metric, now=now,
+    )
+    if event is None or not _pinned_complete_bundle_matches_current_day0_event(
+        bundle, event, metric=metric, settlement_unit=city.settlement_unit,
+    ):
+        return False, {"reason": "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISMATCH"}
+    state = hourly.read_day0_current_temperature_state(
+        conn=conn, city=city, target_date=target_date, decision_time=now,
+    )
+    sealed_state = x.get("provider_current_state")
+    if (state is None or not isinstance(sealed_state, dict)
+            or state.source != sealed_state.get("source")
+            or not math.isfinite(float(sealed_state.get("value_native", math.nan)))
+            or float(state.value_native) != float(sealed_state["value_native"])):
+        return False, {"reason": "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"}
+    # input_ref is explicitly telemetry in the owning state contract. Same
+    # value/source at a later causal observation can sponsor normal rebuilding,
+    # not a claim that the old materialized mean has already been rebuilt.
+    vectors = hourly.day0_hourly_provider_representatives(hourly.read_freshest_day0_hourly_vectors(
+        city=city.name, target_date=target_date, now=now, conn=conn,
+        expected_models=tuple(hourly.day0_hourly_models_for_city(city)), require_expected=True,
+        max_bundle_skew_minutes=hourly.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        remaining_window_start=datetime.fromisoformat(str(x["scope_start_utc"]).replace("Z", "+00:00")),
+        require_complete_remaining_window=True, raise_on_db_error=True,
+    ))
+    declared = x.get("provider_inputs")
+    if not isinstance(declared, list) or not vectors or {v.model for v in vectors} != {
+        item.get("model") for item in declared if isinstance(item, dict)
+    }:
+        return False, {"reason": "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"}
+
+    def semantic_meta(text, model):
+        meta = json.loads(str(text))
+        return {key: hourly._day0_normalize_vector_request_semantics(key, value, model=model)
+                for key, value in meta.items() if key not in hourly._DAY0_CAPTURE_EQUIVALENCE_ONLY_META}
+
+    by_model = {item["model"]: item for item in declared}
+    for vector in vectors:
+        sealed = by_model[vector.model]
+        old = conn.execute(
+            "SELECT timezone_name,times_json,temps_c_json,source_run_meta_json FROM day0_hourly_vectors "
+            "WHERE city=? AND target_date=? AND model=? AND captured_at=? AND source_run_meta_json=? LIMIT 1",
+            (city.name, target_date, vector.model, sealed["captured_at"], sealed["source_run_meta_json"]),
+        ).fetchone()
+        if (old is None or old[0] != vector.timezone_name
+                or tuple(json.loads(old[1])) != tuple(vector.times)
+                or tuple(json.loads(old[2])) != tuple(vector.temps_c)
+                or semantic_meta(old[3], vector.model) != semantic_meta(vector.source_run_meta_json, vector.model)):
+            return False, {"reason": "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"}
+    return True, {"basis": "qualified_current_inputs", "day0_event_id": event.event_id,
+                  "models": sorted(by_model), "materialized_base_usable": True}
+
+
+def _probability_upgrade_qualification_check() -> CheckResult:
+    """Read current public probability proofs for this cutover's held scopes.
+
+    This is only called by the loader on an owning semantics transition, after
+    source-code warmup and before STOP. Source acquisition/materialization is
+    normal actor DRAIN, never a side effect of this proof. Missing participating
+    roles block their family; an undeclared Y is not made mandatory here.
+    """
+    from src.config import cities_by_name
+    from src.data.replacement_forecast_bundle_reader import (
+        ReplacementForecastAuthorityPurpose,
+        read_prior_complete_replacement_forecast_bundle,
+        read_replacement_forecast_bundle,
+    )
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    from src.execution.day0_hard_fact_exit import _final_daily_observation_extreme
+    from src.engine.monitor_refresh import (
+        _pinned_carrier_provenance_matches_current_day0_event,
+        _pinned_complete_bundle_has_valid_causal_evidence,
+        _pinned_complete_bundle_matches_current_day0_event,
+    )
+
+    def held_scope() -> dict[tuple[str, str, str], dict[str, str]]:
+        scopes: dict[tuple[str, str, str], dict[str, str]] = {}
+        for row in _open_positions(positive_chain_only=True):
+            if str(row["phase"]).lower() not in OPEN_POSITION_PHASES:
+                continue
+            key = (str(row["city"] or ""), str(row["target_date"] or ""),
+                   str(row["temperature_metric"] or "").lower())
+            scopes.setdefault(key, {})[str(row["position_id"])] = str(row["condition_id"] or "")
+        return scopes
+
+    evidence: dict[str, Any] = {
+        "trade_db": str(TRADE_DB), "world_db": str(WORLD_DB),
+        "forecast_db": str(FORECAST_DB), "families": [], "failures": [],
+    }
+    try:
+        scopes = held_scope()
+        with _connect_live_ro() as conn:
+            for (city_name, target_date, metric), holdings in sorted(scopes.items()):
+                scope = {"city": city_name, "target_date": target_date,
+                         "metric": metric, "positions": sorted(holdings)}
+                evidence["families"].append(scope)
+                now = datetime.now(timezone.utc)
+                scope["checked_at"] = now.isoformat()
+                city = cities_by_name.get(city_name)
+                if city is None or not target_date or metric not in {"high", "low"}:
+                    scope["reason"] = "PROBABILITY_UPGRADE_HELD_SCOPE_UNKNOWN"
+                else:
+                    conditions = {
+                        str(row[0]) for row in conn.execute(
+                            "SELECT condition_id FROM market_events "
+                            "WHERE city=? AND target_date=? AND temperature_metric=?",
+                            (city_name, target_date, metric),
+                        )
+                    }
+                    if any(not cid or cid not in conditions for cid in holdings.values()):
+                        scope["reason"] = "PROBABILITY_UPGRADE_HELD_CONTRACT_NOT_BOUND"
+                    elif _final_daily_observation_extreme(
+                        city=city, target_date=target_date, metric=metric, now=now, conn=conn,
+                    ) is not None:
+                        scope["reason"] = "FINAL_DAILY_OBSERVATION_AUTHORITY"
+                        continue
+                    else:
+                        readiness = latest_replacement_readiness(
+                            conn, city=city_name, target_date=target_date,
+                            temperature_metric=metric, decision_time=now,
+                        )
+                        result = None
+                        if readiness is None:
+                            scope["reason"] = "PROBABILITY_UPGRADE_READINESS_MISSING"
+                        else:
+                            result = read_replacement_forecast_bundle(
+                                conn, baseline_bundle=None, readiness=readiness,
+                                city=city_name, target_date=target_date,
+                                temperature_metric=metric, decision_time=now,
+                                require_baseline_bundle=False, enforce_raw_input_hwm=True,
+                                raw_input_hwm_conn=conn,
+                                authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+                            )
+                            scope["readiness_id"] = readiness.readiness_id
+                            scope["reason"] = result.reason_code
+                        if result is None or not result.ok:
+                            # Normal HELD continuity is diagnostic rebuilding
+                            # base evidence, not current-preparation authority.
+                            # Only normal materialization/public READY above
+                            # can RESET this semantic-upgrade qualification gate.
+                            event = _probability_upgrade_current_day0_event(
+                                conn, city=city_name, target_date=target_date, metric=metric, now=now,
+                            )
+                            if event is None:
+                                scope["reason"] = "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISSING"
+                            else:
+                                scope["day0_event_id"] = event.event_id
+                                prior = read_prior_complete_replacement_forecast_bundle(
+                                    conn, city=city_name, target_date=target_date,
+                                    temperature_metric=metric, decision_time=now,
+                                    raw_input_hwm_conn=conn,
+                                    authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+                                    consumable=lambda provenance: _pinned_carrier_provenance_matches_current_day0_event(
+                                        provenance, event, metric=metric, settlement_unit=city.settlement_unit,
+                                    ),
+                                )
+                                scope["prior_reason"] = prior.reason_code
+                                if prior.ok and (
+                                    not _pinned_complete_bundle_matches_current_day0_event(
+                                        prior.bundle, event, metric=metric, settlement_unit=city.settlement_unit,
+                                    ) or not _pinned_complete_bundle_has_valid_causal_evidence(prior.bundle)
+                                ):
+                                    scope["reason"] = "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISMATCH"
+                                elif prior.ok:
+                                    scope["prior_base_usable"] = True
+                                    scope["reason"] = "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"
+                                elif prior.status == "BLOCKED":
+                                    scope["reason"] = prior.reason_code
+                        if result is not None and result.ok:
+                            bundle = result.bundle
+                            inputs_ok, input_proof = _probability_upgrade_current_inputs(
+                                conn, bundle=bundle, city=city, target_date=target_date, metric=metric, now=now,
+                            )
+                            scope["current_input_proof"] = input_proof
+                            if not inputs_ok:
+                                scope["reason"] = input_proof["reason"]
+                                evidence["failures"].append(scope)
+                                continue
+                            scope.update({
+                                "posterior_id": bundle.posterior_id,
+                                "posterior_identity_hash": bundle.posterior_identity_hash,
+                                "family_id": bundle.family_id,
+                                "bin_topology_hash": bundle.bin_topology_hash,
+                            })
+                            continue
+                evidence["failures"].append(scope)
+        # New fills during a slow public body replay must not be omitted by a
+        # frozen warm snapshot. Retry via the normal deployment invocation.
+        if held_scope() != scopes:
+            evidence["failures"].append({"reason": "PROBABILITY_UPGRADE_HELD_SCOPE_CHANGED"})
+    except (sqlite3.Error, OSError, ValueError, KeyError, TypeError) as exc:
+        evidence["failures"].append({"reason": "PROBABILITY_UPGRADE_PROOF_UNAVAILABLE",
+                                     "error": str(exc)})
+    ok = not evidence["failures"]
+    return CheckResult(
+        "probability_upgrade_qualification", ok,
+        "current public held probability proofs qualified" if ok else
+        "PROBABILITY_UPGRADE_QUALIFICATION_PENDING: normal source/seed DRAIN required",
+        evidence,
+    )
 
 
 def _position_current_projection_integrity_check(rows: list[sqlite3.Row]) -> CheckResult:

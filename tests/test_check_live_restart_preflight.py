@@ -1,28 +1,392 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-29; last_reused=2026-08-31
+# Lifecycle: created=2026-06-18; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import plistlib
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
+from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from scripts import check_live_restart_preflight as preflight
+from tests.test_replacement_forecast_materializer import (  # noqa: F401 - owning physical fixtures
+    _hko_native_surfaces,
+    _hko_source_surface,
+)
 from src.decision import qlcb_reliability_guard as guard_mod
 from src.state.fact_revocation import (
     DECISION_CERTIFICATES_TABLE,
     REASON_INVALID_LIVE_ACTIONABLE,
 )
+
+
+def _persist_upgrade_control_event(conn, *, metric, payload_changes=None):
+    from src.events.opportunity_event import make_opportunity_event
+    from src.state.schema.opportunity_events_schema import ensure_table
+    ensure_table(conn)
+    at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    payload = {"city": "London", "target_date": "2026-10-06", "metric": metric,
+               "settlement_source": "wu_observation_instants", "settlement_unit": "C",
+               "observation_time": at.isoformat(), "raw_value": 11.0}
+    payload.update(payload_changes or {})
+    observed = datetime.fromisoformat(payload["observation_time"])
+    captured = max(at, observed).isoformat()
+    event = make_opportunity_event(
+        event_type="DAY0_EXTREME_UPDATED", entity_key="private held family",
+        source="private canonical writer", observed_at=observed.isoformat(),
+        available_at=captured, received_at=captured,
+        created_at=captured, payload=payload,
+    )
+    conn.execute("""INSERT INTO opportunity_events VALUES (
+        :event_id,:event_type,:entity_key,:source,:observed_at,:available_at,
+        :received_at,:causal_snapshot_id,:payload_hash,:idempotency_key,
+        :priority,:expires_at,:payload_json,:schema_version,:created_at)""", asdict(event))
+    return event
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeypatch, metric):
+    """Actual normal capture -> canonical materialization -> RO public gate.
+
+    Only the held projection is a control fixture; no probability, physical
+    role qualification, READY selector or public reader is simulated.
+    """
+    from tests.test_replacement_forecast_materializer import _normal_native_originals_public_case
+    from src import config
+    private_state = Path(tempfile.mkdtemp(prefix="upgrade-gate-" + metric + "-", dir=config.STATE_DIR))
+    monkeypatch.setattr(config, "STATE_DIR", private_state)
+    from src.data import replacement_forecast_bundle_reader as reader_mod
+    from src.engine import event_reactor_adapter as adapter
+    owning_reader = reader_mod.read_replacement_forecast_bundle
+    owning_prepare = adapter._prepare_current_global_probability_family
+    proofs = []
+    pending_event = []
+    inside_gate = False
+
+    def prepare(event, **kwargs):
+        # Persist the exact event emitted by the existing normal producer
+        # fixture, not an event manufactured by the deployment gate.
+        from src.state.schema.opportunity_events_schema import ensure_table
+        conn = kwargs["forecast_conn"]
+        ensure_table(conn)
+        conn.execute("""INSERT OR IGNORE INTO opportunity_events VALUES (
+            :event_id,:event_type,:entity_key,:source,:observed_at,:available_at,
+            :received_at,:causal_snapshot_id,:payload_hash,:idempotency_key,
+            :priority,:expires_at,:payload_json,:schema_version,:created_at)""", asdict(event))
+        return owning_prepare(event, **kwargs)
+
+    def public_reader(conn, **kwargs):
+        nonlocal inside_gate
+        result = owning_reader(conn, **kwargs)
+        if inside_gate or not result.ok:
+            return result
+        cut = kwargs["decision_time"]
+
+        class GateClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cut.astimezone(tz or timezone.utc)
+
+        condition = conn.execute(
+            "SELECT condition_id FROM market_events WHERE city=? AND target_date=? "
+            "AND temperature_metric=? LIMIT 1",
+            (kwargs["city"], str(kwargs["target_date"]), metric),
+        ).fetchone()[0]
+        held = {"position_id": "private-held", "phase": "active", "city": kwargs["city"],
+                "target_date": str(kwargs["target_date"]), "temperature_metric": metric,
+                "condition_id": condition}
+
+        @contextlib.contextmanager
+        def connect():
+            yield conn
+
+        monkeypatch.setattr(preflight, "datetime", GateClock)
+        monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: [held])
+        monkeypatch.setattr(preflight, "_connect_live_ro", connect)
+        previous_readonly = conn.execute("PRAGMA query_only").fetchone()[0]
+        conn.execute("PRAGMA query_only=ON")
+        inside_gate = True
+        try:
+            proof = preflight._probability_upgrade_qualification_check()
+            if not proof.ok and proof.evidence["families"][0].get("reason") == "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISMATCH":
+                # The original helper publishes its Day0 event later in the
+                # same normal path; absence must not be waved through as READY.
+                pending_event.append(proof.evidence)
+                return result
+            assert proof.ok, proof.evidence
+            proofs.append(proof.evidence["families"][0])
+        finally:
+            inside_gate = False
+            conn.execute(f"PRAGMA query_only={int(previous_readonly)}")
+        return result
+
+    monkeypatch.setattr(reader_mod, "read_replacement_forecast_bundle", public_reader)
+    monkeypatch.setattr(adapter, "_prepare_current_global_probability_family", prepare)
+    _normal_native_originals_public_case(tmp_path, monkeypatch, metric)
+    assert len(proofs) >= 2
+    assert all(item["posterior_identity_hash"] and item["family_id"] for item in proofs)
+    assert any(item.get("current_input_proof", {}).get("basis") == "qualified_current_inputs" for item in proofs)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("state", ("source_pending", "mixed_revision", "remaining_X", "full_Y", "prior_complete"))
+def test_upgrade_qualification_public_reader_controls(monkeypatch, metric, state):
+    """Control twins, not a substitute for normal producer/public proof."""
+    from src.data import replacement_forecast_readiness as readiness_mod
+    from src.data import replacement_forecast_bundle_reader as reader_mod
+    from src.execution import day0_hard_fact_exit as hard_fact
+    from src.engine import monitor_refresh as monitor
+    row = {"position_id": "held", "phase": "active", "city": "London",
+           "target_date": "2026-10-06", "temperature_metric": metric,
+           "condition_id": "condition", "last_monitor_prob": 1.0,
+           "last_monitor_market_price": 0.03}
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE market_events(city,target_date,temperature_metric,condition_id)")
+    conn.execute("INSERT INTO market_events VALUES(?,?,?,?)",
+                 (row["city"], row["target_date"], metric, "condition"))
+    event = _persist_upgrade_control_event(conn, metric=metric)
+    observation_time = json.loads(event.payload_json)["observation_time"]
+
+    @contextlib.contextmanager
+    def connect():
+        yield conn
+
+    monkeypatch.setattr(preflight, "_connect_live_ro", connect)
+    monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: [row])
+    monkeypatch.setattr(hard_fact, "_final_daily_observation_extreme", lambda **_kw: None)
+    # This case isolates public-selector control, not the causal codec itself.
+    monkeypatch.setattr(monitor, "_pinned_complete_bundle_has_valid_causal_evidence", lambda _bundle: True)
+    monkeypatch.setattr(readiness_mod, "latest_replacement_readiness", lambda *_a, **_kw:
+                        None if state in {"source_pending", "prior_complete"} else SimpleNamespace(readiness_id="ready"))
+    calls = []
+
+    def public_reader(*_a, **kwargs):
+        calls.append(kwargs)
+        if state == "mixed_revision":
+            return SimpleNamespace(ok=False, reason_code="CURRENT_SEMANTICS_REVISION_REQUIRED")
+        return SimpleNamespace(ok=True, reason_code="READY", bundle=SimpleNamespace(
+            posterior_id=1, posterior_identity_hash="immutable proof", family_id="family",
+            bin_topology_hash="canonical geometry", provenance_json={
+                "native_point_model": state,
+                "day0_provisional_observation": {"active": True, "metric": metric,
+                    "source": "wu_observation_instants", "unit": "C",
+                    "observation_time": observation_time, "observed_extreme_c": 11.0},
+            },
+        ))
+
+    monkeypatch.setattr(reader_mod, "read_replacement_forecast_bundle", public_reader)
+    prior_calls = []
+    def prior_reader(*_a, **kwargs):
+        prior_calls.append(kwargs)
+        if state == "prior_complete":
+            result = public_reader(*_a, **kwargs)
+            assert kwargs["consumable"](result.bundle.provenance_json)
+            return result
+        return SimpleNamespace(ok=False, status="NOT_APPLICABLE", reason_code="NO_LEGAL_PRIOR")
+    monkeypatch.setattr(reader_mod, "read_prior_complete_replacement_forecast_bundle", prior_reader)
+    try:
+        first = preflight._probability_upgrade_qualification_check()
+        assert first.ok is (state in {"remaining_X", "full_Y"})
+        if state == "prior_complete":
+            assert first.evidence["families"][0]["prior_base_usable"] is True
+            assert first.evidence["families"][0]["reason"] == "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"
+        if calls:
+            assert calls[0]["authority_purpose"] is reader_mod.ReplacementForecastAuthorityPurpose.HELD_REDECISION
+            if state != "prior_complete":
+                assert calls[0]["enforce_raw_input_hwm"] is True
+                assert calls[0]["require_baseline_bundle"] is False
+            assert calls[0]["raw_input_hwm_conn"] is conn
+        state = "remaining_X"
+        assert preflight._probability_upgrade_qualification_check().ok
+    finally:
+        conn.close()
+
+
+def test_upgrade_qualification_final_daily_is_canonical_not_monitor_label(monkeypatch):
+    from src.data import replacement_forecast_readiness as readiness_mod
+    from src.data import replacement_forecast_bundle_reader as reader_mod
+    row = {"position_id": "hko", "phase": "active", "city": "Hong Kong",
+           "target_date": "2026-10-01", "temperature_metric": "low",
+           "condition_id": "condition", "last_monitor_prob": 1.0}
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE observations(city,target_date,source,station_id,authority,unit,high_temp,low_temp,fetched_at)")
+    conn.execute("CREATE TABLE market_events(city,target_date,temperature_metric,condition_id)")
+    conn.execute("INSERT INTO market_events VALUES(?,?,?,?)", (row["city"], row["target_date"], "low", "condition"))
+
+    @contextlib.contextmanager
+    def connect():
+        yield conn
+
+    monkeypatch.setattr(preflight, "_connect_live_ro", connect)
+    monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: [row])
+    monkeypatch.setattr(readiness_mod, "latest_replacement_readiness", lambda *_a, **_kw: None)
+    monkeypatch.setattr(reader_mod, "read_prior_complete_replacement_forecast_bundle",
+                        lambda *_a, **_kw: SimpleNamespace(ok=False, status="NOT_APPLICABLE", reason_code="NO_LEGAL_PRIOR"))
+    try:
+        assert not preflight._probability_upgrade_qualification_check().ok
+        conn.execute("INSERT INTO observations VALUES(?,?,?,?,?,?,?,?,?)", (
+            "Hong Kong", "2026-10-01", "hko_daily_api", "HKO", "VERIFIED", "C", 30.1, 22.3,
+            "2026-10-02T02:00:00+00:00",
+        ))
+        result = preflight._probability_upgrade_qualification_check()
+        assert result.ok
+        assert result.evidence["families"][0]["reason"] == "FINAL_DAILY_OBSERVATION_AUTHORITY"
+        row["phase"] = "settled"
+        conn.execute("DELETE FROM observations")
+        assert preflight._probability_upgrade_qualification_check().evidence["families"] == []
+    finally:
+        conn.close()
+
+
+def test_upgrade_qualification_rechecks_scope_and_contract_binding(monkeypatch):
+    from src.execution import day0_hard_fact_exit as hard_fact
+    row = {"position_id": "held", "phase": "active", "city": "London",
+           "target_date": "2026-10-07", "temperature_metric": "high",
+           "condition_id": "foreign-condition"}
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE market_events(city,target_date,temperature_metric,condition_id)")
+
+    @contextlib.contextmanager
+    def connect():
+        yield conn
+
+    monkeypatch.setattr(preflight, "_connect_live_ro", connect)
+    monkeypatch.setattr(hard_fact, "_final_daily_observation_extreme", lambda **_kw: None)
+    scopes = iter(([row], [row, {**row, "position_id": "new-fill"}]))
+    monkeypatch.setattr(preflight, "_open_positions", lambda **_kw: next(scopes))
+    try:
+        result = preflight._probability_upgrade_qualification_check()
+        assert not result.ok
+        assert [item["reason"] for item in result.evidence["failures"]] == [
+            "PROBABILITY_UPGRADE_HELD_CONTRACT_NOT_BOUND", "PROBABILITY_UPGRADE_HELD_SCOPE_CHANGED",
+        ]
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("change", ("new_fetch", "monotone", "model", "run", "body", "geometry", "temps", "unit"))
+def test_upgrade_current_inputs_follow_owning_capture_equivalence(monkeypatch, metric, change):
+    """Input comparison controls; actual physical grade is the producer test."""
+    from src.config import cities_by_name
+    from src.data import day0_hourly_vectors as hourly
+    now = datetime.now(timezone.utc)
+    old_at = (now - timedelta(minutes=10)).isoformat()
+    meta = {"provider_run_id": "run-A", "provider_source_cycle_time_utc": old_at,
+            "original_body_sha256": "body-A", "request_params_json": json.dumps({"latitude": 51.5}),
+            "fetch_finished_at": old_at, "request_hash": "old request"}
+    times = tuple(f"2026-10-06T{hour:02d}:00" for hour in range(24))
+    vector = hourly.Day0HourlyVector("icon_global", "London", "2026-10-06", "Europe/London",
+                                    old_at, times, (11.0,) * 24, json.dumps(meta))
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE day0_hourly_vectors(city,target_date,model,captured_at,timezone_name,times_json,temps_c_json,source_run_meta_json)")
+    conn.execute("INSERT INTO day0_hourly_vectors VALUES(?,?,?,?,?,?,?,?)", (
+        vector.city, vector.target_date, vector.model, vector.captured_at, vector.timezone_name,
+        json.dumps(vector.times), json.dumps(vector.temps_c), vector.source_run_meta_json))
+    changes = ({"raw_value": 12. if metric == "high" else 10.,
+                "observation_time": (now-timedelta(minutes=1)).isoformat()}
+               if change == "monotone" else None)
+    event = _persist_upgrade_control_event(conn, metric=metric, payload_changes=changes)
+    observation_time = old_at if change == "monotone" else json.loads(event.payload_json)["observation_time"]
+    source = "wu_observation_instants"
+    x = {"role": "remaining_X", "scope_start_utc": old_at,
+         "provider_inputs": [{"model": vector.model, "captured_at": old_at,
+                              "source_run_meta_json": vector.source_run_meta_json}],
+         "provider_current_state": {"value_native": 11., "source": source, "input_ref": "old telemetry"}}
+    provenance = {"day0_measurement_domain_shapes": {"unit": "C", "X": x},
+                  "day0_provisional_observation": {"active": True, "source": source, "metric": metric,
+                    "unit": "C", "observed_extreme_c": 11., "observation_time": observation_time}}
+    current_meta = dict(meta, fetch_finished_at=now.isoformat(), request_hash="new request")
+    current_model, temperatures = vector.model, vector.temps_c
+    if change == "model":
+        current_model = "ukmo_global_deterministic_10km"
+    elif change == "run":
+        current_meta["provider_run_id"] = "run-B"
+    elif change == "body":
+        current_meta["original_body_sha256"] = "body-B"
+    elif change == "geometry":
+        current_meta["request_params_json"] = json.dumps({"latitude": 55.})
+    elif change == "temps":
+        temperatures = (12., *temperatures[1:])
+    elif change == "unit":
+        provenance["day0_measurement_domain_shapes"]["unit"] = "F"
+    current = hourly.Day0HourlyVector(current_model, vector.city, vector.target_date, vector.timezone_name,
+                                     now.isoformat(), times, temperatures, json.dumps(current_meta))
+    monkeypatch.setattr(hourly, "read_freshest_day0_hourly_vectors", lambda **_kw: [current])
+    monkeypatch.setattr(hourly, "read_day0_current_temperature_state", lambda **_kw:
+        hourly.Day0CurrentTemperatureState(11., now-timedelta(minutes=1), source, input_ref={"new": "telemetry"}))
+    try:
+        ok, proof = preflight._probability_upgrade_current_inputs(conn,
+            bundle=SimpleNamespace(provenance_json=provenance), city=cities_by_name["London"],
+            target_date=vector.target_date, metric=metric, now=now)
+        assert ok is (change in {"new_fetch", "monotone"})
+        if ok:
+            assert proof["basis"] == "qualified_current_inputs"
+            assert proof["materialized_base_usable"] is True
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("change", ("source", "metric", "unit", "old_time", "correction", "monotone"))
+def test_upgrade_current_inputs_reuse_canonical_event_overlay_law(monkeypatch, metric, change):
+    from src.config import cities_by_name
+    from src.data import day0_hourly_vectors as hourly
+    now = datetime.now(timezone.utc)
+    at = (now-timedelta(minutes=10)).isoformat()
+    changes = {"observation_time": at}
+    if change == "source":
+        changes["settlement_source"] = "foreign_source"
+    elif change == "metric":
+        changes["metric"] = "low" if metric == "high" else "high"
+    elif change == "unit":
+        changes["settlement_unit"] = "F"
+    elif change == "old_time":
+        changes["observation_time"] = (now-timedelta(minutes=20)).isoformat()
+    elif change == "correction":
+        changes["raw_value"] = 12. if metric == "high" else 10.
+    elif change == "monotone":
+        changes.update(observation_time=(now-timedelta(minutes=5)).isoformat(),
+                       raw_value=12. if metric == "high" else 10.)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _persist_upgrade_control_event(conn, metric=metric, payload_changes=changes)
+    provenance = {"day0_measurement_domain_shapes": {"unit": "C", "X": {
+                    "scope_start_utc": at, "provider_current_state": {"value_native": 11., "source": "spot"},
+                    "provider_inputs": []}},
+                  "day0_provisional_observation": {"active": True, "source": "wu_observation_instants",
+                    "metric": metric, "unit": "C", "observed_extreme_c": 11., "observation_time": at}}
+    monkeypatch.setattr(hourly, "read_day0_current_temperature_state", lambda **_kw:
+        hourly.Day0CurrentTemperatureState(11., now-timedelta(minutes=1), "spot"))
+    monkeypatch.setattr(hourly, "read_freshest_day0_hourly_vectors", lambda **_kw: [])
+    try:
+        ok, proof = preflight._probability_upgrade_current_inputs(conn,
+            bundle=SimpleNamespace(provenance_json=provenance), city=cities_by_name["London"],
+            target_date="2026-10-06", metric=metric, now=now)
+        assert not ok
+        # A lawful later monotone overlay reaches input qualification; every
+        # correction/mismatched event is rejected before the vector read.
+        assert proof["reason"] == ("PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"
+                                    if change == "monotone" else "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISMATCH")
+    finally:
+        conn.close()
 
 
 def _absolute_price_band_cfg(

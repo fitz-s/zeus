@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-10-04
+# Last reused/audited: 2026-10-06
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -8438,8 +8438,9 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     assert "live restart preflight passed" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("refusal", ("warm", "probability_upgrade"))
 def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main(
-    monkeypatch, capsys
+    monkeypatch, capsys, refusal
 ):
     dl = _load("deploy_live_warm_preflight_refused_guard", "deploy_live.py")
     calls = []
@@ -8499,9 +8500,32 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
                 kwargs.get("defer_running_monitor_cadence"),
             )
         )
-        return False, "warm preflight timed out"
+        return refusal != "warm", "warm preflight evidence"
 
     monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", _preflight)
+    monkeypatch.setattr(
+        dl, "_loaded_probability_code_identity",
+        lambda: {"loaded_sha": "d" * 40, "generated_at": "immutable boot"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dl, "_wait_for_loaded_live_restart_handoff",
+        lambda *_args: (True, "fresh capital handoff"),
+    )
+    monkeypatch.setattr(
+        dl, "_probability_upgrade_pre_stop_gate",
+        lambda **_kwargs: (
+            calls.append(("probability_upgrade",))
+            or (False, "PROBABILITY_UPGRADE_QUALIFICATION_PENDING: native source pending")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        dl, "_restore_paused_live_monitoring_after_failed_restart",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pre-STOP refusal must not bootstrap the new MAIN")
+        ),
+    )
     monkeypatch.setattr(
         dl,
         "_release_unused_live_restart_guard",
@@ -8524,16 +8548,77 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
     expanded_labels = [*dl.LIVE_TRADING_PREREQUISITE_LABELS, dl.LIVE_TRADING_LABEL]
     assert len(armed_issued_at) == 1 and armed_issued_at[0]
     assert released == [(tuple(expanded_labels), "e" * 40, armed_issued_at[0])]
-    assert calls[-1] == (
-        "preflight",
-        tuple(expanded_labels),
-        "running",
-        True,
-    )
-    assert calls.index(("trade_schema",)) < calls.index(calls[-1])
+    warm_call = ("preflight", tuple(expanded_labels), "running", True)
+    assert warm_call in calls
+    assert calls.index(("trade_schema",)) < calls.index(warm_call)
+    assert calls[-1] == (warm_call if refusal == "warm" else ("probability_upgrade",))
     output = capsys.readouterr().out
-    assert "warm restart preflight is not green" in output
+    assert ("warm restart preflight is not green" if refusal == "warm"
+            else "PROBABILITY_UPGRADE_QUALIFICATION_PENDING") in output
     assert "restart_refused" in output
+
+
+@pytest.mark.parametrize("transition", ("same_sha", "same_revision", "upgrade", "unknown"))
+def test_probability_upgrade_uses_immutable_owning_revisions(monkeypatch, transition):
+    dl = _load("deploy_live_probability_revision_" + transition, "deploy_live.py")
+    old_sha, new_sha = "d" * 40, "e" * 40
+    identity = {"loaded_sha": new_sha if transition == "same_sha" else old_sha,
+                "generated_at": "immutable boot"}
+    monkeypatch.setattr(dl, "_loaded_probability_code_identity", lambda: identity)
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: new_sha)
+    calls = []
+
+    def git(*args, **_kwargs):
+        calls.append(args)
+        if transition == "unknown":
+            return types.SimpleNamespace(returncode=1, stdout="")
+        sha, path = args[1].split(":", 1)
+        revision = "old" if transition != "upgrade" or sha == old_sha else "new"
+        if "cycle_policy" in path:
+            text = f'CURRENT_EVIDENCE_SEMANTICS_REVISION = "{revision}"\n'
+        else:
+            text = (f'A = "{revision}-a"\nB = "{revision}-b"\n'
+                    'def select():\n    return A if configured_selector() else B\n'
+                    'DAY0_PROBABILITY_SEMANTICS_REVISION = select()\n')
+        return types.SimpleNamespace(returncode=0, stdout=text)
+
+    monkeypatch.setattr(dl, "_git", git)
+    from scripts import check_live_restart_preflight as pf
+    monkeypatch.setattr(pf, "_live_trading_plist_environment_overlay", contextlib.nullcontext)
+    proofs = []
+    monkeypatch.setattr(pf, "_probability_upgrade_qualification_check", lambda: (
+        proofs.append("current public proof") or pf.CheckResult("upgrade", False, "pending", {})
+    ))
+    ok, reason = dl._probability_upgrade_pre_stop_gate(
+        expected_sha=new_sha, loaded_identity=identity,
+    )
+    assert ok is (transition in {"same_sha", "same_revision"})
+    assert bool(proofs) is (transition == "upgrade")
+    if transition == "same_sha":
+        assert calls == []  # same SHA must not invent an unknown old revision
+    if transition == "unknown":
+        assert "REVISION_UNKNOWN" in reason
+
+
+def test_probability_upgrade_rechecks_loaded_identity_after_public_proof(monkeypatch):
+    dl = _load("deploy_live_probability_identity_changed", "deploy_live.py")
+    identity = {"loaded_sha": "d" * 40, "generated_at": "old boot"}
+    current = [identity]
+    monkeypatch.setattr(dl, "_loaded_probability_code_identity", lambda: current[0])
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "e" * 40)
+    monkeypatch.setattr(dl, "_owning_probability_revisions", lambda sha: {"owner": (sha,)})
+    from scripts import check_live_restart_preflight as pf
+    monkeypatch.setattr(pf, "_live_trading_plist_environment_overlay", contextlib.nullcontext)
+
+    def proof():
+        current[0] = {"loaded_sha": "d" * 40, "generated_at": "respawned boot"}
+        return pf.CheckResult("upgrade", True, "qualified", {})
+
+    monkeypatch.setattr(pf, "_probability_upgrade_qualification_check", proof)
+    ok, reason = dl._probability_upgrade_pre_stop_gate(
+        expected_sha="e" * 40, loaded_identity=identity,
+    )
+    assert not ok and reason == "PROBABILITY_UPGRADE_CODE_IDENTITY_CHANGED"
 
 
 @pytest.mark.parametrize("failure_stage,guard_change", (
@@ -8543,6 +8628,10 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
     ("capital", "operator"),
     ("capital", "release_failed"),
     ("capital", "cas_race"),
+    ("probability_upgrade", "none"),
+    ("probability_upgrade", "same_sha_new_generation"),
+    ("probability_upgrade", "operator"),
+    ("probability_upgrade", "cas_race"),
     ("one_main_unknown", "none"),
     ("stop_failed", "none"),
     ("post_stop_unknown", "none"),
@@ -8561,6 +8650,10 @@ def test_deploy_live_late_refusal_uses_exact_unused_guard_generation(
     finally:
         conn.close()
     dl = _load("deploy_live_late_unused_guard", "deploy_live.py")
+    monkeypatch.setattr(dl, "_loaded_probability_code_identity",
+                        lambda: {"loaded_sha": "e" * 40, "generated_at": "private boot"})
+    monkeypatch.setattr(dl, "_probability_upgrade_pre_stop_gate", lambda **_kw:
+                        (failure_stage != "probability_upgrade", "upgrade qualification pending"))
     calls, release_runs, armed = [], [], []
     monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
     monkeypatch.setattr(dl, "_gate", lambda *_a, **_k: (True, []))
@@ -8652,7 +8745,7 @@ def test_deploy_live_late_refusal_uses_exact_unused_guard_generation(
     witness = cp.get_active_deploy_live_restart_guard()
     output = capsys.readouterr().out
     assert len(armed) == 1
-    if failure_stage == "capital":
+    if failure_stage in {"capital", "probability_upgrade"}:
         assert not any(call[0] == "stop" for call in calls)
         if guard_change == "none":
             assert witness is None and not cp.is_entries_paused()
@@ -8674,6 +8767,10 @@ def test_deploy_live_late_refusal_uses_exact_unused_guard_generation(
             else:
                 assert witness != armed[0]
                 assert "a different guard is selected" in output
+    elif failure_stage == "one_main_unknown":
+        assert len(release_runs) == 1
+        assert witness is None and not cp.is_entries_paused()
+        assert not any(call[0] == "stop" for call in calls)
     else:
         assert release_runs == []
         assert witness == armed[0] and cp.is_entries_paused()
@@ -8682,6 +8779,8 @@ def test_deploy_live_late_refusal_uses_exact_unused_guard_generation(
 
 def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypatch):
     dl = _load("deploy_live_continuous_monitor_cutover", "deploy_live.py")
+    monkeypatch.setattr(dl, "_loaded_probability_code_identity",
+                        lambda: {"loaded_sha": "c" * 40, "generated_at": "private boot"})
     calls = []
 
     monkeypatch.setattr(dl, "_gate", lambda *_args, **_kwargs: (True, []))
@@ -8954,6 +9053,8 @@ def test_deploy_live_projection_recovery_failure_restores_paused_monitoring(
     monkeypatch,
 ):
     dl = _load("deploy_live_projection_recovery_failure", "deploy_live.py")
+    monkeypatch.setattr(dl, "_loaded_probability_code_identity",
+                        lambda: {"loaded_sha": "d" * 40, "generated_at": "private boot"})
     stops: list[str] = []
     launches: list[str] = []
 
@@ -9485,6 +9586,8 @@ def test_deploy_live_preflight_failure_restores_paused_held_monitoring(
     capsys,
 ):
     dl = _load("deploy_live_restart_preflight_failure", "deploy_live.py")
+    monkeypatch.setattr(dl, "_loaded_probability_code_identity",
+                        lambda: {"loaded_sha": "d" * 40, "generated_at": "private boot"})
     calls = []
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
