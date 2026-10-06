@@ -4541,7 +4541,7 @@ def _read_full_Y_evidence_shape(
         # Snapshot storage and role/native settlement units are independent.
         # Never interpret a Fahrenheit role point with a Celsius DB label.
         native["member_points_c"] = [
-            (float(v) - 32.) / 1.8 if native["unit"] == "F" else float(v)
+            (float(v) - 32.) * 5.0 / 9.0 if native["unit"] == "F" else float(v)
             for v in native["member_points_native"]]
         if member_bounds_c is None:
             # Exact full-day native extrema are point entities too. Never

@@ -1444,9 +1444,9 @@ def read_native_measurement_role(
                                     for s in original["metadata_sections"] if s["section_number"] == 3))).hexdigest()
                                 != scope.physical_witness["grid_sha256"]):
                             raise ValueError("MEASUREMENT_NATIVE_INTERVAL_IDENTITY_INVALID")
-                        value = float(ec.codes_get_elements(gid, "values", [int(point["flat_index"])])[0]) - 273.15
-                        if cities[0]["unit"] == "F":
-                            value = value * 1.8 + 32.0
+                        value = decoder.kelvin_to_native(
+                            float(ec.codes_get_elements(gid, "values", [int(point["flat_index"])])[0]),
+                            cities[0]["unit"])
                         by_member[member].append((start, end, value))
                         identities.append(original["raw_message_sha256"])
                         part_ids[(member, start, end)] = original["raw_message_sha256"]
@@ -1497,9 +1497,7 @@ def read_native_measurement_role(
                     raise ValueError("MEASUREMENT_NATIVE_PAIRED_INTERVAL_UNAVAILABLE")
             knots = {m: [] for m in range(51)}
             for knot in scope.native_knots:
-                value = float(knot["value_k"]) - 273.15
-                if cities[0]["unit"] == "F":
-                    value = value * 1.8 + 32.0
+                value = decoder.kelvin_to_native(float(knot["value_k"]), cities[0]["unit"])
                 knots[int(knot["member"])].append((datetime.fromisoformat(knot["valid_time_utc"]), value))
             points, bounds = [], []
             for member in range(51):
