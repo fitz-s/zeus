@@ -19910,3 +19910,28 @@ freeze before the single final shared CLI, ancestry secret and narrow impacted
 checks. Actual source qualification/13-scope public consumption remain separate
 runtime obligations; no new landing or registered retry without ROOT acceptance
 of the precise final tip.
+
+### HTTP singleton header identity — BEFORE EDIT
+
+The registered209b restart returned rc1 after106.93s before STOP; its guard
+released normally and MAIN9870 stayed alive. One canonical RO cut found13
+held families with old v6 posteriors:10 NOT_LIVE_GRADE,2 expired HKOct6 proofs,
+and Istanbul's qualified final-daily substitution. New source actor90951 was
+PID-bound209b. Normal00Z capture appended a canonical member41 part with an
+exact proof-bound receipt generation; current manifests remain UNKNOWN and
+partial27/1377,61/561,141/663, not current live-role qualification.
+
+LOW06 normal job782 still failed on 'Content-Range'. Native's bounded raw proof
+read established a Google206 receipt whose header keys are lowercase; its
+exact range/body length/full SHA match the already validated original, while
+the retained reader indexes a case-sensitive plain dictionary. This is a real
+reader defect, not an absent provider header. ROOT assigns native only
+src/data/ecmwf_open_data.py and the existing collect-cycle test in the209b
+child: case-insensitive singleton header lookup, duplicate-case names typed
+refusal, original206/range/length validation unchanged. SCOPE exact retained
+HTTP original; DRAIN normal capture/readback; RESET valid header spelling plus
+exact original proof restoration. Do not normalize or rewrite saved receipt
+bytes/SHA/first clocks, widen catches, change endpoints or relax qualification.
+Require actual normal stage/capture/retained-reader RED/GREEN and duplicate
+header negative controls. No final CLI or loader retry before freeze/review;
+source progress and actual current posterior consumption remain separate.
