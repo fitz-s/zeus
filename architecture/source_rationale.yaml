@@ -603,7 +603,13 @@ files:
       through the single ack path once every family it names is unreachable
       under the one family-reachability law (event-id to family resolution
       shared with src/main.py), and an unresolvable event or unreadable
-      world/trade DB retires nothing; age alone never retires a hint. When the pytest state marker is present,
+      world/trade DB retires nothing; age alone never retires a hint. A Day0
+      hint is also finished, and acknowledged by the retire pass and at take
+      time alike, once every event id is terminal for the reactor consumer
+      (missing rows count as terminal; one composite-key driven read) and no
+      family it names has exposure without a MONITOR_REFRESHED event at or
+      after its publish time; a pending event, held-SELL request or unreadable
+      DB keeps it queued. When the pytest state marker is present,
       every default or explicit wake path is rejected unless its resolved target
       stays in a temporary namespace and outside repo/live state.
     downstream:
