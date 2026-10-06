@@ -160,6 +160,37 @@ def test_diagnostic_predicate_report_only_has_no_control_effect():
     assert _alternate_control_violations(source) == []
 
 
+@pytest.mark.parametrize('source', [
+    "variant={'number':2.,'report':'diagnostic'}\nrecord={**variant}\nresult=sqrt(record['number'])\n",
+    "import json\nr={'report':'diagnostic','number':2.}\nparsed=json.loads(json.dumps(r))\nresult=sqrt(parsed['number'])\n",
+    "rows=[{'report':'diagnostic','number':2.}]\nresult=sum(row['number']**2 for row in rows)\n",
+    "row='diagnostic'\nrows=[{'number':2.}]\nresult=sum(row['number'] for row in rows)\n",
+])
+def test_known_structure_transfers_preserve_clean_selected_values(source):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(source) == []
+
+
+@pytest.mark.parametrize('source', [
+    "variant={'number':2.,'report':'diagnostic'}\nrecord={**variant}\nmode=record['report']\n",
+    "r='diagnostic'\nrecord={**r}\nmode=record['anything']\n",
+    "import json\nr={'report':'diagnostic','number':2.}\nparsed=json.loads(json.dumps(r))\nmode=parsed['report']\n",
+    "import json\nr={'report':'diagnostic'}\nruntime=json.dumps(r)\n",
+    "import json\nr={'report':'diagnostic'}\nparsed=json.loads(json.dumps(r,default=custom))\n",
+    "import json\nparsed=json.loads('diagnostic',object_hook=custom)\n",
+    "import json\njson.dumps=custom\nr={'report':'diagnostic'}\nresult=json.dumps(r)\n",
+    "import json\nalias=json\nalias.dumps=custom\nr={'report':'diagnostic'}\nresult=json.dumps(r)\n",
+    "import json\nsetattr(json,'dumps',custom)\nr={'report':'diagnostic'}\nresult=json.dumps(r)\n",
+    "rows=[{'report':'diagnostic','number':2.}]\nmode=next(row['report'] for row in rows)\n",
+    "rows=[{'report':'diagnostic','number':2.}]\nmode=next('live' for row in rows if row['report'])\n",
+    "rows='diagnostic'\nmode=next(row['number'] for row in rows)\n",
+    "rows=[{'report':'diagnostic'}]\nresult=[opaque(row['report']) for row in rows]\n",
+])
+def test_structure_transfers_do_not_exempt_control_unknown_or_hooks(source):
+    from scripts.check_single_live_semantics import _alternate_control_violations
+    assert _alternate_control_violations(source)
+
+
 def test_gate_scans_live_and_current_surfaces(tmp_path: Path) -> None:
     for relative in (
         "src/live.py",

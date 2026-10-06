@@ -19139,3 +19139,25 @@ SCOPE these three transfers; DRAIN one focused and one actual CLI epoch;
 RESET clean selected numeric fields pass while diagnostic selected fields,
 hooks/opaque use, alias mutation, keyword writes and control predicates refuse.
 If large findings remain, stop and report them rather than grow the design.
+
+Three-transfer checkpoint, NOT release approval: final focused134P10.149s,
+0 failures/errors/skips, XML /tmp/zeus-single-live-three-transfers-frozen.xml
+SHA256209302bf140a16ec121461af2f5f249bdd9dfee48bb52afed3efb1e08110037a.
+The original97 single-live controls and20 semantic-classifier controls remain;
+17 new known-unpack/standard-JSON/simple-comprehension and hostile hook,
+override/alias/guard controls pass. An intermediate3F129P caught old JSON
+opaque exclusions and bare-comprehension evaluation omission; the final epoch
+keeps them strict. No source/q/loader/registry behavior changed.
+The one actual full CLI returned1, real134.67s/user129.20s/sys4.04s,213 findings:
+materializer191, offline fit15, native3, global batch2, migration1, trace1.
+Original stdout/time /tmp/zeus-single-live-three-transfers-cli.txt SHA256
+54bc8e28f3c46840c674980cd0698f9981300703f0f9dcb92723992944dedbf0.
+It was not terminated and did not exceed the180s ceiling. The real canonical
+materializer serializer at444 uses default=str, so the strictly limited
+standard-JSON transfer intentionally cannot prove its field structure; the
+remaining downstream wildcard findings are not resolved by the pure clean
+roundtrip/comprehension antibodies. They are not declared213 production bugs.
+ROOT's stop condition is reached: no additional interpreter/JSON/SQLite model,
+effect enumeration, physical-semantics waiver or repeated whole CLI. Preserve
+this ordinary checkpoint and c9 rollback point for a bounded further decision.
+Actual required single-live gate remains BLOCKED; no push/live FF/load authority.

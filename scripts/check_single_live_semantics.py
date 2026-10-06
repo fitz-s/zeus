@@ -338,6 +338,25 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     functions = {node.name: node for node in nodes
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     classes = {node.name for node in nodes if isinstance(node, ast.ClassDef)}
+    json_modules = {alias.asname or alias.name for node in nodes if isinstance(node, ast.Import)
+                    for alias in node.names if alias.name == 'json'}
+    json_mutations = set()
+    for node in nodes:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(
+            node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) else []
+        for target in targets:
+            base = target
+            while isinstance(base, (ast.Attribute, ast.Subscript)):
+                base = base.value
+            if isinstance(base, ast.Name):
+                json_modules.discard(base.id)
+                json_mutations.add(base.id)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            json_modules.discard(node.name)
+        if (isinstance(node, ast.Call) and _call_name(node.func) == 'setattr'
+                and node.args and isinstance(node.args[0], ast.Name)):
+            json_mutations.add(node.args[0].id)
+    encoded_json = '__encoded_json_value__'
     assignments = {}
     writes = {}
     aliases = {}
@@ -389,6 +408,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             name, path = location(target)
             if name:
                 (writes if path else assignments).setdefault(root(name), []).append((path, value))
+    json_modules = {root(name) for name in json_modules} - {root(name) for name in json_mutations}
 
     def join(values):
         return set().union(*values) if values else set()
@@ -430,6 +450,11 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             result |= call_mutations.get(name, set())
         elif isinstance(node, ast.Dict):
             for key, expr in zip(node.keys, node.values, strict=True):
+                if key is None:
+                    # **known_mapping copies its existing field paths; it does
+                    # not make every sibling field an unknown projection.
+                    result |= value(expr, bindings)
+                    continue
                 path = key.value if isinstance(key, ast.Constant) else '*'
                 result |= {(path,) + item for item in value(expr, bindings)}
         elif isinstance(node, (ast.Tuple, ast.List, ast.Set)):
@@ -440,6 +465,27 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
             result = project(value(node.value, bindings), key, node)
         elif isinstance(node, ast.Attribute):
             result = project(value(node.value, bindings), node.attr, node)
+        elif isinstance(node, (ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)) and len(node.generators) == 1:
+            generator = node.generators[0]
+            iterable = value(generator.iter, bindings)
+            element = {path[1:] for path in iterable if path and isinstance(path[0], int)}
+            if any(not path or not isinstance(path[0], int) for path in iterable):
+                element |= {('*',)}
+            local = dict(bindings)
+            def bind_element(target, paths):
+                if isinstance(target, ast.Name):
+                    local[root(target.id)] = paths
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    for index, item in enumerate(target.elts):
+                        bind_element(item, project(paths, index, target))
+            bind_element(generator.target, element)
+            guards = join([value(guard, local) for guard in generator.ifs])
+            selected = value(node.value if isinstance(node, ast.DictComp) else node.elt, local)
+            if guards:
+                selected |= {('*',)}
+            result = ({('*',) + path for path in selected} if isinstance(node, ast.DictComp)
+                      else {(0,) + path for path in selected} if isinstance(node, (ast.ListComp, ast.SetComp))
+                      else selected)
         elif isinstance(node, ast.Call):
             name = root(_call_name(node.func))
             arguments = [value(arg, bindings) for arg in node.args]
@@ -494,6 +540,19 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                     check(child, supplied)
                 result = join([value(expr, supplied) for expr in returns[name]])
                 call_active.remove(fn)
+            elif (isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                  and root(node.func.value.id) in json_modules and node.func.attr in {'dumps', 'loads'}
+                  and len(node.args) == 1 and all(kw.arg in {'sort_keys', 'separators', 'indent',
+                      'ensure_ascii', 'allow_nan', 'check_circular', 'strict'}
+                      and isinstance(kw.value, (ast.Constant, ast.Tuple)) for kw in node.keywords)):
+                paths = arguments[0]
+                if node.func.attr == 'dumps' and all(path and path[0] != '*' for path in paths):
+                    result = {(encoded_json,) + path for path in paths}
+                elif node.func.attr == 'loads' and all(path and path[0] == encoded_json for path in paths):
+                    result = {path[1:] for path in paths}
+                elif paths:
+                    result = {('*',)}
+                    opaque_calls.add(node)
             elif isinstance(node.func, ast.Attribute) and node.func.attr == 'get':
                 key = node.args[0].value if node.args and isinstance(node.args[0], ast.Constant) else '*'
                 result = project(value(node.func.value, bindings), key, node)
@@ -524,8 +583,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
                 inputs = join([*arguments, *keywords.values(), value(node.func, bindings)])
                 if inputs:
                     result = {('*',)}
-                    if name not in {'json.dumps', 'json.loads'}:
-                        opaque_calls.add(node)
+                    opaque_calls.add(node)
         else:
             result = join([value(child, bindings) for child in ast.iter_child_nodes(node)])
         active.remove(cache_key)
@@ -612,7 +670,7 @@ def _projected_control_violations(tree: ast.AST, approved=frozenset(), report_st
     # Resolve call-side mutations before reading sink expressions; statement
     # traversal order must not make a previously cached alias look clean.
     for node in nodes:
-        if isinstance(node, ast.Call):
+        if isinstance(node, (ast.Call, ast.GeneratorExp, ast.ListComp, ast.SetComp, ast.DictComp)):
             value(node, {})
     for node in nodes:
         check(node, {})
@@ -671,6 +729,28 @@ def _lexical_flow_tree(tree: ast.AST) -> ast.AST:
             return node
 
         visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_ListComp(self, node):
+            if len(node.generators) != 1:
+                return self.generic_visit(node)
+            generator = node.generators[0]
+            generator.iter = self.visit(generator.iter)
+            self.sequence += 1
+            names = {child.id for child in ast.walk(generator.target) if isinstance(child, ast.Name)}
+            self.scopes.append({name: f"__comp_{self.sequence}_{name}" for name in names})
+            generator.target = self.visit(generator.target)
+            generator.ifs = [self.visit(guard) for guard in generator.ifs]
+            if isinstance(node, ast.DictComp):
+                node.key = self.visit(node.key)
+                node.value = self.visit(node.value)
+            else:
+                node.elt = self.visit(node.elt)
+            self.scopes.pop()
+            return node
+
+        visit_GeneratorExp = visit_ListComp
+        visit_SetComp = visit_ListComp
+        visit_DictComp = visit_ListComp
     return Bindings().visit(tree)
 
 
