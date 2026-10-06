@@ -1094,6 +1094,114 @@
       "role": "canonical_resolver"
     },
     {
+      "provider": "metaviatelecom_metar",
+      "source_channel": "metaviatelecom_metar_temperature",
+      "station_id": "UUWW",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "UUWW",
+        "display_id": "219"
+      },
+      "access": "free_public_no_account",
+      "transport_security": "PLAINTEXT_HTTP: http://display.meteocenter.ru/219 is the only reachable transport; its HTTPS certificate is self-signed (curl ssl_verify_result=18, 2026-10-01). No TLS is involved, so none is disabled. Fixed host and path (display_id is a validated integer, never a URL); redirects refused; no credentials or cookies sent; station, source clock, unit and NIL validated inside one bounded report; the response sha256 is recorded with every print. Value identity does not authenticate a response in transit.",
+      "authority_note": "Re-admitted 2026-10-06 by operator decision. The operator explicitly accepts the plaintext-HTTP transport risk for which commit 40c7ac548 withdrew this route on 2026-10-01; transport was the only withdrawal reason. Value identity: 4/4 exact against the resolver, plus the later 2026-10-01T04:00Z 6C = AWC 6C check recorded in ROUND4.md. Lead over AWC and the resolver at 2026-09-30T23:00Z. The audit report labels this transport metaviatelecom_display.",
+      "value_identity_proof": {
+        "city": "Moscow",
+        "channel": "metaviatelecom_metar",
+        "report_channel": "metaviatelecom_display",
+        "n_pairs": 4,
+        "n_exact": 4,
+        "mismatches": [],
+        "report_path": "artifacts/fast_obs_audit/round4_moscow_proof.json",
+        "station": "UUWW",
+        "unit": "C"
+      },
+      "latency_evidence": {
+        "scope": "Individual observed publication transitions, not universal dominance or percentiles.",
+        "first_proven_lead": {
+          "observation": "2026-09-30T23:00:00+00:00",
+          "candidate": {
+            "city": "Moscow",
+            "station": "UUWW",
+            "channel": "metaviatelecom_metar",
+            "observed_at": "2026-09-30T23:00:00+00:00",
+            "value": 8.0,
+            "unit": "C",
+            "negative_request_at": "2026-09-30T23:00:47.069972+00:00",
+            "positive_receipt_at": "2026-09-30T23:01:47.153364+00:00",
+            "lag_lower_ms": 47069.972,
+            "lag_upper_ms": 107153.364
+          },
+          "comparators": [
+            {
+              "channel": "awc",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Moscow",
+                "station": "UUWW",
+                "channel": "awc",
+                "observed_at": "2026-09-30T23:00:00+00:00",
+                "value": 8.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:03:46.209315+00:00",
+                "positive_receipt_at": "2026-09-30T23:04:51.209997+00:00",
+                "lag_lower_ms": 226209.315,
+                "lag_upper_ms": 291209.997
+              }
+            },
+            {
+              "channel": "resolver",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Moscow",
+                "station": "UUWW",
+                "channel": "resolver",
+                "observed_at": "2026-09-30T23:00:00+00:00",
+                "value": 8.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:04:30.899696+00:00",
+                "positive_receipt_at": "2026-09-30T23:05:30.657554+00:00",
+                "lag_lower_ms": 270899.696,
+                "lag_upper_ms": 330657.554
+              }
+            },
+            {
+              "channel": "mgm_metar",
+              "verdict": "FASTER",
+              "interval": {
+                "city": "Moscow",
+                "station": "UUWW",
+                "channel": "mgm_metar",
+                "observed_at": "2026-09-30T23:00:00+00:00",
+                "value": 8.0,
+                "unit": "C",
+                "negative_request_at": "2026-09-30T23:08:31.359554+00:00",
+                "positive_receipt_at": "2026-09-30T23:09:30.507286+00:00",
+                "lag_lower_ms": 511359.554,
+                "lag_upper_ms": 570507.2860000001
+              }
+            }
+          ],
+          "paired_value": {
+            "candidate": {
+              "value": 8.0,
+              "unit": "C"
+            },
+            "resolver": {
+              "value": 8.0,
+              "unit": "C"
+            },
+            "source": "artifacts/fast_obs_audit/round4_moscow_proof.json"
+          }
+        }
+      },
+      "role": "fast_admission"
+    },
+    {
       "provider": "imd_olbs_metar",
       "source_channel": "imd_olbs_metar_temperature",
       "station_id": "VILK",

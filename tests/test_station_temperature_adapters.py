@@ -1,7 +1,7 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-04
-# Lifecycle: created=2026-09-29; last_reviewed=2026-10-04; last_reused=2026-10-04
-# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md native sample boolean boundary
+# Last reused/audited: 2026-10-06
+# Lifecycle: created=2026-09-29; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md native sample boolean boundary; operator re-admission of Moscow UUWW 2026-10-06 (artifacts/fast_obs_audit/ROUND4.md)
 # Purpose: Pin station adapter parsing and registry source roles, including fast-admission proof law.
 # Reuse: Run when physical_current_sources, station_temperature_adapters, or the registry JSON changes.
 # Authority: REQ-20260929-223929-bf51a2; recorded provider responses, 2026-09-30 UTC.
@@ -170,7 +170,7 @@ def _public_route(provider="mgm_metar", station="LTAC"):
     from src.data.physical_current_sources import PhysicalCurrentSource, SourceRole
     from src.data.station_temperature_adapters import CHANNELS
     return PhysicalCurrentSource(provider, CHANNELS[provider], station, ("noaa",),
-        "C", 60., None, {"provider_station": station}, SourceRole.FAST_ADMISSION)
+        "C", 60., None, {"provider_station": station, "display_id": "219"}, SourceRole.FAST_ADMISSION)
 
 
 def _public_fixture(name):
@@ -182,6 +182,7 @@ def _public_fixture(name):
 
 @pytest.mark.parametrize("provider,station,name", [
     ("mgm_metar", "LTAC", "mgm_public"),
+    ("metaviatelecom_metar", "UUWW", "metaviatelecom"),
     ("imd_olbs_metar", "VILK", "imd_olbs_public"),
 ])
 def test_public_native_metar_real_response_reaches_current_reader(monkeypatch,provider,station,name):
@@ -259,6 +260,89 @@ def test_imd_public_form_contract_and_cache(monkeypatch):
     client=httpx.Client(transport=httpx.MockTransport(handler))
     first=_fetch_public_metar(route,client);second=_fetch_public_metar(route,client)
     assert first==second and len(calls)==1
+
+
+def test_public_metar_route_cannot_inject_host_or_path():
+    from src.data.station_temperature_adapters import fetch_station_temperature
+    route=replace(_public_route("metaviatelecom_metar","UUWW"),identity={"provider_station":"UUWW","display_id":"../secret"})
+    class Client:
+        def get(self,*a,**k):raise AssertionError("network must not be reached")
+        def stream(self,*a,**k):raise AssertionError("network must not be reached")
+    with pytest.raises(ValueError,match="DISPLAY_ID_INVALID"):
+        fetch_station_temperature(route,start=NOW,end=NOW,client=Client())
+
+
+def test_moscow_fixed_plain_http_page_refuses_redirects_and_records_body_digest():
+    import hashlib
+    import httpx
+    from src.data.station_temperature_adapters import _PUBLIC_METAR_CACHE, fetch_station_temperature
+    route=_public_route("metaviatelecom_metar","UUWW");body,receipt=_public_fixture("metaviatelecom")
+    calls=[]
+    def page(request):
+        calls.append(request)
+        assert request.method=="GET" and str(request.url)=="http://display.meteocenter.ru/219"
+        assert "cookie" not in request.headers and "authorization" not in request.headers
+        return httpx.Response(200,content=body)
+    _PUBLIC_METAR_CACHE.clear()
+    try:
+        sample,=fetch_station_temperature(route,start=receipt-timedelta(hours=2),end=receipt+timedelta(days=1),
+                                          client=httpx.Client(transport=httpx.MockTransport(page)))
+        assert len(calls)==1
+        assert (sample.observed_at,sample.value_native)==(datetime(2026,9,30,22,30,tzinfo=timezone.utc),9.0)
+        assert json.loads(sample.raw_report)["payload_sha256"]==hashlib.sha256(body).hexdigest()
+        moved=[]
+        def redirect(request):
+            moved.append(request)
+            return httpx.Response(302,headers={"Location":"http://elsewhere.invalid/219"},content=body)
+        _PUBLIC_METAR_CACHE.clear()
+        with pytest.raises(ValueError,match="TRANSPORT_DEFERRED"):
+            fetch_station_temperature(route,start=NOW,end=NOW,client=httpx.Client(transport=httpx.MockTransport(redirect)))
+        assert [str(r.url) for r in moved]==["http://display.meteocenter.ru/219"]
+    finally:
+        _PUBLIC_METAR_CACHE.clear()
+
+
+def test_moscow_registry_display_id_is_structure_not_a_url(tmp_path):
+    data=json.loads(REGISTRY_PATH.read_text())
+    next(r for r in data["sources"] if r["provider"]=="metaviatelecom_metar")["identity"]["display_id"]="219/../x"
+    path=tmp_path/"display.json";path.write_text(json.dumps(data))
+    routes=load_physical_current_sources(path)[0]
+    assert all(r.provider!="metaviatelecom_metar" for r in routes)
+    assert any(r.provider=="mgm_metar" for r in routes)
+
+
+def test_moscow_admission_binds_round4_artifact_verbatim():
+    data=json.loads(REGISTRY_PATH.read_text())
+    row=next(r for r in data["sources"] if r["provider"]=="metaviatelecom_metar")
+    proof=row["value_identity_proof"]
+    measured,=[r for r in json.loads((REGISTRY_PATH.parents[1]/proof["report_path"]).read_text())
+               if r["station"]=="UUWW" and r["channel"]==proof["report_channel"]]
+    assert (row["role"],row["station_id"],row["unit"])==("fast_admission","UUWW","C")
+    assert (proof["n_pairs"],proof["n_exact"],proof["mismatches"])==(measured["n_pairs"],measured["n_exact"],[])==(4,4,[])
+    lead=row["latency_evidence"]["first_proven_lead"]
+    race,=[r for r in measured["races"] if r["observation"]==lead["observation"]]
+    assert lead["observation"]=="2026-09-30T23:00:00+00:00"
+    assert lead["candidate"]=={**race["candidate"],"channel":"metaviatelecom_metar"}
+    assert lead["comparators"]==race["comparators"]
+    pair,=[p for p in measured["pairs"] if p["time"]==lead["observation"]]
+    assert pair["match"] and [lead["paired_value"]["candidate"]]==pair["candidate_raw"]
+    assert [lead["paired_value"]["resolver"]]==pair["resolver_raw"]
+    assert row["identity"]=={"provider_station":"UUWW","display_id":"219"}
+
+
+def test_moscow_recorded_proof_bodies_still_reproduce_their_values():
+    import gzip
+    root = Path(__file__).parents[1] / "artifacts" / "fast_obs_audit"
+    recorded = [s for s in json.loads(gzip.decompress((root / "round4_all_samples.json.gz").read_bytes()))
+                if s["channel"] == "metaviatelecom_display"]
+    assert recorded
+    for sample in recorded:
+        body = next(root.glob(f"*/{sample['sha256']}.body.gz"))
+        parsed = parse_station_payload(_public_route("metaviatelecom_metar", "UUWW"),
+            gzip.decompress(body.read_bytes()),
+            received_at=datetime.fromisoformat(sample["receipt_at"]))
+        assert [(s.observed_at, s.value_native) for s in parsed] == [
+            (datetime.fromisoformat(sample["observed_at"]), sample["value"])]
 
 
 def test_public_mgm_batch_never_exceeds_ten_stations(monkeypatch):
@@ -424,7 +508,9 @@ def test_every_configured_promotion_matches_committed_pair_evidence():
         evidence_path=proof.get('report_path')
         evidence=json.loads((REGISTRY_PATH.parents[1]/evidence_path).read_text()) if evidence_path else report
         if isinstance(evidence,list):
-            matches=[r for r in evidence if r['city']==proof['city'] and r['channel']==proof['channel']]
+            # report_channel: the audit's own label when it differs from the route provider.
+            channel=proof.get('report_channel',proof['channel'])
+            matches=[r for r in evidence if r['city']==proof['city'] and r['channel']==channel]
             assert len(matches)==1
             actual=matches[0]
             proven=actual['n_pairs']>0 and actual['n_pairs']==actual['n_exact'] and not actual['mismatches']
@@ -633,6 +719,7 @@ def test_wrh_rate_limit_is_deferred_without_secret_in_error(monkeypatch):
 
 @pytest.mark.parametrize("city_name,provider,value,unit", [
     ("Chicago","noaa_wrh",62.6,"F"),
+    ("Moscow","metaviatelecom_metar",8.0,"C"),
     ("Lucknow","imd_olbs_metar",24.0,"C"),
     ("Ankara","mgm_metar",12.0,"C"),
     ("Istanbul","mgm_metar",19.0,"C"),
@@ -938,7 +1025,8 @@ def test_target_plan_authorizes_only_settlement_roles():
     from src.data.physical_current_sources import SourceRole
     routes = load_physical_current_sources()[0]
     assert {r.provider for r in routes if r.settlement_authorized} == {
-        "jma_amedas", "eccc_swob", "imd_olbs_metar", "mgm_metar", "wu_station_history", "noaa_wrh"}
+        "jma_amedas", "eccc_swob", "metaviatelecom_metar", "imd_olbs_metar", "mgm_metar",
+        "wu_station_history", "noaa_wrh"}
     assert all(r.role is SourceRole.PHYSICAL_ONLY for r in routes
                if r.provider in {"fmi_wfs", "imgw_synop", "dwd_cdc", "knmi_observations", "wu_station_current"})
 
