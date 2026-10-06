@@ -879,8 +879,12 @@ def _role_original_snapshot_references(conn, now_utc: datetime, *, raw_root: Pat
 
     # Storage candidates are not qualified actions. Keep the transport frontier
     # and the public role selector's finite native-run envelope without decoding
-    # every global field once per city/metric. Only the action reader qualifies
-    # bytes, grid, 51 members and causal possession; missing X permits no fallback.
+    # every global field once per city/metric. A market needs both quantities
+    # of its same-city/day native cohort before its counterpart snapshot exists:
+    # either normal collector can finish and run GC first. This storage-only
+    # frontier uses the same finite role/run and target-expiry bounds below.
+    # Only the action reader qualifies bytes, grid, 51 members and causal
+    # possession; retaining the opposite quantity grants no X/Y authority.
     frontiers = conn.execute("""SELECT coverage.city, coverage.target_local_date,
             coverage.temperature_metric, coverage.target_window_start_utc,
             coverage.target_window_end_utc, source.source_cycle_time, coverage.source_run_id
@@ -892,7 +896,7 @@ def _role_original_snapshot_references(conn, now_utc: datetime, *, raw_root: Pat
           AND source.source_cycle_time<=? AND coverage.target_window_end_utc>?
           AND EXISTS (SELECT 1 FROM market_events market
             WHERE market.city=coverage.city AND market.target_date=coverage.target_local_date
-              AND market.temperature_metric=coverage.temperature_metric
+              AND market.temperature_metric IN ('high','low')
               AND market.token_id IS NOT NULL AND market.range_label IS NOT NULL)
         ORDER BY source.source_cycle_time DESC""", (SOURCE_ID, now_utc.isoformat(), now_utc.isoformat()))
     chosen = set()

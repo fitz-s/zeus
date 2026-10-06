@@ -3773,6 +3773,127 @@ def _record_raw_authority(
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
+def test_normal_opposite_first_original_custody_needs_only_the_actual_market(tmp_path, monkeypatch, metric):
+    """A sibling transport completes first; one real market still needs its bytes."""
+    import eccodes as ec
+    import numpy as np
+    import tempfile
+    from src import config
+    from src.state import db as state_db
+    from src.data import ecmwf_open_data as native
+    from src.data import replacement_forecast_production as production
+    from src.data.day0_hourly_vectors import read_native_measurement_role
+    from src.config import runtime_coordinate_manifest_json, runtime_cities_by_name
+    from scripts import extract_open_ens_localday as decoder
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+
+    set_values = ec.codes_set_values
+    def original_temperature(gid, values):
+        if ec.codes_get(gid,"paramId") in {167,228026,228027}:
+            ec.codes_set(gid,"packingType","grid_ieee")
+            ec.codes_set(gid,"precision",2)
+            values = np.full(len(values),284.15)
+        return set_values(gid,values)
+    monkeypatch.setattr(ec,"codes_set_values",original_temperature)
+    s = _normal_native_http(tmp_path,monkeypatch,steps=tuple(range(0,37,3)),hour=12)
+    state_db.init_schema_world_only(s.conn)
+    ledgers = Path(tempfile.mkdtemp(prefix="opposite-first-"+metric+"-",dir=config.STATE_DIR))
+    for filename,initialize in (("zeus-world.db",state_db.init_schema_world_only),
+                                ("zeus_trades.db",state_db.init_schema_trade_only)):
+        with sqlite3.connect(ledgers/filename) as ledger: initialize(ledger)
+    monkeypatch.setattr(config,"STATE_DIR",ledgers)
+    monkeypatch.setattr(state_db,"ZEUS_WORLD_DB_PATH",ledgers/"zeus-world.db")
+    monkeypatch.setattr(state_db,"ZEUS_FORECASTS_DB_PATH",Path(s.conn.execute("PRAGMA database_list").fetchone()[2]))
+    queues = {key:ledgers/key for key in ("seed_dir","request_dir","inflight_dir")}
+    for directory in queues.values(): directory.mkdir()
+    monkeypatch.setattr(production,"_replacement_forecast_live_materialization_queue_config",lambda:queues)
+    # No opposite market, request, posterior or command is fabricated.
+    s.conn.execute("""INSERT INTO market_events(market_slug,city,target_date,temperature_metric,
+        condition_id,token_id,range_label,range_low,range_high)
+        VALUES('opposite-first','London','2026-10-04',?,'private-condition','private-token','11°C',11,11)""",(metric,))
+    s.conn.commit()
+    captured = s.run+timedelta(hours=10)
+    decision_clock = [captured]
+    class ClockType(type):
+        def __instancecheck__(cls,value): return isinstance(value,datetime)
+    class NativeClock(datetime,metaclass=ClockType):
+        @classmethod
+        def now(cls,tz=None): return decision_clock[0].astimezone(tz or timezone.utc)
+    monkeypatch.setattr(native,"datetime",NativeClock)
+    monkeypatch.setattr(decoder,"datetime",NativeClock)
+    monkeypatch.setattr(native._ingest_grib_module,"_now_utc_iso",lambda:captured.isoformat())
+    builtin = sqlite3.connect(":memory:")
+    s.conn.create_function("strftime",2,lambda fmt,value:captured.isoformat(timespec="milliseconds")
+        if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+    try:
+        acquired = native.collect_native_temperature_source(**{**s.args,"cycle_deadline_monotonic":time.monotonic()+59})
+        assert acquired["status"] == "AVAILABLE",acquired
+        paths = native._resolve_opendata_paths(source_root=s.paths.raw_root,environ={})
+        monkeypatch.setattr(native,"_resolve_opendata_paths",lambda **kwargs:paths)
+        manifest = tmp_path/"coordinate-manifest.json"
+        manifest.write_text(runtime_coordinate_manifest_json())
+        coord_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        static_dir = tmp_path/"static";static_dir.mkdir()
+        static = _native_temperature_knots_fixture(static_dir,steps=(0,3),hour=12)
+        opposite = "low" if metric=="high" else "high"
+        first = None
+        for quantity in (opposite,metric):
+            track = "mx2t6_high" if quantity=="high" else "mn2t6_low"
+            folder = tmp_path/track;folder.mkdir()
+            raw,_,_,_ = _tiny_native_grib(folder,track,issue=s.run,horizon=36)
+            messages = []
+            with raw.open("rb") as stream:
+                while (gid:=ec.codes_grib_new_from_file(stream)) is not None:
+                    try:
+                        ec.codes_set(gid,"generatingProcessIdentifier",161)
+                        messages.append(ec.codes_get_message(gid))
+                    finally: ec.codes_release(gid)
+            target = native._download_output_path(run_date=s.run.date(),run_hour=12,
+                param=decoder.TRACKS[track].open_data_param,raw_root=paths.raw_root)
+            target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(b"".join(messages))
+            mask,phi = _physical_static_originals(static,directory=target.parent,track=track)
+            decoded = decoder.extract_open_ens_localday(grib_path=target,track_name=track,manifest_path=manifest,
+                cities_filter={"London"},output_root=paths.raw_root/"raw/coordinate_manifests"/coord_sha,
+                mask_grib_path=mask,mask_proof_path=mask.with_suffix(".proof.json"),
+                surface_geopotential_grib_path=phi,surface_geopotential_proof_path=phi.with_suffix(".proof.json"))
+            sample = json.loads(Path(decoded["sample_outputs"][0]).read_bytes())
+            collected = native.collect_open_ens_cycle(track=track,skip_download=True,skip_extract=True,
+                conn=s.conn,now_utc=captured,_paths=paths,grid_surface_source_evidence=sample["grid_surface_evidence"])
+            assert collected["status"] == "ok" and collected["raw_retention"]["status"] == "APPLIED",collected
+            assert not target.exists()
+            row = s.conn.execute("SELECT * FROM ensemble_snapshots WHERE city='London' AND target_date='2026-10-04' AND temperature_metric=?",(quantity,)).fetchone()
+            captures = json.loads(row["provenance_json"])["native_capture_receipt"]["messages"]
+            originals = {native._role_message_path(paths.raw_root,capture["raw_message_sha256"]):capture for capture in captures}
+            assert all(path.is_file() for path in originals), "opposite-first originals disappeared before counterpart capture"
+            if first is None:
+                assert not s.conn.execute("SELECT 1 FROM ensemble_snapshots WHERE temperature_metric=?",(metric,)).fetchone()
+                first = (row["snapshot_id"],tuple(row),{path:(path.read_bytes(),path.stat().st_mtime_ns) for path in originals})
+            else:
+                assert tuple(s.conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=?",(first[0],)).fetchone()) == first[1]
+                assert all((path.read_bytes(),path.stat().st_mtime_ns)==body for path,body in first[2].items())
+        rows = {table:tuple(tuple(row) for row in s.conn.execute(f"SELECT * FROM {table}"))
+            for table in ("source_run","ensemble_snapshots","source_run_coverage")}
+        decision_clock[0] = captured+timedelta(seconds=1)
+        role = read_native_measurement_role(conn=s.conn,city=runtime_cities_by_name()["London"],
+            target_date="2026-10-04",metric=metric,role="full_Y",scope_start=datetime(2026,10,3,23,tzinfo=timezone.utc),
+            decision_time=decision_clock[0],snapshot_id=row["snapshot_id"],_paths=paths)
+        assert role["member_points_native"] == [11.]*51
+        assert role["native_snapshot_id"] == row["snapshot_id"]
+        assert rows == {table:tuple(tuple(row) for row in s.conn.execute(f"SELECT * FROM {table}")) for table in rows}
+        # Removal of the only real market releases this finite cohort normally;
+        # storage candidates were not converted into durable q/action authority.
+        s.conn.execute("DELETE FROM market_events WHERE market_slug='opposite-first'");s.conn.commit()
+        plan = native._plan_decoded_open_data_raw_retention(s.conn,raw_root=paths.raw_root,
+            reference_date=captured.date(),reference_time=captured)
+        assert plan.role_reference_complete,plan.role_reference_errors
+        drained = native._apply_decoded_open_data_raw_retention(plan)
+        assert drained["role_message_deleted_count"] > 0
+        assert all(not path.exists() for path in first[2])
+    finally:
+        s.conn.close();builtin.close()
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
 def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkeypatch, metric, _bootstrap_only=False):
     """Normal capture/commit/cleanup feeds the unmocked public role reader."""
     import eccodes as ec
@@ -3852,13 +3973,30 @@ def test_normal_role_originals_survive_real_aggregate_retention(tmp_path, monkey
         monkeypatch.setattr(state_db, "ZEUS_WORLD_DB_PATH", world_path)
         queued = {name: tmp_path / name for name in ("seed_dir", "request_dir", "inflight_dir")}
         for directory in queued.values():
-            directory.mkdir()
+            # The normal producer already created these exact private empty
+            # queues; reuse them, without clearing any original reference.
+            assert directory.is_relative_to(tmp_path) and (not directory.exists() or not any(directory.iterdir()))
+            directory.mkdir(exist_ok=True)
         monkeypatch.setattr(production, "_replacement_forecast_live_materialization_queue_config", lambda: queued)
         provenance = {"bayes_precision_fusion": {"current_evidence_shape": shape.as_payload()}}
         # Retain actual primary AND actual paired original identities.
         posterior_hash = "private-custody-posterior-" + metric
         cycle = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
         if not _bootstrap_only:
+            # Isolate the Prepared/posterior age axis from the independent
+            # current-market storage frontier installed by the normal producer.
+            # Only these exact private H/L market references cease to exist;
+            # no acquired original, source clock or certificate is edited.
+            market_references = tuple(tuple(row) for row in conn.execute(
+                "SELECT * FROM market_events WHERE city='London' AND target_date='2026-10-04' AND temperature_metric IN ('high','low')"))
+            assert market_references
+            assert not conn.execute("SELECT 1 FROM forecast_posteriors LIMIT 1").fetchone()
+            assert not trade.execute("SELECT 1 FROM venue_commands LIMIT 1").fetchone()
+            assert not trade.execute("SELECT 1 FROM position_current LIMIT 1").fetchone()
+            assert all(not any(directory.iterdir()) for directory in queued.values())
+            conn.execute("DELETE FROM market_events WHERE city='London' AND target_date='2026-10-04' AND temperature_metric IN ('high','low')")
+            conn.commit()
+            assert not conn.execute("SELECT 1 FROM market_events WHERE city='London' AND target_date='2026-10-04' AND temperature_metric IN ('high','low')").fetchone()
             cursor = conn.execute("""INSERT INTO forecast_posteriors(source_id,product_id,data_version,city,
             target_date,temperature_metric,source_cycle_time,source_available_at,computed_at,
             q_json,posterior_method,posterior_identity_hash,provenance_json)
