@@ -18658,3 +18658,42 @@ append or exact legitimate new scope, not new publisher clocks or config edits.
 After freeze/review/integration, separate ROOT authorization is required for
 normal landing/reload. Live Google acquisition and qualified currentv7/v35
 consumer restoration remain OPEN until normal production receipts prove them.
+
+Integration paused on fresh origin rollback, no probability work completed:
+origin790040c70386257627663cf9dacf487b14ed0494 has parenta5778a889 and author/
+committer Fitz <113385294+yuxuan53@users.noreply.github.com>, authored
+2026-10-06T04:16:42-05:00. Its stated reason is full-Y reader refusal on every
+current ENS snapshot,1,031 FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE since
+07:22:16Z and no posterior commit since07:22:00Z. Those global counts are
+the rollback author's reported basis, not a new canonical-wide audit by this
+integrator. Our directly verified prior scope was HK old certificates plus
+HK/Shanghai probability refusals, native AWS503 and normal fairness RESET.
+The rollback changes26files,+317/-8240, restoring series src/scripts/tests to
+8069 bytes while retaining127's markerless queue optimization. Its added PLAN
+section requires absent-native data never to block the existing serving path.
+
+No AGENTS or docs/authority path changed in a577->790. The owning authority
+still explicitly distinguishes point assignments from variance bounds and
+requires UNKNOWN rather than endpoint/midpoint fallback for absent point
+evidence (replacement_final_form lines276-311); root AGENTS still requires
+missing/invalid current ENS shape to block that posterior. Hence the newly
+recorded re-land demand is not itself an authorized law revision. Git author
+attribution alone does not establish that a direct human instruction selected
+a replacement probability contract; ROOT must coordinate the conflicting
+task/runtime choice with the human, not silently reverse the peer rollback.
+
+Source mirror fix74011023a892af98c192fcc8adef4b5674b5b64f is independently
+APPROVED0C/I on its a577 base, but remains unpicked/unlanded. Its source SHA
+1a9dc3e3fdceda7931eafd70f7bc0d6a97cce7341bfa8126700166814d6f5ad6/test
+SHAf32d5391fa8c2a065460a8381a41945332a572e6456186fd1d9dd1836aeb55fb
+are frozen.790 removed the normal native collector/read-record/typed scope/
+deadline-session/persistence and dispatcher interfaces required by740; only
+offline capture remains. Therefore it cannot be safely transplanted as an
+independent two-file fix or justified by the old private proofs. No pick,
+rebase, source rewrite, push, live FF/reload or production probe occurred after
+discovering the rollback. Independent once-only runtime cut09:21:18 reports
+all three actors loaded790; HK monitors consume freshv34, Shanghai consumesv6.
+This is old-contract consumption restored, not qualified native/v7-v35 success.
+Raw123, peer edits/recovery refs and config absence remain preserved. This
+task is unresolved pending human-coordinated scope/authority/base disposition;
+no new implementation or blind reintroduction of the reverted package starts.
