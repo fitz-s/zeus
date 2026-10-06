@@ -4688,37 +4688,19 @@ def _replacement_availability_poll_tick():
                 "error": f"{type(exc).__name__}: {str(exc)[:220]}",
             }
 
-    # The public source clock owns this latency path. Its metadata requests are
-    # unmetered by provider contract, so metered download cooldown must never
-    # suppress the probe. The scoped downloader below still fails closed on its
-    # own quota gate and preserves the cursor until raw inputs commit.
-    source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
-    source_clock_payload = source_clock_report.as_dict()
-    if not source_clock_report.updated_sources:
-        source_clock_status = str(source_clock_payload.get("status") or "")
-        report: dict[str, object] = {
-            "status": (
-                "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
-                if source_clock_status == "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
-                else "SOURCE_CLOCK_POLL_CURRENT"
-            ),
-            "source_clock_status": source_clock_status,
-            "source_clock_updated_sources": source_clock_payload.get("updated_sources", []),
-            "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
-            "source_clock_error": source_clock_payload.get("error"),
-        }
-        # The source cursor can advance after a bounded first anchor wave, while
-        # exact-cycle target manifests still have residual gaps. Global source
-        # high-water is therefore never completion evidence. The downloader's own
-        # exact-cycle preflight proves the gap set (a covered market returns
-        # without fetching), so every no-change tick drains a residual gap on the
-        # reserved source-clock quota lane. A no-change probe carries no frozen
-        # source run, so this drain must not wait for one. Proven-complete
-        # coverage rests the exact-cycle scan for one maintenance interval; a
-        # newly listed market waits at most that long.
+    def _drain_anchor_residual(report: dict[str, object]) -> None:
+        """Drain market families with no anchor row at the provider-proved cycle.
+
+        The source cursor can advance after a bounded first anchor wave while
+        exact-cycle targets still lack rows, and a newly listed market arrives
+        between runs, so global source high-water is never completion evidence.
+        Each poll names the row-less families in one statement and downloads
+        one batch on the reserved source-clock lane. It needs no frozen source
+        run, and proven coverage rests it for one maintenance interval.
+        """
         global _ANCHOR_RESIDUAL_NEXT_MONOTONIC
         if (
-            source_clock_status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
+            cfg.get("forecast_db") is not None
             and time.monotonic() >= _ANCHOR_RESIDUAL_NEXT_MONOTONIC
         ):
             try:
@@ -4754,7 +4736,7 @@ def _replacement_availability_poll_tick():
                         decision_time=datetime.now(timezone.utc),
                         deadline_monotonic=residual_deadline,
                     )
-                    if residual_cycle is not None and cfg.get("forecast_db") is not None
+                    if residual_cycle is not None
                     else ()
                 )
                 residual_report = (
@@ -4801,6 +4783,28 @@ def _replacement_availability_poll_tick():
                 report["source_clock_anchor_residual_error"] = (
                     f"{type(exc).__name__}: {str(exc)[:220]}"
                 )
+
+    # The public source clock owns this latency path. Its metadata requests are
+    # unmetered by provider contract, so metered download cooldown must never
+    # suppress the probe. The scoped downloader below still fails closed on its
+    # own quota gate and preserves the cursor until raw inputs commit.
+    source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
+    source_clock_payload = source_clock_report.as_dict()
+    if not source_clock_report.updated_sources:
+        source_clock_status = str(source_clock_payload.get("status") or "")
+        report: dict[str, object] = {
+            "status": (
+                "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
+                if source_clock_status == "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
+                else "SOURCE_CLOCK_POLL_CURRENT"
+            ),
+            "source_clock_status": source_clock_status,
+            "source_clock_updated_sources": source_clock_payload.get("updated_sources", []),
+            "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
+            "source_clock_error": source_clock_payload.get("error"),
+        }
+        if source_clock_status == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE":
+            _drain_anchor_residual(report)
         report["maintenance_status"] = "REPLACEMENT_MAINTENANCE_DECOUPLED"
         logger.info("replacement source-clock poll current: %s", report)
         return report
@@ -5275,6 +5279,10 @@ def _replacement_availability_poll_tick():
     report["source_clock_cursor_deferred_sources"] = tuple(
         sorted(set(source_clock_report.updated_sources) - set(advanced_sources))
     )
+    # A source whose cursor cannot yet advance reports "changed" on every poll;
+    # the anchor residual must not wait for the clock to go quiet.
+    if "ecmwf_ifs" not in source_clock_report.updated_sources:
+        _drain_anchor_residual(report)
     logger.info("replacement source-clock scoped download report: %s", report)
     return report
 
