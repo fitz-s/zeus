@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-04
+# Last reused/audited: 2026-10-07
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -6663,7 +6663,13 @@ def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
     assert rebound["_edli_global_day0_binding"]["posterior_id"] == 29914
 
 
-def test_global_day0_binding_freezes_the_persisted_carrier_identity_inputs():
+@pytest.mark.parametrize("domain_shapes", [None, {
+    "physical_current": {"identity": "physical-current-shape", "samples": [26.0, 27.0]},
+    "resolver_terminal": {"identity": "resolver-terminal-shape", "samples": [27.0, 28.0]},
+}])
+def test_global_day0_binding_freezes_the_persisted_carrier_identity_inputs(domain_shapes):
+    # Opaque identity inputs exercise binding/deep-copy, not source qualification.
+    domain_shapes = copy.deepcopy(domain_shapes)
     conn, carrier = _stale_day0_carrier_and_current_observations()
     witness = {"semantics": "day0_conditional_high_equal_provider_v1", "latency_margin_c": 0.1}
     state = {"value_native": 27.0, "observed_at_utc": "2026-07-10T19:00:00+00:00",
@@ -6677,6 +6683,7 @@ def test_global_day0_binding_freezes_the_persisted_carrier_identity_inputs():
         "day0_conditional_high_shape_identity": "shape-identity",
         "day0_conditional_high_shape_witness": witness,
         "day0_remaining_variance_basis": "conditional_ens_within_plus_provider_center_delta_v1",
+        "day0_measurement_domain_shapes": domain_shapes,
     }
     rebound = era._global_day0_execution_payload(
         carrier,
@@ -6693,11 +6700,15 @@ def test_global_day0_binding_freezes_the_persisted_carrier_identity_inputs():
         "conditional_high_shape_identity": "shape-identity",
         "conditional_high_shape_witness": witness,
         "remaining_variance_basis": "conditional_ens_within_plus_provider_center_delta_v1",
+        "domain_role_shapes": copy.deepcopy(domain_shapes),
     }
     assert rebound["_edli_day0_carrier_written_inputs"] == written
     # A later fresh-decision recompute overwrites only the top-level keys.
     rebound["_edli_day0_conditional_high_shape_identity"] = "recomputed-later"
     rebound["_edli_day0_current_temperature_observed_at_utc"] = "2026-07-10T20:30:00+00:00"
+    rebound["_edli_day0_measurement_domain_shapes"] = {"identity": "recomputed-later"}
+    if domain_shapes is not None:
+        domain_shapes["physical_current"]["samples"][0] = 99.0
     assert era._day0_carrier_written_inputs(rebound) == written
 
 
@@ -8709,20 +8720,18 @@ def test_day0_partial_exact_fallback_rebuilds_when_remaining_vectors_are_unavail
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
-    import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
 
-    fixture = _day0_partial_exact_fixture()
+    fixture = _day0_qualified_exact_fixture()
     bundle = _day0_ready_bundle(fixture)
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
-    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    bundle.provenance_json["day0_conditioning"] = {
+        "active": True, "metric": "high", "source": fixture.fact["observation_source"],
+        "observation_time": fixture.fact["observation_time"],
+        "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": fixture.fact["unit"],
+    }
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {fixture.city_name: fixture.city})
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
-    monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
-        "metric": "high", "source": "ogimet_metar_ltfm",
-        "observation_time": fixture.fact["observation_time"],
-        "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
-    })
     monkeypatch.setattr(
         era,
         "_day0_remaining_global_probability_components",
@@ -8741,6 +8750,27 @@ def test_day0_partial_exact_fallback_rebuilds_when_remaining_vectors_are_unavail
             allow_partial_deterministic=True,
         )
         assert isinstance(prepared.probability_witness, DeterministicBinPayoffWitness)
+    finally:
+        fixture.forecast.close()
+        fixture.observations.close()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_day0_metar_missing_revision_evidence_cannot_authorize_entry(monkeypatch, metric):
+    from src.events.day0_authority import DAY0_PROVISIONAL_CURRENT_SNAPSHOT, day0_evidence_finality
+
+    fixture = _day0_partial_exact_fixture(metric=metric)
+    try:
+        assert day0_evidence_finality({"settlement_source": "ogimet_metar_ltfm"}) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+        # Probe the actual ENTRY source gate directly: no source-fact or
+        # conditioning double can masquerade as same-station revision history.
+        with pytest.raises(ValueError, match="METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE") as caught:
+            era._provisional_day0_revision_likelihood(
+                fixture.observations, source="ogimet_metar_ltfm", city="Istanbul",
+                city_timezone="Europe/Istanbul", target_date="2026-07-11",
+                temperature_metric=metric, decision_time=fixture.decision_at,
+                entry_authority=True)
+        assert str(caught.value.__cause__) == "NOAA_PRELIMINARY_SURVIVAL_EVIDENCE_UNAVAILABLE"
     finally:
         fixture.forecast.close()
         fixture.observations.close()
@@ -9090,29 +9120,20 @@ def test_complete_day0_fact_preserves_exact_payoff_with_ready_forecast(
 @pytest.mark.parametrize("selected_unknown", [False, True])
 def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exists(monkeypatch, metric, point, action, selected_unknown):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
-    import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
     from tests.solve.test_solver_properties import _global_candidate, _global_sell_candidate
     from src.solve.solver import executable_curve_identity, rebind_family_payoff_witness
 
-    fixture = _day0_partial_exact_fixture(metric=metric)
+    fixture = _day0_qualified_exact_fixture(metric=metric)
     bundle = _day0_ready_bundle(fixture)
-    fixture.observations.execute(
-        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("Istanbul", "2026-07-11", "ogimet_metar_ltfm", "LTFM",
-         "2026-07-11T12:00:00+03:00", fixture.fact["observation_time"], "UTC",
-         30.0, 30.0, "C", fixture.fact["observation_available_at"],
-         "live", "causal", "settlement", 1, "{}"),
-    )
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
-    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    bundle.provenance_json["day0_conditioning"] = {
+        "active": True, "metric": metric, "source": fixture.fact["observation_source"],
+        "observation_time": fixture.fact["observation_time"],
+        "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": fixture.fact["unit"],
+    }
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {fixture.city_name: fixture.city})
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
-    monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
-        "metric": metric, "source": "ogimet_metar_ltfm",
-        "observation_time": fixture.fact["observation_time"],
-        "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
-    })
     monkeypatch.setattr(era, "_day0_remaining_global_probability_components", lambda *_a, **k: (
         np.asarray([point] * 400, dtype=float),
         np.asarray(point, dtype=float),
