@@ -20584,3 +20584,86 @@ single-testdc178 was normally integrated as01b7cfdf4; exact final test SHA
 999d353ef949f6e6c6fcf43dd506c4f7bfa77d45ee691ba52786e8bf390cd20c,
 full-module20P author evidence retained. Production bytes remain78a. Remaining
 W3/pricing fixture repairs and the final complete mandatory commands stay open.
+
+ROOT authorizes native sole test-only ownership of
+tests/test_day0_remaining_day_pricing.py for the13 reproduced fixture failures.
+Invalid KMA evidence must stay unavailable (None), with lawful KMA positive
+coverage preserved; do not restore invalid fallback. Bind producer probes to
+actual city timezone and the observed-extreme source/unit/date/cut consumed by
+the restored API, retaining their original station/metric semantics. Cases
+depending on W3 common native preparation must consume B's independently fixed
+helper without rewriting W3 or pretending the old toy is qualified. SCOPE is
+this single pricing test module; DRAIN/RESET is complete truthful fixture inputs
+and genuine qualification or explicit refusal, not a weakened production gate.
+Keep independent private DB/transport paths, no mock READY, and preserve the
+original13 failures and source byte identity. Native does not own the Shanghai
+reader fixture file; any additional ownership needs an explicit bounded decision.
+
+ROOT grants parent the bounded Shanghai reader fixture slice in
+tests/test_replacement_forecast_bundle_reader.py: only
+_shanghai_reader_certificate and adjacent necessary antibodies. Before changing
+it, prove that the existing normal-native helper can bind actual Shanghai
+city/point/run/metric and private original capture; no HK/KORD relabeling,
+invented native hashes, fake READY or daily-shape-only qualification. SCOPE is
+that fixture's consumers, DRAIN/RESET is actual normal raw/PIT/public preparation
+or an explicit necessary missing dependency. Preserve original body possession
+clocks and metric/date semantics; do not expand to external fetching or production
+changes. Check a representative real consumer and missing-physical-original
+refusal, not the whole module. Other test functions stay byte-identical except
+the smallest neighboring antibody needed for the revised helper contract.
+B keeps W3 HK/KORD ownership and native keeps pricing ownership. Final original
+mandatory commands, CLI/secrets and landing acceptance remain downstream of
+the completed reviewed fixture batch, never an assumed result.
+
+ROOT already authorizes B's next test-only W3 common-fixture slice in the same
+tests/integration/test_w3_solve_seam_g3.py: replace the toy physical preparation
+inside _hko_clock_normal_materializer_fixture and _kord_normal_prior_fixture,
+using a bounded _normal_native_role_inputs(tmp_path, monkeypatch, *, conn, city,
+cycle, target, capture_at, metric, center_c, member_step_c=0) interface. Geometry,
+native member values, run and target are set before original GRIB/index/static
+encoding; real collector, hash/proof/PIT and owning role readback return actual
+snapshot/source_run/native paths/grid. No post-capture clock edits, qualification
+labels or mocked READY, and no production changes. Preserve HKO/KORD station,
+date/metric and existing consumer meanings. Parent Shanghai reader may import
+this same primitive with actual Shanghai Oct1/00 run, Oct2 target and original
+private capture/decision cuts; never borrow another city's encoded body. SCOPE
+is these shared test preparations; DRAIN/RESET is valid independently owned
+normal source input for each private case. Representative H/L and bad-physical
+inputs precede broader affected consumers, with all original XMLs retained.
+
+Shanghai's first integrated probe reproduces an existing fixture-order conflict:
+_shanghai_current_owner_request stages the old scalar-only canonical SUCCESS
+before normal capture, so collector NOOP correctly preserves that row and role
+readback refuses missing native_capture_receipt. ROOT authorizes a reader-local
+scoped preparation callback replacing only the test helper
+_fixture_native_shape_identity during request setup: invoke the accepted B
+primitive before that first toy write, returning its actual snapshot/grid/member
+inputs. Never replace production qualification, alter helper APIs elsewhere or
+DELETE/UPDATE sealed rows. Use real original capture at run+8h05 (00/12 tracks),
+private SQLite INSERT clock at capture and unchanged later provider/decision
+cuts. A second stage reuses the same private possessed source, not renewed clocks
+or cached q/READY. Preserve parameterized city/run/target and function-outside AST.
+
+Pricing8e56 was integrated normally asf93b9e9aa (source0delta); its13 independent
+controls and574P2F full-module evidence stay distinct, with the two untouched
+KORD prerequisites pending B's shared repair. B's accepted city-bound primitive
+496b was integrated only as its W3 delta inbb28edb21; exact file SHA
+478e4f3f7d68c90ec62a9479720f6f34ad5657f0e47ba1a93698c57ffe189fe3.
+
+Shanghai's local callback now retains the original forecast-bootstrap step and
+prepares physical inputs before the former toy writer. Actual consumer1P16.33s
+proves public ENTRY/HELD/JIT followed by consumed-provider-raw deletion refusing
+ENTRY/SELL; shanghai-bootstrap.xml SHA
+3c9da7b2f4b7ab9b2086ca6292b2454c300bda36c0e3928cf5141dadaf43045a.
+New physical-original refusal/RESET1P15.45s quarantines the participating primary
+CAS plus any assembled alias in this private fixture, then restores the original
+bytes and reads the same posterior; shanghai-physical-original-reset.xml SHA
+eff4c980c5aed26d1be3f298f5a2645b43aacfee1ddfe8ced9b3ea8dac7c1fde.
+Consumer execution preceded only the addition/correction of the neighboring
+antibody, not a further helper/source change. Keep intermediate import/schema/
+alias-selection failures in the external logs, not as passes. Reader test SHA
+c861bd06181d6607008673d5fe3794b840f9b38b2e34b60185cd74dea5e38427;
+AST outside the owned helper/new antibody is identical. Production bytes remain
+78a; these tests establish relationship-test source qualification, not current
+official station equivalence or live loaded qualification. B's common HK/KORD
+repair and the final mandatory commands remain open; no CLI/secret/landing yet.
