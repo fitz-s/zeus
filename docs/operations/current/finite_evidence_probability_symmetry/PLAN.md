@@ -21568,3 +21568,17 @@ roles stay required. SCOPE is these owned synthetic fixtures, not online city
 truth. DRAIN/RESET is genuine normal capture->registration->vector replay at
 the chronological private write/decision cuts. No handcrafted descriptors,
 qualification stubs, requested-as-returned coordinates or production changes.
+
+BEFOREEDIT — normal native public fixture Day0 original closure: the actual
+two-green batch retains32P/1F; normal-producer HIGH fails in
+_normal_native_originals_public_case's array-only Day0 vector block, with no
+returned-point/body capture descriptor. ROOT permits only that block to use
+normal fetch_day0_hourly_vectors single-run transport, independently selected
+static grid points, original body callbacks and causal private registration/
+SQL clocks. Preserve full_y_ready's early return, native51 originals, all
+values/run/target/unit and original consumer assertions. SCOPE is this private
+fixture's new vectors; DRAIN/RESET is normal capture->registration->persistence
+before its existing decision cut. No production gate or old row changes.
+Validate normal-producer HIGH/LOW twins; retain the old failed XML. The accepted
+255P money epoch remains reusable only because the full-Y branch and all
+production dependencies stay unchanged, not as proof of these Day0 inputs.

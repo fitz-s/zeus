@@ -1899,27 +1899,53 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
                 fetched_at_utc=(asof + timedelta(seconds=10)).isoformat(),
                 raw_report=json.dumps({"recordTime": asof.isoformat(),
                     "data": [{"place": "Hong Kong Observatory", "unit": "C", "value": 20.}]}))
-        for index, model in enumerate(day0_hourly_models_for_city(city)):
-            captured = fixture_clock[0] - timedelta(minutes=1)
-            payload = {"hourly": {"time": [f"2026-10-04T{hour:02d}:00" for hour in range(24)] + ["2026-10-05T00:00"],
-                "temperature_2m": [20. if city_name == "Hong Kong" else 10. + index * .5] * 25}}
-            api = OPENMETEO_MODEL_IDS.get(model, model)
-            request_hash = hashlib.sha256(json.dumps({"model": api, "body": payload}).encode()).hexdigest()
-            endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
-            meta = {"provider": "openmeteo", "model": model, "model_api_id": api,
-                "endpoint": endpoint, "endpoint_mode": "single_runs", "source_run_authority": "run_pinned_single_runs",
-                "provider_run_id": f"openmeteo:{api}:{full_request.source_cycle_time.isoformat()}",
-                "provider_source_cycle_time_utc": full_request.source_cycle_time.isoformat(),
-                "provider_source_available_at_utc": (full_request.source_cycle_time + timedelta(minutes=1)).isoformat(),
-                "provider_source_modified_at_utc": (full_request.source_cycle_time + timedelta(minutes=1)).isoformat(),
-                "fetch_started_at": captured.isoformat(), "fetch_finished_at": captured.isoformat(),
-                "request_hash": request_hash, "source_run_id": f"day0_hourly:{request_hash}",
-                "request_params_json": json.dumps({"metadata_model": api}),
-                "original_body_sha256": hashlib.sha256(json.dumps(payload).encode()).hexdigest()}
-            vectors = parse_openmeteo_hourly_payload(json.loads(json.dumps(payload)), city=city,
-                models=[model], captured_at=captured.isoformat(), source_run_meta_json=json.dumps(meta))
+        from src.data import day0_hourly_vectors as hourly, bayes_precision_fusion_download as dl
+        from src.data import openmeteo_model_updates as updates, openmeteo_model_surface as surface
+        provider_models = day0_hourly_models_for_city(city)
+        api_models = {OPENMETEO_MODEL_IDS.get(model, model): model for model in provider_models}
+        captured = fixture_clock[0] - timedelta(minutes=1)
+        vector_meta = {"last_run_initialisation_time": full_request.source_cycle_time.isoformat(),
+            "last_run_availability_time": (full_request.source_cycle_time + timedelta(minutes=1)).isoformat(),
+            "last_run_modification_time": (full_request.source_cycle_time + timedelta(minutes=1)).isoformat(),
+            "update_interval_seconds": 21600, "temporal_resolution_seconds": 3600}
+        def original_vector_http(_url, params, **kwargs):
+            model = api_models[params["models"]]
+            if model == "ecmwf_ifs":
+                from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+                cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon, target_elevation_m=32.)
+                lat, lon = cell["selected_grid_lat"], (cell["selected_grid_lon"] + 180) % 360 - 180
+            else:
+                profile = surface._profile(model)
+                if profile["grid_type"] == "regular":
+                    lat = profile["lat_min"] + round((city.lat-profile["lat_min"])/profile["dy"]) * profile["dy"]
+                    lon = profile["lon_min"] + round((city.lon-profile["lon_min"])/profile["dx"]) * profile["dx"]
+                else:
+                    x, y = surface._project(profile, latitude=city.lat, longitude=city.lon)
+                    x = profile["origin_x"] + round((x-profile["origin_x"])/profile["dx"]) * profile["dx"]
+                    y = profile["origin_y"] + round((y-profile["origin_y"])/profile["dy"]) * profile["dy"]
+                    lat, lon = surface._project(profile, x=x, y=y)
+            index = provider_models.index(model)
+            payload = {"latitude": lat, "longitude": lon, "elevation": 32.,
+                "timezone": city.timezone,
+                "utc_offset_seconds": int(captured.astimezone(ZoneInfo(city.timezone)).utcoffset().total_seconds()),
+                "hourly": {"time": [f"2026-10-04T{hour:02d}:00" for hour in range(24)] + ["2026-10-05T00:00"],
+                    "temperature_2m": [20. if city_name == "Hong Kong" else 10. + index * .5] * 25},
+                "hourly_units": {"temperature_2m": "°C"}}
+            body = json.dumps(payload).encode()
+            kwargs["capture_entity_body"](body, captured.timestamp())
+            kwargs["capture_network_response"](body, captured.timestamp(), {"content-type": "application/json"})
+            return json.loads(body)
+        with monkeypatch.context() as vector_capture:
+            vector_capture.setattr(dl, "datetime", NativeClock)
+            vector_capture.setattr(hourly, "_day0_utc_now", lambda: captured)
+            vector_capture.setattr(updates, "_fetch_openmeteo", lambda *_a, **_kw: dict(vector_meta))
+            vector_capture.setattr("src.data.openmeteo_client.fetch", original_vector_http)
+            vectors, request_hash = hourly.fetch_day0_hourly_vectors(city, models=provider_models, now=captured)
+            assert [row.model for row in vectors] == provider_models
+            for index, row in enumerate(vectors):
+                assert row.temps_c == tuple([20. if city_name == "Hong Kong" else 10. + index * .5] * 25)
             assert persist_day0_hourly_vectors(vectors, target_date="2026-10-04", request_hash=request_hash,
-                endpoint=endpoint, now=fixture_clock[0], conn=s.conn) == 1
+                now=fixture_clock[0], conn=s.conn) == len(provider_models)
         day0_request = replace(full_request, computed_at=fixture_clock[0], expires_at=fixture_clock[0] + timedelta(hours=1),
             day0_observed_extreme_c=11., day0_observed_extreme_source="aviationweather_metar",
             day0_observed_extreme_observation_time=current_at, day0_observed_extreme_sample_count=17,
