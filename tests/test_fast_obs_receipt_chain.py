@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-09-29
+# Last reused/audited: 2026-10-07 (EFHK alias routes now include its settlement-page route, G5)
 # Authority: INV-01/INV-06/INV-08/INV-37; REQ-20260929-170443-dd6d0b.
 """Live receipt clocks, civil days, and terminal remainder law antibodies."""
 from datetime import datetime, timedelta, timezone
@@ -122,7 +122,8 @@ def test_station_route_not_city_name_and_shared_budget(tmp_path):
     from src.data.physical_current_sources import (REGISTRY_PATH, load_physical_current_sources,
         physical_current_sources_for_city, physical_current_poll_seconds)
     alias = SimpleNamespace(name="arbitrary-label",wu_station="EFHK",settlement_unit="C",settlement_source_type="noaa")
-    assert len(physical_current_sources_for_city(alias)) == 1
+    # The physical FMI route plus the city's own settlement-page route (G5).
+    assert {r.provider for r in physical_current_sources_for_city(alias)} == {"fmi_wfs", "noaa_wrh"}
     assert physical_current_poll_seconds() == 11
     alias.wu_station = "EFHF"
     assert physical_current_sources_for_city(alias) == ()
@@ -175,15 +176,21 @@ def test_alias_cities_share_one_provider_fetch_even_when_it_fails(monkeypatch):
     import src.data.fmi_airport_temperature as fmi
     cities = {name: SimpleNamespace(name=name, wu_station="EFHK", settlement_unit="C",
               settlement_source_type="noaa", timezone="Europe/Helsinki") for name in ("alias-a","alias-b")}
-    calls = []
+    import src.data.station_temperature_adapters as adapters
+    calls, page_calls = [], []
     def unavailable(**kwargs):
         calls.append(kwargs)
         raise ValueError("synthetic optional-source failure")
+    def page_unavailable(route, client):
+        page_calls.append(route.station_id)
+        raise ValueError("WRH_CURRENT_TRANSPORT_DEFERRED:synthetic")
     monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: cities)
     monkeypatch.setattr(fmi,"fetch_temperature",unavailable)
+    monkeypatch.setattr(adapters,"_fetch_wrh_batch",page_unavailable)
     result=ingest._day0_fmi_temperature_tick()
-    assert len(calls)==1
-    assert len(result["reports"])==2
+    # One fetch per provider/station, shared by both aliases: FMI and the page route (G5).
+    assert len(calls)==1 and page_calls==["EFHK"]
+    assert len(result["reports"])==4
     assert all(r["status"]=="SOURCE_UNAVAILABLE" for r in result["reports"])
 
 
