@@ -936,6 +936,7 @@ def _latest_authorized_day0_fact(
     temperature_metric: str,
     decision_time: datetime,
     require_settlement_channel: bool = False,
+    metar_content_only: bool = False,
     ) -> dict[str, object] | None:
     """Latest Day0 fact, optionally restricted to the settlement channel.
 
@@ -943,6 +944,9 @@ def _latest_authorized_day0_fact(
     prediction-market payoff is defined by the declared settlement channel.
     They may advance refresh/redecision; they cannot alone create exact
     absorbing certainty when ``require_settlement_channel`` is true.
+    ``metar_content_only`` drops physical-only routes (a national dense station
+    such as FMI 100968) from the physical set: they are likelihood evidence
+    inside the Day0 laws, never a conditioning source (G1).
     """
 
     metric = str(temperature_metric or "").strip().lower()
@@ -1459,7 +1463,11 @@ def _latest_authorized_day0_fact(
                 # Optional fast-source registry failure cannot remove the base
                 # settlement/physical channels or block a previously servable belief.
                 station_routes_by_channel = {}
-            physical_channels.update(station_routes_by_channel)
+            physical_channels.update(
+                channel
+                for channel, route in station_routes_by_channel.items()
+                if route.settlement_authorized or not metar_content_only
+            )
             settlement_channels.update(
                 channel
                 for channel, route in station_routes_by_channel.items()
@@ -1539,10 +1547,10 @@ def _latest_authorized_day0_fact(
                                 observed_at=route_observed_at,
                                 value=value,
                             )
-                            # G2: a fast admission is settlement content only at its
-                            # proven METAR instants; other rows stay physical.
+                            # G2: a fast admission is METAR content only at its proven
+                            # METAR instants; other rows stay physical evidence.
                             or (
-                                require_settlement_channel
+                                (require_settlement_channel or metar_content_only)
                                 and not station_route.settlement_instant(route_observed_at)
                             )
                         ):
@@ -1983,7 +1991,11 @@ def _day0_observation_lag_reason(
             settlement_unit = str(fact["unit"])
         except (KeyError, TypeError, ValueError):
             return None
-    fast = latest_fast_station_conditioning(
+    from src.data.day0_dense_evidence import dense_serves
+
+    # A dense-served family never takes the fast tail (same rule as seed discovery).
+    fast = None if dense_serves(conn, city=city, metric=temperature_metric, target_date=target_date,
+                                decision=decision_time) else latest_fast_station_conditioning(
         conn,
         city=city,
         target_date=target_date,

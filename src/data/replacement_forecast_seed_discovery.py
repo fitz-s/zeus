@@ -212,12 +212,16 @@ def _day0_observed_extreme_seed_payload(
                 )
             except (KeyError, TypeError, ValueError):
                 return None
+        from src.data.day0_dense_evidence import dense_serves
         from src.data.day0_fast_obs import (
             FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
             latest_fast_station_conditioning,
         )
 
-        fast = latest_fast_station_conditioning(
+        # A dense-served family prices its METAR rows inside the dense law; the
+        # fast tail would transport the same evidence a second time.
+        fast = None if dense_serves(world_conn, city=city, metric=metric_norm, target_date=target_date,
+                                    decision=computed_at) else latest_fast_station_conditioning(
             world_conn,
             city=city,
             target_date=target_date,
@@ -243,6 +247,7 @@ def _day0_observed_extreme_seed_payload(
             temperature_metric=metric_norm,
             decision_time=computed_at,
             require_settlement_channel=False,
+            metar_content_only=True,
         )
         if fact is None:
             row = world_conn.execute(

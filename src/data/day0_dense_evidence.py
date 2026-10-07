@@ -246,11 +246,9 @@ def gather_day(conn, *, params, city_obj, metric: str, target: date, decision: d
             if abs(t / ds.GRID_MIN - round(t / ds.GRID_MIN)) < 1e-9:
                 dense.append((t, val))
         day_rows = [obs for obs in seen if obs >= start]
-        if not day_rows:
-            raise DenseUnavailable("DENSE_NO_ROWS_TODAY")
-        newest = max(day_rows)
-        if (decision - newest).total_seconds() / 60.0 > params.dense_max_age_minutes:
-            raise DenseUnavailable("DENSE_STALE")
+        newest = max(day_rows) if day_rows else None
+    if not qualifying_channel_fresh(conn, params=params, target=target, decision=decision):
+        raise DenseUnavailable("QUALIFYING_CHANNEL_ABSENT_OR_STALE")
     schedule = [t for t in np.arange(0.0, day_minutes, 1.0)
                 if int(((start + timedelta(minutes=float(t))).astimezone(UTC).minute)) in routine]
     day = ds.build_day(metric=metric, day_minutes=day_minutes, forecast=forecast, hour=hour,
@@ -271,6 +269,50 @@ def gather_day(conn, *, params, city_obj, metric: str, target: date, decision: d
         "information_cutoff_utc": decision.isoformat(),
     }
     return day, digest
+
+
+def qualifying_channel(params) -> str | None:
+    """The channel whose fresh rows qualify the family: the dense channel, else the first fast route."""
+    return params.dense_channel or (params.provisional_route_channels[0] if params.provisional_route_channels else None)
+
+
+def qualifying_channel_fresh(conn, *, params, target: date, decision: datetime) -> bool:
+    """Whether the qualifying channel has a row observed today, received by ``decision`` and fresh."""
+    from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
+
+    channel = qualifying_channel(params)
+    table = _table(conn, "observation_prints")
+    if channel is None or table is None:
+        return False
+    tz = ZoneInfo(params.timezone)
+    start = datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
+    row = conn.execute(
+        f"SELECT max(julianday(publish_ts_utc)) FROM {table} WHERE city = ? AND source_channel = ? "
+        "AND julianday(publish_ts_utc) >= julianday(?) AND julianday(publish_ts_utc) <= julianday(?) "
+        f"AND {RECEIPT_US_SQL} <= ?",
+        (params.city, channel, start.isoformat(), decision.isoformat(), receipt_us(decision)),
+    ).fetchone()
+    if row is None or row[0] is None:
+        return False
+    newest = datetime.fromtimestamp((float(row[0]) - 2440587.5) * 86400.0, tz=UTC)  # julian day -> UTC
+    return (decision - newest).total_seconds() / 60.0 <= params.dense_max_age_minutes
+
+
+def dense_serves(conn, *, city: str, metric: str, target_date: str, decision: datetime) -> bool:
+    """Whether the dense law serves this family at ``decision`` (parameters and a fresh qualifying channel).
+
+    Seed selection asks this so a dense family is never given a second transport of the same
+    METAR evidence (the fast-residual tail)."""
+    from src.calibration.day0_dense_state_space_params import dense_params_for
+
+    qualified = dense_params_for(city, metric, str(target_date)[:10])
+    if qualified is None:
+        return False
+    try:
+        return qualifying_channel_fresh(conn, params=qualified[1], target=date.fromisoformat(str(target_date)[:10]),
+                                        decision=decision.astimezone(UTC))
+    except (sqlite3.Error, ValueError):
+        return False
 
 
 def state_receipt(conn, *, city: str, station: str, state: Mapping[str, object], decision: datetime) -> datetime:

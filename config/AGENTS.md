@@ -7,6 +7,7 @@ Runtime parameters — all configuration that controls Zeus behavior at runtime.
 | File | Purpose |
 |------|---------|
 | `settings.json` | Tunable runtime parameters — cycle intervals, thresholds, Kelly multipliers, risk limits |
+| `day0_dense_state_space_params.json` | FORECAST-class fitted Day0 dense state-space parameters (content-hashed; written only by `scripts/fit_day0_dense_state_space.py`). `metrics` lists the qualified metrics per city; an empty list is fitted but serves nothing. Served only for target dates after the training and page-retention cutoffs. |
 | `cities.json` | 46 cities: coordinates (= settlement station lat/lon), station id, `settlement_source_type`, timezone, unit, peak hour, cluster; `_source_contract_pending_conversions` blocks config-only source migrations until release evidence exists. **Routine check needed** — see discipline note below |
 | `station_precise_coords.json` | Per-city station/reference coordinates and elevation; optional typed `station_ground_proof` binds HKO/HOMR/WMD ground metadata to original entities, not sensor AGL or a blanket precision-PASS grant. Only where no ground proof exists, `station_height_bound` (MPMG, ZSQD) binds the hull of the heights the station's own WRH and AWC records publish: ground status BOUNDED, point ground UNPROVEN, OM9 elevation predicates evaluated over the whole hull |
 | `hko_station_metadata.html` | Original official HKO station-table response body referenced only by a content-hash-bound `station_ground_proof`; do not execute or normalize this source HTML |

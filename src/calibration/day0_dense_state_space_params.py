@@ -76,7 +76,7 @@ def _city(name: str, block: Mapping[str, Any]) -> DenseCityParams:
     routine = tuple(int(m) for m in block["routine_minutes"])
     retention = float(block["page_retention"]["s"])
     dense = block.get("dense_channel")
-    if (not metrics or not metrics <= {"high", "low"} or not routine or any(not 0 <= m < 60 for m in routine)
+    if (not metrics <= {"high", "low"} or not routine or any(not 0 <= m < 60 for m in routine)
             or not 0.0 < retention < 1.0 or not math.isfinite(speci) or speci < 0
             or (dense is not None and not isinstance(dense, str))):
         raise ValueError("DAY0_DENSE_CITY_PARAMS_INVALID")
@@ -118,7 +118,8 @@ def _load(path: str, mtime_ns: int, size: int) -> DenseParamsArtifact | None:
         return None
 
 
-def load_dense_params(path: Path = ARTIFACT_PATH) -> DenseParamsArtifact | None:
+def load_dense_params(path: Path | None = None) -> DenseParamsArtifact | None:
+    path = ARTIFACT_PATH if path is None else path
     try:
         stat = path.stat()
     except OSError:
@@ -126,7 +127,8 @@ def load_dense_params(path: Path = ARTIFACT_PATH) -> DenseParamsArtifact | None:
     return _load(str(path), stat.st_mtime_ns, stat.st_size)
 
 
-def dense_params_for(city: str, metric: str, target_date: str, path: Path = ARTIFACT_PATH) -> tuple[DenseParamsArtifact, DenseCityParams] | None:
+def dense_params_for(city: str, metric: str, target_date: str,
+                     path: Path | None = None) -> tuple[DenseParamsArtifact, DenseCityParams] | None:
     """The qualified city block for this family, or None (legacy).  Walk-forward: the target date
     must be after the training data."""
     artifact = load_dense_params(path)

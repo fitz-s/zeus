@@ -62,6 +62,13 @@ SEL_DECISION_STEP = 60.0
 SEM = SettlementSemantics(resolution_source="fit", measurement_unit="C", precision=1.0,
                           rounding_rule="wmo_half_up", finalization_time="12:00:00Z")
 
+# Qualified metrics: those whose A/B gate passed in artifacts/fast_obs_audit/dense_station_model/
+# ss_verdicts.json (bc024fedd): B - A log-loss day-block 95 % upper bound < 0, zero semantic
+# violations, and B's high-confidence errors within the model-expected Poisson bound.  Toronto failed
+# the log-loss bound on both metrics; it is fitted (latent/mean/retention) but serves nothing.
+QUALIFIED = {"Helsinki": ("high", "low"), "Tokyo": ("high", "low"), "Singapore": ("high", "low"), "Toronto": ()}
+QUALIFICATION_BASIS = "artifacts/fast_obs_audit/dense_station_model/ss_verdicts.json (bc024fedd); model-expected Poisson gate"
+
 CITIES = {
     "Helsinki": dict(icao="EFHK", tz="Europe/Helsinki", archive=DAE / "fmi_efhk.csv.gz", step=10,
                      dense_channel="fmi_airport_temperature", dense_max_age_minutes=25.0, routes=(),
@@ -364,7 +371,8 @@ def fit_city(city: str, train_last: str, retention_last: str, variants: int, wor
     if cfg["archive"] is not None:
         sources["dense_archive"] = _sha256(cfg["archive"])
     return dict(
-        station=cfg["icao"], timezone=cfg["tz"], metrics=["high", "low"], routine_minutes=meta["routine_minutes"],
+        station=cfg["icao"], timezone=cfg["tz"], metrics=list(QUALIFIED[city]), qualification_basis=QUALIFICATION_BASIS,
+        routine_minutes=meta["routine_minutes"],
         speci_rate_per_min=speci_rate, speci_policy=cfg["speci_policy"], page_retention=retention,
         dense_channel=cfg["dense_channel"], dense_max_age_minutes=cfg["dense_max_age_minutes"],
         provisional_route_channels=list(cfg["routes"]),

@@ -272,6 +272,32 @@ def _jma_raw(at: datetime, value: float) -> str:
                        "station_id": "RJTT", "unit": "C", "value_native": value})
 
 
+def test_g1_physical_only_dense_station_never_conditions_a_seed(conn, monkeypatch):
+    """Helsinki: FMI 11.2 beat AWC 11.0 in the physical MAX and became an UNKNOWN-finality source
+    (11 fused_normal_direct posteriors). With metar_content_only the physical fact is METAR content."""
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Helsinki": CITY})
+    append_print(conn, city="Helsinki", station_id="EFHK", source_channel="fmi_airport_temperature",
+                 publish_ts_utc=local(12, 10).isoformat(), value_native=19.4, unit="C",
+                 fetched_at_utc=local(12, 12).isoformat(), raw_report=fmi_raw(local(12, 10), 19.4))
+    kwargs = dict(city="Helsinki", target_date="2026-10-07", temperature_metric="high",
+                  decision_time=local(12, 30))
+    physical = _latest_authorized_day0_fact(conn, require_settlement_channel=False, **kwargs)
+    assert physical["observation_source"] == "fmi_airport_temperature"
+    metar = _latest_authorized_day0_fact(conn, require_settlement_channel=False, metar_content_only=True, **kwargs)
+    assert metar["observation_source"] == "aviationweather_metar"
+    assert float(metar["observed_extreme_native"]) < 19.4
+
+
+def test_dense_served_family_skips_the_fast_tail(artifact, conn):
+    assert evidence.dense_serves(conn, city="Helsinki", metric="high", target_date="2026-10-07", decision=local(13, 5))
+    assert not evidence.dense_serves(conn, city="Helsinki", metric="high", target_date="2026-10-07",
+                                     decision=local(15, 0))  # FMI rows end 13:00: stale
+    assert not evidence.dense_serves(conn, city="Helsinki", metric="high", target_date="2026-10-05",
+                                     decision=local(13, 5))  # not after training
+
+
 def test_g2_non_metar_instant_route_row_sets_no_settlement_fact(monkeypatch):
     """Tokyo 2026-10-04 LOW: JMA 18.4 at 20:40Z (a non-METAR instant) must not be a settlement fact."""
     from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
