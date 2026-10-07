@@ -30,6 +30,9 @@ COMMANDS
         --allow-dirty to bypass the full git-surface gate with a loud warning.
         live-trading restarts also reload the live prerequisite sidecars before
         preflight, and still require scripts/check_live_restart_preflight.py to pass.
+        forecast-live reloads first dry-run replay the newest queued requests on
+        the target code and REFUSE unless one is READY; pass
+        --skip-forecast-replay-gate to override with a loud warning.
 
 SAFETY
     Read-mostly: the only state-changing action is `launchctl bootout` followed
@@ -59,6 +62,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 import urllib.parse
@@ -4467,6 +4471,105 @@ def _probability_upgrade_pre_stop_gate(
     return result.ok, detail
 
 
+def _replay_forecast_request(path: Path, *, timeout_s: float) -> tuple[str, str]:
+    """Dry-run one queued request through the materializer CLI on the live checkout.
+
+    Returns (status, reason); status is "UNPARSEABLE" when no result JSON came
+    back and "CONSUMED" when the queue already took the request. The CLI
+    rewrites ``<input>.stage`` (the queue's retained_turn and last_failure live
+    there), so it runs on a copy in a temp dir, with relative ``*_json`` fields
+    anchored to the original request directory.
+    """
+    root = Path(_require_live_repo())
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return "CONSUMED", ""  # the live queue picked it up between listing and replay
+    except OSError as exc:
+        return "UNPARSEABLE", f"{type(exc).__name__}: {exc}"
+    try:
+        payload = json.loads(raw)
+        for k, v in payload.items():
+            if k.endswith("_json") and isinstance(v, str) and (path.parent / v).exists():
+                payload[k] = str(path.parent / v)
+        with tempfile.TemporaryDirectory(prefix="forecast-replay-") as tmp:
+            copy = Path(tmp) / path.name
+            copy.write_text(json.dumps(payload), encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, "-B",
+                 str(root / "scripts" / "materialize_replacement_forecast_live.py"),
+                 "--input-json", str(copy)],
+                cwd=root, capture_output=True, text=True, timeout=timeout_s, check=False,
+            )
+    except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired) as exc:
+        return "UNPARSEABLE", f"{type(exc).__name__}: {exc}"
+    # rc 0/1 print the result on stdout; rc 2 (ERROR) prints its JSON on stderr.
+    lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("{")] or [
+        ln for ln in proc.stderr.splitlines() if ln.startswith("{")
+    ]
+    try:
+        result = json.loads(lines[-1])
+        status = str(result["status"])
+    except (IndexError, ValueError, KeyError, TypeError):
+        tail = (proc.stderr.strip().splitlines() or ["no output"])[-1]
+        return "UNPARSEABLE", f"rc={proc.returncode} {tail[:200]}"
+    codes = [str(c) for c in result.get("reason_codes") or []]
+    declined = [c for c in codes if c.startswith("FUSION_DECLINED:")]
+    return status, ",".join(declined or codes[:1]) or str(result.get("error") or "")
+
+
+def _forecast_live_replay_gate(
+    *, sample: int = 10, timeout_s: float = 150.0,
+) -> tuple[bool, str]:
+    """SCOPE: can the target checkout materialize any queued live request.
+
+    Replays queued requests newest first, one per distinct city/date/metric, up
+    to ``sample``, stopping at the first READY. Each is a dry run: read snapshot,
+    compute, rollback; no wake is published. A bad tip answers BLOCKED for every
+    request, and a crashed or unparseable replay (e.g. an import error) never
+    counts as READY, so both fail closed. An empty queue passes: it must never
+    block a restart. ``sample`` is 10, not 3: on healthy code only about a third
+    of queued requests replay READY (the rest are stale-request data blocks or
+    snapshot contention), so a short sample would refuse healthy restarts.
+    """
+    request_dir = (
+        Path(_require_live_repo()) / "state" / "replacement_forecast_live" / "requests"
+    )
+    found: list[tuple[float, str]] = []
+    try:
+        entries = list(os.scandir(request_dir))
+    except OSError:
+        entries = []
+    for entry in entries:
+        parts = entry.name.split(".", 3)  # <City>.<YYYY-MM-DD>.<high|low>.<rest>
+        if not entry.name.endswith(".json") or len(parts) < 4 or parts[2] not in ("high", "low"):
+            continue
+        try:
+            found.append((entry.stat().st_mtime, entry.name))
+        except OSError:
+            continue  # the queue moved it between listing and stat
+    picked: dict[tuple[str, ...], str] = {}
+    for _mtime, name in sorted(found, reverse=True):
+        picked.setdefault(tuple(name.split(".", 3)[:3]), name)
+        if len(picked) == sample:
+            break
+    if not picked:
+        return True, "forecast-live replay gate: no queued requests to replay"
+    rows: list[str] = []
+    ready = False
+    for family, name in picked.items():
+        status, reason = _replay_forecast_request(request_dir / name, timeout_s=timeout_s)
+        if status == "CONSUMED":
+            continue
+        rows.append(f"{'/'.join(family)} {status}" + (f" {reason}" if reason else ""))
+        if status == "READY":
+            ready = True
+            break
+    if not rows:
+        return True, "forecast-live replay gate: queued requests were consumed during replay"
+    return ready, "forecast-live replay gate:\n  " + "\n  ".join(rows)
+
+
 def _cmd_restart_locked(args: argparse.Namespace) -> int:
     target = args.daemon
     labels = _restart_labels_for_target(target)
@@ -4495,6 +4598,23 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         for b in blockers:
             print(f"  {b}")
         print("!" * 64)
+
+    # Nothing is stopped or armed yet, so a refusal here needs no guard release.
+    if DAEMONS["forecast-live"] in labels:
+        if args.skip_forecast_replay_gate:
+            print("!" * 64)
+            print("WARNING --skip-forecast-replay-gate: forecast-live will be reloaded")
+            print("WITHOUT replaying queued requests on the target code. A bad tip blocks")
+            print("every live posterior until the next restart.")
+            print("!" * 64)
+        else:
+            replay_ok, replay_detail = _forecast_live_replay_gate()
+            if not replay_ok:
+                print("REFUSING to restart — forecast-live replay gate failed:")
+                print(replay_detail)
+                print("\nFix the target code, or pass --skip-forecast-replay-gate to override.")
+                return 1
+            print(replay_detail)
 
     rc_all = 0
     includes_live_trading = LIVE_TRADING_LABEL in labels
@@ -4900,6 +5020,8 @@ def main(argv: list[str] | None = None) -> int:
                            help="allow clean committed HEAD that is not at origin/<branch>; dirty runtime files still block")
     p_restart.add_argument("--allow-dirty", action="store_true",
                            help="bypass the clean-tree gate (loud warning)")
+    p_restart.add_argument("--skip-forecast-replay-gate", action="store_true",
+                           help="reload forecast-live without replaying queued requests (loud warning)")
     p_restart.set_defaults(func=cmd_restart)
 
     args = ap.parse_args(argv)

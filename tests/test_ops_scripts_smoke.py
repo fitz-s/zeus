@@ -7867,6 +7867,7 @@ def test_deploy_live_command_arms_entry_pause_before_capital_handoff_gate(
     monkeypatch, capsys
 ):
     dl = _load("deploy_live_restart_refusal_order", "deploy_live.py")
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     calls = []
     monkeypatch.setattr(dl, "_gate", lambda *_args: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=False: "a" * 40)
@@ -7891,6 +7892,7 @@ def test_deploy_live_command_arms_entry_pause_before_capital_handoff_gate(
             daemon="live-trading",
             allow_dirty=False,
             allow_unpushed=False,
+            skip_forecast_replay_gate=False,
         )
     )
 
@@ -7903,6 +7905,7 @@ def test_deploy_live_command_pause_failure_keeps_loaded_main_running(
     monkeypatch, capsys
 ):
     dl = _load("deploy_live_restart_pause_failure_order", "deploy_live.py")
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     monkeypatch.setattr(dl, "_gate", lambda *_args: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=False: "b" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
@@ -7934,6 +7937,7 @@ def test_deploy_live_command_pause_failure_keeps_loaded_main_running(
             daemon="live-trading",
             allow_dirty=False,
             allow_unpushed=False,
+            skip_forecast_replay_gate=False,
         )
     )
 
@@ -8449,6 +8453,7 @@ def test_deploy_live_warm_preflight_failure_releases_guard_without_stopping_main
     monkeypatch, capsys, refusal
 ):
     dl = _load("deploy_live_warm_preflight_refused_guard", "deploy_live.py")
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     calls = []
     released = []
     armed_issued_at = []
@@ -8785,6 +8790,7 @@ def test_deploy_live_late_refusal_uses_exact_unused_guard_generation(
 
 def test_deploy_live_current_migrations_keep_main_until_warm_preflight(monkeypatch):
     dl = _load("deploy_live_continuous_monitor_cutover", "deploy_live.py")
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     monkeypatch.setattr(dl, "_loaded_probability_code_identity",
                         lambda: {"loaded_sha": "c" * 40, "generated_at": "private boot"})
     calls = []
@@ -8897,6 +8903,7 @@ def test_deploy_live_failed_zero_main_witness_never_bootstraps_second_main(
     monkeypatch,
 ):
     dl = _load("deploy_live_zero_main_fail_closed", "deploy_live.py")
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     calls = []
 
     monkeypatch.setattr(dl, "_gate", lambda *_args, **_kwargs: (True, []))
@@ -9059,6 +9066,7 @@ def test_deploy_live_projection_recovery_failure_restores_paused_monitoring(
     monkeypatch,
 ):
     dl = _load("deploy_live_projection_recovery_failure", "deploy_live.py")
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     monkeypatch.setattr(dl, "_loaded_probability_code_identity",
                         lambda: {"loaded_sha": "d" * 40, "generated_at": "private boot"})
     stops: list[str] = []
@@ -9137,6 +9145,7 @@ def test_deploy_live_starts_heartbeat_before_monitor_and_stops_after_failure(
     monkeypatch,
 ):
     dl = _load("deploy_live_heartbeat_before_monitor", "deploy_live.py")
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     calls = []
     monkeypatch.setattr(
         dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, [])
@@ -9473,6 +9482,7 @@ def test_deploy_live_verified_restart_preserves_non_deploy_pause(monkeypatch, tm
 
 def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     dl = _load("deploy_live_restart_order_all", "deploy_live.py")
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     calls = []
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
@@ -9592,6 +9602,7 @@ def test_deploy_live_preflight_failure_restores_paused_held_monitoring(
     capsys,
 ):
     dl = _load("deploy_live_restart_preflight_failure", "deploy_live.py")
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     monkeypatch.setattr(dl, "_loaded_probability_code_identity",
                         lambda: {"loaded_sha": "d" * 40, "generated_at": "private boot"})
     calls = []
@@ -9780,6 +9791,329 @@ def test_gen_schema_cheatsheet_handles_missing_db(tmp_path):
     content = gsc.build()
     assert "## ghost.db" in content
     assert "ERR" in content
+
+
+# --------------------------------------------------------------------------
+# deploy_live: forecast-live replay gate
+# --------------------------------------------------------------------------
+
+
+def _replay_queue(dl, monkeypatch, tmp_path, names):
+    """Point the live repo at tmp_path and create queue request files (oldest first)."""
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    queue = tmp_path / "state" / "replacement_forecast_live" / "requests"
+    queue.mkdir(parents=True)
+    for i, name in enumerate(names):
+        f = queue / name
+        f.write_text("{}")
+        import os as _os
+
+        _os.utime(f, (1_000_000 + i, 1_000_000 + i))
+    return queue
+
+
+def test_forecast_live_replay_gate_passes_on_empty_queue(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_empty", "deploy_live.py")
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        dl, "_replay_forecast_request", lambda *_a, **_k: pytest.fail("nothing to replay")
+    )
+    (tmp_path / "state" / "replacement_forecast_live" / "requests").mkdir(parents=True)
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True
+    assert "no queued requests" in detail
+
+
+def test_forecast_live_replay_gate_passes_when_queue_dir_absent(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_nodir", "deploy_live.py")
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+
+    assert dl._forecast_live_replay_gate()[0] is True
+
+
+def test_forecast_live_replay_gate_fails_when_every_replay_is_blocked(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_blocked", "deploy_live.py")
+    _replay_queue(dl, monkeypatch, tmp_path, [
+        "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json",
+        "Tokyo.2026-10-07.low.20261007T020000Z.enqueue-b.json",
+    ])
+    monkeypatch.setattr(
+        dl, "_replay_forecast_request",
+        lambda *_a, **_k: ("BLOCKED", "FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE"),
+    )
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is False
+    assert "Paris/2026-10-07/high BLOCKED FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE" in detail
+    assert "Tokyo/2026-10-07/low BLOCKED" in detail
+
+
+def test_forecast_live_replay_gate_passes_on_first_ready_and_stops(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_ready", "deploy_live.py")
+    _replay_queue(dl, monkeypatch, tmp_path, [
+        "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json",
+        "Rome.2026-10-07.high.20261007T020000Z.enqueue-b.json",
+        "Tokyo.2026-10-07.low.20261007T030000Z.enqueue-c.json",
+    ])
+    seen = []
+
+    def replay(path, **_k):
+        seen.append(path.name.split(".")[0])
+        return ("READY", "") if path.name.startswith("Rome") else ("BLOCKED", "X")
+
+    monkeypatch.setattr(dl, "_replay_forecast_request", replay)
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True
+    assert seen == ["Tokyo", "Rome"]  # newest first; the older Paris is never replayed
+    assert "Tokyo/2026-10-07/low BLOCKED X" in detail
+    assert "Rome/2026-10-07/high READY" in detail
+    assert "Paris" not in detail
+
+
+def test_forecast_live_replay_gate_fails_closed_when_nothing_parses(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_unparseable", "deploy_live.py")
+    _replay_queue(dl, monkeypatch, tmp_path, [
+        "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json",
+    ])
+    monkeypatch.setattr(
+        dl, "_replay_forecast_request",
+        lambda *_a, **_k: ("UNPARSEABLE", "rc=1 ModuleNotFoundError: no module named x"),
+    )
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is False
+    assert "ModuleNotFoundError" in detail
+
+
+def test_forecast_live_replay_gate_samples_newest_distinct_families(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_sampling", "deploy_live.py")
+    queue = _replay_queue(dl, monkeypatch, tmp_path, [
+        "Old.2026-10-07.high.20261007T000000Z.enqueue-1.json",
+        "Dup.2026-10-07.high.20261007T010000Z.enqueue-2.json",
+        "Dup.2026-10-07.high.20261007T020000Z.transition-3.json",
+        "Dup.2026-10-08.high.20261007T030000Z.enqueue-4.json",
+        "Mid.2026-10-07.low.20261007T040000Z.enqueue-5.json",
+        "New.2026-10-07.high.20261007T050000Z.enqueue-6.json",
+        "New.2026-10-07.high.20261007T060000Z.enqueue-7.json.stage",
+        "notes.json",
+    ])
+    seen = []
+    monkeypatch.setattr(
+        dl, "_replay_forecast_request",
+        lambda path, **_k: seen.append(path.name) or ("BLOCKED", "X"),
+    )
+
+    ok, _ = dl._forecast_live_replay_gate(sample=3)
+
+    assert ok is False
+    # Newest first; the duplicate (Dup, 10-07, high) family appears once, with its
+    # newest file; `.json.stage` and non-request names are never replayed.
+    assert seen == [
+        "New.2026-10-07.high.20261007T050000Z.enqueue-6.json",
+        "Mid.2026-10-07.low.20261007T040000Z.enqueue-5.json",
+        "Dup.2026-10-08.high.20261007T030000Z.enqueue-4.json",
+    ]
+    assert all((queue / n).is_file() for n in seen)
+
+
+def test_replay_forecast_request_is_dry_run_on_a_copy_and_reads_last_json_line(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_replay_cli", "deploy_live.py")
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    queue = tmp_path / "state" / "replacement_forecast_live" / "requests"
+    queue.mkdir(parents=True)
+    (queue / "payload.json").write_text("{}")
+    request = queue / "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json"
+    request.write_text(json.dumps({"city": "Paris", "openmeteo_payload_json": "payload.json"}))
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        copy = Path(cmd[cmd.index("--input-json") + 1])
+        assert copy.parent != queue
+        assert json.loads(copy.read_text())["openmeteo_payload_json"] == str(queue / "payload.json")
+        out = 'log line\n{"status": "BLOCKED", "reason_codes": ["x"]}\n{"status": "BLOCKED", "reason_codes": ["FUSION_DECLINED:Y", "z"]}\n'
+        return subprocess.CompletedProcess(cmd, 1, out, "")
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+
+    assert dl._replay_forecast_request(request, timeout_s=7.0) == (
+        "BLOCKED", "FUSION_DECLINED:Y",
+    )
+    (cmd, kwargs), = calls
+    assert "--commit" not in cmd
+    assert cmd[0] == sys.executable
+    assert cmd[-2] == "--input-json"
+    assert kwargs["cwd"] == tmp_path and kwargs["timeout"] == 7.0
+    assert sorted(p.name for p in queue.iterdir()) == [request.name, "payload.json"]
+
+
+@pytest.mark.parametrize("stdout, stderr, raises", [
+    ("", "Traceback...\nImportError: boom", False),
+    ("no json here\n", "", False),
+    ('{"no_status": 1}\n', "", False),
+    ("", "", True),
+])
+def test_replay_forecast_request_unparseable_results_never_pass(
+    monkeypatch, tmp_path, stdout, stderr, raises
+):
+    dl = _load("deploy_live_replay_cli_bad", "deploy_live.py")
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    request = tmp_path / "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json"
+    request.write_text("{}")
+
+    def fake_run(cmd, **kwargs):
+        if raises:
+            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+        return subprocess.CompletedProcess(cmd, 2, stdout, stderr)
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+
+    status, _reason = dl._replay_forecast_request(request, timeout_s=1.0)
+
+    assert status == "UNPARSEABLE"
+
+
+def _forecast_live_restart_fixture(dl, monkeypatch, gate):
+    launched = []
+    monkeypatch.setattr(dl, "_gate", lambda *_a, **_k: (True, []))
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", gate, raising=False)
+    monkeypatch.setattr(
+        dl, "_launch_or_restart_label", lambda label: launched.append(label) or (True, f"launched {label}")
+    )
+    monkeypatch.setattr(dl, "_run_restart_recovery_if_needed", lambda *_a, **_k: (True, "recovery not required"))
+    monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", lambda *_a, **_k: (True, "preflight not required"))
+    return launched
+
+
+def test_replay_forecast_request_reports_rc2_error_json_from_stderr(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_cli_err", "deploy_live.py")
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    request = tmp_path / "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json"
+    request.write_text("{}")
+    err = '{"error": "REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED", "status": "ERROR"}\n'
+    monkeypatch.setattr(
+        dl.subprocess, "run",
+        lambda cmd, **_k: subprocess.CompletedProcess(cmd, 2, "", err),
+    )
+
+    assert dl._replay_forecast_request(request, timeout_s=1.0) == (
+        "ERROR", "REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED",
+    )
+
+
+def test_replay_forecast_request_consumed_by_queue_is_not_a_crash(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_cli_gone", "deploy_live.py")
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        dl.subprocess, "run", lambda *_a, **_k: pytest.fail("no request, no replay")
+    )
+
+    status, _ = dl._replay_forecast_request(
+        tmp_path / "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json", timeout_s=1.0,
+    )
+
+    assert status == "CONSUMED"
+
+
+def test_replay_forecast_request_missing_checkout_is_not_consumed(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_cli_nocwd", "deploy_live.py")
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path / "no-such-checkout"))
+    request = tmp_path / "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json"
+    request.write_text("{}")
+
+    status, _ = dl._replay_forecast_request(request, timeout_s=5.0)
+
+    assert status == "UNPARSEABLE"
+
+
+def test_forecast_live_replay_gate_ignores_requests_consumed_mid_replay(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_consumed", "deploy_live.py")
+    _replay_queue(dl, monkeypatch, tmp_path, [
+        "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json",
+        "Tokyo.2026-10-07.low.20261007T020000Z.enqueue-b.json",
+    ])
+    results = {"Tokyo": ("CONSUMED", ""), "Paris": ("BLOCKED", "FUSION_DECLINED:Z")}
+    monkeypatch.setattr(
+        dl, "_replay_forecast_request", lambda path, **_k: results[path.name.split(".")[0]]
+    )
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is False  # a consumed request is neither READY nor evidence of a crash
+    assert "Tokyo" not in detail and "Paris/2026-10-07/high BLOCKED" in detail
+
+    results["Paris"] = ("CONSUMED", "")
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True
+    assert "consumed during replay" in detail
+
+
+def test_deploy_live_forecast_live_restart_refused_when_replay_gate_fails(monkeypatch, capsys):
+    dl = _load("deploy_live_replay_restart_refused", "deploy_live.py")
+    launched = _forecast_live_restart_fixture(
+        dl, monkeypatch, lambda **_k: (False, "Paris/2026-10-07/high BLOCKED FUSION_DECLINED:Z")
+    )
+    monkeypatch.setattr(
+        dl, "_stop_label", lambda *_a, **_k: pytest.fail("a refused restart must stop nothing")
+    )
+
+    rc = dl._cmd_restart_locked(types.SimpleNamespace(
+        daemon="forecast-live", allow_dirty=False, allow_unpushed=False,
+        skip_forecast_replay_gate=False,
+    ))
+
+    assert rc == 1
+    assert launched == []
+    out = capsys.readouterr().out
+    assert "REFUSING to restart — forecast-live replay gate failed:" in out
+    assert "FUSION_DECLINED:Z" in out
+
+
+def test_deploy_live_forecast_live_restart_proceeds_when_replay_gate_passes(monkeypatch):
+    dl = _load("deploy_live_replay_restart_ok", "deploy_live.py")
+    launched = _forecast_live_restart_fixture(dl, monkeypatch, lambda **_k: (True, "replay ok"))
+
+    rc = dl._cmd_restart_locked(types.SimpleNamespace(
+        daemon="forecast-live", allow_dirty=False, allow_unpushed=False,
+        skip_forecast_replay_gate=False,
+    ))
+
+    assert rc == 0
+    assert launched == ["com.zeus.forecast-live"]
+
+
+def test_deploy_live_skip_forecast_replay_gate_flag_bypasses_with_banner(monkeypatch, capsys):
+    dl = _load("deploy_live_replay_restart_skip", "deploy_live.py")
+    launched = _forecast_live_restart_fixture(
+        dl, monkeypatch, lambda **_k: pytest.fail("--skip-forecast-replay-gate must skip the gate")
+    )
+
+    rc = dl.main(["restart", "forecast-live", "--skip-forecast-replay-gate"])
+
+    assert rc == 0
+    assert launched == ["com.zeus.forecast-live"]
+    assert "WARNING --skip-forecast-replay-gate" in capsys.readouterr().out
+
+
+def test_deploy_live_restart_of_other_daemons_never_runs_the_replay_gate(monkeypatch):
+    dl = _load("deploy_live_replay_restart_other", "deploy_live.py")
+    launched = _forecast_live_restart_fixture(
+        dl, monkeypatch, lambda **_k: pytest.fail("only forecast-live reloads replay")
+    )
+
+    rc = dl.main(["restart", "price-channel-ingest"])
+
+    assert rc == 0
+    assert launched == ["com.zeus.price-channel-ingest"]
 
 
 if __name__ == "__main__":
