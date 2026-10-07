@@ -20,6 +20,8 @@ Evidence classes at a decision (all receipt-gated by the caller):
                             s 1{T in R^-1(k)} 1{k does not cross} + (1 - s) 1{R(T) does not cross}
                             (evidence column: s 1{T in R^-1(k)} + 1 - s) is the exact marginal for
                             independent per-row retention.  It never creates a 0/1.
+  context row (t, k)        METAR integer outside the local day (the pre-midnight window): exact
+                            interval evidence about T_t with no role in the extreme.
   pending instant t         scheduled routine instant with no row of either class: R(T_t) joins.
   SPECI hazard              Poisson rate lambda from ``speci_from`` to the day end: R(T_t) joins.
   dense reading (t, x)      quantised national-station value: likelihood only, never a boundary.
@@ -136,6 +138,7 @@ class DenseDay:
     dense: tuple[tuple[float, float], ...]
     pending: tuple[float, ...]
     speci_from: float
+    context: tuple[tuple[float, int, int], ...] = ()
 
     def __post_init__(self) -> None:
         n = grid_minutes(self.day_minutes).size
@@ -145,6 +148,7 @@ class DenseDay:
                 or any(not 0 <= t < self.day_minutes for t in self.pending)
                 or any(not 0 <= t < self.day_minutes for t, *_ in (*self.page, *self.provisional))
                 or any(not -PRE_MIN <= t <= self.day_minutes for t, _ in self.dense)
+                or any(not -PRE_MIN <= t < 0 for t, _, _ in self.context)
                 or any(not 0.0 < s <= 1.0 for *_, s in self.provisional)
                 or not -PRE_MIN <= self.speci_from <= self.day_minutes):
             raise ValueError("DAY0_DENSE_DAY_INVALID")
@@ -269,7 +273,7 @@ def thresholds_for(metric: str, bins: Sequence[tuple[float | None, float | None]
 
 # ---------------------------------------------------------------- forward recursion
 
-_PAGE, _PROVISIONAL, _DENSE, _PENDING, _SPECI, _END = range(6)
+_CONTEXT, _PAGE, _PROVISIONAL, _DENSE, _PENDING, _SPECI, _END = range(7)
 
 
 class _Recursion:
@@ -283,7 +287,7 @@ class _Recursion:
         lat = model.latent
         sd = math.sqrt(lat.s2)
         implied = [0.0]
-        for t, k_lo, k_hi, *_ in (*day.page, *day.provisional):
+        for t, k_lo, k_hi, *_ in (*day.page, *day.provisional, *day.context):
             base = m[_slot(t)] + offset
             implied += [k_lo + self.lo_off - base, k_hi + self.hi_off - base]
         implied += [x - m[_slot(t)] - offset for t, x in day.dense]
@@ -350,6 +354,7 @@ class _Recursion:
         """(G(k) per threshold, log evidence)."""
         day, K = self.day, self.k.size
         events: list[tuple[float, int, tuple]] = []
+        events += [(float(t), _CONTEXT, (k_lo, k_hi)) for t, k_lo, k_hi in day.context]
         events += [(float(t), _PAGE, (k_lo, k_hi)) for t, k_lo, k_hi in day.page]
         events += [(float(t), _PROVISIONAL, (k_lo, k_hi, s)) for t, k_lo, k_hi, s in day.provisional]
         if self.model.noise is not None:
@@ -375,6 +380,8 @@ class _Recursion:
             t_prev = t
             if kind == _DENSE:
                 a = a * self._dense_lik(t, payload[0])
+            elif kind == _CONTEXT:
+                a = a * self._interval(t, *payload)[:, None, None]
             elif kind == _PAGE:
                 a = columns(a) * self._interval(t, *payload)[:, None, None]
                 a[:, :, 1:] *= self._row_allows(*payload)[None, None, :]
@@ -454,7 +461,8 @@ def bin_probabilities(model: DenseModel, day: DenseDay, bins: Sequence[tuple[flo
 
 def build_day(*, metric: str, day_minutes: float, forecast: Iterable[float], hour: Iterable[int],
               page: Iterable[tuple[float, int]], provisional: Iterable[tuple[float, int, float]],
-              dense: Iterable[tuple[float, float]], schedule: Iterable[float], speci_from: float) -> DenseDay:
+              dense: Iterable[tuple[float, float]], schedule: Iterable[float], speci_from: float,
+              context: Iterable[tuple[float, int]] = ()) -> DenseDay:
     """Assemble a DenseDay at one decision.
 
     Same-slot rows of one class merge into the hull of their integers.  A provisional row is
@@ -476,6 +484,7 @@ def build_day(*, metric: str, day_minutes: float, forecast: Iterable[float], hou
         return out
 
     page_slots = merge(page)
+    context_slots = merge(context)
     last_page = max((v[0] for v in page_slots.values()), default=-math.inf)
     prov_slots = {g: v for g, v in merge(provisional).items() if g not in page_slots and v[0] > last_page}
     occupied = set(page_slots) | set(prov_slots)
@@ -486,4 +495,5 @@ def build_day(*, metric: str, day_minutes: float, forecast: Iterable[float], hou
                     page=tuple(sorted((v[0], v[1], v[2]) for v in page_slots.values())),
                     provisional=tuple(sorted((v[0], v[1], v[2], v[3]) for v in prov_slots.values())),
                     dense=tuple(sorted((float(t), float(x)) for t, x in dense)), pending=pending,
-                    speci_from=float(speci_from))
+                    speci_from=float(speci_from),
+                    context=tuple(sorted((v[0], v[1], v[2]) for v in context_slots.values())))
