@@ -6710,7 +6710,7 @@ def _build_scaled_normal_uniform_q(
 
     _sigma_pred = float(sigma_pred)
     if _sigma_pred == 0.0 and k == 1.0 and uniform_w == 0.0 and floor_steps == 0.0 and settlement_sigma_floor_c is None:
-        from src.contracts.settlement_semantics import SettlementSemantics
+        from src.contracts.settlement_semantics import quantize_preimage_axis
 
         final = float(mu)
         if not math.isfinite(final):
@@ -6720,9 +6720,8 @@ def _build_scaled_normal_uniform_q(
                 raise ValueError("CURRENT_DEGENERATE_METRIC_INVALID")
             final = (max(final, day0_obs_extreme_c) if metric == "high"
                      else min(final, day0_obs_extreme_c))
-        settled = SettlementSemantics(resolution_source="forecast_preimage",
-            measurement_unit="C", rounding_rule=rounding_rule,
-            precision=2.0 * half_step, finalization_time="UNKNOWN").round_single(final)
+        settled = float(quantize_preimage_axis([final], rounding_rule=rounding_rule,
+                                              half_step=half_step)[0])
         point = {str(b.bin_id): float((b.lower_c is None or settled >= float(b.lower_c))
                                      and (b.upper_c is None or settled <= float(b.upper_c)))
                  for b in bins}
@@ -7446,7 +7445,7 @@ def _build_fused_q_bounds(
         cdf_high = ndtr(z_high)
     day0_obs = None if day0_observed_extreme_c is None else float(day0_observed_extreme_c)
     if sigma == 0.0:
-        from src.contracts.settlement_semantics import SettlementSemantics
+        from src.contracts.settlement_semantics import quantize_preimage_axis
 
         atom_values = mu_draws.copy()
         if day0_obs is not None and math.isfinite(day0_obs):
@@ -7456,9 +7455,8 @@ def _build_fused_q_bounds(
                 atom_values = np.minimum(atom_values, day0_obs)
             else:
                 raise ValueError("day0_metric must be high or low for a settlement atom")
-        semantics = SettlementSemantics("forecast_preimage", "C", 2.0 * half_step,
-                                        rounding_rule, "UNKNOWN")
-        settled = np.asarray([semantics.round_single(float(value)) for value in atom_values])
+        settled = quantize_preimage_axis(atom_values, rounding_rule=rounding_rule,
+                                         half_step=half_step)
         probs = np.column_stack([
             ((settled >= float(b.lower_c)) if b.lower_c is not None else np.ones(len(settled), dtype=bool))
             & ((settled <= float(b.upper_c)) if b.upper_c is not None else np.ones(len(settled), dtype=bool))

@@ -236,7 +236,7 @@ def test_native_role_trace_bad_projection_is_only_diagnostic_unavailable(fault):
     elif fault == "revision": kernel["domain_role_shapes"]["semantics_revision"] = "old"
     elif fault == "unit": kernel["domain_role_shapes"]["X"]["unit"] = "F"
     elif fault == "points": kernel["domain_role_shapes"]["X"]["member_points_native"].pop()
-    elif fault == "hash": kernel["domain_role_shapes"]["X"]["member_points_native"][0] += 1.
+    elif fault == "hash": kernel["domain_role_shapes"]["X"]["provider_families"][0] = "valid_other_family"
     else: trace["family"] = "x"*(16*1024)
     frozen = corpus.freeze_held_sell_point_trace(trace)
     assert json.loads(frozen)["status"] == "UNAVAILABLE"

@@ -20701,3 +20701,41 @@ this distinct named issue; no fourth source edit or skip is authorized here.
 Planning-lock and map-maintenance return ok/no issues, compile5 and diffcheck
 pass. Full mandatory commands and real HKO trace consumer rechecks remain
 downstream of B's still-running module and review; these97 do not replace them.
+
+BEFOREEDIT axis followup: ROOT/XY verify that the two materializer constructor
+calls at6723/7459 quantify forecast-preimage Celsius coordinates, not city
+settlement contracts. Parent may additionally edit only those two call sites
+in src/data/replacement_forecast_materializer.py and add an owning pure
+quantize_preimage_axis primitive in src/contracts/settlement_semantics.py.
+Input is the already-bound rounding_rule/half_step and finite values, never a
+city/frozen contract wrapper. Reuse the existing floor/half-up/ceil formula;
+positive-sigma integration, provider/role/clock and current probability law
+stay unchanged. SCOPE is sigma-zero point/bootstrap axis quantization;
+DRAIN/RESET is lawful finite positive step and known rounding rule with
+identical old numeric output. Test C/F Celsius step5/9, H/L extrema, negative
+and half-boundary nextafter values, atom/bootstrap consistency and invalid
+inputs in the existing settlement test module; preserve rawconstructor guard.
+Update only existing source_rationale rows. Rollback this numeric-neutral
+followup with its tests, not A/B source authority. No CLI/secrets/landing before
+the combined source/frozen/role review and original required commands.
+
+Axis/trace combination: actual new primitive RED1F4.34s axis-red.xml SHA
+9f7f5b2dcecb41b06e19902a80189bb7d4ae86b90b4137b0e8784892406c7cce;
+after both call replacements, two complete trace/settlement test modules plus
+four existing zero/positive-width materializer controls give129P0F/E/S6.58s,
+trace-axis-final.xml SHA
+0e0dd73e067d40e76034a1dd923652741efbebcb136d261f51c40b9b17a3b7bd.
+The former constructor guard now passes without a file whitelist or frozen
+wrapper around forecast axes. A previously conflated hash antibody was narrowed
+to a valid provider-family edit (all math/grammar unchanged); that one case is
+actual1P2.01s, trace-hash-isolated.xml SHA
+abde0a2a7bd16e3e32e49ce3939ad55f796c1757a2682d062313c707900c169e,
+not a130th unique pass or an all129 rerun after the test-only edit. Planning,
+map-maintenance, compile6 and diffcheck return0. The optional command
+python scripts/topology_doctor.py --invariants --zone K0 --json fails at
+scripts/topology_doctor_cli.py:455 because __main__.build_invariants_slice is
+absent; this emit-slice route is not invoked by any current workflow, whereas
+money-path-required.yml:117 separately requires ci/assert_invariant_coverage.py.
+Name the legacy CLI failure, do not count it as a pass or repair unrelated code.
+B's W3 actual run, real HKO optional replay and final original mandatory union/
+money commands remain open; no final CLI/secrets/landing were started.

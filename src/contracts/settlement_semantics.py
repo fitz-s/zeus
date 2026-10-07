@@ -59,6 +59,36 @@ logger = logging.getLogger(__name__)
 RoundingRule = Literal["wmo_half_up", "floor", "ceil", "oracle_truncate"]
 
 
+def _round_values_on_axis(values: Any, precision: float, rounding_rule: str) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    inv = 1.0 / precision if precision > 0 else 1.0
+    scaled = arr * inv
+    if rounding_rule == "wmo_half_up":
+        rounded = np.floor(scaled + 0.5)
+    elif rounding_rule in ("floor", "oracle_truncate"):
+        rounded = np.floor(scaled)
+    elif rounding_rule == "ceil":
+        rounded = np.ceil(scaled)
+    else:
+        raise ValueError(f"Unsupported settlement rounding rule: {rounding_rule}")
+    return rounded / inv
+
+
+def quantize_preimage_axis(values: Any, *, rounding_rule: str, half_step: float) -> np.ndarray:
+    """Quantize already-bound forecast coordinates, not a city settlement claim."""
+    if (type(half_step) not in (int, float) or not np.isfinite(half_step)
+            or half_step <= 0 or not np.isfinite(2.0 * half_step)
+            or rounding_rule not in ("wmo_half_up", "floor", "ceil", "oracle_truncate")):
+        raise ValueError("FORECAST_PREIMAGE_AXIS_INVALID")
+    arr = np.asarray(values, dtype=float)
+    if not np.isfinite(arr).all():
+        raise ValueError("FORECAST_PREIMAGE_VALUES_NONFINITE")
+    result = _round_values_on_axis(arr, 2.0 * half_step, rounding_rule)
+    if not np.isfinite(result).all():
+        raise ValueError("FORECAST_PREIMAGE_RESULT_NONFINITE")
+    return result
+
+
 def settlement_source_publication_grade(
     *, city: str, target_date: str, temperature_metric: str,
     market_slug: str | None, source_family: str | None = None,
@@ -409,27 +439,10 @@ class SettlementSemantics:
         ``self.measurement_unit`` (set by ``for_city()``).  Typed-unit
         enforcement for this path is PR 2/3 scope.
         """
-        arr = np.asarray(values, dtype=float)
-        inv = 1.0 / self.precision if self.precision > 0 else 1.0
-        scaled = arr * inv
-
-        if self.rounding_rule == "wmo_half_up":
-            rounded = np.floor(scaled + 0.5)
-        elif self.rounding_rule in ("floor", "oracle_truncate"):
-            # DANGER: oracle_truncate 仅限 HKO 等受到 UMA 截断偏见污染
-            # 的合约使用！严禁用于正常的气象学 P_raw 模拟！
-            #
-            # UMA voters treat decimal °C as truncated: "28.7 hasn't
-            # reached 29, so it's 28". Empirically verified: floor()
-            # achieves 14/14 (100%) match on HKO same-source settlement
-            # days vs 5/14 (36%) with wmo_half_up.
-            rounded = np.floor(scaled)
-        elif self.rounding_rule == "ceil":
-            rounded = np.ceil(scaled)
-        else:
-            raise ValueError(f"Unsupported settlement rounding rule: {self.rounding_rule}")
-
-        return rounded / inv
+        # Dispatch remains the captured/live contract's own rule; the shared
+        # primitive also serves forecast-preimage coordinates without claiming
+        # those coordinates are a new city contract.
+        return _round_values_on_axis(values, self.precision, self.rounding_rule)
 
     def round_single(self, value: float) -> float:
         """Round a single settlement value to contract precision.
