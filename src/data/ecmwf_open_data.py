@@ -2807,6 +2807,35 @@ def _promote_native_mirror_part(path: Path, cache: Path, run: datetime) -> dict:
     return _read_native_temperature_record(cache / path.name, run)[0]
 
 
+def _native_original_object_fence(path: Path) -> tuple | None:
+    """Mutation evidence for four physical objects, never source time or proof.
+
+    Only a record strongly verified in this same invocation may use this fence.
+    A missing, aliased or changed object falls back to the ordinary verifier.
+    """
+    import stat
+    try:
+        proof_path = path.with_suffix(".grib2.proof.json")
+        proof = json.loads(proof_path.read_bytes())
+        name, digest = proof["index_path"], proof["index_receipt_sha256"]
+        if (type(name) is not str or Path(name).name != name
+                or type(digest) is not str or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            return None
+        index = path.parent / name
+        generation = index.with_name(f"{index.stem}.http-{digest}.json")
+        receipt = generation if _path_present(generation) else index.with_suffix(".http.json")
+        objects = []
+        for original in (path, proof_path, index, receipt):
+            observed = original.lstat()
+            if not stat.S_ISREG(observed.st_mode):
+                return None
+            objects.append((observed.st_dev, observed.st_ino, observed.st_size,
+                observed.st_mtime_ns, observed.st_ctime_ns))
+        return tuple(objects)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: datetime,
         required_steps: list[int], cycle_deadline_monotonic: float,
         _priority: Any, _paths: OpenDataPaths | None = None, _on_acquired: Any = None) -> dict:
@@ -2840,6 +2869,15 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
             _on_acquired()
         paths = _paths or _resolve_opendata_paths()
         cache = paths.raw_root / "raw" / "ecmwf_open_ens" / "native_2t_scheduled" / f"{run_utc:%Y%m%dT%HZ}"
+        if time.monotonic() >= cycle_deadline_monotonic and any(
+            not _path_present(cache / f"step{step:03d}-member{member:02d}.grib2")
+            or not _path_present(cache / f"step{step:03d}-member{member:02d}.grib2.proof.json")
+            for step in steps for member in range(51)
+        ):
+            # A missing required object can only refute complete readback. This
+            # expired cache probe grants nothing and leaves the active turn's
+            # original cut for strict validation and normal missing-part fetch.
+            return {**report, "reason": "STEP_DEADLINE_EXCEEDED"}
         manifest = cache / "source-manifest.json"
         manifest_bytes = manifest.read_bytes() if manifest.exists() else None
         previous = json.loads(manifest_bytes) if manifest_bytes is not None else {}
@@ -2866,7 +2904,7 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
         old = {(m["member"], m["step_hours"]): m for m in previous.get("retained_identities", [])}
         # Validate before requesting: unproved old bytes cannot become a first
         # normal capture, and a tampered identity must not be overwritten.
-        retained = {}
+        retained, verified_objects = {}, {}
         for path in sorted(cache.glob("step*-member*.grib2")):
             if not _path_present(path.with_suffix(".grib2.proof.json")):
                 # Only a complete staged original can repair interrupted
@@ -2891,11 +2929,14 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
                                     raise ValueError("NATIVE_2T_MIRROR_COHORT_DIVERGED")
                         _promote_native_mirror_part(staged_path, cache, run_utc)
                         break
+            before_read = _native_original_object_fence(path)
             record, _ = _read_native_temperature_record(path, run_utc)
             proof = json.loads(path.with_suffix(".grib2.proof.json").read_bytes())
             if proof.get("ingest_mode") != "SCHEDULED_LIVE":
                 raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
             retained[(record["member"], record["step_hours"])] = record
+            if before_read is not None and before_read == _native_original_object_fence(path):
+                verified_objects[path.name] = (record, before_read)
         if any(key in retained and retained[key] != saved for key, saved in old.items()):
             raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
         if any(key not in retained for key in old):
@@ -2947,14 +2988,24 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
                 stage.mkdir(exist_ok=True)
                 prefix = dict(retained)
                 staged = {}
+                expected_origin = ("https://storage.googleapis.com/ecmwf-open-data/" if mirror == "google"
+                    else "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/")
                 for path in sorted(stage.glob("step*-member*.grib2")):
                     if path.is_symlink() or path.with_suffix(".grib2.proof.json").is_symlink():
                         raise ValueError("NATIVE_2T_MIRROR_STAGE_ALIAS")
-                    record, _ = _read_native_temperature_record(path, run_utc)
+                    verified = verified_objects.get(path.name)
+                    if (verified is not None and verified[0]["source_url"].startswith(expected_origin)
+                            and verified[1] == _native_original_object_fence(cache / path.name)
+                            and verified[1] == _native_original_object_fence(path)):
+                        # Same original body/proof/index/exact receipt hardlinks,
+                        # validated above at this run/member/grid/cohort. Nothing
+                        # survives this invocation; touching any object cancels
+                        # reuse, and a different replica is verified normally.
+                        record = {**verified[0], "path": str(path.resolve())}
+                    else:
+                        record, _ = _read_native_temperature_record(path, run_utc)
                     if json.loads(path.with_suffix(".grib2.proof.json").read_bytes()).get("ingest_mode") != "SCHEDULED_LIVE":
                         raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
-                    expected_origin = ("https://storage.googleapis.com/ecmwf-open-data/" if mirror == "google"
-                        else "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/")
                     if not record["source_url"].startswith(expected_origin):
                         raise ValueError("NATIVE_2T_MIRROR_STAGE_ORIGIN_INVALID")
                     staged[(record["member"], record["step_hours"])] = record

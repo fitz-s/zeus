@@ -1,6 +1,6 @@
 # Created: 2026-05-11
-# Last reused/audited: 2026-10-06
-# Lifecycle: created=2026-05-11; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Last reused/audited: 2026-10-07
+# Lifecycle: created=2026-05-11; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Protect collector isolation, optional native capture and offline 2t knots without prediction-budget regression.
 # Reuse: Inspect source-run, land-mask and shared-deadline contracts; use private DB/GRIB fixtures and fake HTTP.
 # Authority basis: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md §5.5
@@ -649,6 +649,109 @@ def configured_native_pool(tmp_path, monkeypatch):
         yield s
     finally:
         s.conn.close()
+
+
+def test_normal_native_partial_cache_probe_and_same_turn_resume_keep_budget(tmp_path, monkeypatch):
+    """An actual 509-part prefix must leave the original cut for missing parts."""
+    s = _normal_native_http(tmp_path, monkeypatch, steps=tuple(range(0, 33, 3)))
+    clock, ranges = [100.], [0]
+    monkeypatch.setattr(s.module.time, "monotonic", lambda: clock[0])
+    original_get = s.session.get
+    def stop_capture(url, **kwargs):
+        response = original_get(url, **kwargs)
+        if "Range" in kwargs.get("headers", {}):
+            ranges[0] += 1
+            if ranges[0] == 510:
+                clock[0] = s.session._zeus_deadline
+        return response
+    s.session.get = stop_capture
+    try:
+        first = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": 159.})
+        assert first["status"] == "INCOMPLETE" and first["observed_count"] == 509, first
+        cache = Path(first["manifest_path"]).parent
+        before = json.loads(Path(first["manifest_path"]).read_bytes())["retained_identities"]
+        original_read = s.module._read_native_temperature_record
+        reads, missing_requests = [], []
+        def charged_read(path, *args, **kwargs):
+            result = original_read(path, *args, **kwargs)
+            reads.append(path)
+            # Controlled clock models the observed ~45ms/original read cost;
+            # the original parser, hashes, source binding and clocks still run.
+            clock[0] += .045
+            return result
+        monkeypatch.setattr(s.module, "_read_native_temperature_record", charged_read)
+        s.session.get = lambda url, **kwargs: (missing_requests.append(url), original_get(url, **kwargs))[1]
+        clock[0] = 200.
+        probe = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": 200.})
+        assert probe["status"] == "DEFERRED" and not reads and not missing_requests, probe
+        result = s.module.collect_native_temperature_source(**{**s.args, "cycle_deadline_monotonic": 259.})
+        assert missing_requests and result["observed_count"] > 509, result
+        # Stage hardlinks already strongly read in this invocation need no
+        # second read; independent/new originals retain the full verifier.
+        stage = cache / f".mirror-{s.module._resume_source_namespace('aws')}.partial"
+        old_names = {Path(record["path"]).name for record in before}
+        assert not [p for p in reads if p.parent == stage and p.name in old_names]
+        after = json.loads(Path(result["manifest_path"]).read_bytes())["retained_identities"]
+        assert all(next(r for r in after if (r["member"], r["step_hours"]) ==
+            (old["member"], old["step_hours"])) == old for old in before)
+    finally:
+        s.conn.close()
+
+
+@pytest.mark.parametrize("object_kind,change", (
+    ("body", "touch"), ("body", "replace"), ("proof", "replace"),
+    ("index", "replace"), ("receipt", "replace"),
+    ("body", "corrupt"), ("proof", "corrupt"),
+    ("index", "corrupt"), ("receipt", "corrupt"),
+))
+def test_normal_native_same_turn_reuse_revalidates_changed_objects(
+        configured_native_pool, monkeypatch, object_kind, change):
+    s = configured_native_pool
+    s.mode = "healthy"
+    monkeypatch.setattr(s.module, "_DOWNLOAD_SOURCES", ("aws",))
+    assert s.poll()["status"] == "AVAILABLE"
+    before = {p.name: p.read_bytes() for p in s.cache.iterdir()
+        if p.is_file() and p.name != "mirror-attempt.json"}
+    source_rows = [tuple(r) for r in s.conn.execute("SELECT * FROM source_run")]
+    stage = s.cache / f".mirror-{s.module._resume_source_namespace('aws')}.partial"
+    body = stage / "step000-member00.grib2"
+    proof_path = body.with_suffix(".grib2.proof.json")
+    proof = json.loads(proof_path.read_bytes())
+    index = stage / proof["index_path"]
+    receipt = s.module._native_index_receipt_path(index, proof["index_receipt_sha256"])
+    target = {"body":body,"proof":proof_path,"index":index,"receipt":receipt}[object_kind]
+    real_read, changed = s.module._read_native_temperature_record, [False]
+    reread, requests = [], []
+    def read(path, *args, **kwargs):
+        if path.parent == stage and path.name == body.name:
+            reread.append(path)
+        result = real_read(path, *args, **kwargs)
+        if path.parent == s.cache and path.name == "step003-member50.grib2" and not changed[0]:
+            changed[0] = True
+            if change == "touch":
+                observed = target.stat()
+                s.module.os.utime(target, ns=(observed.st_atime_ns, observed.st_mtime_ns+1))
+            else:
+                # Change only the private stage, preserving published originals.
+                replacement = target.with_name(target.name+".private-replacement")
+                replacement.write_bytes(target.read_bytes() if change == "replace" else b"{}")
+                s.module.os.replace(replacement, target)
+        return result
+    monkeypatch.setattr(s.module, "_read_native_temperature_record", read)
+    def stop_missing(url, **kwargs):
+        requests.append(url)
+        raise ValueError("PRIVATE_MISSING_HTTP_BOUNDARY")
+    s.session.get = stop_missing
+    s.args["required_steps"] = [0,3,6]
+    result = s.poll()
+    assert changed[0] and reread, result
+    assert result["status"] == "UNKNOWN" and result["qualification_status"] == "UNKNOWN", result
+    if change == "corrupt":
+        assert not requests and result["reason"] != "PRIVATE_MISSING_HTTP_BOUNDARY", result
+    else:
+        assert len(requests) == 1 and requests[0].endswith("-6h-oper-fc.index"), result
+    assert source_rows == [tuple(r) for r in s.conn.execute("SELECT * FROM source_run")]
+    assert all((s.cache/name).read_bytes() == raw for name,raw in before.items())
 
 
 def test_normal_native_fast_503_uses_configured_google_originals(configured_native_pool):
