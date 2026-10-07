@@ -206,3 +206,7 @@ Rebased onto origin/live b452210d5 (clean). Coordinator decisions D1-D7 recorded
 
 ### Status
 Stopped before D1 per brief: the D2(i) law fork needs a coordinator decision (how to treat °F page revisions: the precise→integer swap on US resolver routes).
+- Fork impact check: of the 17 integer-changing °F revisions, 1 moved a day extreme.
+  - KAUS 2026-10-02 LOW: first value 74 at 11:30Z → 73, and the day's LOW went 74 → 73; settled 73, so the revised value is the settlement one.
+  - The page's first-received °F value is therefore not a safe semantic boundary for that row within about 20 min of receipt.
+  - The remaining 16 were not the day extreme.
