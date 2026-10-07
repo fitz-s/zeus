@@ -51930,6 +51930,19 @@ def test_noaa_kord_fast_public_q_reaches_actual_held_and_jit(tmp_path,monkeypatc
             forecast_conn=fixture.conn,topology_conn=fixture.conn,observation_conn=fixture.conn,decision_time=cut)
         assert rebound.probability_witness is witness
         assert rebound.probability_witness.witness_identity == witness.witness_identity
+        from scripts import check_live_restart_preflight as preflight
+        from src.engine.monitor_refresh import _pinned_complete_bundle_matches_current_day0_event
+        # Composite conditioning is not an overlay of the old source label or
+        # publication clock. Current proof binds the original spot report;
+        # ENTRY/HELD/JIT above all consumed that actual normal source closure.
+        assert not _pinned_complete_bundle_matches_current_day0_event(persisted, event,
+            metric="low", settlement_unit=fixture.city.settlement_unit)
+        inputs_ok, input_proof = preflight._probability_upgrade_current_inputs(
+            fixture.conn, bundle=persisted, city=fixture.city,
+            target_date=str(request.target_date), metric="low", now=cut)
+        assert inputs_ok, (input_proof, json.loads(event.payload_json))
+        assert input_proof["basis"] == "qualified_current_inputs"
+        assert input_proof["day0_event_id"] == event.event_id
         producer_inputs,producer_carrier = kernel_calls[0]
         assert len(kernel_calls) >= 5  # Producer, three real lanes and submit rebind.
         def canonical_inputs(inputs):
