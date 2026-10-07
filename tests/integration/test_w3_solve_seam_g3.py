@@ -50653,7 +50653,7 @@ def test_hko_current_prefix_requires_original_bytes_and_capture_clock(metric):
 
 def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, prior_hour=12,
                                            observed_extreme_native=None, shuffled_conditions=False,
-                                           include_target_station_forecast=True):
+                                           include_target_station_forecast=True, prepare_native_successor=None):
     """Normal writers + controlled source receipts; no probability authority mock.
 
     The 51-member fields are controlled values encoded into original GRIBs;
@@ -50722,6 +50722,13 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     native_input = _normal_native_role_inputs(tmp_path, monkeypatch, conn=conn, city=city,
         cycle=cycle, target=target, capture_at=native_capture, metric=metric,
         center_c=center-.5, member_step_c=.02)
+    native_successor = None
+    if prepare_native_successor is not None:
+        native_successor = prepare_native_successor(conn=conn, city=city, sql_clock=sql_clock)
+        # Each private source root owns its original files. The first producer
+        # still reads its bound old run; no raw identity is relabeled or copied.
+        from src.data import ecmwf_open_data as native
+        monkeypatch.setattr(native, "_resolve_opendata_paths", lambda **kwargs: native_input.paths)
     # Advance this private writer's wall clock for the independently acquired
     # provider/anchor receipts. Native possession and write clocks stay frozen.
     sql_clock[0] = captured+timedelta(minutes=1)
@@ -50988,7 +50995,8 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     conn.commit()
     return SimpleNamespace(conn=conn,db=db,city=city,request=request,result=result,cut=cut,bins=bins,
                            anchor_request=anchor_request,artifact_path=artifact_path,manifest_dir=manifest_dir,
-                           write_provider_cohort=write_provider_cohort,sql_clock=sql_clock,native_input=native_input)
+                           write_provider_cohort=write_provider_cohort,sql_clock=sql_clock,native_input=native_input,
+                           native_successor=native_successor)
 
 
 @pytest.mark.parametrize("metric",("high","low"))
@@ -51760,7 +51768,7 @@ def test_noaa_kord_fast_public_q_reaches_actual_held_and_jit(tmp_path,monkeypatc
     from src.data import replacement_forecast_bundle_reader as reader
     from src.events.opportunity_event import OpportunityEvent
     from src.engine.monitor_refresh import _current_global_held_point_probability
-    kernel_calls, transport_calls, sampler_rows = [], [], []
+    kernel_calls, kernel_origins, transport_calls, sampler_rows = [], [], [], []
     original_builder = hourly.build_day0_remaining_probability_carrier
     original_transport = materializer._apply_fast_residual_likelihood_to_probability_carrier
     original_sampler = era._Day0CarrierRowSampler.sample_matrix
@@ -51771,6 +51779,9 @@ def test_noaa_kord_fast_public_q_reaches_actual_held_and_jit(tmp_path,monkeypatc
         effective = deepcopy(dict(bound.arguments))
         effective["operator"] = result["operator"]  # Omitted V2 default == explicit strict replay.
         kernel_calls.append((effective,result))
+        frame = inspect.currentframe()
+        kernel_origins.append(frame.f_back.f_code.co_name)
+        del frame
         return result
     def transport(**inputs):
         result = original_transport(**inputs)
@@ -51872,8 +51883,40 @@ def test_noaa_kord_fast_public_q_reaches_actual_held_and_jit(tmp_path,monkeypatc
         assert rebound.probability_witness.witness_identity == witness.witness_identity
         producer_inputs,producer_carrier = kernel_calls[0]
         assert len(kernel_calls) >= 5  # Producer, three real lanes and submit rebind.
-        for inputs,carrier in kernel_calls:
-            assert inputs == producer_inputs
+        def canonical_inputs(inputs):
+            # JSON persists tuples as arrays; compare every value/identity,
+            # including nested roles, with only that container equivalence.
+            return hourly._day0_canonical_json({**inputs,
+                "settlement_semantics": asdict(inputs["settlement_semantics"])})
+        canonical_producer = canonical_inputs(producer_inputs)
+        source_provenance = json.loads(fixture.conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+            (result.posterior_id,)).fetchone()[0])
+        canonical_replay = {**canonical_producer, "identity_inputs": hourly._day0_canonical_json({
+            **source_provenance["day0_measurement_domain_replay_inputs"]["identity_inputs"],
+            "domain_role_shapes": source_provenance["day0_measurement_domain_shapes"]})}
+        def differing_leaves(expected, actual, path=""):
+            if isinstance(expected, dict) and isinstance(actual, dict):
+                return [leaf for key in sorted(expected.keys() | actual.keys())
+                    for leaf in differing_leaves(expected.get(key), actual.get(key), path+"/"+key)]
+            if isinstance(expected, list) and isinstance(actual, list) and len(expected) == len(actual):
+                return [leaf for index, (left, right) in enumerate(zip(expected, actual))
+                    for leaf in differing_leaves(left, right, path+"/"+str(index))]
+            return [] if expected == actual else [(path, expected, actual)]
+        changed_identity = deepcopy(producer_inputs)
+        changed_identity["identity_inputs"]["city"] = "not-Chicago"
+        assert canonical_inputs(changed_identity) != canonical_producer
+        for (inputs,carrier), origin in zip(kernel_calls, kernel_origins, strict=True):
+            canonical = canonical_inputs(inputs)
+            if origin == "_day0_measurement_domain_carrier_reason":
+                # Pure public point replay uses the persisted economic recipe;
+                # its owning producer deliberately excludes decision clocks.
+                expected = canonical_replay
+            else:
+                assert inputs["identity_inputs"]["decision_time_utc"] == cut.isoformat()
+                assert inputs["identity_inputs"]["probability_cutoff_utc"] == cut.isoformat()
+                expected = canonical_producer
+            assert canonical == expected, differing_leaves(expected, canonical)
             assert carrier["content_identity"] == producer_carrier["content_identity"]
             np.testing.assert_array_equal(carrier["q"],producer_carrier["q"])
             np.testing.assert_array_equal(carrier["samples"],producer_carrier["samples"])
@@ -52085,7 +52128,7 @@ def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_pat
                     WHERE selection_epoch_identity=? AND candidate_id=? LIMIT 1""",
                     (actual_selected.actuation.selection_epoch_identity,winner.candidate_id)).fetchone()
                 if native is not None:
-                    assert native == (winner.token_id,selected_point)
+                    assert tuple(native) == (winner.token_id,selected_point)
                 else:
                     mode = trade.execute("SELECT mode FROM decision_log WHERE rowid=?",(row[5],)).fetchone()[0]
                     assert mode == "global_single_order_auction_delta"
@@ -52111,7 +52154,35 @@ def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_pat
 
 @pytest.mark.parametrize("metric",("high","low"))
 def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(tmp_path,monkeypatch,metric,_hko_clock_native_sources):
-    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric,prior_hour=6)
+    def prepare_successor(*, conn, city, sql_clock):
+        from src.data import ecmwf_open_data as native
+        old_snapshots = [tuple(row) for row in conn.execute("SELECT * FROM ensemble_snapshots ORDER BY snapshot_id")]
+        old_runs = {row["source_run_id"]: dict(row) for row in conn.execute("SELECT * FROM source_run")}
+        cycle = _dt.datetime(2026,9,29,12,tzinfo=_dt.timezone.utc)
+        captured = cycle+_dt.timedelta(hours=8,minutes=5)
+        decision, release = native._select_cycle_for_track(track="mx2t6_high" if metric=="high" else "mn2t6_low",
+            now_utc=captured)
+        assert decision is native.FetchDecision.FETCH_ALLOWED
+        assert release["selected_cycle_time"] == cycle and release["horizon_profile"] == "full"
+        sql_clock[0] = captured
+        root = tmp_path/"successor-native"
+        root.mkdir()
+        successor = _normal_native_role_inputs(root, monkeypatch, conn=conn, city=city,
+            cycle=cycle, target=_dt.date(2026,9,30), capture_at=captured, metric=metric,
+            center_c=(32.0 if metric=="high" else 27.0)-.5, member_step_c=.02)
+        count = len(old_snapshots)
+        assert [tuple(row) for row in conn.execute("SELECT * FROM ensemble_snapshots ORDER BY snapshot_id LIMIT ?",
+            (count,))] == old_snapshots
+        for run_id, original in old_runs.items():
+            assert dict(conn.execute("SELECT * FROM source_run WHERE source_run_id=?",(run_id,)).fetchone()) == original
+        from src.data.day0_hourly_vectors import read_native_measurement_role
+        with pytest.raises(ValueError, match="AFTER_DECISION"):
+            read_native_measurement_role(conn=conn,city=city,target_date="2026-09-30",metric=metric,role="full_Y",
+                scope_start=successor.window.start_utc,decision_time=captured-_dt.timedelta(seconds=1),
+                snapshot_id=successor.snapshot["snapshot_id"],_paths=successor.paths)
+        return successor
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,metric,prior_hour=6,
+        prepare_native_successor=prepare_successor)
     try:
         from src.data import replacement_forecast_bundle_reader as reader
         row = fixture.conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
@@ -52228,40 +52299,21 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
             target_date="2026-09-30",temperature_metric=metric,decision_time=decision,raw_input_hwm_conn=fixture.conn)
         assert missing.status == "NOT_APPLICABLE" and missing.reason_code == "REPLACEMENT_PINNED_HKO_CURRENT_TEMPERATURE_CLOCK_UNAVAILABLE"
 
-        # Supply a new causal toy ENS receipt through the source-run writer and
-        # ordinary deterministic HTTP writers, then run the actual materializer.
-        # No READY flag, pin predicate, shape reader, or probability is mocked.
-        from src.state.source_run_repo import write_source_run
+        # The 12Z originals were normally possessed at 20:05 before this old
+        # decision. Only the independent provider wave arrives at 06:22 now.
         from src.data import bayes_precision_fusion_download as dl
+        from src.data import ecmwf_open_data as native
         from src.data.replacement_forecast_materializer import materialize_replacement_forecast_live
-        new_cycle = fixture.request.source_cycle_time+_dt.timedelta(hours=6)
+        successor = fixture.native_successor
+        snapshot = successor.snapshot
+        new_cycle = _dt.datetime.fromisoformat(snapshot["source_cycle_time"])
+        assert new_cycle == fixture.request.source_cycle_time+_dt.timedelta(hours=6)
+        assert _dt.datetime.fromisoformat(snapshot["source_available_at"]) < fixture.cut
+        assert snapshot["snapshot_id"] != fixture.native_input.snapshot["snapshot_id"]
+        new_run_id = snapshot["source_run_id"]
         new_capture = decision+_dt.timedelta(minutes=2)
         fixture.sql_clock[0] = new_capture
-        run = dict(fixture.conn.execute("SELECT * FROM source_run WHERE source_run_id=?",
-                                       (fixture.request.baseline_source_run_id,)).fetchone())
-        new_run_id = run["source_run_id"]+"-new"
-        run.update(source_run_id=new_run_id,source_cycle_time=new_cycle.isoformat(),
-            source_available_at=new_capture.isoformat(),fetch_finished_at=new_capture.isoformat(),
-            captured_at=new_capture.isoformat(),imported_at=new_capture.isoformat())
-        names = set(inspect.signature(write_source_run).parameters)-{"conn"}
-        write_source_run(fixture.conn,**{name:run[name] for name in names if name in run})
-        coverage = dict(fixture.conn.execute("SELECT * FROM source_run_coverage LIMIT 1").fetchone())
-        coverage.update(coverage_id=new_run_id,source_run_id=new_run_id,snapshot_ids_json="[2]",
-            computed_at=new_capture.isoformat(),recorded_at=new_capture.isoformat())
-        columns = tuple(coverage)
-        fixture.conn.execute("INSERT INTO source_run_coverage ("+",".join(columns)+") VALUES ("+
-            ",".join("?" for _ in columns)+")",tuple(coverage[name] for name in columns))
-        snapshot = dict(fixture.conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=1").fetchone())
-        source_proof = json.loads(snapshot["provenance_json"])
-        source_proof["grid_surface_evidence"].update(mask_source_cycle_time=new_cycle.isoformat(),
-            mask_source_fetched_at=(new_cycle+_dt.timedelta(minutes=4)).isoformat())
-        snapshot.update(snapshot_id=2,source_run_id=new_run_id,issue_time=new_cycle.isoformat(),
-            source_cycle_time=new_cycle.isoformat(),available_at=new_capture.isoformat(),
-            source_available_at=new_capture.isoformat(),fetch_time=new_capture.isoformat(),
-            recorded_at=new_capture.isoformat(),provenance_json=json.dumps(source_proof))
-        columns = tuple(snapshot)
-        fixture.conn.execute("INSERT INTO ensemble_snapshots ("+",".join(columns)+") VALUES ("+
-            ",".join("?" for _ in columns)+")",tuple(snapshot[name] for name in columns))
+        monkeypatch.setattr(native,"_resolve_opendata_paths",lambda **kwargs: successor.paths)
         fixture.write_provider_cohort(new_cycle,new_capture)
         raw_body = fixture.artifact_path.read_bytes()
         def current_anchor_http(_url,params,**kwargs):
@@ -52284,7 +52336,8 @@ def test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers(
         fixture.conn.commit()
         fixture.sql_clock[0] = new_capture+_dt.timedelta(minutes=1)
         normal = materialize_replacement_forecast_live(fixture.conn,replace(fixture.request,
-            source_cycle_time=new_cycle,baseline_source_run_id=new_run_id,baseline_source_available_at=new_capture,
+            source_cycle_time=new_cycle,baseline_source_run_id=new_run_id,
+            baseline_data_version=snapshot["dataset_id"],baseline_source_available_at=snapshot["source_available_at"],
             openmeteo_anchor=replace(fixture.request.openmeteo_anchor,source_cycle_time=new_cycle),
             anchor_artifact_id=incomplete_artifact_id,openmeteo_source_available_at=capture,
             computed_at=new_capture+_dt.timedelta(minutes=1),expires_at=new_capture+_dt.timedelta(hours=1)))
@@ -54195,6 +54248,28 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
         fixture.conn.close()
 
 
+def _assert_current_native_role_variance(kernel):
+    from src.data.day0_hourly_vectors import _day0_role_noise
+    domains = kernel.get("domain_role_shapes") or kernel["identity_inputs"]["domain_role_shapes"]
+    assert kernel["instrument_sigma_c"] == 0.0
+    for axis, role in (("X", "remaining_X"), ("Y", "full_Y")):
+        shape = domains[axis]
+        points = np.asarray(shape["member_points_native"], dtype=float)
+        centers = np.sort(np.asarray(shape["provider_centers_native"], dtype=float))
+        within, between = float(points.std()), float(centers.std())
+        delta = float(points.mean()-centers.mean())
+        noise, _ = _day0_role_noise(shape, role=role, centers=centers)
+        assert within > 0.0  # Controlled 51-member native spread is still present.
+        assert noise**2 == pytest.approx(within**2+delta**2, abs=1e-12)
+        # Provider-center mixture supplies the third term, not a constant floor.
+        assert noise**2+between**2 == pytest.approx(
+            float(np.mean((points[:, None]-centers[None, :])**2)), abs=1e-12)
+        invalid = copy.deepcopy(shape)
+        invalid["member_points_native"][0] = float("nan")
+        with pytest.raises(ValueError, match="DAY0_DOMAIN_ROLE_SHAPE_INVALID"):
+            _day0_role_noise(invalid, role=role, centers=centers)
+
+
 @pytest.mark.parametrize("metric", ("high", "low"))
 def test_hko_normal_kernel_uses_the_producers_instrument_variance(tmp_path, monkeypatch, metric,_hko_clock_native_sources):
     """One normal source/cut, independently inspect the actually consumed kernel."""
@@ -54228,7 +54303,7 @@ def test_hko_normal_kernel_uses_the_producers_instrument_variance(tmp_path, monk
             witness = prepared.probability_witness
             witnesses.append(witness)
             kernel = json.loads(consumed["kernel"])
-            assert kernel["instrument_sigma_c"] == pytest.approx(.1, abs=1e-12)
+            _assert_current_native_role_variance(kernel)
             assert kernel["path_error_sigma_c"] == pytest.approx(
                 provenance["day0_remaining_carrier_path_error_sigma_c"], abs=1e-12)
             assert kernel["future_extremes_c"] == provenance["day0_remaining_carrier_future_extremes_c"]
@@ -54246,7 +54321,8 @@ def test_hko_normal_kernel_uses_the_producers_instrument_variance(tmp_path, monk
                 for boundary, weight in inputs["boundary_scenarios"]
             ]
             replay = build_day0_remaining_probability_carrier(**inputs, n_point=1, n_samples=1,
-                identity_inputs={"unit": "C"}, settlement_semantics=SettlementSemantics(**kernel["settlement"]))
+                identity_inputs={"unit": "C", "domain_role_shapes": kernel["domain_role_shapes"]},
+                settlement_semantics=SettlementSemantics.from_frozen_payload(kernel["settlement"]))
             expected = [producer_q[fixture.conn.execute(
                 "SELECT range_label FROM market_events WHERE condition_id=?", (binding.condition_id,)
             ).fetchone()[0]] for binding in witness.bindings]
@@ -54517,7 +54593,7 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
             probability_use=era._CurrentProbabilityUse.HELD_MONITOR, raw_input_hwm_conn=fixture.conn)
         kernel, current_result = calls[-1]
         assert kernel["boundary_scenarios"][0][0] == raw
-        assert kernel["instrument_sigma_c"] == .1
+        _assert_current_native_role_variance(kernel)
         current = prepared.probability_witness
         np.testing.assert_array_equal(current.yes_point_q, current_result["q"])
         # The runtime sampler owns its draw sequence. Fixed-action economics
@@ -54536,7 +54612,7 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
         variants = {
             "boundary": {"boundary_scenarios": tuple((None if b is None else math.trunc(b), w)
                 for b,w in kernel["boundary_scenarios"])},
-            "instrument": {"path_error_sigma_c": legacy_extra},
+            "instrument": {"path_error_sigma_c": legacy_extra, "instrument_sigma_c": .28},
         }
         variants["both"] = {**variants["boundary"], **variants["instrument"]}
         fee = FeeModel(fee_rate=Decimal(str(exit_fee_rate())))
@@ -54562,9 +54638,9 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
                         if min(points)+.001 < net < max(points)-.001:
                             possibilities.append((abs(points[0]-points[1]),binding,bid,points))
                 if not possibilities:
-                    # This LOW fixture's zero unresolved width is clamped on
-                    # both implementations; a sigma-only fix is no action flip.
-                    assert metric == "low" and name == "instrument"
+                    # Native role variance owns both metrics. Retired scalar
+                    # floors cannot change a typed q or authorize an action flip.
+                    assert name == "instrument"
                     np.testing.assert_array_equal(legacy.yes_point_q,current.yes_point_q)
                     continue
                 _,binding,bid,points = max(possibilities,key=lambda item:(item[0],
@@ -54634,8 +54710,7 @@ def test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law(
                 changed.add((name,side))
         assert {("boundary",side) for side in ("YES","NO")} <= changed
         assert {("both",side) for side in ("YES","NO")} <= changed
-        if metric == "high":
-            assert {("instrument",side) for side in ("YES","NO")} <= changed
+        assert not {("instrument",side) for side in ("YES","NO")} & changed
         record_property("counterfactual_action_law",json.dumps(outcomes,sort_keys=True))
         assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
             (fixture.result.posterior_id,)).fetchone()) == original_row
@@ -55530,7 +55605,9 @@ def test_optional_universe_hint_cannot_consume_normal_claim_window(
     monkeypatch.setattr(queue, "_GLOBAL_AUCTION_SCOPE_CACHE", None)
     clock = [100.0]
     import time as real_time
-    monkeypatch.setattr(queue, "time", SimpleNamespace(monotonic=lambda: clock[0], time=real_time.time, sleep=real_time.sleep))
+    monkeypatch.setattr(queue, "time", SimpleNamespace(monotonic=lambda: clock[0],
+        time=real_time.time, sleep=real_time.sleep,
+        perf_counter=real_time.perf_counter, thread_time=real_time.thread_time))
     inspections = []
     caller_progress = []
     conn.set_progress_handler(lambda: caller_progress.append(True) or 0, 1)
@@ -55576,6 +55653,12 @@ def test_optional_universe_hint_cannot_consume_normal_claim_window(
     )
     assert report.status == "PROCESSED"
     assert report.processed_count == len(spawned) == 1
+    trace = report.producer_trace
+    assert trace["clock_role"] == "producer_invocation_not_source_issue_or_input_cut"
+    assert trace["cpu_role"] == "parent_thread_only_not_child_cpu_or_io_evidence"
+    assert trace["phases"]
+    assert all(phase["wall_seconds"] >= 0 and phase["parent_thread_cpu_seconds"] >= 0
+        for phase in trace["phases"])
     assert max(hint_inspections) <= queue._GLOBAL_AUCTION_SCOPE_RECENT_ROWS
     assert any(claim_windows)
     # The hint's temporary SQLite guard must not poison a following caller read.
