@@ -1404,3 +1404,35 @@ def test_knmi_grid_is_physical_only_dense_not_settlement_instants():
     route = next(r for r in load_physical_current_sources()[0] if r.provider == "knmi_observations")
     assert route.station_id == "EHAM" and route.role is SourceRole.PHYSICAL_ONLY
     assert not route.settlement_authorized
+
+
+def test_knmi_presigned_download_keeps_its_signature(monkeypatch):
+    """The temporary download URL is S3-presigned. httpx replaces a URL's query
+    with ``params`` even when empty, which stripped the signature and made every
+    live EHAM download 403 (2026-10-07). The signed query must reach S3 intact."""
+    import httpx
+    pytest.importorskip("netCDF4")
+    from src.data import station_temperature_adapters as adapters
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "knmi_observations")
+    monkeypatch.setattr(adapters, "resolve_knmi_api_key", lambda: _KNMI_FAKE_KEY)
+    name = "KMDS__OPER_P___10M_OBS_L2_202609301700.nc"
+    signed = ("https://knmi-kdp-datasets-eu-west-1.s3.eu-west-1.amazonaws.com/"
+              f"10-minute-in-situ-meteorological-observations/1.0/{name}"
+              "?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef")
+    downloads = []
+
+    def handler(request):
+        if request.url.host == "api.dataplatform.knmi.nl":
+            if str(request.url.path).endswith("/url"):
+                return httpx.Response(200, json={"temporaryDownloadUrl": signed})
+            return httpx.Response(200, json={"files": [{"filename": name}]})
+        downloads.append(str(request.url))
+        if "X-Amz-Signature=deadbeef" not in str(request.url):
+            return httpx.Response(403)
+        return httpx.Response(200, content=(ROOT / "knmi.bin").read_bytes())
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    samples = adapters.fetch_station_temperature(
+        route, start=NOW - timedelta(days=30), end=NOW + timedelta(days=30), client=client)
+    assert downloads and "X-Amz-Signature=deadbeef" in downloads[0]
+    assert samples

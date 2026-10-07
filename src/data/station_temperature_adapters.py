@@ -593,7 +593,10 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
             raise ValueError("KNMI_DOWNLOAD_HOST_INVALID")
     else:
         raise ValueError("STATION_ADAPTER_UNKNOWN")
-    body = _bounded_body(client, "GET", url, params=params, headers=headers, timeout=6)
+    # httpx replaces a URL's query string with ``params`` even when it is empty,
+    # which strips a presigned download URL's signature (KNMI S3 -> 403).
+    body = _bounded_body(client, "GET", url, headers=headers, timeout=6,
+                         **({"params": params} if params else {}))
     received = datetime.now(UTC)
     return tuple(s for s in parse_station_payload(route, body, received_at=received)
                  if start <= s.observed_at <= end)
