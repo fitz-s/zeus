@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-10-06
+# Last reused/audited: 2026-10-07
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -4599,23 +4599,6 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             print(f"  {b}")
         print("!" * 64)
 
-    # Nothing is stopped or armed yet, so a refusal here needs no guard release.
-    if DAEMONS["forecast-live"] in labels:
-        if args.skip_forecast_replay_gate:
-            print("!" * 64)
-            print("WARNING --skip-forecast-replay-gate: forecast-live will be reloaded")
-            print("WITHOUT replaying queued requests on the target code. A bad tip blocks")
-            print("every live posterior until the next restart.")
-            print("!" * 64)
-        else:
-            replay_ok, replay_detail = _forecast_live_replay_gate()
-            if not replay_ok:
-                print("REFUSING to restart — forecast-live replay gate failed:")
-                print(replay_detail)
-                print("\nFix the target code, or pass --skip-forecast-replay-gate to override.")
-                return 1
-            print(replay_detail)
-
     rc_all = 0
     includes_live_trading = LIVE_TRADING_LABEL in labels
     live_was_loaded_before = (
@@ -4624,6 +4607,9 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         else False
     )
     expected_live_sha = head_sha(short=False) if includes_live_trading else ""
+    expected_prerequisite_sha = expected_live_sha or (
+        head_sha(short=False) if DAEMONS["forecast-live"] in labels else ""
+    )
     loaded_probability_identity = (
         _loaded_probability_code_identity()
         if includes_live_trading and live_was_loaded_before else {}
@@ -4686,7 +4672,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     ]
     reusable_prerequisite_labels = _current_prerequisite_code_identity_labels(
         preflight_prerequisite_labels,
-        expected_sha=expected_live_sha,
+        expected_sha=expected_prerequisite_sha,
     )
     prerequisite_launch_started_at = datetime.now(timezone.utc)
     continuous_monitor_cutover = False
@@ -4712,25 +4698,50 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             ))
         return rc_all
 
-    if includes_live_trading:
+    if includes_live_trading or DAEMONS["forecast-live"] in labels:
         prerequisite_ok, prerequisite_detail = _wait_for_prerequisite_code_identity(
             preflight_prerequisite_labels,
-            expected_sha=expected_live_sha,
+            expected_sha=expected_prerequisite_sha,
             launched_after=prerequisite_launch_started_at,
         )
         if not prerequisite_ok:
-            print("REFUSING to restart — live prerequisite code identity is not ready:")
+            print("REFUSING to restart — prerequisite code identity is not ready:")
             print(prerequisite_detail)
-            print(
-                "live-trading left running; fix prerequisite daemon startup before retrying.",
-                file=sys.stderr,
-            )
-            print(_release_unused_live_restart_guard(
-                labels, expected_sha=expected_live_sha, issued_at=restart_guard_issued_at,
-            ))
+            if includes_live_trading:
+                print(
+                    "live-trading left running; fix prerequisite daemon startup before retrying.",
+                    file=sys.stderr,
+                )
+                print(_release_unused_live_restart_guard(
+                    labels, expected_sha=expected_live_sha, issued_at=restart_guard_issued_at,
+                ))
             return 1
         print(prerequisite_detail)
 
+    # SCOPE: queued forecast proofs on this deployed source identity. DRAIN:
+    # let the verified source actors capture normally before replay. RESET:
+    # replay passes on real current evidence; source BOOT alone never arms MAIN.
+    if DAEMONS["forecast-live"] in labels:
+        if args.skip_forecast_replay_gate:
+            print("!" * 64)
+            print("WARNING --skip-forecast-replay-gate: forecast-live was reloaded")
+            print("WITHOUT replaying queued requests on the target code. A bad tip blocks")
+            print("every live posterior until the next restart.")
+            print("!" * 64)
+        else:
+            replay_ok, replay_detail = _forecast_live_replay_gate()
+            if not replay_ok:
+                print("REFUSING to restart — forecast-live replay gate failed:")
+                print(replay_detail)
+                print("source actors verified; probability qualification remains pending")
+                if includes_live_trading:
+                    print(_release_unused_live_restart_guard(
+                        labels, expected_sha=expected_live_sha, issued_at=restart_guard_issued_at,
+                    ))
+                return 1
+            print(replay_detail)
+
+    if includes_live_trading:
         if live_was_loaded_before:
             migrations_current, migration_detail = _restart_migration_targets_current()
             print(migration_detail)

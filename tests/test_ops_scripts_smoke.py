@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Lifecycle: created=2026-06-12; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-10-06
+# Last reused/audited: 2026-10-07
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -9482,8 +9482,12 @@ def test_deploy_live_verified_restart_preserves_non_deploy_pause(monkeypatch, tm
 
 def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     dl = _load("deploy_live_restart_order_all", "deploy_live.py")
-    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (True, "replay stubbed"))
     calls = []
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", lambda **_: (calls.append(("replay",)) or (True, "replay stubbed")))
+    monkeypatch.setattr(dl, "_current_prerequisite_code_identity_labels", lambda *_a, **_k: set())
+    monkeypatch.setattr(dl, "_loaded_probability_code_identity", lambda: {"loaded_sha": "c" * 40})
+    monkeypatch.setattr(dl, "_probability_upgrade_pre_stop_gate", lambda **_k: (calls.append(("qualification",)) or (True, "qualified")))
+    monkeypatch.setattr(dl, "_wait_for_loaded_live_restart_handoff", lambda *_a: (True, "handoff verified"))
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
     monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
@@ -9577,6 +9581,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
         )
     )
     assert prerequisite_index < stop_index < recovery_index < preflight_index
+    assert prerequisite_index < calls.index(("replay",)) < calls.index(("qualification",)) < stop_index
     live_launch_index = calls.index(("launch", dl.LIVE_TRADING_LABEL))
     assert live_launch_index > preflight_index
     heartbeat_launch_index = calls.index(("launch", dl.DAEMONS["venue-heartbeat"]))
@@ -9984,6 +9989,11 @@ def test_replay_forecast_request_unparseable_results_never_pass(
 def _forecast_live_restart_fixture(dl, monkeypatch, gate):
     launched = []
     monkeypatch.setattr(dl, "_gate", lambda *_a, **_k: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda **_k: "d" * 40)
+    monkeypatch.setattr(dl, "_current_prerequisite_code_identity_labels", lambda *_a, **_k: set())
+    monkeypatch.setattr(dl, "_wait_for_prerequisite_code_identity", lambda *_a, **_k: (True, "source SHA/HB verified"))
+    monkeypatch.setattr(dl, "_pause_entries_for_live_restart_if_needed", lambda *_a, **_k: (True, "source-only: no MAIN guard"))
+    monkeypatch.setattr(dl, "_loaded_live_restart_obligation_gate", lambda *_a, **_k: (True, "source-only: no MAIN obligation"))
     monkeypatch.setattr(dl, "_forecast_live_replay_gate", gate, raising=False)
     monkeypatch.setattr(
         dl, "_launch_or_restart_label", lambda label: launched.append(label) or (True, f"launched {label}")
@@ -10059,9 +10069,17 @@ def test_forecast_live_replay_gate_ignores_requests_consumed_mid_replay(monkeypa
 
 def test_deploy_live_forecast_live_restart_refused_when_replay_gate_fails(monkeypatch, capsys):
     dl = _load("deploy_live_replay_restart_refused", "deploy_live.py")
+    calls = []
     launched = _forecast_live_restart_fixture(
-        dl, monkeypatch, lambda **_k: (False, "Paris/2026-10-07/high BLOCKED FUSION_DECLINED:Z")
+        dl, monkeypatch, lambda **_k: (calls.append("replay") or (False, "Paris/2026-10-07/high BLOCKED FUSION_DECLINED:Z"))
     )
+    def identity(labels, **kwargs):
+        assert launched == [dl.DAEMONS["forecast-live"]]
+        assert labels == launched
+        assert kwargs["expected_sha"] == "d" * 40
+        calls.append("identity")
+        return True, "source SHA/HB verified"
+    monkeypatch.setattr(dl, "_wait_for_prerequisite_code_identity", identity)
     monkeypatch.setattr(
         dl, "_stop_label", lambda *_a, **_k: pytest.fail("a refused restart must stop nothing")
     )
@@ -10072,10 +10090,61 @@ def test_deploy_live_forecast_live_restart_refused_when_replay_gate_fails(monkey
     ))
 
     assert rc == 1
-    assert launched == []
+    assert launched == ["com.zeus.forecast-live"]
+    assert calls == ["identity", "replay"]
     out = capsys.readouterr().out
     assert "REFUSING to restart — forecast-live replay gate failed:" in out
     assert "FUSION_DECLINED:Z" in out
+    assert "qualification remains pending" in out
+
+
+@pytest.mark.parametrize("refusal", ["static", "boot", "identity", "replay", "warm", "qualification"])
+def test_deploy_live_source_boot_precedes_replay_without_bypassing_main_gates(monkeypatch, refusal):
+    dl = _load(f"deploy_live_source_first_{refusal}", "deploy_live.py")
+    calls = []
+    monkeypatch.setattr(dl, "_gate", lambda *_a, **_k: (refusal != "static", ["static blocker"] if refusal == "static" else []))
+    monkeypatch.setattr(dl, "head_sha", lambda **_k: "d" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda _label: True)
+    monkeypatch.setattr(dl, "_loaded_probability_code_identity", lambda: {"loaded_sha": "c" * 40})
+    monkeypatch.setattr(dl, "_current_prerequisite_code_identity_labels", lambda *_a, **_k: set())
+    monkeypatch.setattr(dl, "_pause_entries_for_live_restart_if_needed", lambda *_a, **_k: (calls.append("pause") or (True, "paused")))
+    monkeypatch.setattr(dl, "_loaded_live_restart_obligation_gate", lambda *_a, **_k: (True, "obligation verified"))
+    monkeypatch.setattr(dl, "_release_unused_live_restart_guard", lambda *_a, **_k: calls.append("release") or "own CAS guard released")
+    monkeypatch.setattr(dl, "_launch_or_restart_label", lambda label: (calls.append(("boot", label)) or (refusal != "boot", "source boot")))
+
+    def identity(labels, **kwargs):
+        assert dl.DAEMONS["forecast-live"] in labels
+        assert kwargs["expected_sha"] == "d" * 40
+        assert kwargs["launched_after"].tzinfo is not None
+        calls.append("identity")
+        return refusal != "identity", "source SHA/HB proof"
+
+    def replay():
+        assert ("boot", dl.DAEMONS["forecast-live"]) in calls
+        assert "identity" in calls
+        calls.append("replay")
+        return refusal != "replay", "queued source proof pending"
+
+    monkeypatch.setattr(dl, "_wait_for_prerequisite_code_identity", identity)
+    monkeypatch.setattr(dl, "_forecast_live_replay_gate", replay)
+    monkeypatch.setattr(dl, "_restart_migration_targets_current", lambda: (True, "schema current"))
+    monkeypatch.setattr(dl, "_ensure_restart_trade_schemas_before_warm_preflight", lambda: (True, "schema verified"))
+    monkeypatch.setattr(dl, "_run_restart_preflight_if_needed", lambda *_a, **_k: (calls.append("warm") or (refusal != "warm", "warm proof")))
+    monkeypatch.setattr(dl, "_wait_for_loaded_live_restart_handoff", lambda *_a: (calls.append("handoff") or (True, "handoff proof")))
+    monkeypatch.setattr(dl, "_probability_upgrade_pre_stop_gate", lambda **_k: (calls.append("qualification") or (False, "q not qualified")))
+    monkeypatch.setattr(dl, "_stop_label", lambda *_a, **_k: pytest.fail("refusal must preserve loaded MAIN"))
+
+    assert dl._cmd_restart_locked(types.SimpleNamespace(
+        daemon="live-trading", allow_dirty=False, allow_unpushed=False,
+        skip_forecast_replay_gate=False,
+    )) == 1
+    if refusal == "static":
+        assert calls == []
+    else:
+        assert calls[-1] == "release"
+        assert "replay" in calls if refusal in {"replay", "warm", "qualification"} else "replay" not in calls
+    if refusal == "qualification":
+        assert calls.index("replay") < calls.index("warm") < calls.index("handoff") < calls.index("qualification")
 
 
 def test_deploy_live_forecast_live_restart_proceeds_when_replay_gate_passes(monkeypatch):
