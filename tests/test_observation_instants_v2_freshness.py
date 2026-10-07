@@ -1,6 +1,6 @@
 # Created: 2026-05-17
-# Lifecycle: created=2026-05-17; last_reviewed=2026-10-06; last_reused=2026-10-06
-# Last reused or audited: 2026-10-06 (normal producer/private canonical custody)
+# Lifecycle: created=2026-05-17; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Last reused or audited: 2026-10-07 (live custody widens a backfill_obs hour)
 # Purpose: Pin normal observation freshness and immutable decoded-entity custody through private canonical writes.
 # Reuse: Read scripts/obs_live_tick.py and the typed observation writer before relying on capture/freshness assertions.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-17_post_karachi_remediation/F44_INVESTIGATION.md
@@ -228,6 +228,39 @@ def test_backfill_keeps_capture_in_memory_without_cas_or_retrofill(monkeypatch, 
     assert rows and not directory.exists()
     assert all(path is None and 'captured_entity_custody_v1' not in json.loads(provenance)
                for path, provenance in rows)
+
+
+def test_live_custody_widens_hour_written_by_backfill(monkeypatch, tmp_path):
+    """backfill_obs and the live tick differ in parser_version; custody must still widen."""
+    import json
+    import httpx
+    import scripts.backfill_obs as backfill
+    import scripts.obs_live_tick as tick
+    import src.data.wu_hourly_client as wu
+    db = _entity_test_db(tmp_path)
+    monkeypatch.setattr(tick, 'RAW_ENTITY_DIR', tmp_path / 'observation_raw' / 'sha256')
+    def body(*reports):
+        return json.dumps({'metadata': {'location_id': 'RCSS:9:TW', 'units': 'm'}, 'observations': [
+            {'key': 'RCSS', 'obs_id': 'RCSS', 'temp': temp,
+             'valid_time_gmt': int(datetime(2026, 9, 13, 12, m, tzinfo=timezone.utc).timestamp())}
+            for m, temp in reports]}).encode()
+    day, select = date(2026, 9, 13), ('SELECT running_max,temp_current,observation_count,source_file,'
+        'provenance_json FROM observation_instants')
+    monkeypatch.setattr(wu.httpx, 'get', lambda *a, **k: httpx.Response(200, content=body((0, 31))))
+    with sqlite3.connect(db) as conn:
+        backfill._backfill_wu_city(conn, 'Taipei', day, day, tick.DATA_VERSION, tmp_path / 'log.jsonl', False)
+        assert conn.execute(select).fetchone()[:4] == (31.0, None, 1, None)
+    monkeypatch.setattr(wu.httpx, 'get', lambda *a, **k: httpx.Response(200, content=body((0, 31), (30, 33))))
+    result = tick._tick_wu_city('Taipei', db, start_date=day, end_date=day, dry_run=False)
+    assert result.rows_ready == 1 and result.failure_reason is None
+    with sqlite3.connect(db) as conn:
+        hi, current, count, path, provenance = conn.execute(select).fetchone()
+        reason = conn.execute('SELECT reason FROM observation_revisions').fetchone()[0]
+    assert (hi, current, count) == (33.0, 33.0, 2) and path is not None
+    provenance = json.loads(provenance)
+    assert provenance['hour_max_raw_ts'] == provenance['latest_raw_ts'] == '2026-09-13T12:30:00+00:00'
+    assert provenance['widened_from']['running_max'] == 31.0
+    assert reason == 'payload_hash_mismatch_monotone_widening_applied'
 
 
 def test_forward_entity_capacity_reuse_unavailable_and_recovery(monkeypatch, tmp_path):
