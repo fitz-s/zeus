@@ -267,3 +267,38 @@ def test_static_offset_quadrature_runs_and_normalises():
     day = day_of(dense=[(float(t), 18.0) for t in range(0, 600, 10)], now=605)
     q = ds.bin_probabilities(model(NOISE, s2_static=0.07), day, bins_around(14, 26))
     assert q.sum() == pytest.approx(1.0) and np.all(q >= 0)
+
+
+def test_matches_backtest_grid_oracle_on_identical_inputs():
+    """The shipped operator reproduces the backtest's exact grid oracle (state_space.grid_oracle,
+    bc024fedd) on the same day: one-scale OU, exact METAR cells, Gaussian dense likelihood."""
+    import sys
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parents[1] / "artifacts" / "fast_obs_audit" / "dense_station_model"
+    sys.path.insert(0, str(here))
+    try:
+        import state_space as bss
+        from ss_engine import Day
+    finally:
+        sys.path.remove(str(here))
+    f = diurnal()
+    now = 12 * 60 + 5
+    rng = np.random.default_rng(11)
+    metar = [(t, int(R(f[ds._slot(t)] + 0.3 * rng.standard_normal()))) for t in SCHED if t < now - 30]
+    dense = [(float(t), round(float(f[ds._slot(t)] + 0.3 * rng.standard_normal()), 1)) for t in range(0, now - 30, 10)]
+    sd = 0.3
+    m = ds.DenseModel(ds.DenseLatent(200.0, 1.5), ds.DenseNoise(tuple([0.0] * 24), sd, sd, 0.0, 1e-6), FLAT_MEAN)
+    day = day_of(page=metar, dense=dense, f=f, now=now - 30)
+    bins = bins_around(14, 24)
+    q = ds.bin_probabilities(m, day, bins, cell=0.0125)
+    bday = Day(D, f, None, HOUR, [t for t, _ in metar], [k for _, k in metar], list(SCHED),
+               [t for t, _ in dense], [x for _, x in dense], [0.0] * len(dense), fmu=f)
+    ks, p = bss.grid_oracle(bday, 200.0, 1.5, sd ** 2, now - 30, K=1601)["high"]
+    pk = dict(zip(ks.tolist(), p.tolist()))
+    ref = []
+    for low, high in bins:
+        lo = -10 ** 6 if low is None else int(low)
+        hi = 10 ** 6 if high is None else int(high)
+        ref.append(sum(v for k, v in pk.items() if lo <= k <= hi))
+    assert np.max(np.abs(q - np.asarray(ref))) < 1e-3  # measured 2.6e-4
