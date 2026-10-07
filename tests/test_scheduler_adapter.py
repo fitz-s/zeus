@@ -5216,3 +5216,97 @@ def test_changed_non_anchor_source_still_drains_anchor_residual(monkeypatch) -> 
     assert result["source_clock_anchor_residual_download"]["committed_family_count"] == 1
     assert ("anchor", (scope,)) in calls
     assert ("cycle", (scope,)) in calls
+
+
+def _ecmwf_changed_residual_harness(monkeypatch, *, wave_report):
+    """ecmwf_ifs reports changed; the broad anchor wave returns ``wave_report``."""
+    from datetime import datetime, timezone
+
+    import src.data.replacement_cycle_availability as availability
+    import src.data.replacement_forecast_production as prod
+    import src.data.source_clock_update_probe as source_clock_probe
+    import src.ingest_main as ingest_main
+
+    class _Changed:
+        updated_sources = ("ecmwf_ifs",)
+
+        def as_dict(self):
+            return {
+                "status": "SOURCE_CLOCK_UPDATES_CHANGED",
+                "updated_sources": ["ecmwf_ifs"],
+                "affected_cities": ["Dallas"],
+                "error": None,
+            }
+
+    scope = ("Dallas", "2026-10-09", "high")
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True, "forecast_db": "forecast.db"},
+    )
+    monkeypatch.setattr(source_clock_probe, "probe_openmeteo_source_clock_updates",
+                        lambda **_k: _Changed())
+    monkeypatch.setattr(source_clock_probe, "advance_source_clock_cursor",
+                        lambda *_a, **_k: ())
+    monkeypatch.setattr(
+        prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed",
+        lambda *_a, **_k: {"status": "SOURCE_CLOCK_BPF_SCOPED_NO_TARGETS"},
+    )
+    monkeypatch.setattr(availability, "resolve_provider_anchor_cycle_availability",
+                        lambda *_a, **_k: ())
+    monkeypatch.setattr(availability, "newest_complete_cycle",
+                        lambda _rows: datetime(2026, 10, 7, 0, tzinfo=timezone.utc))
+    monkeypatch.setattr(prod, "_current_target_anchor_row_gaps", lambda *_a, **_k: (scope,))
+    monkeypatch.setattr(ingest_main, "_all_held_current_target_scopes", lambda: ())
+
+    def download(_cfg, **kwargs):
+        if kwargs.get("required_scopes"):
+            calls.append(("residual", tuple(kwargs["required_scopes"])))
+            return {"status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+                    "committed_families": (scope,)}
+        calls.append(("wave", None))
+        return dict(wave_report)
+
+    monkeypatch.setattr(prod, "_download_replacement_forecast_current_targets_if_needed", download)
+    monkeypatch.setattr(
+        prod, "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg, **kwargs: {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 0},
+    )
+    monkeypatch.setattr(
+        prod, "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, **kwargs: {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1},
+    )
+    monkeypatch.setattr(ingest_main, "_enqueue_broad_reseed_batch",
+                        lambda *_a, **_k: "SOURCE_BROAD_RESEEDS_ASYNC_PENDING")
+    monkeypatch.setattr(ingest_main, "_ANCHOR_RESIDUAL_NEXT_MONOTONIC", 0.0)
+
+    ingest_main._replacement_availability_poll_tick.__wrapped__()
+    worker = ingest_main._ANCHOR_RESIDUAL_RESEED_THREAD
+    if worker is not None:
+        worker.join(timeout=5)
+    return calls, scope
+
+
+def test_ecmwf_changed_wave_without_commit_still_drains_anchor_residual(monkeypatch) -> None:
+    """10-07: ecmwf_ifs reported "changed" on every poll from 03Z while its broad
+    wave committed nothing (next run not yet servable). The residual drain was
+    skipped on every such poll, so Dallas/Denver 10-09 high, listed after the
+    00Z wave, had no anchor and no posterior for 4 h."""
+    calls, scope = _ecmwf_changed_residual_harness(
+        monkeypatch,
+        wave_report={"status": "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE",
+                     "committed_family_count": 0},
+    )
+    assert ("wave", None) in calls
+    assert ("residual", (scope,)) in calls
+
+
+def test_ecmwf_changed_wave_that_commits_does_not_also_drain_residual(monkeypatch) -> None:
+    calls, _scope = _ecmwf_changed_residual_harness(
+        monkeypatch,
+        wave_report={"status": "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED",
+                     "committed_families": (("Austin", "2026-10-09", "high"),)},
+    )
+    assert ("wave", None) in calls
+    assert not any(kind == "residual" for kind, _ in calls)
