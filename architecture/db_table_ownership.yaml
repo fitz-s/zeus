@@ -135,6 +135,12 @@ tables:
       existing DDL; registration does not tighten or rewrite that schema.
       Table ownership does not grant source, probability, or settlement authority.
 
+      Deterministic provider vectors may reference their immutable body and HTTP
+      artifacts in source_run_meta_json. The normal hourly writer registers those
+      existing originals on this same FORECAST connection/transaction; readers
+      require exact original/city/model/run/unit/array and possession/written PIT
+      replay. No new columns or raw-value authority are implied by the references.
+
   - name: observations
     db: forecasts
     schema_class: forecast_class
@@ -230,6 +236,11 @@ tables:
       checksum, and fail-closed training_allowed=0 constraints.
       Lives only on zeus-forecasts.db; not a settlement, calibration, or order
       truth table.
+
+      Deterministic Day0 hourly capture reuses the BPF body/HTTP registration
+      primitives on the caller-owned FORECAST transaction, without new
+      raw_model_forecasts values. Existing entity first-possession clocks remain
+      immutable; registration alone is not current-role or probability proof.
 
   - name: raw_model_forecasts
     db: forecasts

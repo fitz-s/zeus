@@ -21366,3 +21366,123 @@ CLI/HEAD-secret/changed-surface batch; exact-tip acceptance must precede normal
 FF landing or registered loader. No source request, venue action or source
 clock invention is part of restoration. Any contrary human directive or new
 semantic peer conflict stops integration for ROOT judgment.
+
+### Final C registry and dependency proof — BEFOREEDIT
+
+ROOT approves parent-only bounded governance updates after C's actual freeze:
+architecture/source_rationale.yaml only the existing
+src/data/bayes_precision_fusion_download.py and src/data/day0_hourly_vectors.py
+entries; architecture/test_topology.yaml only the existing BPF test description
+and the exact trusted/category registration for
+tests/data/test_day0_capture_equivalence_endpoint_fallback.py. C retains sole
+ownership of its test lifecycle header and must supply actual audit/creation
+basis; parent never overwrites its test edits. architecture/db_table_ownership.yaml
+may receive only necessary descriptive notes on existing FORECAST
+raw_forecast_artifacts/day0_hourly_vectors rows after the real writer route is
+verified. Do not change table ownership, required columns, DDL, schema version
+or fingerprint. This harmonizes existing source/test/write-route descriptions,
+not a new source authority, schema, enum or capsule. Protected behavior is
+INV-37 same-canonical-connection persistence, INV-47 scoped unavailable/DRAIN/
+RESET, immutable source clock/PIT and fail-closed original replay.
+
+Final affected proof must include the coupled KORD normal public/current-gate
+consumer and a current HKO native public consumer, A resume/mutation controls,
+C original-body/point/clock/window/transaction controls and preflight negatives.
+C changes the hourly input closure, so execute the actual complete required
+money command on the final source:
+pytest -q tests/money_path --maxfail=5 --timeout=300.
+The old255P is retained only as its own historical epoch, not reused as final
+unchanged dependency proof. Other exact restored b01 nodes retain the explicit
+5674 composite evidence mapping where their complete dependencies remain
+unchanged; any newly affected required node needs actual coverage. Refresh
+classifier and literal required mapping only after C/registry/PLAN freeze,
+report any concrete new selector rather than silently skipping or expanding
+unrelated historical suites. Final CLI/HEAD-secret and changed-surface checks
+run once on frozen inputs; unrelated repo-wide drift remains separately named.
+
+Supplemental C BEFOREEDIT, same four owned files: the first focused receipt is
+18P/2F3.06s, retained as mixed evidence. One failure is a private test's static
+asset_path key and has only a fixture correction; it is not a production
+defect. The independent120h-to72h donor control exposes a real source defect in
+src/data/bayes_precision_fusion_download.py::_single_runs_intrinsic_left_prefix:
+target_local_date arrives as a date object while
+day0_hourly_target_dates_for_refresh returns canonical ISO date strings. Their
+comparison incorrectly loses first-day coverage and triggers a new72h HTTP
+request instead of reusing the lawful120h donor.
+ROOT approves strict canonical ISO local-date normalization only in this
+existing BPF function and its donor antibody. The same root cause also exists
+in _single_runs_payload_has_reusable_hourly_axis: its target loop passes an ISO
+string through the batched parser into extraction, where date-versus-string
+comparison makes legal next-day samples empty. ROOT permits the same strict
+canonical local-date normalization through this existing BPF call chain;
+invalid input returns false rather than guessing a date. Full slot/run start
+and unresolved-suffix coverage remain unchanged. Invalid or datetime inputs must
+not guess or truncate a day; target coverage, source run and PIT remain strict.
+The cache reference must use the normally registered prior immutable artifact
+and HTTP receipt, never remint capture/possession clocks or promote an expired
+donor. SCOPE is this exact model/run/target-date donor selection; DRAIN is normal
+capture or lawful already-registered donor reuse; RESET is actual same-body
+120h-to72h replay without extra HTTP, with missing/wrong/future evidence still
+refused. No fifth file, new endpoint, schema or authority change is authorized.
+
+C's later donor control actually passes1P2.50s in
+/tmp/zeus-provider-vector-donor-green-final.xml: one synthetic120h HTTP,
+zero72h HTTP, zero re-persistence and identical captured/recorded clocks.
+Focused closure19P2.76 and endpoint10P/standard-fallback1P are separate staged
+receipts, not a final whole suite verdict. Final source/test hashes, illegal
+date/endpoint-tail controls and named review remain necessary before landing.
+
+Supplemental C BEFOREEDIT — two independently reproduced Important boundaries:
+the a18c0d3f4 checkpoint is not accepted or picked. A genuine Paris original
+relabelled as same-timezone Lyon makes readonly replay fail to raise, actual
+1F2.67s at /tmp/zeus-provider-vector-foreigncity-red.xml. Self-consistent JSON
+alone therefore does not bind the original to the runtime city scope. A second
+early-return branch trusts ENS prefix/metadata_model labels without requiring
+the original closure; canonical-model relabel/removal of descriptor references
+must not create generic current probability authority. Earlier34P and10P staged
+receipts remain their exact coverage, not final closure of these new boundaries.
+
+ROOT approves only the same C two sources/two tests: bind original city to
+scope.city and replay the owning requested-coordinate/timezone relationship to
+the actual canonical city, preserving the distinct proved returned model cell.
+Reject the same-timezone foreign-city original through real reader controls.
+An Open-Meteo ENS API vector with no original proof cannot pass generic current
+qualification by prefix/model labels; real relabel/delete-reference controls
+must return typed UNAVAILABLE/UNKNOWN. Offline/raw refresh may retain evidence
+without upgrading it to live qualification. The independent native A
+read_native_measurement_role original51/member/grid/LSM/phi/PIT path remains
+lawful and is not replaced by a new transport or hand-built ENS proof.
+SCOPE is exact city/model/vector original closure, not global risk RED.
+DRAIN is normal producer capture and canonical materialization of genuine
+original-role evidence. RESET is a new valid same-scope original closure or
+immutable restoration through the existing owning reader; old labels without
+physical evidence cannot self-reset by asserting PASS. No old-row backfill,
+clock renewal, schema, additional file or qualification fallback is permitted.
+Final C ordinary freeze and physical Important closure precede parent picking,
+registry claims, final tests or landing.
+
+C final ordered a18c0d3f4a967160d81ded3b6591cb4b71604efc then
+40a3f60bd042ed407fc13b01ba3bfbd21ed8e6ee was ordinarily picked as bfea1541e and
+b9f34c882. Final source SHA256: BPF
+2806bcb3579c7e49f987cc4c02aa7eff27f287da305dde52f0e184ecb96d2fa2;
+hourly585c07d8452f6f3d888dd7f9312d98bafaf08330a42c18990bec995dcf393ee3.
+Final controlled originals37P2.83 XML
+/tmp/zeus-provider-vector-C-finalfocused-v3.xml SHA256
+316a41ec6ec11d4f03604eae76f187b5380ecef9f0b79dcc61f43614a7e842d5;
+endpoint10P1.86 XML /tmp/zeus-provider-vector-C-endpoint-final-v3.xml SHA256
+e6c012416e32f2f6df3ca6d1409fff87a83e20d7e4dea1e309d80dfa6152cb73.
+Physical's final named review reports0C/0I and closes both city/ENS escapes.
+These are synthetic controlled source/transaction antibodies, not current
+online provider/station equivalence or a live probability READY claim.
+
+Fresh peer origin/live dc483dbb62e2106768fd775046650e54a9788563 advances2e04
+with KMA instant conflict isolation, NOAA contract-page routes/config/receipts,
+EFHK route tests, a matrix update and an existing PLAN explanation. A/B/C source
+paths do not intersect. Preserve these changes and mechanically union only
+PLAN/test_topology during normal rebase. The new10f71b loader replay gate is
+kept unchanged pending XY's named source-BOOT-before-READY dependency review:
+do not invoke its potentially10x150s replay, use its skip flag, or manually
+reload actors. Private money/merged/classifier checks may run on the combined
+candidate; final CLI/HEAD-secret and landing wait for any loader-risk disposition
+and a final immutable input freeze. No current source, MAIN or certificate load
+is implied by this local integration.
