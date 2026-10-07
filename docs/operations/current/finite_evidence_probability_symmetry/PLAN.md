@@ -21185,3 +21185,25 @@ direct construction) is the pre-v7 baseline.
 Four forecast-live loads of this series have now broken serving (10-06 07:22Z,
 10-06 21:18Z, 10-07 13:46Z). A reload must not carry it until a live-request
 replay on the target tip shows READY.
+
+## Re-land path: split the native producer from the full-Y consumer (Data process, 2026-10-07)
+
+The three restores show a lock-out, not three separate bugs. The native 2t
+scheduled capture (`forecast_live_native_2t_*` jobs and their ecmwf_open_data
+collector) exists only inside the native-role series. On any restored tree it
+does not run, so native runs stay PARTIAL. The series' full-Y shape reader
+needs a complete native run, so every load blocks serving until capture
+catches up, and serving is restored by reverting, which stops capture again.
+
+Proposed order (owner: native-role lane):
+1. Land the producer alone: the native 2t capture jobs and collector, plus
+   their source_run/raw writes. The materializer keeps the v6 shape path
+   unchanged. A live-request replay must stay READY. Let capture run until
+   scheduled runs reach COMPLETE for the current cycles.
+2. Land the consumer behind the existing re-land rule: the full-Y native role
+   is used only when its run is complete for the target day; otherwise the v6
+   shape serves. The replay must be READY on the live queue before load.
+Data process is adding a deploy_live.py gate that refuses a forecast-live reload whose
+queued-request replay gives zero READY.
+
+Evidence: today native capture job_run rows exist only for 01-02Z and 13-14Z (the two v7 load windows); all PARTIAL or FAILED.
