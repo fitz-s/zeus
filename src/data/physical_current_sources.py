@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-06 (metaviatelecom UUWW display-id structure restored)
+# Last reused/audited: 2026-10-07 (G5: canonical-resolver routes are the "resolver" rival, not a new one)
 """Station-bound current observations and their settlement roles.
 
 Adapters own fixed endpoints. Configuration cannot inject URLs, SQL, or code.
@@ -39,7 +39,9 @@ class SourceRole(str, Enum):
 # Resolver products by settlement source type; nothing else may claim the role.
 _CANONICAL = {"noaa_wrh": "noaa", "wu_station_history": "wu_icao"}
 # Current paths every fast admission must beat, besides other registry routes
-# at its station: the AWC METAR feed and the resolver channel itself.
+# at its station: the AWC METAR feed and the resolver channel itself. A
+# canonical-resolver registry route is that resolver channel (the audits'
+# "resolver" comparator fetched the same product), not a further rival.
 CURRENT_COMPARATORS = ("awc", "resolver")
 
 
@@ -58,6 +60,11 @@ class PhysicalCurrentSource:
     @property
     def settlement_authorized(self) -> bool:
         return self.role is not SourceRole.PHYSICAL_ONLY
+
+    @property
+    def current_path(self) -> str:
+        """The comparator a fast admission must beat: a resolver route IS ``resolver``."""
+        return "resolver" if self.role is SourceRole.CANONICAL_RESOLVER else self.provider
 
 
 def _counts_proven(proof: Any) -> bool:
@@ -218,7 +225,7 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
     paths: dict[str, set[str]] = {}
     for source in built.values():
         if isinstance(source, PhysicalCurrentSource):
-            paths.setdefault(source.station_id, set()).add(source.provider)
+            paths.setdefault(source.station_id, set()).add(source.current_path)
     # Pass 2, speed: a fast admission must beat every current path at its station.
     sources = []
     for i, (row, _) in enumerate(rows):
@@ -230,7 +237,7 @@ def _load(path: str, mtime_ns: int, size: int) -> tuple[tuple[PhysicalCurrentSou
             # a malformed optional row never takes the rest of the registry down.
             try:
                 defect = fast_admission_defect(
-                    row, frozenset(paths[source.station_id] - {source.provider}))
+                    row, frozenset(paths[source.station_id] - {source.current_path}))
             except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
                 defect = f"MALFORMED:{type(exc).__name__}"
         if defect is None:
