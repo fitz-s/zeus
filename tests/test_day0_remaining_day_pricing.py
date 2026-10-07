@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-10-01
+# Last reused or audited: 2026-10-07 (KORD fixture needles follow the G8 fixture value)
 # Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
@@ -15821,8 +15821,8 @@ def test_ordinary_wrh_amber_current_kernel_ignores_age_fit(tmp_path, monkeypatch
     observation_source = inspect.getsource(normal._kord_causal_fast_inputs).replace(
         "hours=8,minutes=20", "hours=20,minutes=20").replace("57.2", "66.2").replace(
         "14/14 A3005 RMK AO2 T01440139", "19/18 A3005 RMK AO2 T01900180").replace(
-        '"temp":14.4', '"temp":19.0').replace('"temp":13.9', '"temp":19.0').replace(
-        "14/14 A3005 RMK AO2 T01390139", "19/19 A3005 RMK AO2 T01900190")
+        '"temp":14.4', '"temp":19.0').replace('"temp":13.1', '"temp":19.0').replace(
+        "13/13 A3005 RMK AO2 T01310131", "19/19 A3005 RMK AO2 T01900190")
     observation_source = observation_source[:observation_source.index(
         "    qualified = fast.latest_fast_station_conditioning")] + '''
     latest_report = f"KORD {observed:%d%H%M}Z 00000KT 10SM CLR 19/18 A3005 RMK AO2 T01900180"
