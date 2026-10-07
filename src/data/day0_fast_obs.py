@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-16
+# Last reused or audited: 2026-10-07 (KMA polls every eligible RKSI/RKPK family, fast-obs G4)
 # Authority basis: day0 first-principles review 2026-06-10 §6.2 (live obs hook)
 #   + operator green-light 2026-06-10 (free METAR fast lane; no paid sources);
 #   NOAA/NWS station files provide current-exposure priority transport, cycle
@@ -4147,8 +4147,12 @@ class Day0FastObsEmitter:
                     if (station := str(raw).strip().upper())
                 )
             )
+            # KMA is the first-party same-station feed for RKSI/RKPK. The
+            # cursor throttles each station to one request per minute, so it
+            # serves every eligible family, entry as well as held exposure.
             kma_station_ids = tuple(
-                station for station in priority_station_ids
+                station
+                for station in dict.fromkeys(str(raw).strip().upper() for raw in stations)
                 if station in KMA_PRIORITY_STATIONS
             )
             kma_client = None

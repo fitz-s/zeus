@@ -7223,3 +7223,64 @@ def test_ledger_hydration_window_is_the_local_calendar_day(target_date, start, e
         f"{target_date} is {hours} h: the window must close at {end.isoformat()}"
     )
     assert sorted(report.obs_time for report in emitter._cached_reports) == sorted(in_day)
+
+
+
+# ---------------------------------------------------------------------------
+# Fast-obs gap G4 (2026-10-07): KMA serves entry, not only held exposure.
+# RKSI/RKPK are polled whenever they are eligible fast-lane stations; the
+# cursor's per-station one-minute throttle is the quota bound.
+# ---------------------------------------------------------------------------
+
+
+def _kma_scope_emitter(monkeypatch, kma_polls):
+    import src.data.day0_fast_obs as fast_obs
+
+    class _Cursor:
+        _last_successful_stations = frozenset()
+        _last_conflicts = {}
+
+        def poll(self, *, stations, **_kwargs):
+            kma_polls.append(tuple(stations))
+            return [], False
+
+    emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+    emitter._kma_cursor = _Cursor()
+    monkeypatch.setattr(emitter._station_cursor, "poll", lambda **_kwargs: ([], False))
+    monkeypatch.setattr(
+        emitter,
+        "_fetch_global_sources",
+        lambda **_kwargs: ([], False, False),
+    )
+    monkeypatch.setattr(
+        emitter,
+        "_poll_global_sources_in_background",
+        lambda **_kwargs: ([], False, False),
+    )
+    return emitter
+
+
+@pytest.mark.parametrize("priority", [(), ("RKSI",)], ids=["entry_only", "held"])
+def test_kma_polls_eligible_korean_station_without_held_exposure(monkeypatch, priority):
+    kma_polls: list[tuple[str, ...]] = []
+    emitter = _kma_scope_emitter(monkeypatch, kma_polls)
+    emitter._reports_with_status(["RJTT", "RKSI", "RKPK"], priority_stations=priority)
+    assert kma_polls and all(set(polled) == {"RKSI", "RKPK"} for polled in kma_polls)
+
+
+def test_kma_never_polls_a_station_outside_its_allowlist(monkeypatch):
+    kma_polls: list[tuple[str, ...]] = []
+    emitter = _kma_scope_emitter(monkeypatch, kma_polls)
+    emitter._reports_with_status(["RJTT", "KORD"], priority_stations=("KORD",))
+    assert kma_polls == []
+
+
+def test_kma_entry_family_prefetch_reaches_kma_without_priority_scope(monkeypatch):
+    kma_polls: list[tuple[str, ...]] = []
+    emitter = _kma_scope_emitter(monkeypatch, kma_polls)
+    emitter.prefetch(
+        cities=[_seoul()],
+        decision_time=datetime(2026, 9, 22, 4, 5, tzinfo=UTC),
+        priority_scopes=(),
+    )
+    assert kma_polls and all(polled == ("RKSI",) for polled in kma_polls)
