@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-10-06 (exact original-message retention replay)
+# Last reused or audited: 2026-10-02 (rolling capture aged at window close; CURRENT_REUSABLE)
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
 #   pricing + persist-the-hourly-vector option from the day0 first-principles
 #   review §6.1/§6.3). INV-37: all writes go to zeus-forecasts.db under
@@ -562,7 +562,6 @@ _DAY0_CAPTURE_EQUIVALENCE_ONLY_META = frozenset(
         "source_run_authority",
         "provider_source_available_at_utc",
         "provider_source_modified_at_utc",
-        "provider_metadata_bracket_evidence",
     }
 )
 
@@ -575,27 +574,6 @@ def _day0_parse_aware_clock(value: object, *, field_name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
     return parsed.astimezone(UTC)
-
-
-def _day0_parse_snapshot_written_clock(value: object) -> datetime:
-    """Only canonical ensemble_snapshots CURRENT_TIMESTAMP is naive UTC."""
-    if not isinstance(value, str):
-        raise ValueError("interval_snapshot_written_at invalid")
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError("interval_snapshot_written_at invalid") from exc
-    if parsed.tzinfo is not None and parsed.utcoffset() is not None:
-        return parsed.astimezone(UTC)
-    # Do not extend the SQLite writer convention to provider/source clocks or
-    # arbitrary naive ISO timestamps. Keep the original stored value as witness.
-    try:
-        canonical = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-    except ValueError as exc:
-        raise ValueError("interval_snapshot_written_at invalid") from exc
-    if canonical.strftime("%Y-%m-%d %H:%M:%S") != value:
-        raise ValueError("interval_snapshot_written_at invalid")
-    return canonical.replace(tzinfo=UTC)
 
 
 def _day0_normalize_vector_request_semantics(
@@ -619,17 +597,6 @@ def _day0_normalize_vector_request_semantics(
     proves a DIFFERENT run remains a mismatch here.
     """
 
-    if key == "__physical_response_capture_v1" and isinstance(value, Mapping):
-        index = value.get("location_index")
-        locations = value.get("locations", [])
-        geometry = locations[index] if type(index) is int and 0 <= index < len(locations) else {}
-        # Each original is independently replayed before this semantic projection.
-        # Endpoint/HTTP clocks and a larger donor window are transport, not a new point.
-        value = {"model": value.get("model"), "native_variable": value.get("native_variable"),
-                 "temperature_unit": value.get("temperature_unit"), "geometry": geometry}
-    if key == "__physical_response_reference_v1":
-        value = {"revision": "day0_original_entity_reference_v1",
-                 "model_surface_geometry": value.get("model_surface_witness", {}).get("geometry")}
     if key == "request_params_json" and isinstance(value, str):
         try:
             value = json.loads(value)
@@ -710,10 +677,6 @@ def _day0_canonical_vector_row_snapshot(
         raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SOURCE_META_INVALID") from exc
     if not isinstance(meta, Mapping):
         raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SOURCE_META_INVALID")
-    _day0_replay_vector_original(conn, Day0HourlyVector(model=model, city=city,
-        target_date=target_date, timezone_name=timezone_name, captured_at=str(row[5]),
-        times=times, temps_c=temps, source_run_meta_json=str(row[11])),
-        decision_bound_utc=decision_bound_utc, provider=str(row[6]), endpoint=str(row[7]), request_hash=str(row[8]))
 
     capture = _day0_parse_aware_clock(row[5], field_name="captured_at")
     fetch_started = _day0_parse_aware_clock(
@@ -1340,382 +1303,6 @@ def _day0_sample_truncated_normal(
     return mu + sigma * z
 
 
-def _native_interval_role_projection(*, windows_by_member, knots_by_member,
-        paired_values, scope_start, scope_end, metric):
-    """Project verified original windows; D is support, never an inside sample."""
-    points, bounds = [], []
-    for member in range(51):
-        series = sorted(knots_by_member[member])
-        def interpolate(at):
-            before = max(pair for pair in series if pair[0] <= at)
-            after = min(pair for pair in series if pair[0] >= at)
-            if before[0] == after[0]:
-                return before[1]
-            fraction = (at - before[0]).total_seconds() / (after[0] - before[0]).total_seconds()
-            return before[1] + fraction * (after[1] - before[1])
-        windows = sorted(windows_by_member[member])
-        cursor, member_points, member_bounds = scope_start, [], []
-        for start, end, value in windows:
-            if start > cursor:
-                raise ValueError("MEASUREMENT_NATIVE_INTERVAL_GAP")
-            cursor = max(cursor, end)
-            if scope_start <= start and end <= scope_end:
-                chosen, ambiguity = value, (value, value)
-            else:
-                a, b = max(start, scope_start), min(end, scope_end)
-                partial = [interpolate(a), interpolate(b)] + [v for t, v in series if a < t < b]
-                chosen = max(partial) if metric == "high" else min(partial)
-                paired_value = paired_values[(member, start, end)]
-                actual_inside = [v for t, v in series if a <= t < b]
-                ambiguity = ((max([paired_value, *actual_inside]), value) if metric == "high"
-                             else (value, min([paired_value, *actual_inside])))
-            if not ambiguity[0] <= chosen <= ambiguity[1]:
-                raise ValueError("MEASUREMENT_NATIVE_POINT_OUTSIDE_INTERVAL")
-            member_points.append(chosen)
-            member_bounds.append(ambiguity)
-        if cursor < scope_end or not member_points:
-            raise ValueError("MEASUREMENT_NATIVE_INTERVAL_GAP")
-        aggregate = max if metric == "high" else min
-        points.append(aggregate(member_points))
-        bounds.append([aggregate(b[0] for b in member_bounds), aggregate(b[1] for b in member_bounds)])
-    return points, bounds
-
-
-def read_native_measurement_role(
-    *, conn: Any, city: Any, target_date: str, decision_time: datetime,
-    metric: str, role: str, scope_start: datetime, _paths: Any = None,
-    snapshot_id: int | None = None,
-    paired_snapshot_ids: Sequence[int] | None = None,
-) -> dict[str, object]:
-    """Read one original model point/ambiguity entity on its own lawful frontier.
-
-    No collection, publication inference or settlement-station equivalence.
-    SCOPE is city/metric/role/window. DRAIN is normal native and extrema capture;
-    RESET replays their exact originals, never a midpoint or old width fallback.
-    """
-    from src.data.ecmwf_open_data import (
-        _resolve_opendata_paths, _download_output_path, _read_role_message_bytes,
-        read_native_temperature_scope, _read_native_extrema_static_scope,
-    )
-    from src.data.forecast_target_contract import compute_target_local_day_window_utc
-    import eccodes as ec
-    from scripts import extract_open_ens_localday as decoder
-
-    day = compute_target_local_day_window_utc(
-        city_timezone=str(city.timezone), target_local_date=date.fromisoformat(target_date))
-    if (metric not in {"high", "low"} or role not in {"remaining_X", "full_Y"}
-            or decision_time.tzinfo is None or scope_start.tzinfo is None
-            or decision_time.utcoffset() != timedelta(0)
-            or decision_time > datetime.now(timezone.utc)
-            or not day.start_utc <= scope_start < day.end_utc
-            or (role == "full_Y" and scope_start != day.start_utc)):
-        raise ValueError("MEASUREMENT_ROLE_DOMAIN_INVALID")
-    paths = _paths or _resolve_opendata_paths()
-    cities = [{"city": str(city.name), "lat": float(city.lat), "lon": float(city.lon),
-               "unit": str(city.settlement_unit).upper()}]
-    from src.data.forecast_fetch_plan import data_version_for_track
-    from src.config import runtime_coordinate_manifest_json
-    track_name = "mx2t6_high" if metric == "high" else "mn2t6_low"
-    expected_version = data_version_for_track(track_name, runtime_coordinate_manifest_json())
-    # The role's source is its primary statistic, not the optional instantaneous
-    # product. A complete contained extrema entity needs no fictitious 2t run.
-    rows = conn.execute("""SELECT e.snapshot_id,e.provenance_json,
-            COALESCE(e.source_available_at,e.available_at),e.recorded_at,
-            e.source_run_id,e.source_cycle_time,s.ingest_mode,s.origin_mode
-        FROM ensemble_snapshots e JOIN source_run s ON s.source_run_id=e.source_run_id
-        WHERE e.city=? AND e.target_date=? AND e.temperature_metric=?
-          AND s.source_id='ecmwf_open_data' AND s.track IN (?,?)
-          AND s.status IN ('SUCCESS','PARTIAL') AND s.dataset_id=?
-          AND s.ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP') AND s.origin_mode=s.ingest_mode
-          AND s.source_cycle_time=e.source_cycle_time
-          AND julianday(e.source_cycle_time)<=julianday(?)
-          AND (? IS NULL OR e.snapshot_id=?)
-        ORDER BY e.source_cycle_time DESC,e.snapshot_id DESC LIMIT 16""",
-        (str(city.name), target_date, metric, track_name + "_full_horizon", track_name + "_short_horizon",
-         expected_version, min(scope_start, decision_time).isoformat(), snapshot_id, snapshot_id)).fetchall()
-    last_reason = "NO_LAWFUL_ROLE_RUN"
-    for row in rows:
-        snapshot = row
-        run_id, cycle = str(row[4]), datetime.fromisoformat(str(row[5]))
-        manifest = paths.raw_root / "raw/ecmwf_open_ens/native_2t_scheduled" / f"{cycle:%Y%m%dT%HZ}" / "source-manifest.json"
-        try:
-            provenance = json.loads(snapshot[1])
-            capture = provenance["native_capture_receipt"]
-            if not isinstance(capture.get("messages"), list) or not capture["messages"]:
-                raise ValueError("MEASUREMENT_NATIVE_PRIMARY_ORIGINALS_MISSING")
-            snapshot_clocks = (
-                _day0_parse_aware_clock(snapshot[2], field_name="interval_snapshot_available_at"),
-                _day0_parse_snapshot_written_clock(snapshot[3]),
-            )
-            if (capture["capture_status"] != "OBSERVED" or any(
-                    clock > decision_time for clock in snapshot_clocks)):
-                last_reason = ("AFTER_DECISION" if any(clock > decision_time for clock in snapshot_clocks)
-                    else "MEASUREMENT_NATIVE_PRIMARY_ORIGINALS_MISSING")
-                continue
-            first = capture["messages"][0]
-            grid_sha = hashlib.sha256(base64.b64decode(next(s["bytes_base64"]
-                for s in first["metadata_sections"] if s["section_number"] == 3), validate=True)).hexdigest()
-            scope = _read_native_extrema_static_scope(paths=paths, run=cycle, grid_sha256=grid_sha,
-                cities=cities, metric=metric, role=role, scope_start=scope_start, scope_end=day.end_utc,
-                source_run_id=run_id, first_possession=max(snapshot_clocks), decision_time=decision_time,
-                origin_mode=str(snapshot[6]))
-            if scope.pit_status != "AVAILABLE":
-                last_reason = scope.reason or scope.pit_status
-                continue
-            selected = scope.physical_witness["selected_cities"][str(city.name)]
-            point = capture["selected_point"]
-            if (int(point["flat_index"]) != int(selected["selected_flat_index"])
-                    or float(point["lat"]) != float(selected["selected_lat"])
-                    or float(point["lon"]) != float(selected["selected_lon"])):
-                continue
-            def read_intervals(track, messages):
-                retained = {str(m["raw_message_sha256"]): m for m in messages}
-                if len(retained) != len(messages):
-                    raise ValueError("MEASUREMENT_NATIVE_INTERVAL_DUPLICATE")
-                by_member = {m: [] for m in range(51)}
-                part_ids = {}
-                source = _download_output_path(run_date=cycle.date(), run_hour=cycle.hour,
-                    param=track.open_data_param, raw_root=paths.raw_root)
-                identities = []
-                def original_messages():
-                    if source.exists() or source.is_symlink():
-                        if source.is_symlink():
-                            raise ValueError("MEASUREMENT_NATIVE_ORIGINAL_SYMLINK")
-                        with source.open("rb") as stream:
-                            while (gid := ec.codes_grib_new_from_file(stream)) is not None:
-                                try:
-                                    raw = ec.codes_get_message(gid)
-                                finally:
-                                    ec.codes_release(gid)
-                                yield raw
-                    else:
-                        # Retention replicas preserve the exact captured body.
-                        # The canonical receipt/clock and all checks below are
-                        # unchanged; a CAS file's mtime conveys no availability.
-                        for saved in messages:
-                            yield _read_role_message_bytes(paths.raw_root, saved)
-                for raw in original_messages():
-                    original, decoded = decoder._decode_native_original(raw,
-                        flat_indices=(int(point["flat_index"]),), parameter_id=track.paramId)
-                    h = original["observed_headers"]
-                    if h.get("paramId") != track.paramId:
-                        continue
-                    saved = retained.get(str(original.get("raw_message_sha256")))
-                    if saved != original:
-                        continue
-                    member = int(h.get("perturbationNumber", h.get("number", 0)))
-                    start = cycle + timedelta(hours=int(h["startStep"]))
-                    end = cycle + timedelta(hours=int(h["endStep"]))
-                    if not (start < day.end_utc and end > scope_start):
-                        continue
-                    if (int(h["dataDate"]) != int(cycle.strftime("%Y%m%d"))
-                            or int(h["dataTime"]) != cycle.hour * 100
-                            or h["stepType"] != track.step_type or h["units"] != "K"
-                            or (decoded and decoded[2]) != 161
-                            or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
-                            or h["stepUnits"] != 1 or h["indicatorOfUnitForTimeRange"] != 1
-                            or h["lengthOfTimeRange"] != int(h["endStep"]) - int(h["startStep"])
-                            or h["lengthOfTimeRange"] != track.aggregation_window_hours
-                            or h["stepRange"] != f"{h['startStep']}-{h['endStep']}"
-                            or h["typeOfStatisticalProcessing"] != (2 if track.step_type == "max" else 3)
-                            or hashlib.sha256(base64.b64decode(next(s["bytes_base64"]
-                                for s in original["metadata_sections"] if s["section_number"] == 3))).hexdigest()
-                            != scope.physical_witness["grid_sha256"]):
-                        raise ValueError("MEASUREMENT_NATIVE_INTERVAL_IDENTITY_INVALID")
-                    _, _, _, values = decoded
-                    value = decoder.kelvin_to_native(values[0], cities[0]["unit"])
-                    if not math.isfinite(value) or values[0] == decoded[1]:
-                        raise ValueError("MEASUREMENT_NATIVE_INTERVAL_VALUE_INVALID")
-                    if (member, start, end) in part_ids or not start < end:
-                        raise ValueError("MEASUREMENT_NATIVE_INTERVAL_DUPLICATE")
-                    by_member[member].append((start, end, value))
-                    identities.append(original["raw_message_sha256"])
-                    part_ids[(member, start, end)] = original["raw_message_sha256"]
-                return by_member, identities, part_ids
-            track = decoder.TRACKS["mx2t6_high" if metric == "high" else "mn2t6_low"]
-            by_member, identities, primary_part_ids = read_intervals(track, capture["messages"])
-            scope.physical_witness["native_interval_originals"] = sorted(identities)
-            required_pairs = {(member, start, end) for member, windows in by_member.items()
-                for start, end, _ in windows if not (scope_start <= start and end <= day.end_utc)}
-            paired_values, paired_proofs = {}, {}
-            if required_pairs:
-                other_track = decoder.TRACKS["mn2t6_low" if metric == "high" else "mx2t6_high"]
-                selected_pair_ids = tuple(int(value) for value in paired_snapshot_ids or ())
-                if len(selected_pair_ids) > 32:
-                    raise ValueError("MEASUREMENT_NATIVE_PAIRED_SCOPE_INVALID")
-                id_filter = (" AND snapshot_id IN (" + ",".join("?" for _ in selected_pair_ids) + ")"
-                             if selected_pair_ids else "")
-                pair_rows = conn.execute("""SELECT snapshot_id,provenance_json,
-                        COALESCE(source_available_at,available_at),recorded_at
-                    FROM ensemble_snapshots WHERE city=? AND target_date=?
-                      AND temperature_metric=? AND source_cycle_time=?""" + id_filter +
-                    " ORDER BY snapshot_id ASC LIMIT 32", (str(city.name), target_date,
-                        "low" if metric == "high" else "high", cycle.isoformat(), *selected_pair_ids)).fetchall()
-                for pair_row in pair_rows:
-                    if any(clock > decision_time for clock in (
-                            _day0_parse_aware_clock(pair_row[2], field_name="paired_interval_available_at"),
-                            _day0_parse_snapshot_written_clock(pair_row[3]))):
-                        continue
-                    paired_capture = json.loads(pair_row[1]).get("native_capture_receipt")
-                    if (not isinstance(paired_capture, Mapping)
-                            or paired_capture.get("capture_status") != "OBSERVED"
-                            or paired_capture.get("selected_point") != point):
-                        continue
-                    opposite, _, opposite_ids = read_intervals(other_track, paired_capture["messages"])
-                    for member, windows in opposite.items():
-                        for start, end, value in windows:
-                            key = (member, start, end)
-                            if key in required_pairs and key not in paired_values:
-                                paired_values[key] = value
-                                paired_proofs[key] = {"snapshot_id": int(pair_row[0]),
-                                    "member": member, "window_start_utc": start.isoformat(), "window_end_utc": end.isoformat(),
-                                    "raw_message_sha256": opposite_ids[key],
-                                    "available_at": str(pair_row[2]), "written_at": str(pair_row[3])}
-                    if required_pairs <= paired_values.keys():
-                        break
-                if not required_pairs <= paired_values.keys():
-                    raise ValueError("MEASUREMENT_NATIVE_PAIRED_INTERVAL_UNAVAILABLE")
-            knots = {m: [] for m in range(51)}
-            support_clocks = [_day0_parse_aware_clock(scope.physical_dependency_available_at,
-                field_name="physical_dependency_available_at")]
-            if required_pairs:
-                product = json.loads(manifest.read_bytes())
-                steps = sorted(int(s) for s in product["product_steps"])
-                for start, end in sorted({(max(scope_start, a), min(day.end_utc, b))
-                        for _, a, b in required_pairs}):
-                    left = max(s for s in steps if cycle + timedelta(hours=s) <= start)
-                    right = min(s for s in steps if cycle + timedelta(hours=s) >= end)
-                    # Every clip gets its full PL support, including interior
-                    # knots. The public instant-series reader stays contiguous.
-                    support = read_native_temperature_scope(conn, source_run_id=product["source_run_id"],
-                        manifest_path=manifest, required_steps=[s for s in steps if left <= s <= right],
-                        qualified_prefix_cut_utc=start, local_day_start_utc=day.start_utc,
-                        local_day_end_utc=end, explicit_manifest=cities, decision_at_utc=decision_time,
-                        metric=metric, role="remaining_X", _paths=paths)
-                    if support.pit_status != "AVAILABLE":
-                        raise ValueError(support.reason or support.pit_status)
-                    if (support.physical_witness.get("origin_mode") != "SCHEDULED_LIVE"
-                            or support.physical_witness["grid_sha256"] != grid_sha
-                            or support.physical_witness["selected_cities"][str(city.name)] != selected):
-                        raise ValueError("MEASUREMENT_NATIVE_BOUNDARY_GRID_MISMATCH")
-                    scope.physical_witness["boundary_supports"].append(support.physical_witness)
-                    scope.physical_witness["temperature_messages"].extend(
-                        support.physical_witness["temperature_messages"])
-                    support_clocks.append(_day0_parse_aware_clock(support.physical_dependency_available_at,
-                        field_name="boundary_dependency_available_at"))
-                    for knot in support.native_knots:
-                        value = decoder.kelvin_to_native(float(knot["value_k"]), cities[0]["unit"])
-                        pair = (datetime.fromisoformat(knot["valid_time_utc"]), value)
-                        if pair not in knots[int(knot["member"])]:
-                            knots[int(knot["member"])].append(pair)
-            messages = {m["raw_message_sha256"]: m for m in scope.physical_witness["temperature_messages"]}
-            scope.physical_witness["temperature_messages"] = [messages[key] for key in sorted(messages)]
-            scope.physical_witness["dependency_revision"] = "native_role_minimal_originals_v2"
-            scope.physical_witness["required_original_counts"] = {
-                "primary_extrema": len(identities), "paired_extrema": len(paired_proofs),
-                "instantaneous": len(messages), "static": len(scope.physical_witness["static_dependencies"])}
-            dependency = max(*support_clocks, *snapshot_clocks,
-                *(_day0_parse_aware_clock(p["available_at"], field_name="paired_interval_available_at")
-                  for p in paired_proofs.values()),
-                *(_day0_parse_snapshot_written_clock(p["written_at"]) for p in paired_proofs.values()))
-            if dependency >= decision_time:
-                raise ValueError("AFTER_DECISION")
-            points, bounds = _native_interval_role_projection(windows_by_member=by_member,
-                knots_by_member=knots, paired_values=paired_values, scope_start=scope_start,
-                scope_end=day.end_utc, metric=metric)
-            return {"role": role, "unit": str(city.settlement_unit).upper(),
-                "member_points_native": points, "member_interval_bounds_native": bounds,
-                "point_model": "contained_native_extrema_straddling_2t_PL_v1",
-                "ENS_current_state_transform": "NONE_RAW_NATIVE_ROLE",
-                "city": str(city.name), "target_date": target_date, "temperature_metric": metric,
-                "scope_start_utc": scope_start.isoformat(), "scope_end_utc": day.end_utc.isoformat(),
-                "native_snapshot_id": int(snapshot[0]), "native_interval_original_sha256": sorted(identities),
-                "paired_snapshot_ids": sorted({p["snapshot_id"] for p in paired_proofs.values()}),
-                "paired_interval_originals": [paired_proofs[key] for key in sorted(paired_proofs)],
-                "native_scope": scope.physical_witness,
-                "temperature_scope_first_possession_at": scope.temperature_scope_first_possession_at,
-                "interval_snapshot_available_at": str(snapshot[2]),
-                "interval_snapshot_written_at": str(snapshot[3]),
-                "physical_dependency_available_at": dependency.isoformat()}
-        except (OSError, ValueError, KeyError, TypeError, StopIteration) as exc:
-            last_reason = str(exc) or type(exc).__name__
-            continue
-    raise ValueError(f"MEASUREMENT_ROLE_NATIVE_POINT_UNAVAILABLE:{last_reason}")
-
-
-def _day0_role_noise(shape: Mapping[str, object], *, role: str,
-                     centers: np.ndarray) -> tuple[float, tuple[float, float]]:
-    """Point approximation and independent identification envelope, not a floor."""
-    try:
-        points = np.asarray(shape["member_points_native"], dtype=float)
-        intervals = np.asarray(shape["member_interval_bounds_native"], dtype=float)
-        served = np.asarray(shape["provider_centers_native"], dtype=float)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("DAY0_DOMAIN_ROLE_SHAPE_INVALID") from exc
-    if (shape.get("role") != role or points.shape != (51,) or intervals.shape != (51, 2)
-            or not np.isfinite(points).all() or not np.isfinite(intervals).all()
-            or not np.array_equal(np.sort(served), centers)
-            or np.any(intervals[:, 0] > points) or np.any(points > intervals[:, 1])):
-        raise ValueError("DAY0_DOMAIN_ROLE_SHAPE_INVALID")
-    mu = float(np.mean(centers))
-    point_variance = float(np.mean((points - mu) ** 2))
-    near = np.maximum(intervals[:, 0] - mu, np.maximum(mu - intervals[:, 1], 0.0))
-    far = np.maximum((intervals[:, 0] - mu) ** 2, (intervals[:, 1] - mu) ** 2)
-    return math.sqrt(point_variance), (math.sqrt(float(np.mean(near ** 2))),
-                                      math.sqrt(float(np.mean(far))))
-
-
-def replay_native_measurement_role_identity(
-    conn: Any, model: Mapping[str, object], *, city: Any, target_date: str,
-    metric: str, decision_time: datetime,
-) -> bool:
-    """Reproduce the pinned scope, without letting a later partial row steal Y."""
-    try:
-        if (model["city"] != str(city.name) or model["target_date"] != target_date
-                or model["temperature_metric"] != metric
-                or model["ENS_current_state_transform"] != "NONE_RAW_NATIVE_ROLE"):
-            return False
-        replay = read_native_measurement_role(conn=conn, city=city, target_date=target_date,
-            metric=metric, decision_time=decision_time, role=str(model["role"]),
-            scope_start=_day0_parse_aware_clock(str(model["scope_start_utc"]), field_name="role_scope_start"),
-            snapshot_id=int(model["native_snapshot_id"]), paired_snapshot_ids=model.get("paired_snapshot_ids"))
-        return all(model.get(key) == value for key, value in replay.items())
-    except (ValueError, TypeError, KeyError, OSError):
-        return False
-
-
-def _day0_normal_sigma_envelope(mu: float, lower: float, upper: float,
-                                sigma_bounds: tuple[float, float], *,
-                                lower_inclusive: bool = True,
-                                upper_inclusive: bool = False) -> tuple[float, float]:
-    """Gaussian mass envelope including the interior spread stationary point."""
-    if lower > upper:
-        return 0.0, 0.0
-    lo, hi = sigma_bounds
-    if lower == upper:
-        atom = float(lo == 0.0 and mu == lower and lower_inclusive and upper_inclusive)
-        return (atom if hi == 0.0 else 0.0), atom
-    candidates = [lo, hi]
-    a, b = lower - mu, upper - mu
-    if math.isfinite(a) and math.isfinite(b) and a * b > 0.0 and abs(a) != abs(b):
-        stationary2 = (b * b - a * a) / (2.0 * math.log(abs(b / a)))
-        if stationary2 > 0.0 and lo < math.sqrt(stationary2) < hi:
-            candidates.append(math.sqrt(stationary2))
-    masses = []
-    if lo == 0.0 and hi > 0.0:
-        # A degenerate normal follows the discrete rounding contract, while
-        # sigma -> 0+ divides mass at an exact preimage boundary.
-        masses.append(0.5 if mu in (lower, upper) else float(lower < mu < upper))
-    for sigma_value in candidates:
-        if sigma_value == 0.0:
-            masses.append(float((mu > lower or lower_inclusive and mu == lower)
-                                and (mu < upper or upper_inclusive and mu == upper)))
-        else:
-            masses.append(math.exp(_day0_log_normal_interval_probability(
-                mu, sigma_value, lower, upper)))
-    return min(masses), max(masses)
-
-
 def _build_day0_remaining_probability_carrier_v3(
     *, values: np.ndarray, final_centers: np.ndarray,
     scenarios: tuple[tuple[float | None, float], ...], metric: str,
@@ -1733,44 +1320,7 @@ def _build_day0_remaining_probability_carrier_v3(
     shape-level guard against accidentally turning a final center into a
     boundary atom.
     """
-    domain_shapes = economic_identity_inputs.get("domain_role_shapes")
-    sigma_x = sigma_y = sigma
-    sigma_ranges: dict[str, tuple[float, float]] = {}
-    if domain_shapes is not None:
-        if (not isinstance(domain_shapes, Mapping)
-                or domain_shapes.get("schema") != "day0_measurement_domain_shapes_v1"
-                or domain_shapes.get("unit") != settlement_semantics.measurement_unit):
-            raise ValueError("DAY0_DOMAIN_ROLE_SHAPES_INVALID")
-        families = []
-        for name, role, centers in (("X", "remaining_X", values), ("Y", "full_Y", final_centers)):
-            if not centers.size:
-                continue
-            shape = domain_shapes.get(name)
-            if not isinstance(shape, Mapping):
-                raise ValueError("DAY0_DOMAIN_ROLE_SHAPE_MISSING")
-            if name == "Y" and any(boundary is not None and weight > 0.0 for boundary, weight in scenarios):
-                if (shape.get("prefix_information_kind") not in {"REPORTED_PRODUCT_PROXY", "INCOMPLETE_SAME_QUANTITY_BOUND"}
-                        or shape.get("conditioning_likelihood_scope") != "COARSENED_BOUND_ONLY"):
-                    # A complete same-quantity prefix requires a joint-prefix
-                    # likelihood, not the continuous prior's Y <=/>= m event.
-                    # SCOPE this Y role; producer can retain qualified X experts
-                    # and normally RESET after a lawful joint certificate exists.
-                    raise ValueError("Y_PREFIX_LIKELIHOOD_UNIDENTIFIED")
-            role_families = shape.get("provider_families")
-            if (not isinstance(role_families, list) or len(role_families) != centers.size
-                    or any(not isinstance(f, str) or not f for f in role_families)):
-                raise ValueError("DAY0_DOMAIN_PROVIDER_FAMILIES_INVALID")
-            if len(set(role_families)) != len(role_families):
-                raise ValueError("DAY0_DOMAIN_PROVIDER_FAMILIES_DUPLICATED_WITHIN_ROLE")
-            families.extend(role_families)
-            noise, sigma_ranges[name] = _day0_role_noise(shape, role=role, centers=centers)
-            if name == "X":
-                sigma_x = noise
-            else:
-                sigma_y = noise
-        if len(set(families)) < 2:
-            raise ValueError("DAY0_DOMAIN_PROVIDER_FAMILIES_INCOMPLETE")
-    if sigma_y == 0.0:
+    if sigma == 0.0:
         for boundary, weight in scenarios:
             if boundary is None or weight <= 0.0:
                 continue
@@ -1788,7 +1338,7 @@ def _build_day0_remaining_probability_carrier_v3(
         half_step=settlement_semantics.precision / 2.0,
     )
 
-    def bin_probability_vector(mu: float, boundary: float | None, sigma: float = sigma_x) -> np.ndarray:
+    def bin_probability_vector(mu: float, boundary: float | None) -> np.ndarray:
         out = np.zeros(len(bounds), dtype=float)
         if sigma == 0.0:
             final = mu
@@ -1847,10 +1397,10 @@ def _build_day0_remaining_probability_carrier_v3(
         return out / total
 
     def final_center_probability_vector(
-        mu: float, boundary: float | None, sigma: float = sigma_y,
+        mu: float, boundary: float | None,
     ) -> np.ndarray:
         if sigma == 0.0:
-            return bin_probability_vector(mu, boundary, sigma)
+            return bin_probability_vector(mu, boundary)
         out = np.zeros(len(bounds), dtype=float)
         for index, (low, high) in enumerate(bounds):
             lower = -math.inf if low is None else low + low_offset
@@ -1892,54 +1442,6 @@ def _build_day0_remaining_probability_carrier_v3(
         raise ValueError("DAY0_REMAINING_CARRIER_BIN_TOPOLOGY_INVALID")
     point /= point_total
 
-    identification_bounds = None
-    if domain_shapes is not None:
-        envelope = np.zeros((len(bounds), 2), dtype=float)
-        for boundary, weight in scenarios:
-            for role, centers in (("X", values), ("Y", final_centers)):
-                for center in centers:
-                    mu = float(center)
-                    spread = sigma_ranges[role]
-                    for index, (low, high) in enumerate(bounds):
-                        lower = -math.inf if low is None else low + low_offset
-                        upper = math.inf if high is None else high + high_offset
-                        if boundary is None:
-                            mass = _day0_normal_sigma_envelope(mu, lower, upper, spread,
-                                lower_inclusive=settlement_semantics.rounding_rule != "ceil",
-                                upper_inclusive=settlement_semantics.rounding_rule == "ceil")
-                        elif role == "X":
-                            rounded = float(settlement_semantics.round_values([boundary])[0])
-                            contains = ((low is None or rounded >= low)
-                                        and (high is None or rounded <= high))
-                            if metric == "high":
-                                lower = -math.inf if contains else max(lower, boundary)
-                            else:
-                                upper = math.inf if contains else min(upper, boundary)
-                            mass = _day0_normal_sigma_envelope(mu, lower, upper, spread,
-                                lower_inclusive=settlement_semantics.rounding_rule != "ceil" or lower == boundary,
-                                upper_inclusive=settlement_semantics.rounding_rule == "ceil" or upper == boundary)
-                        else:
-                            support_lo = boundary if metric == "high" else -math.inf
-                            support_hi = math.inf if metric == "high" else boundary
-                            numerator = _day0_normal_sigma_envelope(
-                                mu, max(lower, support_lo), min(upper, support_hi), spread,
-                                lower_inclusive=(support_lo > lower or settlement_semantics.rounding_rule != "ceil"),
-                                upper_inclusive=(support_hi < upper or settlement_semantics.rounding_rule == "ceil"))
-                            denominator = _day0_normal_sigma_envelope(
-                                mu, support_lo, support_hi, spread,
-                                lower_inclusive=True, upper_inclusive=True)
-                            # Conservative ratio enclosure, not an exact supremum.
-                            mass = ((0.0, 1.0) if denominator[0] == 0.0 else
-                                    (numerator[0] / denominator[1],
-                                     min(1.0, numerator[1] / denominator[0])))
-                        envelope[index] += float(weight) * np.asarray(mass) / component_count
-        identification_bounds = {
-            "schema": "role_interval_gaussian_preimage_enclosure_v1",
-            "lower": [min(float(v), float(q)) for v, q in zip(envelope[:, 0], point)],
-            "upper": [max(float(v), float(q)) for v, q in zip(envelope[:, 1], point)],
-            "Y_ratio": "conservative_envelope_not_exact_supremum",
-        }
-
     v3_content = {
         "v": 5,
         "operator": DAY0_REMAINING_CARRIER_OPERATOR_V3,
@@ -1956,10 +1458,6 @@ def _build_day0_remaining_probability_carrier_v3(
             "instrument_sigma": instrument_sigma,
             "combined_sigma": sigma,
             "confidence_draw_identity": legacy_identity,
-            **({"X_point_sigma": sigma_x, "Y_point_sigma": sigma_y,
-                "role_sigma_intervals": sigma_ranges,
-                "basis": "role_member_point_disagreement_without_double_between_v1"}
-               if domain_shapes is not None else {}),
         },
         "bins": bounds,
         "settlement_semantics": {
@@ -1975,7 +1473,7 @@ def _build_day0_remaining_probability_carrier_v3(
 
     def draw_v3(rows: int, seed: int) -> np.ndarray:
         rng = np.random.default_rng(seed)
-        future = values + rng.normal(0.0, sigma_x, (rows, values.size))
+        future = values + rng.normal(0.0, sigma, (rows, values.size))
         scenario_i = rng.choice(len(scenarios), size=rows, p=[w for _, w in scenarios])
         boundary_values = np.asarray(
             [0.0 if scenarios[i][0] is None else scenarios[i][0] for i in scenario_i],
@@ -1993,19 +1491,19 @@ def _build_day0_remaining_probability_carrier_v3(
         if final_centers.size:
             center_means = np.broadcast_to(final_centers, (rows, final_centers.size))
             center_final = np.empty_like(center_means, dtype=float)
-            if sigma_y == 0.0:
+            if sigma == 0.0:
                 center_final = center_means.copy()
             else:
                 unbounded = ~has_boundary
                 if np.any(unbounded):
                     center_final[unbounded] = center_means[unbounded] + rng.normal(
-                        0.0, sigma_y, (int(unbounded.sum()), final_centers.size)
+                        0.0, sigma, (int(unbounded.sum()), final_centers.size)
                     )
                 if np.any(has_boundary):
                     conditional = _day0_sample_truncated_normal(
                         rng,
                         mu=center_means[has_boundary],
-                        sigma=sigma_y,
+                        sigma=sigma,
                         boundary=np.broadcast_to(
                             boundary_values[has_boundary, None],
                             (int(has_boundary.sum()), final_centers.size),
@@ -2037,13 +1535,6 @@ def _build_day0_remaining_probability_carrier_v3(
         "content_identity": identity,
         "operator": DAY0_REMAINING_CARRIER_OPERATOR_V3,
         "sample_count": n_samples,
-        **({"measurement_domain_replay_inputs": {
-            "identity_inputs": {key: value for key, value in economic_identity_inputs.items()
-                                if key != "domain_role_shapes"},
-            "boundary_scenarios": scenarios, "n_point": n_point,
-        }} if domain_shapes is not None else {}),
-        **({"identification_bounds": identification_bounds}
-           if identification_bounds is not None else {}),
     }
 
 
@@ -2265,7 +1756,7 @@ def build_day0_remaining_probability_carrier(
         raise ValueError("DAY0_REMAINING_CARRIER_INPUT_INVALID")
     selected_operator = (
         DAY0_REMAINING_CARRIER_OPERATOR_V3
-        if operator is None and (final_centers.size or identity_inputs.get("domain_role_shapes"))
+        if operator is None and final_centers.size
         else DAY0_REMAINING_CARRIER_OPERATOR
         if operator is None
         else operator
@@ -2277,8 +1768,7 @@ def build_day0_remaining_probability_carrier(
         raise ValueError(
             "DAY0_REMAINING_CARRIER_LEGACY_OPERATOR_FINAL_CENTERS_INVALID"
         )
-    if (selected_operator == DAY0_REMAINING_CARRIER_OPERATOR_V3 and not final_centers.size
-            and not identity_inputs.get("domain_role_shapes")):
+    if selected_operator == DAY0_REMAINING_CARRIER_OPERATOR_V3 and not final_centers.size:
         raise ValueError("DAY0_REMAINING_CARRIER_V3_FINAL_CENTERS_REQUIRED")
     if selected_operator not in {
         DAY0_REMAINING_CARRIER_OPERATOR_V1,
@@ -3186,8 +2676,6 @@ def _day0_provider_run_meta(
     request_hash: str,
     fetch_started_at: datetime,
     fetch_finished_at: datetime,
-    physical_response: Mapping[str, object] | None = None,
-    metadata_bracket_evidence: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build explicit provider-run provenance for one hourly vector."""
 
@@ -3213,8 +2701,6 @@ def _day0_provider_run_meta(
         "request_hash": request_hash,
         "fetch_started_at": fetch_started_at.isoformat(),
         "fetch_finished_at": fetch_finished_at.isoformat(),
-        **({"__physical_response_capture_v1": dict(physical_response)} if physical_response is not None else {}),
-        **({"provider_metadata_bracket_evidence": dict(metadata_bracket_evidence)} if metadata_bracket_evidence is not None else {}),
     }
 
 
@@ -3418,7 +2904,6 @@ def _day0_exact_run_payloads(
         model_api_id = OPENMETEO_MODEL_IDS.get(model, model)
         request_identity["models"].append(model_api_id)
         fetch_started = _day0_utc_now()
-        metadata_bracket_evidence = None
         if selection.endpoint_mode == "single_runs":
             authority = "run_pinned_single_runs"
             endpoint_mode = "single_runs"
@@ -3447,7 +2932,6 @@ def _day0_exact_run_payloads(
                     modified_at = transport.modification_time.astimezone(UTC)
                     authority = "provider_meta_declared"
                     endpoint_mode = "standard_meta_stamped"
-                    metadata_bracket_evidence = transport.metadata_bracket_evidence
                 except Exception as standard_exc:
                     raise ValueError(
                         f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
@@ -3477,7 +2961,6 @@ def _day0_exact_run_payloads(
                 run = transport.run.astimezone(UTC)
                 available_at = transport.source_available_at.astimezone(UTC)
                 modified_at = transport.modification_time.astimezone(UTC)
-                metadata_bracket_evidence = transport.metadata_bracket_evidence
             except Exception as standard_exc:
                 raise ValueError(
                     f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
@@ -3497,7 +2980,6 @@ def _day0_exact_run_payloads(
             "endpoint_mode": endpoint_mode,
             "fetch_started": fetch_started,
             "fetch_finished": fetch_finished,
-            "metadata_bracket_evidence": metadata_bracket_evidence,
         }))
     request_identity_payload = {
         **request_identity,
@@ -3525,8 +3007,6 @@ def _day0_exact_run_payloads(
                         "run": meta["run"].isoformat()},
         request_hash=bundle_hash, fetch_started_at=meta["fetch_started"],
         fetch_finished_at=meta["fetch_finished"],
-        physical_response=payload.get("__physical_response_capture_v1"),
-        metadata_bracket_evidence=meta.get("metadata_bracket_evidence"),
     )) for model, payload, meta in fetched], request_identity_payload)
 
 
@@ -3839,271 +3319,6 @@ def fetch_day0_source_clock_ensemble_vectors(
         return [], ""
 
 
-def _day0_original_entity(vector: Day0HourlyVector, meta: Mapping[str, object], *, city: Any = None) -> dict:
-    """Replay one deterministic provider entity, not request-coordinate echoes.
-
-    SCOPE: this vector's model/location/run and consumed projection. DRAIN: a
-    normal capture retains its genuine original descriptor. RESET: the same
-    immutable evidence replays independently; no newest-row equality is required.
-    Native ENS members retain their separate original-message/member contract.
-    """
-    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
-    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL, STANDARD_FORECAST_URL
-    capture = meta.get("__physical_response_capture_v1")
-    if not isinstance(capture, Mapping):
-        raise ValueError("DAY0_ORIGINAL_ENTITY_MISSING")
-    params = capture["request_params"]
-    if (capture["revision"] != "openmeteo_single_model_entity_body_v1"
-            or capture["model"] != vector.model or meta.get("model") != vector.model
-            or meta.get("provider") != "openmeteo"
-            or params["models"] != OPENMETEO_MODEL_IDS.get(vector.model, vector.model)
-            or meta.get("model_api_id") != params["models"]
-            or meta.get("provider_run_id") != f"openmeteo:{params['models']}:{capture['source_cycle_time']}"
-            or params.get("temperature_unit") != "celsius" or params.get("hourly") != "temperature_2m"
-            or params.get("cell_selection", "land") != "land" or params.get("elevation") is not None
-            or capture["temperature_unit"] != "celsius" or capture["native_variable"] != "temperature_2m"
-            or capture["source_cycle_time"] != meta["provider_source_cycle_time_utc"]):
-        raise ValueError("DAY0_ORIGINAL_MODEL_RUN_UNIT_MISMATCH")
-    endpoint = {"single_runs": SINGLE_RUNS_FORECAST_URL, "standard_meta_stamped": STANDARD_FORECAST_URL}.get(meta.get("endpoint_mode"))
-    if (endpoint is None or capture["request_url"] != endpoint or meta.get("endpoint") != endpoint
-            or meta.get("source_run_authority") != {"single_runs": "run_pinned_single_runs",
-                "standard_meta_stamped": "provider_meta_declared"}.get(meta.get("endpoint_mode"))):
-        raise ValueError("DAY0_ORIGINAL_ENDPOINT_MISMATCH")
-    run = _day0_parse_aware_clock(capture["source_cycle_time"], field_name="original_run")
-    if endpoint == SINGLE_RUNS_FORECAST_URL:
-        pinned = datetime.fromisoformat(str(params["run"]))
-        if pinned.tzinfo is None:
-            pinned = pinned.replace(tzinfo=UTC)  # this protocol's explicit run parameter
-        if pinned != run:
-            raise ValueError("DAY0_ORIGINAL_PINNED_RUN_MISMATCH")
-    body = Path(str(capture["artifact_path"])).read_bytes()
-    if len(body) != capture["byte_size"] or hashlib.sha256(body).hexdigest() != capture["sha256"]:
-        raise ValueError("DAY0_ORIGINAL_BODY_HASH_MISMATCH")
-    decoded = json.loads(body)
-    payloads = [decoded] if isinstance(decoded, dict) else decoded
-    index = capture["location_index"]
-    locations = capture["locations"]
-    if (type(index) is not int or not isinstance(payloads, list) or not 0 <= index < len(payloads)
-            or len(locations) != len(payloads)):
-        raise ValueError("DAY0_ORIGINAL_LOCATION_INDEX_INVALID")
-    payload, point = payloads[index], locations[index]
-    requests = list(zip(str(params["latitude"]).split(","), str(params["longitude"]).split(","),
-                        str(params["timezone"]).split(","), strict=True))
-    scope = json.loads(str(meta["request_params_json"]))
-    if len(requests) != len(payloads):
-        raise ValueError("DAY0_ORIGINAL_LOCATION_COUNT_MISMATCH")
-    latitude, longitude, zone = requests[index]
-    if city is None:
-        from src.config import runtime_cities_by_name
-        city = runtime_cities_by_name().get(vector.city)
-    if (city is None or str(getattr(city, "name", "")) != vector.city
-            or scope.get("city") != vector.city
-            or float(getattr(city, "lat")) != float(latitude)
-            or float(getattr(city, "lon")) != float(longitude)
-            or str(getattr(city, "timezone")) != zone):
-        raise ValueError("DAY0_ORIGINAL_CITY_REQUEST_BINDING_MISMATCH")
-    if (float(latitude) != float(scope["latitude"]) or float(longitude) != float(scope["longitude"])
-            or float(point["requested_latitude"]) != float(latitude)
-            or float(point["requested_longitude"]) != float(longitude)
-            or zone != vector.timezone_name or point["timezone"] != zone or payload["timezone"] != zone):
-        raise ValueError("DAY0_ORIGINAL_REQUESTED_LOCATION_MISMATCH")
-    for key, proofkey, low, high in (("latitude", "selected_latitude", -90, 90),
-            ("longitude", "selected_longitude", -180, 180), ("elevation", "target_dem_elevation_m", -500, 9000)):
-        actual = float(payload[key])
-        if not math.isfinite(actual) or not low <= actual <= high or actual != float(point[proofkey]):
-            raise ValueError("DAY0_ORIGINAL_RETURNED_POINT_MISMATCH")
-    lat1, lat2 = math.radians(float(latitude)), math.radians(float(payload["latitude"]))
-    dlat, dlon = lat2-lat1, math.radians(float(payload["longitude"])-float(longitude))
-    hav = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
-    if 2*6371.0088*math.asin(math.sqrt(min(1., hav))) >= 50.:
-        raise ValueError("DAY0_ORIGINAL_WRONG_SITE")  # existing wrong-site bound, not sensor equivalence
-    keyed = f"temperature_2m_{OPENMETEO_MODEL_IDS.get(vector.model, vector.model)}"
-    units = payload["hourly_units"]
-    if units.get(keyed, units.get("temperature_2m")) != "°C":
-        raise ValueError("DAY0_ORIGINAL_NATIVE_UNIT_MISMATCH")
-    raw_times, raw_values = payload["hourly"]["time"], payload["hourly"].get(keyed, payload["hourly"].get("temperature_2m"))
-    if (not isinstance(raw_times, list) or not isinstance(raw_values, list) or len(raw_times) != len(raw_values)
-            or not raw_times or len(set(raw_times)) != len(raw_times)):
-        raise ValueError("DAY0_ORIGINAL_ARRAY_INVALID")
-    scope_hours = scope.get("forecast_hours", len(raw_times))
-    transport_hours = params.get("forecast_hours", len(raw_times))
-    if (type(scope_hours) is not int or type(transport_hours) is not int
-            or not 0 < scope_hours <= transport_hours):
-        raise ValueError("DAY0_ORIGINAL_TRANSPORT_PROJECTION_MISMATCH")
-    limit = scope_hours if endpoint == SINGLE_RUNS_FORECAST_URL else len(raw_times)
-    pairs = [(str(t), float(v)) for t, v in zip(raw_times[:limit], raw_values[:limit], strict=True)
-             if v is not None and not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(float(v))]
-    if tuple(t for t, _ in pairs) != vector.times or tuple(v for _, v in pairs) != vector.temps_c:
-        raise ValueError("DAY0_ORIGINAL_CONSUMED_ARRAY_MISMATCH")
-    if endpoint == STANDARD_FORECAST_URL:
-        evidence = meta.get("provider_metadata_bracket_evidence")
-        if not isinstance(evidence, Mapping) or evidence.get("status") != "CAPTURED":
-            raise ValueError("DAY0_ORIGINAL_METADATA_BRACKET_MISSING")
-        encoded = Path(str(evidence["manifest_path"])).read_bytes()
-        if hashlib.sha256(encoded).hexdigest() != evidence["sha256"]:
-            raise ValueError("DAY0_ORIGINAL_METADATA_BRACKET_HASH_MISMATCH")
-        bracket = json.loads(encoded)
-        if (bracket["revision"] != "openmeteo_standard_metadata_bracket_v1"
-                or bracket["model"] != vector.model or bracket["model_reference_time_utc"] != run.isoformat()
-                or bracket["provider_modification_time_utc"] != meta["provider_source_modified_at_utc"]
-                or bracket["temperature"]["body_sha256"] != capture["sha256"]
-                or bracket["temperature"]["byte_size"] != capture["byte_size"]
-                or bracket["temperature"]["request_url"] != endpoint
-                or bracket["temperature"]["request_params"] != params
-                or bracket["temperature"]["fetched_at_utc"] != capture["captured_at"]):
-            raise ValueError("DAY0_ORIGINAL_METADATA_TEMPERATURE_MISMATCH")
-        from src.data.openmeteo_model_updates import parse_model_update, metadata_model_id
-        from urllib.parse import urlsplit
-        possession = []
-        for role in ("before", "after"):
-            original = bracket[role]
-            url = urlsplit(str(original["request_url"]))
-            if (url.scheme != "https" or url.hostname != "api.open-meteo.com"
-                    or url.path != f"/data/{metadata_model_id(vector.model)}/static/meta.json"
-                    or original["request_params"] or original["response_role"] != "NETWORK_200_ENTITY"
-                    or original["clock_role"] != "LOCAL_HTTP_ENTITY_POSSESSION"):
-                raise ValueError("DAY0_ORIGINAL_METADATA_SOURCE_MISMATCH")
-            encoded_meta = Path(original["artifact_path"]).read_bytes()
-            if len(encoded_meta) != original["byte_size"] or hashlib.sha256(encoded_meta).hexdigest() != original["body_sha256"]:
-                raise ValueError("DAY0_ORIGINAL_METADATA_BODY_MISMATCH")
-            update = parse_model_update(vector.model, json.loads(encoded_meta))
-            if update.last_run_initialisation_time != run or update.last_run_modification_time.isoformat() != bracket["provider_modification_time_utc"]:
-                raise ValueError("DAY0_ORIGINAL_METADATA_RUN_MISMATCH")
-            possession.append(_day0_parse_aware_clock(original["fetched_at_utc"], field_name=role))
-        if not (run <= possession[0] <= possession[1]
-                <= _day0_parse_aware_clock(meta["fetch_finished_at"], field_name="fetch_finished")
-                and _day0_parse_aware_clock(capture["captured_at"], field_name="body_possession") <= possession[1]):
-            raise ValueError("DAY0_ORIGINAL_METADATA_POSSESSION_INVALID")
-    return {"capture": capture, "point": point, "run": run}
-
-
-def _day0_artifact(conn: sqlite3.Connection, artifact_id: int) -> dict:
-    columns = ("artifact_id", "source_id", "product_id", "data_version", "source_cycle_time",
-        "source_available_at", "captured_at", "artifact_path", "sha256", "byte_size", "request_url",
-        "request_params_json", "artifact_metadata_json", "recorded_at")
-    row = conn.execute("SELECT " + ",".join(columns) + " FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
-    if row is None:
-        raise ValueError("DAY0_ORIGINAL_ARTIFACT_ROW_MISSING")
-    artifact = dict(zip(columns, row, strict=True))
-    artifact["metadata"] = artifact.pop("artifact_metadata_json")
-    return artifact
-
-
-def _day0_register_vector_original(conn: sqlite3.Connection, vector: Day0HourlyVector, meta: dict) -> dict:
-    from src.data.bayes_precision_fusion_download import _persist_physical_response_artifact, _persist_http_capture_receipt
-    original = _day0_original_entity(vector, meta)
-    capture = original["capture"]
-    mode = "single_runs" if meta["endpoint_mode"] == "single_runs" else "standard_meta_stamped"
-    product = (f"{meta['model_api_id']}::single_runs" if mode == "single_runs" else
-        f"{meta['model_api_id']}::standard_api_meta_stamped::run={meta['provider_source_cycle_time_utc']}::modified={meta['provider_source_modified_at_utc']}")
-    row = {"source_id": f"{vector.model}_{mode}", "product_id": product,
-           "source_cycle_time": capture["source_cycle_time"], "source_available_at": capture["captured_at"]}
-    body_id, _captured, _available = _persist_physical_response_artifact(conn, row, capture)
-    event = capture.get("network_capture")
-    receipt = conn.execute("SELECT artifact_id FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? "
-        "AND source_cycle_time=? AND data_version='openmeteo_single_model_http_capture_receipt_v1' "
-        "AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=? "
-        "AND captured_at=? ORDER BY artifact_id LIMIT 1",
-        (row["source_id"], row["product_id"], row["source_cycle_time"], body_id, capture["captured_at"])).fetchone()
-    if receipt is None and isinstance(event, Mapping):
-        _persist_http_capture_receipt(conn, row, capture, body_id)
-        receipt = conn.execute("SELECT artifact_id FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? "
-            "AND source_cycle_time=? AND data_version='openmeteo_single_model_http_capture_receipt_v1' "
-            "AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=? "
-            "AND captured_at=? ORDER BY artifact_id LIMIT 1",
-            (row["source_id"], row["product_id"], row["source_cycle_time"], body_id, capture["captured_at"])).fetchone()
-    if receipt is None:
-        raise ValueError("DAY0_ORIGINAL_HTTP_RECEIPT_MISSING")
-    written_at = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f+00:00','now')").fetchone()[0]
-    from src.data.replacement_current_value_serving import _current_model_surface_witness
-    surface = _current_model_surface_witness({"model": vector.model,
-        "latitude_requested": original["point"]["requested_latitude"],
-        "longitude_requested": original["point"]["requested_longitude"],
-        "physical_proof_cutoff": written_at}, original["point"], _day0_artifact(conn, body_id))
-    if surface is None:
-        raise ValueError("DAY0_ORIGINAL_MODEL_SURFACE_UNAVAILABLE")
-    return {**meta, "__physical_response_reference_v1": {
-        "body_artifact_id": body_id, "http_receipt_artifact_id": int(receipt[0]),
-        "body_sha256": capture["sha256"],
-        "model_surface_witness": surface, "vector_written_at": written_at}}
-
-
-def _day0_replay_vector_original(conn: sqlite3.Connection, vector: Day0HourlyVector, *,
-        decision_bound_utc: datetime, provider: str = "openmeteo", endpoint: str | None = None,
-        request_hash: str | None = None) -> dict:
-    meta = json.loads(str(vector.source_run_meta_json or ""))
-    # The existing native ENS family is not a deterministic API vector. A retained
-    # deterministic descriptor cannot be relabelled as an ENS member to bypass replay.
-    if vector.immutable_run_member:
-        # The legacy OM Ensemble API rows have no retained original entity
-        # closure. Labels cannot confer authority or masquerade as deterministic
-        # evidence. Native ENS remains on read_native_measurement_role's independent
-        # GRIB/member/static proof path; its source cadence is the normal DRAIN.
-        raise ValueError("DAY0_ORIGINAL_PRODUCER_FAMILY_ENSEMBLE_UNAVAILABLE")
-    original = _day0_original_entity(vector, meta)
-    if (provider != "openmeteo" or (endpoint is not None and endpoint != meta["endpoint"])
-            or (request_hash is not None and (request_hash != meta["request_hash"]
-                or meta["source_run_id"] != f"day0_hourly:{request_hash}"))):
-        raise ValueError("DAY0_ORIGINAL_CANONICAL_IDENTITY_MISMATCH")
-    reference = meta["__physical_response_reference_v1"]
-    body = _day0_artifact(conn, reference["body_artifact_id"])
-    receipt = _day0_artifact(conn, reference["http_receipt_artifact_id"])
-    capture = original["capture"]
-    if body["sha256"] != reference["body_sha256"] or body["sha256"] != capture["sha256"]:
-        raise ValueError("DAY0_ORIGINAL_REFERENCE_HASH_MISMATCH")
-    receipt["body_artifact"] = body
-    from src.data.replacement_current_value_serving import _resolve_http_capture_receipt
-    resolved = _resolve_http_capture_receipt({"physical_artifact": receipt, "artifact_id": body["artifact_id"]})
-    if resolved is None:
-        raise ValueError("DAY0_ORIGINAL_HTTP_RECEIPT_INVALID")
-    physical = resolved["physical_artifact"]
-    mode = "single_runs" if meta["endpoint_mode"] == "single_runs" else "standard_meta_stamped"
-    if (physical["source_cycle_time"] != capture["source_cycle_time"]
-            or physical["source_id"] != f"{vector.model}_{mode}"
-            or physical["request_url"] != capture["request_url"]
-            or json.loads(physical["request_params_json"]) != capture["request_params"]
-            or physical["captured_at"] != capture["captured_at"]):
-        raise ValueError("DAY0_ORIGINAL_HTTP_BODY_IDENTITY_MISMATCH")
-    clocks = [original["run"], _day0_parse_aware_clock(capture["captured_at"], field_name="first_possession"),
-              _day0_parse_aware_clock(physical["recorded_at"], field_name="http_written"),
-              _day0_parse_aware_clock(reference["vector_written_at"], field_name="vector_written")]
-    body_written = _day0_parse_aware_clock(body["recorded_at"], field_name="body_written")
-    first_possession = _day0_parse_aware_clock(body["captured_at"], field_name="body_first_possession")
-    if (not clocks[0] <= first_possession <= body_written <= decision_bound_utc
-            or not first_possession <= clocks[1] <= clocks[2] <= clocks[3] <= decision_bound_utc):
-        raise ValueError("DAY0_ORIGINAL_POSSESSION_WRITTEN_PIT_INVALID")
-    request_capture = _day0_parse_aware_clock(vector.captured_at, field_name="request_capture")
-    started = _day0_parse_aware_clock(meta["fetch_started_at"], field_name="fetch_started")
-    finished = _day0_parse_aware_clock(meta["fetch_finished_at"], field_name="fetch_finished")
-    available = _day0_parse_aware_clock(meta["provider_source_available_at_utc"], field_name="provider_available")
-    modified = _day0_parse_aware_clock(meta["provider_source_modified_at_utc"], field_name="provider_modified")
-    if (not request_capture <= started <= finished <= decision_bound_utc
-            or not original["run"] <= available <= finished or not original["run"] <= modified <= finished):
-        raise ValueError("DAY0_ORIGINAL_LOCAL_PROVIDER_CLOCK_INVALID")
-    # Replay the frozen static witness, not an always-newest static reader.
-    surface = reference["model_surface_witness"]
-    point = original["point"]
-    if vector.model == "ecmwf_ifs":
-        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import validate_source_cell_geometry_proof
-        reason = validate_source_cell_geometry_proof(point["source_cell_geometry_proof"],
-            latitude=float(point["selected_latitude"]), longitude=float(point["selected_longitude"]),
-            target_elevation_m=float(point["target_dem_elevation_m"]),
-            requested_latitude=float(point["requested_latitude"]), requested_longitude=float(point["requested_longitude"]),
-            decision_at=decision_bound_utc)
-        if surface.get("geometry") != {**point["source_cell_geometry_proof"],
-                "native_surface": "SEA" if point["source_cell_geometry_proof"]["cell_is_sea"] else "LAND",
-                "native_grid_elevation_m": point["source_cell_geometry_proof"]["raw_grid_elevation_m"]}:
-            reason = "DAY0_ORIGINAL_STATIC_WITNESS_MISMATCH"
-    else:
-        from src.data.openmeteo_model_surface import validate_model_surface_witness
-        reason = validate_model_surface_witness(surface, model=vector.model,
-            selected_latitude=float(point["selected_latitude"]), selected_longitude=float(point["selected_longitude"]),
-            body_captured_at=body["captured_at"], decision_at=decision_bound_utc)
-    if reason is not None:
-        raise ValueError(f"DAY0_ORIGINAL_MODEL_SURFACE_UNAVAILABLE:{reason}")
-    return original
-
-
 def parse_openmeteo_hourly_payload(
     payload: object,
     *,
@@ -4133,7 +3348,7 @@ def parse_openmeteo_hourly_payload(
         ]
         if not pairs:
             return None
-        vector = Day0HourlyVector(
+        return Day0HourlyVector(
             model=model,
             city=city_name,
             target_date="",  # stamped per consumption window
@@ -4143,12 +3358,6 @@ def parse_openmeteo_hourly_payload(
             temps_c=tuple(v for _, v in pairs),
             source_run_meta_json=source_run_meta_json,
         )
-        try:
-            meta = json.loads(str(source_run_meta_json or ""))
-            _day0_original_entity(vector, meta, city=city)
-        except (KeyError, TypeError, ValueError, OSError, IndexError):
-            return None
-        return vector
 
     out: list[Day0HourlyVector] = []
     if isinstance(payload, list):
@@ -4224,7 +3433,6 @@ def persist_day0_hourly_vectors(
             if own_conn:
                 conn = get_forecasts_connection(write_class=WriteClass.LIVE)
             _ensure_schema(conn)
-            conn.execute("SAVEPOINT day0_vector_originals")
             for vector in vectors:
                 if not _vector_covers_target_from_capture(
                     vector, target_date=target_date
@@ -4239,22 +3447,15 @@ def persist_day0_hourly_vectors(
                     )
                     continue
                 row_id = _vector_id(vector.model, vector.city, target_date, vector.captured_at)
-                if conn.execute("SELECT 1 FROM day0_hourly_vectors WHERE vector_id=?", (row_id,)).fetchone():
-                    continue  # immutable prior rows, including unproved legacy captures, are not backfilled
                 row_endpoint = endpoint
-                stored_meta = vector.source_run_meta_json
                 try:
                     source_meta = json.loads(str(vector.source_run_meta_json or ""))
                     if isinstance(source_meta, Mapping) and str(
                         source_meta.get("endpoint") or ""
                     ).strip():
                         row_endpoint = str(source_meta["endpoint"]).strip()
-                    if not vector.immutable_run_member or "__physical_response_capture_v1" in source_meta:
-                        source_meta = _day0_register_vector_original(conn, vector, dict(source_meta))
-                        stored_meta = json.dumps(source_meta, sort_keys=True, separators=(",", ":"))
-                except (KeyError, TypeError, ValueError, OSError, IndexError) as exc:
-                    logger.warning("DAY0_ORIGINAL_VECTOR_UNAVAILABLE city=%s model=%s reason=%s", vector.city, vector.model, exc)
-                    continue
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
                 cur = conn.execute(
                     """
                     INSERT OR IGNORE INTO day0_hourly_vectors (
@@ -4268,7 +3469,7 @@ def persist_day0_hourly_vectors(
                         vector.timezone_name, vector.captured_at, row_endpoint,
                         request_hash, json.dumps(list(vector.times)),
                         json.dumps(list(vector.temps_c)),
-                        stored_meta,
+                        vector.source_run_meta_json,
                     ),
                 )
                 written += int(cur.rowcount or 0)
@@ -4279,12 +3480,7 @@ def persist_day0_hourly_vectors(
                 "DELETE FROM day0_hourly_vectors WHERE captured_at < ?",
                 (cutoff_iso,),
             )
-            conn.execute("RELEASE SAVEPOINT day0_vector_originals")
             conn.commit()
-    except Exception:
-        if conn is not None:
-            conn.rollback()
-        raise
     finally:
         # conn can be None when the connection-open itself failed inside the
         # flock — guard so the original exception is never masked (PR review
@@ -4735,7 +3931,7 @@ def read_freshest_day0_hourly_vectors(
             rows = conn.execute(
                 """
                 SELECT model, city, target_date, timezone_name, captured_at,
-                       times_json, temps_c_json, source_run_meta_json, provider, endpoint, request_hash
+                       times_json, temps_c_json, source_run_meta_json
                 FROM day0_hourly_vectors
                 WHERE city = ? AND target_date = ?
                   AND julianday(captured_at) <= julianday(?)
@@ -4783,11 +3979,6 @@ def read_freshest_day0_hourly_vectors(
                     None if row[7] in (None, "") else str(row[7])
                 ),
             )
-            try:
-                _day0_replay_vector_original(conn, candidate, decision_bound_utc=moment,
-                    provider=str(row[8]), endpoint=str(row[9]), request_hash=str(row[10]))
-            except (KeyError, TypeError, ValueError, OSError, IndexError):
-                continue
             candidates.append(candidate)
         return select_ready_day0_hourly_vectors(
             candidates,
@@ -5502,7 +4693,6 @@ def remaining_day_extremes_c_with_current_state(
     current_state: Day0CurrentTemperatureState | None,
     settlement_unit: str,
     fallback_window_start: datetime,
-    unresolved_window_start: datetime | None = None,
 ) -> tuple[list[float], dict[str, float]]:
     """Apply the sole Day0 current-state transform, or the shared no-state path."""
 
@@ -5526,7 +4716,7 @@ def remaining_day_extremes_c_with_current_state(
     if observed_utc > decision_time.astimezone(UTC):
         return [], {}
     aligned = align_day0_hourly_vectors_on_common_causal_grid(
-        vectors, target_date=target_date, window_start=(unresolved_window_start or observed_utc)
+        vectors, target_date=target_date, window_start=observed_utc
     )
     if aligned is None:
         return [], {}
@@ -5568,14 +4758,6 @@ def remaining_day_extremes_c_with_current_state(
             return [], {}
         remaining_indices = [0]
     remaining = conditioned_members[:, remaining_indices]
-    if unresolved_window_start is not None:
-        # A spot update does not supply cumulative coverage of the gap before
-        # it. Keep the issued forecast approximation there, without applying
-        # a future innovation backwards or replacing a past knot by the spot.
-        past_indices = [i for i, at in enumerate(causal_grid)
-                        if unresolved_window_start <= at <= observed_utc]
-        if past_indices:
-            remaining = np.concatenate((np.asarray(aligned_rows)[:, past_indices], remaining), axis=1)
     values = remaining.min(axis=1) if metric == "low" else remaining.max(axis=1)
     return (
         [float(value) for value in values.tolist()],

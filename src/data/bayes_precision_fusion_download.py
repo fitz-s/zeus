@@ -1136,16 +1136,6 @@ def _single_runs_payload_has_reusable_hourly_axis(
     # It never grants that suffix a full-day scalar or a new capture receipt.
     # Internal holes/right-tail loss remain retryable, not pinned for 24 hours.
     for target_local_date in target_local_dates:
-        if isinstance(target_local_date, str):
-            try:
-                parsed_day = date.fromisoformat(target_local_date)
-            except ValueError:
-                return False
-            if parsed_day.isoformat() != target_local_date:
-                return False
-            target_local_date = parsed_day
-        elif type(target_local_date) is not date:
-            return False
         parsed = _parse_batched_single_runs_payload(
             payload, list(models), target_local_date, timezone_name,
         )
@@ -1160,16 +1150,6 @@ def _single_runs_payload_has_reusable_hourly_axis(
 
 def _single_runs_intrinsic_left_prefix(payload, *, model, run, target_local_date, timezone_name):
     if run is None or run.tzinfo is None:
-        return False
-    if isinstance(target_local_date, str):
-        try:
-            parsed_day = date.fromisoformat(target_local_date)
-        except ValueError:
-            return False
-        if parsed_day.isoformat() != target_local_date:
-            return False
-        target_local_date = parsed_day
-    elif type(target_local_date) is not date:
         return False
     from src.data.openmeteo_ecmwf_ifs9_anchor import (
         _parse_openmeteo_time, _localday_hourly_slots, extract_openmeteo_ecmwf_ifs9_localday_anchor,
@@ -3293,35 +3273,6 @@ def _persist_http_capture_receipt(conn, row: Mapping[str, object], capture: Mapp
     )
 
 
-def _persist_physical_response_artifact(conn, row: Mapping[str, object], capture: Mapping[str, object],
-        *, station: bool = False) -> tuple[int, str, str]:
-    """Register existing immutable entity bytes, without manufacturing forecast values.
-
-    Caller owns the FORECAST transaction and separately records genuine HTTP events.
-    ON CONFLICT preserves this entity's original first-possession clocks.
-    """
-    data_version = "station_forecast_entity_body_v1" if station else "openmeteo_single_model_entity_body_v1"
-    metadata = {"station_response": capture["station_response"]} if station else {"physical_response": dict(capture)}
-    conn.execute(
-        """INSERT INTO raw_forecast_artifacts
-           (source_id,product_id,data_version,source_cycle_time,source_available_at,
-            captured_at,artifact_path,sha256,byte_size,request_url,request_params_json,
-            artifact_metadata_json,recorded_at,training_allowed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)
-           ON CONFLICT(source_id,product_id,data_version,source_cycle_time,sha256) DO NOTHING""",
-        (row["source_id"], row["product_id"], data_version,
-         row["source_cycle_time"], row["source_available_at"], capture["captured_at"],
-         capture["artifact_path"], capture["sha256"], capture["byte_size"],
-         capture["request_url"], json.dumps(capture["request_params"], sort_keys=True),
-         json.dumps(metadata, sort_keys=True), datetime.now(UTC).isoformat()),
-    )
-    artifact = conn.execute(
-        "SELECT artifact_id,captured_at,source_available_at FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? "
-        "AND data_version=? AND source_cycle_time=? AND sha256=?",
-        (row["source_id"], row["product_id"], data_version, row["source_cycle_time"], capture["sha256"]),
-    ).fetchone()
-    return int(artifact[0]), str(artifact[1]), str(artifact[2])
-
-
 def _persist_rows(
     conn,
     rows: Sequence[dict],
@@ -3369,8 +3320,29 @@ def _persist_rows(
         row.setdefault("artifact_id", None)
         if not isinstance(capture, Mapping):
             continue
+        # Existing raw artifact relation, in the same forecast transaction as rows.
         params = capture["request_params"]
-        artifact = _persist_physical_response_artifact(conn, row, capture, station=station)
+        data_version = "station_forecast_entity_body_v1" if station else "openmeteo_single_model_entity_body_v1"
+        metadata = {"station_response": capture["station_response"]} if station else {"physical_response": dict(capture)}
+        conn.execute(
+            """INSERT INTO raw_forecast_artifacts
+               (source_id,product_id,data_version,source_cycle_time,source_available_at,
+                captured_at,artifact_path,sha256,byte_size,request_url,request_params_json,
+                artifact_metadata_json,recorded_at,training_allowed) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0)
+               ON CONFLICT(source_id,product_id,data_version,source_cycle_time,sha256)
+               DO NOTHING""",
+            (row["source_id"], row["product_id"], data_version,
+             row["source_cycle_time"], row["source_available_at"], capture["captured_at"],
+             capture["artifact_path"], capture["sha256"], capture["byte_size"],
+             capture["request_url"], json.dumps(params, sort_keys=True),
+             json.dumps(metadata, sort_keys=True), datetime.now(UTC).isoformat()),
+        )
+        artifact = conn.execute(
+            "SELECT artifact_id,captured_at,source_available_at FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? "
+            "AND data_version=? AND source_cycle_time=? AND sha256=?",
+            (row["source_id"], row["product_id"], data_version,
+             row["source_cycle_time"], capture["sha256"]),
+        ).fetchone()
         row["artifact_id"], row["raw_sha256"] = int(artifact[0]), capture["sha256"]
         event = capture.get("network_capture")
         event_key = (row["source_id"], row["product_id"], row["source_cycle_time"], capture["sha256"],

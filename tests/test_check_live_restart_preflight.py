@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Lifecycle: created=2026-06-18; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -150,6 +150,7 @@ def test_upgrade_probability_connection_keeps_exact_read_only_roots_and_lifetime
         failed.execute("SELECT 1")
 
 
+@pytest.mark.skip(reason="v7 native-role producer restored to 620a0b5f5 bytes by 6f9bca665; re-lands with that series")
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeypatch, metric):
@@ -250,6 +251,7 @@ def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeyp
     assert any(item.get("current_input_proof", {}).get("basis") == "qualified_current_inputs" for item in proofs)
 
 
+@pytest.mark.skip(reason="v7 native-role producer restored to 620a0b5f5 bytes by 6f9bca665; re-lands with that series")
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_upgrade_full_Y_public_local_day_rollover(tmp_path, monkeypatch, metric):
@@ -673,121 +675,6 @@ def test_upgrade_current_inputs_reuse_canonical_event_overlay_law(monkeypatch, m
                                     if change == "monotone" else "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISMATCH")
     finally:
         conn.close()
-
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-@pytest.mark.parametrize("city_name", ("London", "Chicago"))
-@pytest.mark.parametrize("fault", (
-    "none", "station", "body", "identity", "spot", "missing_spot", "bool_spot",
-    "city", "date", "metric", "unit", "contract", "valid", "missing_raw",
-    "future_available", "future_received", "future_created", "naive_available",
-    "future_print", "naive_print", "ledger_temperature", "ledger_unit", "sealed_unit",
-))
-def test_upgrade_current_metar_requires_canonical_spot_closure(monkeypatch, metric, city_name, fault):
-    """Actual source reader; empty vectors never become READY or qualified q."""
-    from src.config import runtime_cities_by_name, settlement_source_type_for_city
-    from src.data import day0_hourly_vectors as hourly
-    from src.data.day0_fast_obs import _normalized_raw_report_identity
-    from src.events.opportunity_event import make_opportunity_event
-    from src.state.schema.observation_prints_schema import append_print, ensure_table
-    from src.state.schema.opportunity_events_schema import ensure_table as ensure_events
-    city = runtime_cities_by_name()[city_name]
-    now = datetime(2026,10,7,14,25,tzinfo=timezone.utc)
-    valid, published, fetched = now-timedelta(minutes=5), now-timedelta(minutes=4), now-timedelta(minutes=3)
-    target = valid.astimezone(ZoneInfo(city.timezone)).date().isoformat()
-    raw = f"{city.wu_station} {valid:%d%H%M}Z 00000KT CAVOK 11/01 Q1013 RMK AO2 T01100010"
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    ensure_table(conn); ensure_events(conn)
-    hourly._ensure_schema(conn)
-    if fault == "naive_print":
-        # The canonical admission boundary rejects this before any immutable
-        # print exists. Do not disable its append-only trigger to forge one.
-        with pytest.raises(ValueError):
-            append_print(conn,city=city.name,station_id=city.wu_station,
-                source_channel="aviationweather_metar",publish_ts_utc=published.replace(tzinfo=None).isoformat(),
-                fetched_at_utc=fetched.isoformat(),value_native=11.,unit="C",raw_report=raw)
-        assert conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0] == 0
-        conn.close()
-        return
-    print_published = (now+timedelta(seconds=1)).isoformat() if fault == "future_print" else published.isoformat()
-    append_print(conn, city=city.name, station_id=city.wu_station,
-        source_channel="aviationweather_metar", publish_ts_utc=print_published,
-        fetched_at_utc=max(fetched,now+timedelta(seconds=2)).isoformat() if fault == "future_print" else fetched.isoformat(),
-        value_native=12. if fault == "ledger_temperature" else 11.,
-        unit="F" if fault == "ledger_unit" else "C", raw_report=raw)
-    payload = dict(city=city.name,target_date=target,metric=metric,station_id=city.wu_station,
-        settlement_source="aviationweather_metar",settlement_source_type=settlement_source_type_for_city(city,target),
-        observation_time=valid.isoformat(),observation_available_at=published.isoformat(),
-        current_observation_temp_c=11.,current_observation_raw_report=raw,
-        raw_report_identity=_normalized_raw_report_identity(raw))
-    changed = {"station": {"station_id":"FOREIGN"}, "body": {"current_observation_raw_report":raw+" COR"},
-        "identity":{"raw_report_identity":"0"*64}, "spot":{"current_observation_temp_c":12.},
-        "bool_spot":{"current_observation_temp_c":True}, "city":{"city":"Paris"},
-        "date":{"target_date":"2026-10-06"}, "metric":{"metric":"low" if metric=="high" else "high"},
-        "unit":{"settlement_unit":"F" if city.settlement_unit=="C" else "C"},
-        "contract":{"settlement_source_type":"foreign"}, "valid":{"observation_time":(valid-timedelta(minutes=1)).isoformat()}}
-    payload.update(changed.get(fault, {}))
-    if fault == "missing_raw": del payload["current_observation_raw_report"]
-    if fault == "missing_spot": del payload["current_observation_temp_c"]
-    available, received, created = published.isoformat(), fetched.isoformat(), now.isoformat()
-    if fault == "future_available": available = (now+timedelta(seconds=1)).isoformat()
-    if fault == "future_received": received = (now+timedelta(seconds=1)).isoformat()
-    if fault == "future_created": created = (now+timedelta(seconds=1)).isoformat()
-    if fault == "naive_available": available = published.replace(tzinfo=None).isoformat()
-    def event_from_protocol():
-        return make_opportunity_event(event_type="DAY0_EXTREME_UPDATED",entity_key=f"{city.name}|{target}|{metric}",
-            source="private-source-closure",observed_at=valid.isoformat(),available_at=available,
-            received_at=received,created_at=created,payload=payload)
-    if fault == "naive_available":
-        from src.events.opportunity_event import OpportunityEventValidationError
-        with pytest.raises(OpportunityEventValidationError, match="must include timezone"):
-            event_from_protocol()
-        assert conn.execute("SELECT COUNT(*) FROM opportunity_events").fetchone()[0] == 0
-        conn.close()
-        return
-    event = event_from_protocol()
-    conn.execute("""INSERT INTO opportunity_events VALUES (
-        :event_id,:event_type,:entity_key,:source,:observed_at,:available_at,
-        :received_at,:causal_snapshot_id,:payload_hash,:idempotency_key,
-        :priority,:expires_at,:payload_json,:schema_version,:created_at)""", asdict(event))
-    source = "aviationweather_metar"
-    native_value = 11. if city.settlement_unit=="C" else 11.*9/5+32
-    shapes = {"unit":"foreign" if fault=="sealed_unit" else city.settlement_unit,
-        "X":{"scope_start_utc":valid.isoformat(),"provider_inputs":[],
-            "provider_current_state":{"value_native":native_value,"source":source,"input_ref":{"print_id":-1}}}}
-    bundle = SimpleNamespace(provenance_json={"day0_measurement_domain_shapes":shapes,
-        "day0_provisional_observation":{"active":True,"source":"unrelated_composite_source"}})
-    reads = []
-    owning_vectors = hourly.read_freshest_day0_hourly_vectors
-    def vectors(**kwargs):
-        reads.append(kwargs)
-        return owning_vectors(**kwargs)
-    monkeypatch.setattr(hourly,"read_freshest_day0_hourly_vectors",vectors)
-    try:
-        ok, proof = preflight._probability_upgrade_current_inputs(conn,bundle=bundle,city=city,
-            target_date=target,metric=metric,now=now)
-        assert not ok  # No independent native/provider proof exists here.
-        assert len(reads) == (1 if fault=="none" else 0), proof
-        if fault=="none":
-            assert proof["reason"] == "PROBABILITY_UPGRADE_PENDING_CURRENT_PREPARATION"
-    finally:
-        conn.close()
-
-
-def test_upgrade_old_pin_rejects_high_correction_34_to_32():
-    from src.engine.monitor_refresh import _pinned_complete_bundle_matches_current_day0_event
-    from src.events.opportunity_event import make_opportunity_event
-    earlier = "2026-10-07T10:00:00+00:00"
-    bundle = SimpleNamespace(provenance_json={"day0_provisional_observation":{
-        "source":"hko_hourly_accumulator","metric":"high","unit":"C",
-        "observed_extreme_c":34.,"observation_time":earlier}})
-    event = make_opportunity_event(event_type="DAY0_EXTREME_UPDATED",entity_key="Hong Kong|2026-10-07|high",
-        source="private-overlay-control",observed_at="2026-10-07T10:01:00+00:00",
-        available_at="2026-10-07T10:01:00+00:00",received_at="2026-10-07T10:01:00+00:00",payload={
-            "metric":"high","settlement_source":"hko_hourly_accumulator","settlement_unit":"C",
-            "observation_time":"2026-10-07T10:01:00+00:00","high_so_far":32.})
-    assert not _pinned_complete_bundle_matches_current_day0_event(bundle,event,metric="high",settlement_unit="C")
 
 
 def _absolute_price_band_cfg(

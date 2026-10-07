@@ -1,6 +1,3 @@
-# Created: 2026-09-18 (git c18b7be26e45)
-# Lifecycle: last_reviewed=2026-10-07; last_reused=2026-10-07
-# Authority: current finite_evidence_probability_symmetry packet C original closure.
 """Endpoint fallback must not read as a different observation.
 
 ``_select_day0_run_endpoint`` (35ff9a3dc) deliberately falls back from the
@@ -164,7 +161,6 @@ def test_transport_and_replica_clock_fields_are_the_only_widening():
             "source_run_authority",
             "provider_source_available_at_utc",
             "provider_source_modified_at_utc",
-            "provider_metadata_bracket_evidence",
         }
     )
     for field in (

@@ -119,10 +119,6 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
 
     if not current_day0_probability_mixture_policy_has_authority(provenance):
         return "REPLACEMENT_DAY0_PROBABILITY_MIXTURE_POLICY_NOT_CURRENT"
-    if provenance.get("day0_measurement_domain_shapes") is not None:
-        reason = _day0_measurement_domain_carrier_reason(provenance)
-        if reason is not None:
-            return reason
     identity_field = "day0_remaining_carrier_content_identity"
     operator_field = "day0_remaining_carrier_operator"
     has_identity = identity_field in provenance
@@ -190,17 +186,6 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
             return "REPLACEMENT_DAY0_FINAL_EXTREME_OPERATOR_MISMATCH"
         return None
     if operator == DAY0_REMAINING_CARRIER_OPERATOR_V3:
-        roles = provenance.get("day0_measurement_domain_shapes")
-        if isinstance(roles, Mapping) and "Y" not in roles:
-            from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
-            if (roles.get("semantics_revision") != DAY0_PROBABILITY_SEMANTICS_REVISION
-                    or roles.get("schema") != "day0_measurement_domain_shapes_v1"):
-                return "REPLACEMENT_DAY0_DOMAIN_SEMANTICS_NOT_CURRENT"
-            # The qualified role replay above admits X-only proposals when Y
-            # lacks an identified prefix likelihood; it does not invent Y.
-            if providers not in (None, (), []) or final not in (None, (), []):
-                return "REPLACEMENT_DAY0_FINAL_EXTREME_OPERATOR_MISMATCH"
-            return None
         if not isinstance(providers, (list, tuple)) or not providers:
             return "REPLACEMENT_DAY0_FINAL_EXTREME_PROVIDERS_INVALID"
         if not isinstance(final, (list, tuple)) or not final or len(providers) != len(final):
@@ -442,48 +427,6 @@ def _held_pinned_carrier_claimed(provenance: Mapping[str, Any]) -> bool:
     )
 
 
-def _day0_measurement_domain_carrier_reason(provenance: Mapping[str, Any]) -> str | None:
-    """Re-integrate the immutable role-point world, not the confidence supremum."""
-    from src.contracts.settlement_semantics import SettlementSemantics
-    from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
-
-    try:
-        domains = provenance["day0_measurement_domain_shapes"]
-        replay = provenance["day0_measurement_domain_replay_inputs"]
-        inputs = dict(replay["identity_inputs"])
-        inputs["domain_role_shapes"] = domains
-        city = cities_by_name[str(inputs["city"])]
-        if any(role.get("city") != inputs["city"] for name, role in domains.items()
-               if name in {"X", "Y"}):
-            return "REPLACEMENT_DAY0_DOMAIN_CARRIER_SCOPE_MISMATCH"
-        semantics = SettlementSemantics.for_city(city)
-        scale, offset = (1.0, 0.0) if semantics.measurement_unit == "C" else (1.8, 32.0)
-        topology = provenance["bin_topology"]
-        rebuilt = build_day0_remaining_probability_carrier(
-            future_extremes_c=[float(v) * scale + offset for v in provenance["day0_remaining_carrier_future_extremes_c"]],
-            final_extreme_centers_c=[float(v) * scale + offset for v in provenance.get("day0_remaining_carrier_final_extremes_c", ())],
-            boundary_scenarios=tuple((boundary, weight) for boundary, weight in replay["boundary_scenarios"]),
-            metric=str(domains["X"]["temperature_metric"]),
-            path_error_sigma_c=float(provenance["day0_remaining_carrier_path_error_sigma_c"]) * scale,
-            instrument_sigma_c=0.0,
-            bin_bounds_c=[(None if row["lower_c"] is None else float(row["lower_c"]) * scale + offset,
-                           None if row["upper_c"] is None else float(row["upper_c"]) * scale + offset) for row in topology],
-            n_point=int(replay["n_point"]), n_samples=int(provenance["day0_remaining_carrier_sample_count"]),
-            identity_inputs=inputs, settlement_semantics=semantics,
-            operator=str(provenance["day0_remaining_carrier_operator"]),
-            remaining_center_bias_native=0.0)
-        if rebuilt["content_identity"] != provenance["day0_remaining_carrier_content_identity"]:
-            return "REPLACEMENT_DAY0_DOMAIN_CARRIER_IDENTITY_MISMATCH"
-        if rebuilt["identification_bounds"] != provenance["day0_measurement_domain_identification_bounds"]:
-            return "REPLACEMENT_DAY0_DOMAIN_CONFIDENCE_IDENTITY_MISMATCH"
-        if (rebuilt["q"] != provenance["day0_remaining_carrier_q"]
-                or rebuilt["samples"] != day0_remaining_carrier_samples_row_major(provenance)):
-            return "REPLACEMENT_DAY0_DOMAIN_CARRIER_VALUE_MISMATCH"
-    except (KeyError, IndexError, TypeError, ValueError, OverflowError):
-        return "REPLACEMENT_DAY0_DOMAIN_CARRIER_REPLAY_INVALID"
-    return None
-
-
 def _wu_fast_pinned_carrier_reason(
     provenance: Mapping[str, Any],
     *,
@@ -585,9 +528,6 @@ def _wu_fast_pinned_carrier_reason(
         from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
 
         identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
-        domain_shapes = provenance.get("day0_measurement_domain_shapes")
-        if domain_shapes is not None:
-            identity_inputs["domain_role_shapes"] = domain_shapes
         conditional_identity = provenance.get("day0_conditional_high_shape_identity")
         conditional_witness = provenance.get("day0_conditional_high_shape_witness")
         conditional_basis = provenance.get("day0_remaining_variance_basis")
@@ -621,8 +561,7 @@ def _wu_fast_pinned_carrier_reason(
             future_extremes_c=future, final_extreme_centers_c=final,
             boundary_scenarios=((None, 1.0),), metric=metric,
             path_error_sigma_c=float(provenance["day0_remaining_carrier_path_error_sigma_c"]) * scale,
-            instrument_sigma_c=(0.0 if domain_shapes is not None else
-                                float(sigma_instrument_for_city(city_obj).to(unit).value)),
+            instrument_sigma_c=float(sigma_instrument_for_city(city_obj).to(unit).value),
             bin_bounds_c=bounds, n_point=ensemble_n_mc(), n_samples=500,
             identity_inputs=identity_inputs,
             settlement_semantics=SettlementSemantics.for_city(city_obj),
@@ -633,9 +572,6 @@ def _wu_fast_pinned_carrier_reason(
         return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_INVALID"
     if provenance.get("day0_remaining_carrier_content_identity") != carrier["content_identity"]:
         return "REPLACEMENT_PINNED_DAY0_FAST_RESIDUAL_CARRIER_IDENTITY_MISMATCH"
-    if domain_shapes is not None and provenance.get(
-            "day0_measurement_domain_identification_bounds") != carrier.get("identification_bounds"):
-        return "REPLACEMENT_PINNED_DAY0_DOMAIN_CONFIDENCE_IDENTITY_MISMATCH"
     try:
         persisted_q = tuple(float(value) for value in provenance["day0_remaining_carrier_q"])
         persisted_samples = day0_remaining_carrier_samples_row_major(provenance)
@@ -1109,18 +1045,6 @@ def _current_ensemble_snapshot_identity_reason(
     shape = fusion.get("current_evidence_shape") if isinstance(fusion, Mapping) else None
     if not isinstance(shape, Mapping) or shape.get("snapshot_id") != snapshot_id:
         return "REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH"
-    if shape.get("admission_role") == "remaining_X":
-        # Full-day coverage is not X scope coverage. The current Day0 variant
-        # must reproduce both its carrier and its exact original role subset.
-        from src.data.replacement_forecast_cycle_policy import remaining_x_admission_shape_matches_domain
-        from src.data.day0_hourly_vectors import replay_native_measurement_role_identity
-        if (not remaining_x_admission_shape_matches_domain(provenance)
-                or not replay_native_measurement_role_identity(conn, shape["native_point_model"],
-                    city=cities_by_name[city], target_date=target_date, metric=metric,
-                    decision_time=_parse_utc(provenance["day0_remaining_carrier_probability_cutoff_utc"],
-                        field_name="day0_remaining_carrier_probability_cutoff_utc"))):
-            return "REPLACEMENT_CURRENT_X_SCOPE_AUTHORITY_UNAVAILABLE"
-        return None
     compatibility_reason = native_coordinate_certificate_reason(conn, shape=shape,
         city=city, target_date=target_date, metric=metric)
     if compatibility_reason is not None:

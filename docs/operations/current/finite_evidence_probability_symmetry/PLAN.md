@@ -21638,3 +21638,27 @@ docs/ref drift stays separate from changed-surface results. Any final failure
 is a blocker, not permission to skip. Landing and the registered loader remain
 pending ROOT's exact-TIP acceptance; runtime MAIN/source/qualification proof
 cannot be inferred from these synthetic fixtures or source actors' BOOT.
+
+## 2026-10-07 third runtime restore to c696081f2 (fourth v7 load, every posterior blocked)
+
+At 16:49:43Z the live checkout was fast-forwarded to 64e4951ec, and at 16:50Z
+data-ingest and forecast-live were reloaded (MAIN untouched). That loaded the
+native-role series again (1c92057b2 "restore verified independent native role
+contract", with 164d02e97, 519c3ff0a, 7bd790222, bedb876fd, a009dc557). The
+same load included a1da25eb6, which moved deploy_live's forecast-live replay
+gate from before the reload to after it. A refusal therefore no longer
+prevents the bad code from serving; it only reports after the damage.
+
+From 16:50:10Z, 17 materializer runs committed 0 posteriors (16
+FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE). Dry-run of six live requests:
+64e4951ec gives 0/6 READY; this restore gives 4/6 READY (the other two are
+request-level data blocks, as on any healthy tree).
+
+Restore: the 13 runtime files changed since c696081f2, and their 15 coupled
+test files, return to c696081f2 bytes. That includes deploy_live.py, so the
+gate runs before the reload again.
+
+This is the fourth forecast-live load of this series that blocked serving.
+The re-land path is the producer/consumer split recorded above. Native capture
+must reach COMPLETE under v6 serving first. No forecast-live load may move
+the replay gate after the reload.

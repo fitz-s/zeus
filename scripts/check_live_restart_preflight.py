@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Lifecycle: created=2026-06-18; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-10-07
+# Last reused or audited: 2026-10-06
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -4948,81 +4948,13 @@ def _probability_upgrade_current_inputs(conn, *, bundle, city, target_date, metr
     event = _probability_upgrade_current_day0_event(
         conn, city=city.name, target_date=target_date, metric=metric, now=now,
     )
-    if event is None:
+    if event is None or not _pinned_complete_bundle_matches_current_day0_event(
+        bundle, event, metric=metric, settlement_unit=city.settlement_unit,
+    ):
         return False, {"reason": "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISMATCH"}
     state = hourly.read_day0_current_temperature_state(
         conn=conn, city=city, target_date=target_date, decision_time=now,
     )
-    if state is not None and state.source == "aviationweather_metar":
-        # SCOPE: this current city/date/metric report, not an old carrier's
-        # monotone overlay. DRAIN: normal source/emitter/materialization.
-        # RESET: the current original report and causal event close again.
-        # Publication may lag valid time; a composite residual source label
-        # and a margin/extreme are neither the report's source nor its spot.
-        from src.data.day0_fast_obs import (
-            _normalized_raw_report_identity, metar_observation_time_from_raw,
-            metar_temperature_c,
-        )
-        from src.config import settlement_source_type_for_city
-        try:
-            payload = json.loads(event.payload_json)
-            print_id = state.input_ref["print_id"]
-            if type(print_id) is not int or print_id <= 0:
-                raise ValueError("current print identity missing")
-            attached = {str(row[1]) for row in conn.execute("PRAGMA database_list")}
-            table = "world.observation_prints" if "world" in attached else "observation_prints"
-            original = conn.execute(
-                f"SELECT city,station_id,source_channel,publish_ts_utc,fetched_at_utc,"
-                f"value_native,unit,raw_report FROM {table} WHERE id=?", (print_id,),
-            ).fetchone()
-            if original is None:
-                raise ValueError("current original missing")
-            def causal(text):
-                value = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
-                if value.tzinfo is None or value.utcoffset() is None or value > now:
-                    raise ValueError("current report clock unavailable")
-                return value.astimezone(timezone.utc)
-            published, fetched = causal(original[3]), causal(original[4])
-            valid = metar_observation_time_from_raw(str(original[7]), published_at=published)
-            raw = str(original[7] or "")
-            tokens = raw.upper().split()
-            station_token = tokens[1] if tokens and tokens[0] in {"METAR", "SPECI"} else tokens[0]
-            station, channels = hourly.day0_current_temperature_channels(city)
-            spot_c = float(payload["current_observation_temp_c"])
-            spot_native = spot_c if city.settlement_unit == "C" else spot_c * 9.0 / 5.0 + 32.0
-            available, received, created = causal(event.available_at), causal(event.received_at), causal(event.created_at)
-            if not (
-                event.event_type == "DAY0_EXTREME_UPDATED"
-                and payload["city"] == original[0] == city.name
-                and payload["target_date"] == str(target_date)
-                and payload["metric"] == metric and metric in {"high", "low"}
-                and payload["station_id"] == original[1] == station_token == station
-                and payload["settlement_source"] == original[2] == state.source
-                and state.source in channels
-                and payload["settlement_source_type"] == settlement_source_type_for_city(city, target_date)
-                # The owning event DTO names Celsius in this field and has
-                # no unit member. Reject contradictory external unit fields.
-                and all(payload.get(field, city.settlement_unit) == city.settlement_unit
-                        for field in ("settlement_unit", "unit"))
-                and original[6] == "C" and type(payload["current_observation_temp_c"]) is not bool
-                and math.isfinite(spot_c) and spot_c == float(original[5]) == metar_temperature_c(raw)
-                and spot_native == state.value_native
-                and valid == causal(payload["observation_time"]) == state.observed_at == causal(event.observed_at)
-                and valid.astimezone(ZoneInfo(city.timezone)).date().isoformat() == str(target_date)
-                and payload["current_observation_raw_report"] == raw
-                and payload["raw_report_identity"] == _normalized_raw_report_identity(raw)
-                and valid <= published <= fetched <= received <= created
-                and published <= available <= received
-                and causal(payload["observation_available_at"]) == available
-            ):
-                raise ValueError("current report/event mismatch")
-        except (KeyError, TypeError, ValueError, IndexError, sqlite3.Error):
-            return False, {"reason": "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISMATCH"}
-    elif not _pinned_complete_bundle_matches_current_day0_event(
-        bundle, event, metric=metric, settlement_unit=city.settlement_unit,
-    ):
-        # Unproved source protocols retain the strict existing path.
-        return False, {"reason": "PROBABILITY_UPGRADE_CURRENT_DAY0_EVENT_MISMATCH"}
     sealed_state = x.get("provider_current_state")
     if (state is None or not isinstance(sealed_state, dict)
             or state.source != sealed_state.get("source")

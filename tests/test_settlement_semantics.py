@@ -1,5 +1,5 @@
 # Created: 2026-04-27 (BATCH C of 2026-04-27 harness debate executor work)
-# Last reused/audited: 2026-10-07
+# Last reused/audited: 2026-04-27
 # Authority basis: docs/operations/task_2026-04-27_harness_debate/round2_verdict.md
 #   §1.1 #4 + §4.1 #4 + opponent §3.1 (relationship test for type-encoded HK
 #   HKO antibody). Per Fitz "test relationships, not just functions" — these
@@ -18,7 +18,6 @@ Test count = 3 (per BATCH C dispatch baseline arithmetic 73 + 3 = 76).
 from __future__ import annotations
 
 from decimal import Decimal
-import json
 
 import pytest
 
@@ -27,114 +26,6 @@ from src.contracts.settlement_semantics import (
     WMO_HalfUp,
     settle_market,
 )
-
-
-@pytest.mark.parametrize("unit,rule", [("C", "oracle_truncate"), ("F", "wmo_half_up")])
-def test_frozen_settlement_semantics_does_not_read_current_city(monkeypatch, unit, rule):
-    from src.contracts.settlement_semantics import SettlementSemantics
-    payload = dict(resolution_source="frozen_station", measurement_unit=unit,
-        precision=1., rounding_rule=rule, finalization_time="12:00:00Z")
-    monkeypatch.setattr(SettlementSemantics, "for_city", classmethod(
-        lambda *_: (_ for _ in ()).throw(AssertionError("current city drift"))))
-    restored = SettlementSemantics.from_frozen_payload(payload)
-    assert restored.measurement_unit == unit and restored.rounding_rule == rule
-    assert restored.round_single(28.7) == (28. if rule == "oracle_truncate" else 29.)
-
-
-@pytest.mark.parametrize("field,value", [("precision", float("nan")), ("precision", 0.),
-    ("precision", True), ("rounding_rule", "unknown"), ("measurement_unit", "K"),
-    ("finalization_time", "25:00:00Z"), ("resolution_source", ""), ("extra", 1)])
-def test_frozen_settlement_semantics_refuses_invalid_fields(field, value):
-    from src.contracts.settlement_semantics import SettlementSemantics
-    payload = dict(resolution_source="frozen_station", measurement_unit="C",
-        precision=1., rounding_rule="wmo_half_up", finalization_time="12:00:00Z")
-    payload[field] = value
-    with pytest.raises(ValueError): SettlementSemantics.from_frozen_payload(payload)
-
-
-@pytest.mark.parametrize("step", [1., 5./9.])
-@pytest.mark.parametrize("rule", ["wmo_half_up", "oracle_truncate", "floor", "ceil"])
-def test_preimage_axis_quantization_preserves_negative_half_boundary_neighbors(step, rule):
-    import numpy as np
-    from src.contracts.settlement_semantics import quantize_preimage_axis
-    thresholds = np.array([-1.5, -.5, .5, 1.5])*step
-    values = np.concatenate([np.nextafter(thresholds, -np.inf), thresholds,
-                             np.nextafter(thresholds, np.inf)])
-    scaled = values*(1./step)
-    rounded = (np.floor(scaled+.5) if rule == "wmo_half_up" else
-               np.ceil(scaled) if rule == "ceil" else np.floor(scaled))
-    expected = rounded/(1./step)
-    np.testing.assert_array_equal(quantize_preimage_axis(values,
-        rounding_rule=rule, half_step=step/2.), expected)
-
-
-@pytest.mark.parametrize("metric", ["high", "low"])
-@pytest.mark.parametrize("step", [1., 5./9.])
-@pytest.mark.parametrize("rule", ["wmo_half_up", "oracle_truncate", "ceil"])
-def test_preimage_zero_sigma_point_and_bootstrap_use_same_extreme_axis(metric, step, rule):
-    import numpy as np
-    from types import SimpleNamespace
-    from src.data import replacement_forecast_materializer as mat
-    bins = [SimpleNamespace(bin_id="negative", lower_c=None, upper_c=-step),
-        SimpleNamespace(bin_id="zero", lower_c=0., upper_c=0.),
-        SimpleNamespace(bin_id="positive", lower_c=step, upper_c=None)]
-    mu, obs = .2*step, (.7 if metric == "high" else -.7)*step
-    extreme = max(mu, obs) if metric == "high" else min(mu, obs)
-    scaled = extreme*(1./step)
-    atom = (np.floor(scaled+.5) if rule == "wmo_half_up" else
-            np.ceil(scaled) if rule == "ceil" else np.floor(scaled))/(1./step)
-    expected = {b.bin_id: float((b.lower_c is None or atom >= b.lower_c)
-        and (b.upper_c is None or atom <= b.upper_c)) for b in bins}
-    point, capped, uniform = mat._build_scaled_normal_uniform_q(mu=mu, sigma_pred=0.,
-        k=1., uniform_w=0., floor_steps=0., bins=bins, half_step=step/2.,
-        rounding_rule=rule, day0_obs_extreme_c=obs, metric=metric,
-        settlement_step_c=step, settlement_sigma_floor_c=None, city_unit="C")
-    assert point == expected and capped == [] and uniform is False
-    lower, upper, samples = mat._build_fused_q_bounds(mu_star=mu, center_sigma_c=0.,
-        predictive_sigma_c=0., bins=bins, half_step=step/2., rounding_rule=rule,
-        q_point=point, n_draws=8, return_samples=True,
-        day0_observed_extreme_c=obs, day0_metric=metric)
-    assert lower == upper == point
-    assert samples == {key: [value]*8 for key, value in point.items()}
-
-
-@pytest.mark.parametrize("values,step,rule", [([float("nan")], .5, "wmo_half_up"),
-    ([float("inf")], .5, "wmo_half_up"), ([0.], 0., "wmo_half_up"),
-    ([0.], -.5, "wmo_half_up"), ([0.], float("inf"), "wmo_half_up"),
-    ([0.], True, "wmo_half_up"), ([0.], .5, "unknown")])
-def test_preimage_axis_invalid_values_step_or_rule_refuse(values, step, rule):
-    from src.contracts.settlement_semantics import quantize_preimage_axis
-    with pytest.raises(ValueError):
-        quantize_preimage_axis(values, rounding_rule=rule, half_step=step)
-
-
-@pytest.mark.parametrize("metric", ["high", "low"])
-def test_hko_selection_keeps_original_metric_provenance_without_publication_authority(metric):
-    from src.config import City
-    from src.data.settlement_observation_selection import observation_selection
-
-    city = City(name="Hong Kong", lat=22.3, lon=114.2, timezone="Asia/Hong_Kong",
-                settlement_unit="C", cluster="HK", wu_station="HKO",
-                country_code="HK", settlement_source_type="hko")
-    original = json.dumps({"source_entity": {
-        "entity_sha256": ("a" if metric == "high" else "b") * 64,
-        "entity_bytes_b64": "e30=", "source_issued_at_utc": None,
-        "capture_received_at_utc": "2026-09-29T00:00:00Z",
-        "first_publication": True,
-    }})
-    row = {metric + "_provenance_metadata": original,
-           "station_id": "HKO", "fetched_at": "2026-09-29T00:00:00Z",
-           ("low" if metric == "high" else "high") + "_provenance_metadata": "twin"}
-    _, selected = observation_selection(None, city, "2026-09-27", "hko_daily_api",
-                                         row=row, metric=metric)
-    assert selected["provenance_metadata"] == original
-    assert selected["source_entity"] == json.loads(original)["source_entity"]
-    assert selected["temperature_metric"] == metric
-    assert selected["source_grade"] == "UNKNOWN"
-    from src.contracts.settlement_semantics import SettlementSemantics
-    sem = SettlementSemantics.for_city(city)
-    assert sem.precision == 1.0
-    assert sem.assert_settlement_value(32.7) == 32.0
 
 
 def test_hko_policy_required_for_hong_kong():

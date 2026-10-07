@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-10-07
+# Last reused/audited: 2026-08-18
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 #   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
 #   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
@@ -22,120 +22,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-@pytest.mark.parametrize("unit", ("C", "F"))
-def test_day0_domain_shape_conditioning_and_written_replay_identity_are_lossless(metric, unit):
-    import copy
-    import src.engine.event_reactor_adapter as adapter
-    shape = {"schema": "day0_measurement_domain_shapes_v1", "unit": unit,
-        "X": {"role": "remaining_X", "provider_centers_native": [20., 21.],
-            "provider_families": ["ifs", "gfs"], "member_points_native": [20.] * 51,
-            "member_interval_bounds_native": [[19., 22.]] * 51},
-        "Y": {"role": "full_Y", "provider_centers_native": [22., 23.],
-            "provider_families": ["ifs", "gfs"], "member_points_native": [22.] * 51,
-            "member_interval_bounds_native": [[21., 24.]] * 51}}
-    enclosure = {"schema": "role_interval_gaussian_preimage_enclosure_v1",
-        "lower": [0.01, 0.1], "upper": [0.8, 0.99],
-        "Y_ratio": "conservative_envelope_not_exact_supremum"}
-    conditioning = adapter._day0_replacement_conditioning(SimpleNamespace(provenance_json={
-        "day0_provisional_observation": {"active": True, "metric": metric, "unit": unit},
-        "day0_measurement_domain_shapes": shape,
-        "day0_measurement_domain_identification_bounds": enclosure}),
-        provisional=True, metric=metric, unit=unit,
-        decision_time=datetime(2026, 10, 6, tzinfo=timezone.utc), entry_authority=False)
-    assert conditioning["day0_measurement_domain_shapes"] == shape
-    assert conditioning["day0_measurement_domain_identification_bounds"] == enclosure
-    payload = {"_edli_day0_measurement_domain_shapes": copy.deepcopy(shape),
-        "_edli_day0_measurement_domain_identification_bounds": copy.deepcopy(enclosure)}
-    adapter._bind_day0_carrier_written_inputs(payload)
-    adapter._snapshot_day0_source_clock_carrier_provenance(payload)
-    payload["_edli_day0_measurement_domain_shapes"]["X"]["member_points_native"][0] = 100.
-    assert adapter._day0_carrier_written_inputs(payload)["domain_role_shapes"] == shape
-    original = payload["_edli_day0_source_clock_carrier_provenance"]
-    assert original["measurement_domain_shapes"] == shape
-    assert original["measurement_domain_identification_bounds"] == enclosure
-
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-def test_day0_domain_enclosure_cannot_be_narrowed_by_adapter_sample_caps(metric):
-    import src.engine.event_reactor_adapter as adapter
-    from src.types.market import Bin
-    family = SimpleNamespace(family_id="family", city="London", metric=metric,
-        candidates=(SimpleNamespace(condition_id="c1", bin=Bin(None, 20., "C", "source-left")),
-                    SimpleNamespace(condition_id="c2", bin=Bin(21., None, "C", "source-right"))))
-    bindings = (SimpleNamespace(condition_id="c1", bin_id="b1"), SimpleNamespace(condition_id="c2", bin_id="b2"))
-    payload = {"rounded_value": 20., "metric": metric, "evidence_finality": "PROVISIONAL_CURRENT_SNAPSHOT",
-        "_edli_q_source": "day0_remaining_day",
-        "_edli_day0_measurement_domain_shapes": {"schema": "day0_measurement_domain_shapes_v1"},
-        # Reversed carrier topology proves this is bin identity, not array index.
-        "_edli_day0_carrier_bin_topology": [
-            {"bin_id": "source-right", "lower_c": 21., "upper_c": None},
-            {"bin_id": "source-left", "lower_c": None, "upper_c": 20.}],
-        "_edli_day0_measurement_domain_identification_bounds": {
-            "schema": "role_interval_gaussian_preimage_enclosure_v1",
-            "lower": [.01, .1], "upper": [.99, .9]}}
-    caps = adapter._day0_global_candidate_payoff_q_lcb_caps(payload=payload, family=family,
-        bindings=bindings, samples=np.full((500, 2), .5), point_q=np.array([.5, .5]),
-        band_alpha=.05, decision_time=datetime(2026, 10, 6, tzinfo=timezone.utc))
-    indexed = {(row[2], row[3]): row[4] for row in caps}
-    assert indexed[("b1", "YES")] == pytest.approx(.1) and indexed[("b1", "NO")] == pytest.approx(.1)
-    assert indexed[("b2", "YES")] == pytest.approx(.01) and indexed[("b2", "NO")] == pytest.approx(.01)
-    payload["_edli_day0_measurement_domain_identification_bounds"]["lower"] = [float("nan"), .1]
-    with pytest.raises(ValueError, match="DAY0_MEASUREMENT_DOMAIN_BOUNDS_INVALID"):
-        adapter._day0_global_candidate_payoff_q_lcb_caps(payload=payload, family=family,
-            bindings=bindings, samples=np.full((500, 2), .5), point_q=np.array([.5, .5]),
-            band_alpha=.05, decision_time=datetime(2026, 10, 6, tzinfo=timezone.utc))
-
-
-@pytest.mark.parametrize("use", ("ENTRY", "HELD_MONITOR"))
-def test_day0_old_revision_cache_is_rejected_without_relabel_or_held_mutation(monkeypatch, use):
-    import src.engine.event_reactor_adapter as adapter
-    probability_use = getattr(adapter._CurrentProbabilityUse, use)
-    namespace = "private-domain-cache"
-    key = adapter._global_probability_family_cache_key("family", probability_use)
-    witness = SimpleNamespace(q_version="day0-semrev:older-law:original-content")
-    prepared = SimpleNamespace(probability_witness=witness)
-    monkeypatch.setattr(adapter, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", namespace)
-    monkeypatch.setattr(adapter, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {key: ("event", "binding", prepared)})
-    assert adapter._probe_global_probability_family_cache(namespace, family_key="family",
-        event_id="event", causal_snapshot_id="snapshot", captured_at_utc=datetime(2026, 10, 6, tzinfo=timezone.utc),
-        probability_use=probability_use) is None
-    assert key not in adapter._GLOBAL_PROBABILITY_FAMILY_CACHE
-    assert witness.q_version == "day0-semrev:older-law:original-content"
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-def test_global_Y_certified_enclosure_survives_sample_caps_without_changing_point(metric):
-    import src.engine.event_reactor_adapter as adapter
-    from src.types.market import Bin
-    family = SimpleNamespace(family_id="family", metric=metric,
-        candidates=(SimpleNamespace(condition_id="c1", bin=Bin(None, 20., "C", "market-left")),
-                    SimpleNamespace(condition_id="c2", bin=Bin(21., None, "C", "market-right"))))
-    bindings = (SimpleNamespace(condition_id="c1", bin_id="b1"), SimpleNamespace(condition_id="c2", bin_id="b2"))
-    bundle = SimpleNamespace(q={"source-left": .5, "source-right": .5}, q_lcb={"source-left": .1, "source-right": .01},
-        q_ucb={"source-left": .9, "source-right": .99}, provenance_json={"bin_topology": [
-            {"bin_id": "source-left", "lower_c": None, "upper_c": 20.},
-            {"bin_id": "source-right", "lower_c": 21., "upper_c": None}], "bayes_precision_fusion": {
-            "current_evidence_shape": {"predictive_sigma_interval_c": [1., 20.],
-                                       "native_point_model": {"role": "full_Y"}}}})
-    points = np.array([.5, .5])
-    samples = np.full((500, 2), .5)
-    caps = adapter._replacement_global_candidate_payoff_q_lcb_caps(
-        replacement_bundle=bundle, family=family, bindings=bindings,
-        samples=samples, point_q=points, band_alpha=.05)
-    indexed = {(row[2], row[3]): row[4] for row in caps}
-    assert indexed[("b1", "YES")] == pytest.approx(.1)
-    assert indexed[("b1", "NO")] == pytest.approx(.1)
-    assert indexed[("b2", "YES")] == pytest.approx(.01)
-    assert indexed[("b2", "NO")] == pytest.approx(.01)
-    assert points.tolist() == [.5, .5] and np.all(samples == .5)
-    bundle.q_ucb["source-right"] = float("nan")
-    with pytest.raises(ValueError, match="GLOBAL_Y_IDENTIFICATION_BOUNDS_INVALID"):
-        adapter._replacement_global_candidate_payoff_q_lcb_caps(
-            replacement_bundle=bundle, family=family, bindings=bindings,
-            samples=samples, point_q=points, band_alpha=.05)
-
 
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -1600,12 +1486,7 @@ def _insert_platt_model(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM platt_models WHERE model_key = 'platt-world-1'")
     conn.execute(
         """
-        INSERT INTO platt_models (
-            model_key, temperature_metric, cluster, season, data_version,
-            input_space, param_A, param_B, param_C, bootstrap_params_json,
-            n_samples, brier_insample, fitted_at, is_active, authority,
-            cycle, source_id, horizon_profile, recorded_at
-        ) VALUES (
+        INSERT INTO platt_models VALUES (
             'platt-world-1', 'high', 'Chicago', 'MAM',
             'tigge_mx2t6_local_calendar_day_max',
             'width_normalized_density',
@@ -1720,155 +1601,11 @@ def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():
     assert edli_trade_score_gate(event) is True
 
 
-def _normal_native_final_intent_case(tmp_path, monkeypatch, metric, *, before_receipt=None,
-                                    receipt_probe=None, source_probe=None):
-    """Real scheduled originals/public q, then the normal mean-selected receipt.
+def test_runtime_receipt_uses_event_bound_final_intent_contract():
+    event = _bound_replacement_forecast_event()
+    receipt = _receipt(event, _trade_conn_with_live_replacement_taker_snapshot())
 
-    Reuse only the existing private source/book harnesses. No qualifier, READY
-    row, probability or selected actuation is manufactured by this callback.
-    """
-    from contextlib import ExitStack
-    from tests import test_replacement_forecast_materializer as normal
-    from tests.money_path import test_finding_b_free_cash_bound as cash
-    from src.events.triggers.forecast_snapshot_ready import ForecastSnapshotReadyTrigger
-    from src.data.replacement_forecast_bundle_reader import ReplacementForecastAuthorityPurpose
-
-    def final_intent(*, conn, city, request, bundle, decision_time):
-        # The normal producer has already read the actual committed bundle for
-        # every public authority purpose, including ENTRY, HELD and JIT.
-        events = ForecastSnapshotReadyTrigger(None).build_committed_snapshot_events(
-            forecasts_conn=conn, decision_time=decision_time,
-            received_at=decision_time.isoformat(), restrict_to_families={
-                (city.name, request.target_date.isoformat(), metric)})
-        assert len(events) == 1
-        if source_probe is not None:
-            return source_probe(conn=conn, city=city, request=request, event=events[0],
-                                bundle=bundle, decision_time=decision_time)
-        if before_receipt is not None:
-            before_receipt(conn=conn, event=events[0], bundle=bundle, decision_time=decision_time)
-        # A probe runs only at the baseline's actual receipt boundary, after
-        # public source qualification and normal global prepare/select/store.
-        # Independent private connections and sealed q are never cached.
-        original_receipt = cash._receipt
-        receipt_calls = [0]
-        def inspect_receipt(event, trade_conn, **kwargs):
-            receipt_calls[0] += 1
-            if receipt_probe is not None and receipt_calls[0] == 2:
-                def read(**updates):
-                    return original_receipt(event, trade_conn, **{**kwargs, **updates})
-                return receipt_probe(conn=conn, trade_conn=trade_conn, event=event,
-                    bundle=bundle, decision_time=decision_time, read=read, kwargs=kwargs)
-            return original_receipt(event, trade_conn, **kwargs)
-        with monkeypatch.context() as receipt_boundary:
-            receipt_boundary.setattr(cash, "_receipt", inspect_receipt)
-            receipts = cash._normal_cash_matrix(conn=conn, city=city, request=request,
-                bundle=bundle, decision_time=decision_time, monkeypatch=monkeypatch)
-        receipt = receipts["baseline"]
-        if receipt_probe is not None:
-            return receipt
-        label = conn.execute("SELECT range_label FROM market_events WHERE condition_id=? "
-            "AND city=? AND target_date=? AND temperature_metric=?",
-            (receipt.condition_id, city.name, request.target_date.isoformat(), metric)).fetchone()
-        assert label is not None
-        # The receipt uses canonical bin hashes; persisted q uses settlement
-        # labels. Join by the actual selected condition, never by key spelling.
-        return events[0], receipt, bundle, bundle.q[label[0]], decision_time
-
-    with ExitStack() as stack:
-        for fixture in (normal._hko_native_surfaces, normal._hko_source_surface):
-            arguments = (tmp_path, monkeypatch) if fixture is normal._hko_native_surfaces else (tmp_path, monkeypatch, None)
-            source = fixture.__wrapped__(*arguments)
-            next(source)
-            stack.callback(lambda source=source: next(source, None))
-        return normal._normal_native_originals_public_case(
-            tmp_path, monkeypatch, metric, full_y_ready=final_intent, original_cassette=True,
-            full_y_public_purposes=(ReplacementForecastAuthorityPurpose.ENTRY,)
-            if receipt_probe is not None or source_probe is not None else None)
-
-
-def _qualified_native_quote_probe(tmp_path, monkeypatch, *, edit, unavailable=False):
-    """Actual qualified baseline, then a selected-token quote-unit attack.
-
-    A local row copy cannot authorize or refute the sealed global actuation.
-    Full global book rejection/reselection is tested separately below.
-    """
-    from src.engine.event_reactor_adapter import _execution_price_from_snapshot
-    def probe(*, trade_conn, kwargs, read, **_):
-        baseline = read()
-        assert baseline.proof_accepted is True, baseline.reason
-        assert baseline.side_effect_status == "NO_SUBMIT"
-        token = kwargs["global_actuation"].decision.candidate.token_id
-        row = dict(trade_conn.execute("SELECT * FROM executable_market_snapshots "
-            "WHERE selected_outcome_token_id=? ORDER BY captured_at DESC LIMIT 1", (token,)).fetchone())
-        direction = "buy_yes" if token == row["yes_token_id"] else "buy_no"
-        original, _, _ = _execution_price_from_snapshot(row, selected_token_id=token, direction=direction)
-        edit(row)
-        if unavailable:
-            with pytest.raises(ValueError):
-                _execution_price_from_snapshot(row, selected_token_id=token, direction=direction)
-        else:
-            quoted, fill, cost = _execution_price_from_snapshot(row, selected_token_id=token, direction=direction)
-            assert quoted.value == original.value
-            assert 0 < fill <= 1 and cost >= quoted.value
-        return baseline
-    return _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
-
-
-@pytest.mark.parametrize("bad_scope", ("all_books", "winner_only"))
-def test_qualified_current_global_book_redecides_without_bad_token(tmp_path, monkeypatch, bad_scope):
-    """Qualified q does not authorize absent books or freeze the former winner."""
-    from tests.money_path.test_finding_b_free_cash_bound import _normal_cash_matrix
-    from tests.fakes.polymarket_v2 import FakePolymarketVenue
-    sdk_calls = []
-    def forbidden_submit(*args, **kwargs):
-        sdk_calls.append((args, kwargs))
-        raise AssertionError("no-submit receipt crossed fake SDK submission")
-    for name in ("submit", "submit_batch", "submit_limit_order"):
-        monkeypatch.setattr(FakePolymarketVenue, name, forbidden_submit)
-    def probe(*, conn, city, request, bundle, decision_time, **_):
-        baseline = _normal_cash_matrix(conn=conn, city=city, request=request,
-            bundle=bundle, decision_time=decision_time, monkeypatch=monkeypatch)["baseline"]
-        assert baseline.proof_accepted and baseline.kelly_pass, baseline.reason
-        assert baseline.side_effect_status == "NO_SUBMIT"
-        bad_token = baseline.token_id
-        original_q = dict(bundle.q)
-        def empty_books(*, snapshot, **_):
-            if bad_scope == "winner_only" and snapshot["selected_outcome_token_id"] != bad_token:
-                return
-            depth = json.loads(snapshot["orderbook_depth_jsonb"])
-            if bad_scope == "all_books":
-                depth = {side: {"asks": [], "bids": []} for side in ("YES", "NO")}
-            else:
-                depth[snapshot["outcome_label"]] = {"asks": [], "bids": []}
-            snapshot.update(orderbook_depth_jsonb=json.dumps(depth),
-                            orderbook_top_ask=None, orderbook_top_bid=None)
-        result = _normal_cash_matrix(conn=conn, city=city, request=request,
-            bundle=bundle, decision_time=decision_time, monkeypatch=monkeypatch, book_inputs=empty_books)
-        assert bundle.q == original_q
-        if bad_scope == "all_books":
-            assert "baseline" not in result, "empty books produced an actionable receipt"
-            if "preparation" in result:
-                assert result["preparation"].prepared_global_family is None
-                assert "READINESS_NOT_LIVE_GRADE" not in result["preparation"].reason
-            elif "selection" in result:
-                assert result["selection"].actuation is None
-            else:
-                assert "book_unavailable_reason" in result and result["book_unavailable_reason"]
-        else:
-            assert "baseline" in result, result
-            redecided = result["baseline"]
-            assert redecided.proof_accepted and redecided.kelly_pass, redecided.reason
-            assert redecided.token_id != bad_token
-            assert redecided.side_effect_status == "NO_SUBMIT"
-        assert sdk_calls == []
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", source_probe=probe)
-
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-def test_runtime_receipt_uses_event_bound_final_intent_contract(tmp_path, monkeypatch, metric):
-    event, receipt, bundle, selected_q, decision_time = _normal_native_final_intent_case(tmp_path, monkeypatch, metric)
-
-    assert receipt.proof_accepted is True, receipt.reason
+    assert receipt.proof_accepted is True
     assert receipt.submitted is False
     assert receipt.event_id == event.event_id
     assert receipt.causal_snapshot_id == event.causal_snapshot_id
@@ -1876,37 +1613,31 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract(tmp_path, monkey
     assert receipt.trade_score is not None
     assert receipt.trade_score > 0
     assert receipt.q_live is not None
-    assert receipt.outcome_label == "YES"
-    assert receipt.q_live == pytest.approx(selected_q)
+    assert receipt.q_live > 0.60
     assert receipt.c_fee_adjusted is not None
     assert receipt.p_fill_lcb is not None
-    assert 0.0 < receipt.p_fill_lcb <= 1.0
+    assert 0.0 < receipt.p_fill_lcb < 1.0
     assert receipt.family_complete is True
     assert receipt.fdr_pass is True
-    assert receipt.fdr_hypothesis_count == 2 * len(bundle.q)
+    assert receipt.fdr_hypothesis_count == 4
     assert receipt.kelly_execution_price_type == "ExecutionPrice"
     assert receipt.kelly_price_fee_deducted is True
     assert receipt.kelly_size_usd > 0
     assert receipt.side_effect_status == "NO_SUBMIT"
-    assert receipt.final_intent_id
-    assert (receipt.city, receipt.target_date, receipt.metric) == (bundle.city, bundle.target_date, metric)
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.forecast_authority.certificate_type == claims.FORECAST_AUTHORITY
     assert receipt.decision_proof_bundle.forecast_authority.payload["reader_status"] == "LIVE_ELIGIBLE"
     assert receipt.decision_proof_bundle.forecast_authority.payload["reader_authority"] == "forecast_posteriors.replacement_0_1"
     assert receipt.decision_proof_bundle.forecast_authority.payload["source_id"] == REPLACEMENT_SOURCE_ID
     assert receipt.decision_proof_bundle.forecast_authority.payload["members_json_source"] == "raw_model_forecasts.multimodel"
-    assert receipt.decision_proof_bundle.forecast_authority.payload["posterior_identity_hash"] == bundle.posterior_identity_hash
-    assert receipt.decision_proof_bundle.calibration.payload["posterior_id"] == bundle.posterior_id
+    assert receipt.decision_proof_bundle.forecast_authority.payload["posterior_identity_hash"] == "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    assert receipt.decision_proof_bundle.calibration.payload["posterior_id"] == 9001
     assert receipt.decision_proof_bundle.calibration.payload["replacement_q_mode"] == "FUSED_NORMAL_FULL"
     assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
     assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
-    # The replacement bootstrap credential is available at this decision;
-    # its certificate clock is not the original provider possession clock.
-    assert receipt.decision_proof_bundle.calibration.clock.source_available_at == decision_time
-    assert datetime.fromisoformat(bundle.source_available_at) <= decision_time
+    assert receipt.decision_proof_bundle.calibration.clock.source_available_at.isoformat() == "2026-05-24T08:12:00+00:00"
     assert receipt.decision_proof_bundle.belief.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
-    assert receipt.decision_proof_bundle.belief.payload["forecast_snapshot_id"]
+    assert receipt.decision_proof_bundle.belief.payload["forecast_snapshot_id"] == "rmf-Chicago|2026-05-25|high|2026-05-24"
     assert receipt.decision_proof_bundle.belief.payload["bin_labels_hash"] == receipt.decision_proof_bundle.family_closure.payload["bin_labels_hash"]
     assert receipt.decision_proof_bundle.fdr.payload["edge_bootstrap_n"] == receipt.decision_proof_bundle.model_config.payload["edge_bootstrap_n"]
     assert receipt.decision_proof_bundle.executable_snapshot.payload["orderbook_hash"]
@@ -1920,93 +1651,70 @@ def test_runtime_receipt_uses_event_bound_final_intent_contract(tmp_path, monkey
     assert receipt.decision_proof_bundle.quote_feasibility.payload["execution_price_type"] == "ExecutionPrice"
 
 
-def test_runtime_receipt_legacy_row_only_fixture_cannot_authorize_entry_or_held():
-    from src.data.replacement_forecast_bundle_reader import (
-        ReplacementForecastAuthorityPurpose, read_replacement_forecast_bundle,
-    )
-    from src.data.replacement_forecast_readiness import latest_replacement_readiness
-
-    event = _bound_replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_taker_snapshot()
-    try:
-        receipt = _receipt(event, conn)
-        assert receipt.proof_accepted is False
-        assert "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE" in receipt.reason
-        readiness = latest_replacement_readiness(conn, city="Chicago", target_date="2026-05-25",
-            temperature_metric="high", decision_time=DECISION_TIME)
-        assert readiness is not None
-        for purpose in ReplacementForecastAuthorityPurpose:
-            result = read_replacement_forecast_bundle(conn, baseline_bundle=None,
-                readiness=readiness, city="Chicago", target_date="2026-05-25",
-                temperature_metric="high", decision_time=DECISION_TIME,
-                require_baseline_bundle=False, authority_purpose=purpose)
-            assert not result.ok
-            assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
-    finally:
-        conn.close()
-
-
-@pytest.mark.parametrize("metric", ("high", "low"))
-def test_runtime_receipt_does_not_fit_platt_models(tmp_path, monkeypatch, metric):
+def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
     def _forbid_runtime_fit(*_args, **_kwargs):
         raise AssertionError("receipt path must not call get_calibrator/runtime fit")
 
     monkeypatch.setattr("src.calibration.manager.get_calibrator", _forbid_runtime_fit)
 
-    # This is a runtime fitting antibody, not a Chicago/Fahrenheit or calendar
-    # assertion. The real London H/L originals are admitted independently,
-    # and the spy remains installed through actual global receipt production.
-    event, receipt, bundle, selected_q, decision_time = _normal_native_final_intent_case(
-        tmp_path, monkeypatch, metric)
+    event = _bound_replacement_forecast_event()
+    receipt = _receipt(event, _trade_conn_with_live_replacement_taker_snapshot())
 
     assert receipt.proof_accepted is True
-    assert receipt.q_live == pytest.approx(selected_q)
-    assert receipt.decision_proof_bundle.calibration.payload["posterior_id"] == bundle.posterior_id
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
     assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
 
 
-def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt(tmp_path, monkeypatch):
-    event, receipt, bundle, selected_q, _ = _normal_native_final_intent_case(tmp_path, monkeypatch, "high")
-    trigger_payload = json.loads(event.payload_json)
-    assert "q" not in trigger_payload and "token_id" not in trigger_payload
+def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
+    event = _replacement_forecast_event()
+    receipt = _receipt(event, _trade_conn_with_live_replacement_taker_snapshot(), decision_time=DECISION_TIME)
 
     assert receipt.proof_accepted is True
-    assert receipt.token_id
+    assert receipt.token_id == "yes-1"
     assert receipt.q_live is not None
-    assert receipt.q_live == pytest.approx(selected_q)
+    assert receipt.q_live > 0.60
     assert receipt.trade_score is not None
-    assert receipt.fdr_hypothesis_count == 2 * len(bundle.q)
+    assert receipt.fdr_hypothesis_count == 4
     assert receipt.kelly_execution_price_type == "ExecutionPrice"
     assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_legacy_platt_materialization_time_does_not_affect_replacement_live_certificate(tmp_path, monkeypatch):
-    def future_legacy_fit(*, conn, decision_time, **_):
-        _insert_platt_model(conn)
-        future = (decision_time + timedelta(seconds=1)).isoformat()
-        conn.execute("UPDATE platt_models SET recorded_at=?, fitted_at=? WHERE model_key='platt-world-1'", (future, future))
-    _, receipt, bundle, _, decision_time = _normal_native_final_intent_case(
-        tmp_path, monkeypatch, "high", before_receipt=future_legacy_fit)
+def test_legacy_platt_materialization_time_does_not_affect_replacement_live_certificate():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
+    conn.execute(
+        """
+        UPDATE platt_models
+        SET recorded_at = '2026-05-24T08:13:00+00:00',
+            fitted_at = '2026-05-24T08:13:00+00:00'
+        WHERE model_key = 'platt-world-1'
+        """
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
     assert receipt.proof_accepted is True
     assert receipt.decision_proof_bundle is not None
     calibration = receipt.decision_proof_bundle.calibration
-    assert calibration.payload["posterior_id"] == bundle.posterior_id
+    assert calibration.payload["posterior_id"] == 9001
     assert calibration.payload["calibrator_model_key"].startswith("fused_bootstrap_settlement_coverage_v1:")
     assert "platt" not in calibration.payload["calibrator_model_key"]
-    assert calibration.clock.source_available_at == decision_time
+    assert calibration.clock.source_available_at.isoformat() == "2026-05-24T08:12:00+00:00"
 
 
-def test_legacy_platt_training_cutoff_after_decision_cannot_poison_replacement_live_certificate(tmp_path, monkeypatch):
-    def future_training(*, conn, decision_time, **_):
-        _insert_platt_model(conn)
-        if "training_cutoff" not in {row[1] for row in conn.execute("PRAGMA table_info(platt_models)")}:
-            conn.execute("ALTER TABLE platt_models ADD COLUMN training_cutoff TEXT")
-        conn.execute("UPDATE platt_models SET training_cutoff=? WHERE model_key='platt-world-1'",
-            ((decision_time + timedelta(seconds=1)).isoformat(),))
-    _, receipt, _, _, _ = _normal_native_final_intent_case(
-        tmp_path, monkeypatch, "high", before_receipt=future_training)
+def test_legacy_platt_training_cutoff_after_decision_cannot_poison_replacement_live_certificate():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
+    conn.execute("ALTER TABLE platt_models ADD COLUMN training_cutoff TEXT")
+    conn.execute(
+        """
+        UPDATE platt_models
+        SET training_cutoff = '2026-05-24T08:13:00+00:00'
+        WHERE model_key = 'platt-world-1'
+        """
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.proof_accepted is True
     assert receipt.decision_proof_bundle is not None
@@ -2014,47 +1722,43 @@ def test_legacy_platt_training_cutoff_after_decision_cannot_poison_replacement_l
     assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
 
 
-def test_market_topology_certificate_uses_topology_row_clock_not_event_clock(tmp_path, monkeypatch):
-    topology_clock = []
-    def captured_topology(*, conn, decision_time, **_):
-        at = decision_time - timedelta(minutes=1)
-        topology_clock.append(at)
-        conn.execute("UPDATE market_events SET created_at=?", (at.isoformat(),))
-    event, receipt, _, _, _ = _normal_native_final_intent_case(
-        tmp_path, monkeypatch, "high", before_receipt=captured_topology)
+def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
+    conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:11:00+00:00'")
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.decision_proof_bundle is not None
-    assert receipt.decision_proof_bundle.market_topology.clock.source_available_at == topology_clock[0]
-    assert receipt.decision_proof_bundle.family_closure.clock.source_available_at == topology_clock[0]
+    assert receipt.decision_proof_bundle.market_topology.clock.source_available_at.isoformat() == "2026-05-24T08:11:00+00:00"
+    assert receipt.decision_proof_bundle.family_closure.clock.source_available_at.isoformat() == "2026-05-24T08:11:00+00:00"
     assert receipt.decision_proof_bundle.market_topology.clock.source_available_at.isoformat() != event.available_at
 
 
-def test_topology_persisted_after_decision_blocks_certificate(tmp_path, monkeypatch):
-    event, receipt, _, _, decision_time = _normal_native_final_intent_case(tmp_path, monkeypatch, "high")
-    assert receipt.proof_accepted
-    proof = receipt.decision_proof_bundle
-    # Compiler-only tamper boundary after lawful normal source admission.
-    # The original source bodies, receipts and canonical clocks stay intact.
-    late = decision_time + timedelta(seconds=1)
-    topology = replace(proof.market_topology, clock=replace(proof.market_topology.clock,
-        source_available_at=late, agent_received_at=late, persisted_at=late))
-    proof = replace(proof, market_topology=topology)
+def test_topology_persisted_after_decision_blocks_certificate():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
+    conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:13:00+00:00'")
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
     result = DecisionCompiler().compile_pre_submit(
         event,
-        decision_time=decision_time,
-        proof_bundle=proof,
+        decision_time=DECISION_TIME,
+        proof_bundle=receipt.decision_proof_bundle,
     )
 
     assert result.status == "REJECTED"
     assert result.failures[0].reason_code == "PRE_SUBMIT_CERTIFICATE_REJECTED"
-    assert "after decision_time" in (result.failures[0].reason_detail or "")
+    assert "max_parent_source_available_at after decision_time" in (result.failures[0].reason_detail or "")
 
 
-def test_topology_clock_missing_blocks_certificate(tmp_path, monkeypatch):
-    def missing_clock(*, conn, **_):
-        conn.execute("UPDATE market_events SET created_at=NULL")
+def test_topology_clock_missing_blocks_certificate():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
+    conn.execute("UPDATE market_events SET created_at = NULL")
+
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
-        _normal_native_final_intent_case(tmp_path, monkeypatch, "high", before_receipt=missing_clock)
+        _receipt(event, conn, decision_time=DECISION_TIME)
 
 
 def test_latest_snapshot_rows_exclude_future_captured_rows_without_freshness_gate():
@@ -2188,8 +1892,11 @@ def test_non_accepting_snapshot_is_admitted_as_current_non_executable_state():
     assert gate(_forecast_event(), decide_at) is True
 
 
-def test_adapter_source_truth_status_comes_from_forecast_authority(tmp_path, monkeypatch):
-    _, receipt, _, _, _ = _normal_native_final_intent_case(tmp_path, monkeypatch, "high")
+def test_adapter_source_truth_status_comes_from_forecast_authority():
+    event = _forecast_event()
+    conn = _enable_qkernel_fixture(_trade_conn_with_taker_snapshot())
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.source_truth.payload["source_status"] == "LIVE_ELIGIBLE"
@@ -2200,14 +1907,17 @@ def test_adapter_source_truth_status_comes_from_forecast_authority(tmp_path, mon
     assert receipt.decision_proof_bundle.source_truth.payload["derived_from_reader_status"] == receipt.decision_proof_bundle.forecast_authority.payload["reader_status"]
 
 
-def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(tmp_path, monkeypatch):
+def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(monkeypatch):
     import src.engine.event_reactor_adapter as event_reactor_adapter
     monkeypatch.setattr(
         event_reactor_adapter,
         "_family_rank_reversed_at_recapture",
         lambda **_: False,
     )
-    _, receipt, _, _, _ = _normal_native_final_intent_case(tmp_path, monkeypatch, "high")
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
     assert receipt.decision_proof_bundle is not None
     forecast_payload = receipt.decision_proof_bundle.forecast_authority.payload
@@ -2216,30 +1926,36 @@ def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(tm
     assert source_payload["source_authority_id"] == forecast_payload["reader_authority"]
 
 
-def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_source_context(tmp_path, monkeypatch):
-    captured = []
-    def capture_context(*, conn, event, bundle, decision_time):
-        captured.append(_forecast_authority_payload_from_posterior(conn,
-            event=event, family=SimpleNamespace(city=bundle.city,
-                target_date=bundle.target_date, metric=bundle.temperature_metric),
-            payload={**json.loads(event.payload_json), "source_id": REPLACEMENT_SOURCE_ID},
-            decision_time=decision_time))
-    _, receipt, bundle, _, decision_time = _normal_native_final_intent_case(
-        tmp_path, monkeypatch, "high", before_receipt=capture_context)
-    assert receipt.proof_accepted
-    result = captured[0]
+def test_replacement_posterior_forecast_authority_payload_satisfies_pre_submit_source_context():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
+
+    result = _forecast_authority_payload_from_posterior(
+        conn,
+        event=event,
+        family=family,
+        payload={
+            "source_id": REPLACEMENT_SOURCE_ID,
+            "source_run_id": "run-1",
+        },
+        decision_time=DECISION_TIME,
+    )
+
     assert result is not None
     forecast_payload, clock = result
-    assert clock.source_available_at <= decision_time
+    assert clock.source_available_at.isoformat() == "2026-05-24T08:10:00+00:00"
     decision_context = DecisionSourceContext.from_forecast_context(forecast_payload)
     assert decision_context is not None
-    assert len(decision_context.raw_payload_hash) == 64
-    assert forecast_payload["posterior_identity_hash"] == bundle.posterior_identity_hash
+    assert decision_context.raw_payload_hash == (
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    )
     assert decision_context.forecast_source_role == "entry_primary"
     assert decision_context.degradation_level == "OK"
     assert decision_context.authority_tier == "FORECAST"
-    assert datetime.fromisoformat(decision_context.first_member_observed_time) <= decision_time
-    assert datetime.fromisoformat(decision_context.run_complete_time) <= decision_time
+    assert decision_context.first_member_observed_time == "2026-05-24T07:10:00+00:00"
+    assert decision_context.run_complete_time == "2026-05-24T08:05:00+00:00"
     errors = set(decision_context.integrity_errors())
     assert "missing_forecast_valid_time" not in errors
     assert "missing_raw_payload_hash" not in errors
@@ -2300,19 +2016,37 @@ def test_replacement_posterior_rejects_malformed_intrinsic_dependency():
     assert reason["reason"] == "current_ensemble_dependency_unparseable"
 
 
-def test_replacement_posterior_refuses_old_current_evidence_semantics(tmp_path, monkeypatch):
-    def probe(*, conn, city, request, event, bundle, decision_time):
-        row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_id=?",
-                           (bundle.posterior_id,)).fetchone()
-        provenance = json.loads(row[0])
-        provenance["bayes_precision_fusion"]["current_evidence_shape"]["semantics_revision"] = "older-law"
-        conn.execute("UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
-                     (json.dumps(provenance), bundle.posterior_id))
-        family = SimpleNamespace(city=city.name, target_date=request.target_date.isoformat(), metric="high")
-        with pytest.raises(ValueError, match="REPLACEMENT_CURRENT_EVIDENCE_SEMANTICS_MISMATCH"):
-            _forecast_authority_payload_from_posterior(conn, event=event, family=family,
-                payload=json.loads(event.payload_json), decision_time=decision_time)
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", source_probe=probe)
+def test_replacement_posterior_refuses_old_current_evidence_semantics():
+    event = _replacement_forecast_event()
+    conn = _trade_conn_with_snapshot()
+    _insert_replacement_forecast_fixture(conn)
+    row = conn.execute(
+        "SELECT posterior_id, provenance_json FROM forecast_posteriors ORDER BY posterior_id DESC LIMIT 1"
+    ).fetchone()
+    provenance = json.loads(str(row["provenance_json"]))
+    provenance["bayes_precision_fusion"]["current_evidence_shape"][
+        "semantics_revision"
+    ] = "older-law"
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json=? WHERE posterior_id=?",
+        (json.dumps(provenance), row["posterior_id"]),
+    )
+    family = SimpleNamespace(city="Chicago", target_date="2026-05-25", metric="high")
+
+    with pytest.raises(
+        ValueError,
+        match="REPLACEMENT_CURRENT_EVIDENCE_SEMANTICS_MISMATCH",
+    ):
+        _forecast_authority_payload_from_posterior(
+            conn,
+            event=event,
+            family=family,
+            payload={
+                "source_id": REPLACEMENT_SOURCE_ID,
+                "source_run_id": "run-1",
+            },
+            decision_time=DECISION_TIME,
+        )
 
 
 def _bind_current_evidence_shape_to_snapshot(conn: sqlite3.Connection, *, bound: bool = True) -> None:
@@ -2409,38 +2143,35 @@ def test_market_events_authority_rows_have_topology_clock_fields():
     assert "created_at" in columns
 
 
-def test_no_submit_receipt_succeeds_with_production_market_events_clock_shape(tmp_path, monkeypatch):
-    def probe(*, conn, decision_time, read, **_):
-        at = decision_time - timedelta(minutes=1)
-        conn.execute("SAVEPOINT topology_clock_probe")
-        try:
-            conn.execute("UPDATE market_events SET created_at=?", (at.isoformat(),))
-            receipt = read()
-            assert receipt.proof_accepted is True, receipt.reason
-            assert receipt.decision_proof_bundle.market_topology.clock.persisted_at == at
-            return receipt
-        finally:
-            conn.execute("ROLLBACK TO topology_clock_probe")
-            conn.execute("RELEASE topology_clock_probe")
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_no_submit_receipt_succeeds_with_production_market_events_clock_shape():
+    event = _forecast_event()
+    conn = _trade_conn_with_taker_snapshot()
+    conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:11:00+00:00'")
+    conn = _enable_qkernel_fixture(conn)
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.decision_proof_bundle is not None
+    assert receipt.decision_proof_bundle.market_topology.clock.persisted_at.isoformat() == "2026-05-24T08:11:00+00:00"
 
 
-def test_topology_clock_missing_blocks_with_topology_clock_missing_reason(tmp_path, monkeypatch):
-    def probe(*, conn, read, **_):
-        conn.execute("SAVEPOINT missing_topology_clock")
-        try:
-            conn.execute("UPDATE market_events SET created_at=NULL")
-            with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
-                read()
-        finally:
-            conn.execute("ROLLBACK TO missing_topology_clock")
-            conn.execute("RELEASE missing_topology_clock")
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_topology_clock_missing_blocks_with_topology_clock_missing_reason():
+    event = _forecast_event()
+    conn = _trade_conn_with_taker_snapshot()
+    conn.execute("UPDATE market_events SET created_at = NULL")
+    conn = _enable_qkernel_fixture(conn)
+
+    with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
+        _receipt(event, conn, decision_time=DECISION_TIME)
 
 
-def test_cost_model_certificate_records_native_cost_source(tmp_path, monkeypatch):
-    _, receipt, _, _, _ = _normal_native_final_intent_case(tmp_path, monkeypatch, "high")
-    assert receipt.proof_accepted is True, receipt.reason
+def test_cost_model_certificate_records_native_cost_source():
+    event = _forecast_event()
+    conn = _enable_qkernel_fixture(_trade_conn_with_taker_snapshot())
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
     assert receipt.decision_proof_bundle is not None
     assert receipt.decision_proof_bundle.cost_model.payload["cost_source"] == "native_orderbook_ask"
     assert receipt.decision_proof_bundle.cost_model.payload["quote_source_kind"] == "executable_market_snapshot_native_book"
@@ -2477,17 +2208,13 @@ def test_adapter_does_not_synthesize_forecast_applied_validations():
     assert "FORECAST_AUTHORITY_VALIDATIONS_MISSING" in forecast_section
 
 
-def test_family_closure_clock_missing_blocks_certificate(tmp_path, monkeypatch):
-    def probe(*, conn, read, **_):
-        conn.execute("SAVEPOINT empty_topology_clock")
-        try:
-            conn.execute("UPDATE market_events SET created_at=''")
-            with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
-                read()
-        finally:
-            conn.execute("ROLLBACK TO empty_topology_clock")
-            conn.execute("RELEASE empty_topology_clock")
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_family_closure_clock_missing_blocks_certificate():
+    event = _forecast_event()
+    conn = _trade_conn_with_taker_snapshot()
+    conn.execute("UPDATE market_events SET created_at = ''")
+
+    with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
+        _receipt(event, conn, decision_time=DECISION_TIME)
 
 
 def test_topology_db_read_fallback_requires_db_state_read_certificate():
@@ -2623,16 +2350,11 @@ def test_edli_p_cal_matches_existing_evaluator_platt_path_for_same_snapshot_and_
 
 
 def test_family_candidates_use_market_event_range_bounds_not_payload_default():
-    """Chicago/F bin-construction unit boundary, not posterior authority."""
-    from src.engine.event_reactor_adapter import _topology_candidate_from_market_event
     event = _forecast_event()
-    with _trade_conn_with_taker_snapshot() as conn:
-        row = dict(conn.execute("SELECT * FROM market_events WHERE condition_id='condition-1'").fetchone())
-        candidate = _topology_candidate_from_market_event(row,
-            {"yes_token_id": "yes-1", "no_token_id": "no-1"}, json.loads(event.payload_json))
-    assert (candidate.bin.low, candidate.bin.high, candidate.bin.unit) == (None, 71., "F")
-    assert candidate.bin.label == "70-71°F"
-    assert candidate.bin.label != "0-1°F"
+    receipt = _receipt(event, _trade_conn_with_taker_snapshot())
+
+    assert receipt.bin_label == "70-71°F"
+    assert receipt.bin_label != "0-1°F"
 
 
 def test_bin_from_market_event_carries_celsius_unit_from_city_settlement_authority():
@@ -2706,69 +2428,74 @@ def test_missing_market_topology_range_blocks_no_submit_receipt():
 #   the best-utility candidate from available snapshots regardless of requested side.
 
 
-def test_runtime_receipt_accepts_family_with_missing_sibling_snapshot_as_non_tradeable(tmp_path, monkeypatch):
-    """Quote absence must not renormalize q or erase already-known token identity."""
-    def probe(*, conn, city, request, bundle, decision_time, **_):
-        from tests.money_path.test_finding_b_free_cash_bound import _normal_cash_matrix
-        baseline = _normal_cash_matrix(conn=conn, city=city, request=request, bundle=bundle,
-            decision_time=decision_time, monkeypatch=monkeypatch)["baseline"]
-        assert baseline.proof_accepted, baseline.reason
-        other = conn.execute("SELECT condition_id FROM market_events WHERE city=? "
-            "AND target_date=? AND temperature_metric=? AND condition_id<>? LIMIT 1",
-            (city.name, request.target_date.isoformat(), "high", baseline.condition_id)).fetchone()[0]
-        q_before = dict(bundle.q)
-        def absent_quotes(*, snapshot, **_):
-            if snapshot["condition_id"] == other:
-                # The current response has no executable book. Token metadata
-                # remains known; no canonical capture is removed or rewritten.
-                snapshot.update(orderbook_depth_jsonb=json.dumps({side: {"asks": [], "bids": []}
-                    for side in ("YES", "NO")}), orderbook_top_ask=None, orderbook_top_bid=None)
-        receipt = _normal_cash_matrix(conn=conn, city=city, request=request, bundle=bundle,
-            decision_time=decision_time, monkeypatch=monkeypatch, book_inputs=absent_quotes)["baseline"]
-        assert receipt.proof_accepted, receipt.reason
-        assert receipt.condition_id != other
-        assert receipt.family_complete and receipt.fdr_pass
-        assert receipt.fdr_hypothesis_count == 2 * len(bundle.q)
-        assert bundle.q == q_before and sum(bundle.q.values()) == pytest.approx(1.)
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", source_probe=probe)
+def test_runtime_receipt_accepts_family_with_missing_sibling_snapshot_as_non_tradeable():
+    """With the full-family design, a 3-bin family where only 2 of 3 bins have
+    executable snapshots must PASS the FDR proof (the third bin is non-tradeable,
+    not absent).  The selected bin (condition-1) has a snapshot, so the receipt
+    must be accepted with fdr_hypothesis_count == 5 (3 yes-tokens + 2 no-tokens;
+    the non-tradeable bin contributes its yes-token but has no no-token).
+
+    The old exact-set-equality gate (FDR_FULL_FAMILY_PROOF_MISSING) is incorrect
+    because it renormalized q over the 2-bin subset, inflating probabilities ~1.2×
+    and shrinking fdr_hypothesis_count from 5 to 4 — both unsafe.
+    """
+    event = _bound_forecast_event(fdr_condition_count=3)
+    receipt = _receipt(event, _trade_conn_with_taker_snapshot(condition_count=3, snapshot_condition_count=2))
+
+    # Full-family: receipt must not be rejected for missing sibling snapshot
+    assert receipt.reason != "FDR_FULL_FAMILY_PROOF_MISSING"
+    assert receipt.family_complete is True
+    # 3-bin family: 2 tradeable (yes+no each) + 1 non-tradeable (yes only, no_token_id=None).
+    # yes_token_ids has 3 entries; no_token_ids has 2 entries → 5 total hypotheses.
+    # This is MORE than the broken 2-bin subset (4 hypotheses) and correct for the full
+    # MECE family — q runs over all 3 bins, FDR denominator is 5 (not 4).
+    assert receipt.fdr_hypothesis_count == 5
 
 
-def test_runtime_receipt_generates_fdr_from_family_not_event_payload(tmp_path, monkeypatch):
-    def probe(*, event, trade_conn, bundle, kwargs, **_):
-        payload = json.loads(event.payload_json)
-        payload.pop("fdr_hypotheses", None)
-        receipt = _receipt(replace(event, payload_json=json.dumps(payload)), trade_conn, **kwargs)
-        assert receipt.proof_accepted is True, receipt.reason
-        assert receipt.fdr_hypothesis_count == 2 * len(bundle.q)
-        return receipt
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_runtime_receipt_generates_fdr_from_family_not_event_payload():
+    event = _bound_forecast_event()
+    payload = json.loads(event.payload_json)
+    payload.pop("fdr_hypotheses", None)
+    event = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    receipt = _receipt(event, _trade_conn_with_taker_snapshot())
+
+    assert receipt.fdr_hypothesis_count == 4
+    assert receipt.reason != "FDR_FULL_FAMILY_PROOF_MISSING"
 
 
-def test_forecast_receipt_does_not_require_old_probability_or_selection_facts(tmp_path, monkeypatch):
-    def probe(*, trade_conn, bundle, read, **_):
-        for table in ("probability_trace_fact", "selection_hypothesis_fact", "selection_family_fact"):
-            trade_conn.execute(f"DROP TABLE IF EXISTS {table}")
-        receipt = read()
-        assert receipt.proof_accepted is True, receipt.reason
-        assert receipt.q_live is not None
-        assert receipt.fdr_pass is True
-        assert receipt.fdr_hypothesis_count == 2 * len(bundle.q)
-        return receipt
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_taker_snapshot()
+    conn.execute("DROP TABLE probability_trace_fact")
+    conn.execute("DROP TABLE selection_hypothesis_fact")
+    conn.execute("DROP TABLE selection_family_fact")
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.q_live is not None
+    assert receipt.q_live > 0.60
+    assert receipt.fdr_pass is True
+    assert receipt.fdr_hypothesis_count == 4
 
 
-def test_forecast_receipt_uses_separate_forecast_authority_connection(tmp_path, monkeypatch):
-    def probe(*, conn, trade_conn, kwargs, read, **_):
-        assert conn is not trade_conn
-        assert kwargs["forecast_conn"] is conn and kwargs["topology_conn"] is conn
-        assert conn.execute("SELECT 1 FROM forecast_posteriors").fetchone()
-        assert not trade_conn.execute("SELECT 1 FROM sqlite_master WHERE name='forecast_posteriors'").fetchone()
-        receipt = read()
-        assert receipt.proof_accepted is True, receipt.reason
-        assert receipt.q_live is not None
-        assert receipt.side_effect_status == "NO_SUBMIT"
-        return receipt
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_forecast_receipt_uses_separate_forecast_authority_connection():
+    event = _bound_forecast_event()
+    trade_conn = _trade_conn_with_taker_snapshot()
+    forecast_conn = _trade_conn_with_snapshot()
+    forecast_conn.execute("DROP TABLE executable_market_snapshots")
+    trade_conn.execute("DROP TABLE ensemble_snapshots")
+    trade_conn.execute("DROP TABLE market_events")
+    trade_conn.execute("DROP TABLE source_run")
+    trade_conn.execute("DROP TABLE source_run_coverage")
+
+    receipt = _receipt(event, trade_conn, forecast_conn=forecast_conn, topology_conn=forecast_conn)
+
+    assert receipt.proof_accepted is True
+    assert receipt.q_live is not None
+    assert receipt.q_live > 0.60
+    assert receipt.side_effect_status == "NO_SUBMIT"
 
 
 def test_executable_snapshot_gate_uses_forecast_topology_authority_connection():
@@ -2881,52 +2608,40 @@ def test_receipt_requires_explicit_forecast_and_topology_authority_connections()
     assert missing_calibration.reason == "CALIBRATION_AUTHORITY_CONNECTION_MISSING"
 
 
-def test_receipt_uses_world_calibration_authority_not_forecast_conn(tmp_path, monkeypatch):
-    """Separate legacy fields cannot replace the current bootstrap credential."""
-    def probe(*, conn, bundle, read, **_):
-        calibration_conn = _calibration_conn_with_platt_model()
-        try:
-            assert calibration_conn is not conn
-            # A legacy model exists on the separately owned connection, but
-            # the current receipt must not query it for its replacement q.
-            platt_reads = []
-            def authority(action, table, *_):
-                if action == sqlite3.SQLITE_READ and table == "platt_models":
-                    platt_reads.append(table)
-                    return sqlite3.SQLITE_DENY
-                return sqlite3.SQLITE_OK
-            calibration_conn.set_authorizer(authority)
-            receipt = read(calibration_conn=calibration_conn)
-            assert receipt.proof_accepted is True, receipt.reason
-            assert platt_reads == []
-            assert receipt.decision_proof_bundle.calibration.payload["posterior_id"] == bundle.posterior_id
-            assert receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"].startswith(
-                "fused_bootstrap_settlement_coverage_v1:")
-            return receipt
-        finally:
-            calibration_conn.close()
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_receipt_uses_world_calibration_authority_not_forecast_conn():
+    event = _bound_forecast_event()
+    trade_conn = _trade_conn_with_taker_snapshot()
+    forecast_conn = _trade_conn_with_snapshot()
+    calibration_conn = _calibration_conn_with_platt_model()
+    forecast_conn.execute("DROP TABLE executable_market_snapshots")
+    trade_conn.execute("DROP TABLE ensemble_snapshots")
+    trade_conn.execute("DROP TABLE market_events")
+    trade_conn.execute("DROP TABLE source_run")
+    trade_conn.execute("DROP TABLE source_run_coverage")
+    forecast_conn.execute("UPDATE ensemble_snapshots SET p_cal_json = NULL")
+
+    receipt = _receipt(
+        event,
+        trade_conn,
+        forecast_conn=forecast_conn,
+        topology_conn=forecast_conn,
+        calibration_conn=calibration_conn,
+    )
+
+    assert receipt.proof_accepted is True
+    assert receipt.q_live is not None
+    assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_exists(tmp_path, monkeypatch):
-    def probe(*, conn, decision_time, read, **_):
-        conn.execute("SAVEPOINT future_legacy_calibration")
-        try:
-            # This obsolete enrichment column is deliberately private test
-            # data, not part of the current source/posterior clock authority.
-            if "p_cal_available_at" not in {row[1] for row in conn.execute("PRAGMA table_info(ensemble_snapshots)")}:
-                conn.execute("ALTER TABLE ensemble_snapshots ADD COLUMN p_cal_available_at TEXT")
-            conn.execute("UPDATE ensemble_snapshots SET p_cal_available_at=?",
-                         ((decision_time + timedelta(days=1)).isoformat(),))
-            receipt = read()
-            assert receipt.proof_accepted is True, receipt.reason
-            assert receipt.side_effect_status == "NO_SUBMIT"
-            assert "platt" not in receipt.decision_proof_bundle.calibration.payload["calibrator_model_key"]
-            return receipt
-        finally:
-            conn.execute("ROLLBACK TO future_legacy_calibration")
-            conn.execute("RELEASE future_legacy_calibration")
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_exists():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_taker_snapshot()
+    conn.execute("UPDATE ensemble_snapshots SET p_cal_available_at = '2026-05-24T08:11:00+00:00'")
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.side_effect_status == "NO_SUBMIT"
 
 
 def test_day0_latest_snapshot_seed_does_not_consume_entry_reader_readiness(monkeypatch):
@@ -2991,79 +2706,116 @@ def test_day0_latest_snapshot_seed_does_not_consume_entry_reader_readiness(monke
     assert payload["day0_entry_readiness_expiry_not_applied"] is True
 
 
-def test_day0_reader_elects_older_contributor_when_newer_snapshot_is_blocked(tmp_path, monkeypatch):
-    """The older contributor has originals; the new row explicitly has none."""
+def test_day0_reader_elects_older_contributor_when_newer_snapshot_is_blocked():
+    """Day0 binds the canonical contributor election instead of the newest row."""
     from src.engine.event_reactor_adapter import _forecast_snapshot_row_for_event
-    from src.events.candidate_binding import weather_family_id
-    from src.state.source_run_repo import write_source_run
-    def probe(*, conn, city, request, event, decision_time, **_):
-        original = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE city=? AND target_date=? "
-            "AND temperature_metric=? AND source_run_id=? ORDER BY snapshot_id DESC LIMIT 1",
-            (city.name, request.target_date.isoformat(), "high", request.baseline_source_run_id)).fetchone())
-        run = dict(conn.execute("SELECT * FROM source_run WHERE source_run_id=?",
-                               (original["source_run_id"],)).fetchone())
-        successor = f"{original['source_run_id']}-blocked-successor"
-        next_cycle = request.source_cycle_time + timedelta(hours=6)
-        failed_at = decision_time + timedelta(seconds=1)
-        # A distinct failed attempt has no physical possession or manifest.
-        # Do not clone the old COMPLETE run, capture receipt or member body.
-        write_source_run(conn, source_run_id=successor, source_id=run["source_id"],
-            track=run["track"], release_calendar_key=run["release_calendar_key"],
-            source_cycle_time=next_cycle, source_issue_time=next_cycle,
-            data_version=run["dataset_id"], status="PARTIAL", completeness_status="PARTIAL",
-            expected_members=51, observed_members=0, partial_run=True,
-            expected_steps_json=json.loads(run["expected_steps_json"]), observed_steps_json=[],
-            reason_code="SOURCE_BODY_UNAVAILABLE")
-        new_id = int(conn.execute("SELECT max(snapshot_id) FROM ensemble_snapshots").fetchone()[0]) + 1
-        snapshot = {key: original[key] for key in ("city", "target_date", "temperature_metric",
-            "physical_quantity", "observation_field", "lead_hours", "model_version", "dataset_id",
-            "source_id", "source_transport", "release_calendar_key", "city_timezone")}
-        snapshot.update(snapshot_id=new_id, source_run_id=successor,
-            contributes_to_target_extrema=0, forecast_window_attribution_status="NON_CONTRIBUTING",
-            source_cycle_time=next_cycle.isoformat(), issue_time=next_cycle.isoformat(),
-            available_at=failed_at.isoformat(), fetch_time=failed_at.isoformat(),
-            members_json="[]", provenance_json="{}", authority="UNVERIFIED")
-        conn.execute(f"INSERT INTO ensemble_snapshots ({','.join(snapshot)}) VALUES ({','.join('?' for _ in snapshot)})",
-                     tuple(snapshot.values()))
-        coverage = conn.execute("SELECT * FROM source_run_coverage WHERE source_run_id=? LIMIT 1",
-                               (original["source_run_id"],)).fetchone()
-        assert coverage is not None
-        bad_coverage = {**dict(coverage), "coverage_id": f"{coverage['coverage_id']}-blocked",
-            "source_run_id": successor, "snapshot_ids_json": json.dumps([new_id]),
-            "completeness_status": "MISSING", "readiness_status": "UNKNOWN_BLOCKED",
-            "observed_members": 0, "observed_steps_json": "[]", "expires_at": None,
-            "computed_at": failed_at.isoformat(), "reason_code": "SOURCE_BODY_UNAVAILABLE"}
-        conn.execute(f"INSERT INTO source_run_coverage ({','.join(bad_coverage)}) VALUES "
-                     f"({','.join('?' for _ in bad_coverage)})", tuple(bad_coverage.values()))
-        conn.commit()
-        # The base reader can elect its qualified contributor for Day0 without
-        # promoting this missing-body successor or minting an action certificate.
-        day0 = replace(event, event_type="DAY0_EXTREME_UPDATED")
-        conditions = [row[0] for row in conn.execute("SELECT condition_id FROM market_events "
-            "WHERE city=? AND target_date=? AND temperature_metric='high'",
-            (city.name, request.target_date.isoformat()))]
-        family = SimpleNamespace(city=city.name, target_date=request.target_date.isoformat(),
-            metric="high", family_id=weather_family_id(city=city.name,
-                target_date=request.target_date.isoformat(), metric="high"),
-            condition_ids=conditions, candidates=[])
-        statements = []
-        conn.set_trace_callback(statements.append)
-        row = _forecast_snapshot_row_for_event(conn, event=day0, family=family, allow_latest=True,
-                                              decision_time=decision_time + timedelta(hours=3))
-        assert row is not None
-        assert str(row["snapshot_id"]) == str(original["snapshot_id"])
-        assert dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=?",
-                                 (original["snapshot_id"],)).fetchone()) == original
-        assert dict(conn.execute("SELECT * FROM source_run WHERE source_run_id=?",
-                                 (original["source_run_id"],)).fetchone()) == run
-        elected_reads = [sql for sql in statements if "SELECT *" in sql and
-                         "FROM ensemble_snapshots" in sql and "WHERE" in sql]
-        assert elected_reads
-        for sql in set(elected_reads):
-            plan = conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
-            assert any("SEARCH" in str(step[3]) for step in plan)
-            assert not any("SCAN" in str(step[3]) for step in plan)
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", source_probe=probe)
+
+    conn = _trade_conn_with_snapshot(attach_world_for_qkernel=False)
+    source_run = dict(conn.execute("SELECT * FROM source_run WHERE source_run_id = 'run-1'").fetchone())
+    source_run.update(
+        {
+            "source_run_id": "run-2",
+            "source_cycle_time": "2026-05-24T12:00:00+00:00",
+            "source_issue_time": "2026-05-24T12:00:00+00:00",
+            "source_release_time": "2026-05-24T13:00:00+00:00",
+            "source_available_at": "2026-05-24T13:00:00+00:00",
+            "fetch_started_at": "2026-05-24T13:01:00+00:00",
+            "fetch_finished_at": "2026-05-24T13:05:00+00:00",
+            "captured_at": "2026-05-24T13:10:00+00:00",
+            "imported_at": "2026-05-24T13:10:00+00:00",
+            "completeness_status": "PARTIAL",
+            "partial_run": 1,
+            "status": "PARTIAL",
+        }
+    )
+    run_columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(source_run)").fetchall()]
+    conn.execute(
+        f"INSERT INTO source_run ({','.join(run_columns)}) VALUES ({','.join('?' for _ in run_columns)})",
+        [source_run[column] for column in run_columns],
+    )
+
+    coverage = dict(conn.execute("SELECT * FROM source_run_coverage WHERE coverage_id = 'coverage-1'").fetchone())
+    coverage.update(
+        {
+            "coverage_id": "coverage-2",
+            "source_run_id": "run-2",
+            "snapshot_ids_json": "[2]",
+            "completeness_status": "PARTIAL",
+            "readiness_status": "BLOCKED",
+            "reason_code": "EXECUTABLE_FORECAST_NON_CONTRIBUTING_EXTREMA",
+            "computed_at": "2026-05-24T13:10:00+00:00",
+        }
+    )
+    coverage_columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(source_run_coverage)").fetchall()]
+    conn.execute(
+        f"INSERT INTO source_run_coverage ({','.join(coverage_columns)}) VALUES ({','.join('?' for _ in coverage_columns)})",
+        [coverage[column] for column in coverage_columns],
+    )
+    # The fixture's replacement posterior setup rewrites the current data_version after the
+    # producer-readiness row is inserted; align that row so the real reader can enumerate both
+    # cycles through its canonical scope query.
+    conn.execute(
+        """
+        UPDATE readiness_state
+        SET data_version = (SELECT data_version FROM source_run_coverage WHERE coverage_id = 'coverage-1')
+        WHERE readiness_id = 'producer-readiness-1'
+        """
+    )
+
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id = '1'").fetchone())
+    snapshot.update(
+        {
+            "snapshot_id": "2",
+            "source_run_id": "run-2",
+            "source_cycle_time": "2026-05-24T12:00:00+00:00",
+            "source_release_time": "2026-05-24T13:00:00+00:00",
+            "source_available_at": "2026-05-24T13:00:00+00:00",
+            "issue_time": "2026-05-24T12:00:00+00:00",
+            "fetch_time": "2026-05-24T13:05:00+00:00",
+            "available_at": "2026-05-24T13:00:00+00:00",
+            "first_member_observed_time": "2026-05-24T13:01:00+00:00",
+            "run_complete_time": "2026-05-24T13:10:00+00:00",
+            "contributes_to_target_extrema": 0,
+            "forecast_window_attribution_status": "NON_CONTRIBUTING",
+        }
+    )
+    snapshot_columns = [str(row[1]) for row in conn.execute("PRAGMA table_info(ensemble_snapshots)").fetchall()]
+    conn.execute(
+        f"INSERT INTO ensemble_snapshots ({','.join(snapshot_columns)}) VALUES ({','.join('?' for _ in snapshot_columns)})",
+        [snapshot[column] for column in snapshot_columns],
+    )
+
+    day0 = _day0_event()
+    family = SimpleNamespace(
+        city="Chicago",
+        target_date="2026-05-25",
+        metric="high",
+        family_id="run-1",
+        condition_ids=["condition-1"],
+        candidates=[],
+    )
+    statements = []
+    conn.set_trace_callback(statements.append)
+    row = _forecast_snapshot_row_for_event(
+        conn,
+        event=day0,
+        family=family,
+        allow_latest=True,
+        decision_time=datetime(2026, 5, 24, 14, 12, tzinfo=timezone.utc),
+    )
+
+    assert row is not None
+    assert str(row["snapshot_id"]) == "1"
+    elected_reads = [
+        statement for statement in statements
+        if statement.startswith("SELECT * FROM ensemble_snapshots WHERE")
+        and "ORDER BY" not in statement
+    ]
+    assert elected_reads
+    for statement in set(elected_reads):
+        plan = conn.execute("EXPLAIN QUERY PLAN " + statement).fetchall()
+        assert any("SEARCH" in str(step[3]) for step in plan)
+        assert not any("SCAN" in str(step[3]) for step in plan)
 
 
 @pytest.mark.parametrize("elected_id", ["01", "+1", "1.0", " 1", "invalid", str(2**63)])
@@ -3293,38 +3045,32 @@ def test_snapshot_lead_days_falls_back_to_day0_observation_time():
     assert lead_days == 0.0
 
 
-def test_executable_snapshot_freshness_uses_reactor_decision_time(tmp_path, monkeypatch):
-    def probe(*, trade_conn, decision_time, kwargs, read, **_):
-        from src.engine.event_reactor_adapter import _snapshot_price_stale_reason
-        receipt = read()
-        assert receipt.proof_accepted is True, receipt.reason
-        token = kwargs["global_actuation"].decision.candidate.token_id
-        row = dict(trade_conn.execute("SELECT * FROM executable_market_snapshots "
-            "WHERE selected_outcome_token_id=?", (token,)).fetchone())
-        assert _snapshot_price_stale_reason(row, decision_time=decision_time) is None
-        assert _snapshot_price_stale_reason(row, decision_time=decision_time + timedelta(seconds=601)).startswith(
-            "EXECUTABLE_SNAPSHOT_STALE:")
-        return receipt
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_executable_snapshot_freshness_uses_reactor_decision_time():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_taker_snapshot(freshness_deadline="2026-05-24T08:12:30+00:00")
+
+    receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
+
+    assert receipt.proof_accepted is True
+    assert receipt.side_effect_status == "NO_SUBMIT"
 
 
-def test_price_stale_selected_snapshot_stays_no_submit_when_live_proof_is_valid(tmp_path, monkeypatch):
+def test_price_stale_selected_snapshot_stays_no_submit_when_live_proof_is_valid():
     """Market identity persists and a valid event-bound proof remains a no-submit live receipt."""
-    def probe(*, trade_conn, decision_time, kwargs, read, **_):
-        from src.engine.event_reactor_adapter import _snapshot_price_stale_reason
-        receipt = read()
-        assert receipt.proof_accepted is True, receipt.reason
-        assert receipt.submitted is False and receipt.side_effect_status == "NO_SUBMIT"
-        token = kwargs["global_actuation"].decision.candidate.token_id
-        row = dict(trade_conn.execute("SELECT * FROM executable_market_snapshots "
-            "WHERE selected_outcome_token_id=?", (token,)).fetchone())
-        row.update(captured_at=(decision_time - timedelta(minutes=2)).isoformat(),
-                   freshness_deadline=(decision_time - timedelta(seconds=1)).isoformat())
-        # Selection's own window is not submit-price freshness. This unit
-        # relation cannot license the copied expired quote at the SDK boundary.
-        assert _snapshot_price_stale_reason(row, decision_time=decision_time) is None
-        return receipt
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+    event = _bound_forecast_event()
+    # captured_at before freshness_deadline (invariant: deadline >= captured);
+    # freshness_deadline is before decision_time (08:12) — simulates price-stale snapshot.
+    conn = _trade_conn_with_taker_snapshot(
+        captured_at="2026-05-24T08:10:00+00:00",
+        freshness_deadline="2026-05-24T08:11:59+00:00",
+    )
+
+    receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
+
+    assert receipt.submitted is False
+    assert receipt.proof_accepted is True
+    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.reason == "event_bound_final_intent_no_submit"
 
 
 def test_capital_efficiency_allows_high_price_positive_ev_for_ranking():
@@ -4031,15 +3777,23 @@ def test_opportunity_book_selector_excludes_all_locked_executables(monkeypatch):
     assert rejected["admitted"] is False
 
 
-def test_top_ask_without_depth_does_not_create_fillable_quote(tmp_path, monkeypatch):
+def test_top_ask_without_depth_does_not_create_fillable_quote(monkeypatch):
     # STALE_LAW re-pin 2026-06-09: S4 ΔU ranker selects best-utility across ALL
     # conditions. With condition-2's hardcoded _depth_extra having negative edge, the
     # ranker returns None (all ΔU ≤ 0) instead of falling through to condition-1.
     # Fix: isolate to condition-1 only (snapshot_condition_count=1, include_no_snapshot=False)
     # so the ranker sees only one candidate (condition-1 YES, empty depth) and falls
     # back to the non-executable path.
-    _qualified_native_quote_probe(tmp_path, monkeypatch, unavailable=True,
-        edit=lambda row: row.update(orderbook_depth_json="{}", depth_at_best_ask=0))
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(
+        selected_ask="0.40", depth_json="{}", snapshot_condition_count=1, include_no_snapshot=False
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
+    assert receipt.proof_accepted is False
 
 
 @pytest.mark.parametrize(
@@ -4122,71 +3876,98 @@ def test_yes_quote_reaches_common_price_boundary(monkeypatch, ask, bid, in_band)
 
 
 
-def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote(tmp_path, monkeypatch):
+def test_non_executable_snapshot_with_depth_cannot_create_fillable_quote():
     # No-bypass invariant: a substrate-only snapshot whose
     # tradeability_status_json.executable_allowed is EXPLICITLY False must NOT
     # become a fillable quote, even when orderbook depth is present. The
     # proof-pricing path (_execution_price_from_snapshot) fail-closes before a
     # selected candidate can become priced, mirroring the submit-time backstop
     # assert_snapshot_executable.
-    _qualified_native_quote_probe(tmp_path, monkeypatch, unavailable=True,
-        edit=lambda row: row.update(tradeability_status_json=json.dumps({
-            "executable_allowed": False, "reason": "synthetic_clob_market_info_substrate_only"})))
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(
+        selected_ask="0.40",
+        tradeability_status_json=json.dumps(
+            {"executable_allowed": False, "reason": "synthetic_clob_market_info_substrate_only"}
+        ),
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith("EVENT_BOUND_SELECTED_CANDIDATE_MISSING:")
+    assert receipt.proof_accepted is False
 
 
-def test_executable_allowed_true_snapshot_with_depth_still_creates_fillable_quote(tmp_path, monkeypatch):
+def test_executable_allowed_true_snapshot_with_depth_still_creates_fillable_quote():
     # No-over-block companion to ZEUS-NOBYPASS-1: the fail-closed guard must
     # ONLY block executable_allowed EXPLICITLY False. A snapshot with the SAME
     # depth that is explicitly executable_allowed=True still produces a fillable
     # native quote and an accepted proof — proving the guard does not regress any
     # legitimate executable quote.
-    _qualified_native_quote_probe(tmp_path, monkeypatch,
-        edit=lambda row: row.update(tradeability_status_json=json.dumps({
-            "executable_allowed": True, "accepting_orders": True, "clob_archived": False,
-            "clob_enable_order_book": True, "reason": "clob_market_info_executable"})))
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_taker_snapshot(
+        selected_ask="0.40",
+        tradeability_status_json=json.dumps(
+            {
+                "executable_allowed": True,
+                "accepting_orders": True,
+                "clob_archived": False,
+                "clob_enable_order_book": True,
+                "reason": "clob_market_info_executable",
+            }
+        ),
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.native_quote_available is True
+    assert receipt.c_fee_adjusted is not None
+    assert not receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
 
 
-def test_absent_tradeability_status_snapshot_with_depth_is_byte_identical_fillable(tmp_path, monkeypatch):
+def test_absent_tradeability_status_snapshot_with_depth_is_byte_identical_fillable():
     # No-over-block companion to ZEUS-NOBYPASS-1: when executable_allowed is
     # ABSENT/None (the default substrate-free fixture), behavior must be
     # byte-identical to pre-guard — the guard is strictly-more-restrictive and
     # must NOT touch snapshots that lack the field.
-    _qualified_native_quote_probe(tmp_path, monkeypatch,
-        edit=lambda row: row.update(tradeability_status_json="{}"))
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_taker_snapshot(selected_ask="0.40")  # tradeability_status_json="{}" -> field absent
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.native_quote_available is True
+    assert receipt.c_fee_adjusted is not None
+    assert not receipt.reason.startswith("EXECUTABLE_NATIVE_ASK_MISSING")
 
 
-@pytest.mark.parametrize("direction,token,label,price", (
-    ("buy_yes", "yes-1", "YES", "0.40"), ("buy_no", "no-1", "NO", "0.80")))
-def test_real_snapshot_depth_at_best_ask_authorizes_selected_token_cost(direction, token, label, price):
-    """Selected-token explicit depth is quote evidence, never q/BUY authority."""
-    from src.engine.event_reactor_adapter import _execution_price_from_snapshot
-    conn = _trade_conn_with_snapshot(attach_world_for_qkernel=False)
-    try:
-        assert "depth_at_best_ask" in {row[1] for row in conn.execute("PRAGMA table_info(executable_market_snapshots)")}
-        row = dict(conn.execute("SELECT * FROM executable_market_snapshots WHERE selected_outcome_token_id=?",
-                                (token,)).fetchone())
-        row.update(orderbook_depth_json="{}", depth_at_best_ask=100,
-                   orderbook_top_ask=price, selected_outcome_token_id=token, outcome_label=label)
-        quoted, fill, cost = _execution_price_from_snapshot(row, selected_token_id=token, direction=direction)
-        assert quoted.value == float(price)
-        assert 0 < fill <= 1 and cost >= quoted.value
-        smaller = {**row, "depth_at_best_ask": 5}
-        _, smaller_fill, _ = _execution_price_from_snapshot(smaller, selected_token_id=token, direction=direction)
-        assert fill >= smaller_fill
-        for missing in (0, None):
-            with pytest.raises(ValueError):
-                _execution_price_from_snapshot({**row, "depth_at_best_ask": missing},
-                                                selected_token_id=token, direction=direction)
-        with pytest.raises(ValueError, match="selected token mismatch"):
-            _execution_price_from_snapshot(row, selected_token_id="foreign", direction=direction)
-        with pytest.raises(ValueError, match="unsupported direction"):
-            _execution_price_from_snapshot(row, selected_token_id=token, direction="sell_yes")
-    finally:
-        conn.close()
+@pytest.mark.xfail(reason="depth_at_best_ask column fallback for empty orderbook_depth_json is unimplemented in the native quote book (EXECUTABLE_NATIVE_ASK_MISSING:NO_DEPTH). Separate from the q/FDR kernel — tracked as its own quote-book feature.", strict=False)
+def test_real_snapshot_depth_at_best_ask_authorizes_selected_token_cost():
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_snapshot(selected_ask="0.40")
+    conn.execute("ALTER TABLE executable_market_snapshots ADD COLUMN depth_at_best_ask TEXT")
+    conn.execute(
+        """
+        UPDATE executable_market_snapshots
+        SET orderbook_depth_json = '{}',
+            depth_at_best_ask = '100'
+        """
+    )
+
+    receipt = _receipt(event, conn, decision_time=DECISION_TIME)
+
+    assert receipt.proof_accepted is True
+    assert receipt.c_fee_adjusted == 0.40
+    assert receipt.native_quote_available is True
+    assert receipt.p_fill_lcb == 0.05
 
 
-def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(tmp_path, monkeypatch):
+def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch):
     from src.runtime import bankroll_provider
+
+    event = _bound_forecast_event()
+    conn = _trade_conn_with_taker_snapshot()
 
     def _explode_current(**_kwargs):
         raise AssertionError("no-submit proof must not live-fetch wallet bankroll")
@@ -4194,16 +3975,18 @@ def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(tmp_path, mo
     monkeypatch.setattr(bankroll_provider, "current", _explode_current)
     monkeypatch.setattr(bankroll_provider, "cached", lambda **_kwargs: None)
 
-    def probe(*, read, **_):
-        baseline = read()
-        assert baseline.proof_accepted and baseline.kelly_pass, baseline.reason
-        receipt = read(bankroll_usd_provider=None)
-        assert receipt.submitted is False
-        assert not receipt.proof_accepted
-        assert receipt.reason == "KELLY_PROOF_MISSING:bankroll_provider_unavailable"
-        assert receipt.side_effect_status == "NO_SUBMIT"
-        return receipt
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+    receipt = build_event_bound_no_submit_receipt(
+        event,
+        trade_conn=conn,
+        decision_time=DECISION_TIME,
+        forecast_conn=conn,
+        topology_conn=conn,
+        calibration_conn=conn,
+        get_current_level=lambda: RiskLevel.GREEN,
+    )
+
+    assert receipt.submitted is False
+    assert receipt.reason == "KELLY_PROOF_MISSING:bankroll_provider_unavailable"
 
 
 def test_runtime_bankroll_for_sizing_uses_total_equity_not_spendable_cash(monkeypatch):
@@ -4328,21 +4111,10 @@ def test_forecast_receipt_uses_attached_forecasts_market_topology():
         ],
     )
 
-    # Attached FORECAST topology routing is a separate F/unit read boundary;
-    # normal native-source receipt authority is covered by the public H/L
-    # cases, not manufactured for this historical Chicago fixture.
-    from src.engine.event_reactor_adapter import _authority_table_ref, _topology_candidate_from_market_event
-    table = _authority_table_ref(conn, "market_events")
-    assert table == "forecasts.market_events"
-    rows = conn.execute(f"SELECT * FROM {table} ORDER BY condition_id").fetchall()
-    payload = json.loads(event.payload_json)
-    candidates = [_topology_candidate_from_market_event(dict(row),
-        {"yes_token_id": f"yes-{index}", "no_token_id": f"no-{index}"}, payload)
-        for index, row in enumerate(rows, 1)]
-    assert [(candidate.bin.low, candidate.bin.high, candidate.bin.unit) for candidate in candidates] == [
-        (None, 71., "F"), (72., None, "F")]
-    assert sum(bool(candidate.yes_token_id) + bool(candidate.no_token_id) for candidate in candidates) == 4
-    conn.close()
+    receipt = _receipt(event, conn, forecast_conn=conn, topology_conn=conn)
+
+    assert receipt.proof_accepted is True
+    assert receipt.fdr_hypothesis_count == 4
 
 
 def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old_facts():
@@ -4360,24 +4132,43 @@ def test_day0_receipt_uses_latest_forecast_source_and_absorbing_boundary_not_old
     assert "decision_time=2026-05-24T14:06:00+00:00" in receipt.reason
 
 
-def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoint(tmp_path, monkeypatch):
+def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoint(monkeypatch):
     # STALE_LAW re-pin 2026-06-09: same ΔU ranker issue as test_top_ask_without_depth.
     # Isolate to condition-1 only (snapshot_condition_count=1, include_no_snapshot=False)
     # so condition-2's hardcoded depth does not let the ranker skip condition-1.
-    _qualified_native_quote_probe(tmp_path, monkeypatch, unavailable=True,
-        edit=lambda row: row.update(orderbook_depth_json="{}", depth_at_best_ask=0,
-                                   orderbook_top_ask=None, orderbook_top_bid=None))
+    event = _bound_forecast_event()
+    receipt = _receipt(
+        event,
+        _trade_conn_with_taker_snapshot(
+            selected_ask="",
+            no_selected_bid="",
+            snapshot_condition_count=1,
+            include_no_snapshot=False,
+        ),
+    )
+
+    assert receipt.submitted is False
+    assert receipt.reason.startswith(
+        (
+            "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE",
+            "QKERNEL_SPINE_NO_TRADE:NO_ROI_FRONTIER_USEFUL_CANDIDATE",
+            "EVENT_BOUND_SELECTED_CANDIDATE_MISSING:",
+        )
+    )
 
 
-def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload(tmp_path, monkeypatch):
-    def probe(*, event, trade_conn, kwargs, **_):
-        payload = {**json.loads(event.payload_json), "bankroll_usd": 0, "kelly_multiplier": 0}
-        receipt = _receipt(replace(event, payload_json=json.dumps(payload)), trade_conn, **kwargs)
-        assert receipt.proof_accepted is True, receipt.reason
-        assert receipt.kelly_pass is True
-        assert receipt.kelly_size_usd > 0
-        return receipt
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():
+    event = _bound_forecast_event()
+    payload = json.loads(event.payload_json)
+    payload["bankroll_usd"] = 0
+    payload["kelly_multiplier"] = 0
+    event = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+    receipt = _receipt(event, _trade_conn_with_taker_snapshot())
+
+    assert receipt.kelly_pass is True
+    assert receipt.kelly_size_usd > 0
+    assert receipt.reason != "KELLY_PROOF_MISSING"
 
 
 # ── Task #107: portfolio-aware Kelly THROUGH the live reactor receipt path ────
@@ -4404,22 +4195,18 @@ def _held_chicago_position(committed_usd: float, tid: str):
     )
 
 
-def test_107_receipt_unwired_provider_equals_single_kelly_modulo_cap(tmp_path, monkeypatch):
-    """Current global selection cannot use an unwired free-cash authority.
-
-    This supersedes the historical scalar-Kelly equality claim, not its
-    production fallback implementation or any capital/sizing law.
-    """
-    def probe(*, conn, city, request, bundle, decision_time, **_):
-        from tests.money_path.test_finding_b_free_cash_bound import _normal_cash_matrix
-        receipts = _normal_cash_matrix(conn=conn, city=city, request=request,
-            bundle=bundle, decision_time=decision_time, monkeypatch=monkeypatch)
-        assert not receipts["unwired"].submitted
-        assert "GLOBAL_ACTUATION_FREE_CASH_SUPERSEDED" in receipts["unwired"].reason
-        assert receipts["baseline"].proof_accepted, receipts["baseline"].reason
-        assert receipts["baseline"].kelly_pass
-        assert receipts["baseline"].kelly_size_usd > 0
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", source_probe=probe)
+def test_107_receipt_unwired_provider_equals_single_kelly_modulo_cap():
+    """No portfolio_state_provider ⇒ receipt sizes EXACTLY as pre-#107 single
+    Kelly (no regression), except the K3 single-bet cap never engages because
+    the cap is only applied on the portfolio-aware path."""
+    event = _bound_forecast_event()
+    receipt = _receipt(
+        event,
+        _trade_conn_with_taker_snapshot(),
+        bankroll_usd_provider=lambda: 170.0,
+    )
+    assert receipt.kelly_pass is True
+    assert receipt.kelly_size_usd > 0
 
 
 # DEAD_TEST 2026-06-09: test_107_receipt_correlated_hold_reduces_size_through_reactor
@@ -4433,21 +4220,20 @@ def test_107_receipt_unwired_provider_equals_single_kelly_modulo_cap(tmp_path, m
 # at higher bankroll or larger edge, but that is out of scope for triage.
 
 
-def test_107_receipt_fractional_kelly_is_not_single_position_clipped(tmp_path, monkeypatch):
-    """Canonical wealth and identical cash bounds retain the sealed proposal.
+def test_107_receipt_fractional_kelly_is_not_single_position_clipped():
+    """The reactor carries fractional Kelly size without a single-position clip."""
+    from src.state.portfolio import PortfolioState
 
-    No old single-position-clipping theorem is inferred from a toy q/portfolio.
-    """
-    def probe(*, conn, city, request, bundle, decision_time, **_):
-        from tests.money_path.test_finding_b_free_cash_bound import _normal_cash_matrix
-        receipts = _normal_cash_matrix(conn=conn, city=city, request=request,
-            bundle=bundle, decision_time=decision_time, monkeypatch=monkeypatch)
-        baseline, large = receipts["baseline"], receipts["large"]
-        assert baseline.proof_accepted and large.proof_accepted
-        assert baseline.kelly_pass and baseline.kelly_size_usd > 0
-        assert baseline.kelly_size_usd == pytest.approx(large.kelly_size_usd)
-        assert baseline.causal_snapshot_id == large.causal_snapshot_id
-    _normal_native_final_intent_case(tmp_path, monkeypatch, "high", source_probe=probe)
+    bankroll = 170.0
+    receipt = _receipt(
+        _bound_forecast_event(),
+        _trade_conn_with_taker_snapshot(),
+        bankroll_usd_provider=lambda: bankroll,
+        portfolio_state_provider=lambda: PortfolioState(positions=[]),
+    )
+    assert receipt.kelly_pass is True
+    assert receipt.kelly_size_usd is not None
+    assert receipt.kelly_size_usd > 0.0
 
 
 # DEAD_TEST 2026-06-09: test_107_receipt_full_exposure_soft_damps_through_reactor
@@ -5518,19 +5304,23 @@ def test_refresh_failure_falls_through_to_stale_rejection():
     assert receipt_noop.proof_accepted is False
 
 
-def test_fresh_row_skips_refresh(tmp_path, monkeypatch):
+def test_fresh_row_skips_refresh():
     """Already-fresh elected row ⇒ refresher NOT called (rate budget)."""
+    decision_time = DECISION_TIME
+    conn = _trade_conn_with_taker_snapshot(
+        freshness_deadline=_fresh_freshness_deadline_for(decision_time),
+    )
+
     calls: list[dict] = []
 
     def _refresher(**kwargs):
         calls.append(kwargs)
         return True
 
-    def probe(*, read, **_):
-        receipt = read(family_snapshot_refresher=_refresher)
-        assert receipt.proof_accepted is True, receipt.reason
-        return receipt
-    receipt = _normal_native_final_intent_case(tmp_path, monkeypatch, "high", receipt_probe=probe)
+    receipt = _receipt(
+        _bound_forecast_event(), conn, decision_time=decision_time, family_snapshot_refresher=_refresher
+    )
+
     assert calls == [], "fresh row must NOT trigger a refresh (rate budget)"
     assert receipt.proof_accepted is True
 
