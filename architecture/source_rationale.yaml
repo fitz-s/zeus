@@ -388,6 +388,19 @@ files:
     downstream:
     - src/ingest_main.py
     - src/events/triggers/day0_extreme_updated.py
+  src/data/day0_dense_state_space.py:
+    zone: K3_extension
+    authority_role: day0_dense_state_space_operator
+    why: Pure dense-observation state-space law for the settled Day0 extreme. Forward recursion on residual cells with exact OU transitions, exact METAR interval and quantised dense-mixture likelihoods, page rows as the only semantic certificate, mirrored METAR rows as per-row page-retention marks, pending-instant and SPECI kills, and a Gauss-Hermite static offset. No IO, no DB.
+    downstream:
+    - src/data/day0_dense_evidence.py
+    - scripts/fit_day0_dense_state_space.py
+  src/data/day0_dense_evidence.py:
+    zone: K3_extension
+    authority_role: day0_dense_state_space_dispatch
+    why: Receipt-gated evidence reader and dispatch for the dense carrier. Called by build_day0_remaining_probability_carrier; returns the dense carrier only for fitted city/metric, fresh dense rows today and valid inputs, else None so the legacy operator runs unchanged. Evidence is admitted at the current-state print's first receipt (writer/replay agreement). Reads FORECAST day0_hourly_vectors and WORLD observation_prints read-only; computation outside write locks.
+    downstream:
+    - src/data/day0_hourly_vectors.py
   src/data/physical_current_sources.py:
     zone: K1_truth
     authority_role: physical_current_station_route_registry
@@ -2712,6 +2725,18 @@ files:
     why: "Offline-only read-only loader for the historical fitted Day0 remaining-center diagnostic (state/day0_remaining_center_bias.json, produced by scripts/fit_day0_remaining_center_bias.py). Shrunk metric/station node curves and their absent/stale/malformed/schema diagnostics remain available for offline attribution and comparison, never live probability authority. Live carrier construction, materialization and reactor/public/JIT rebuilding must not read or apply this artifact; current carrier policy is unshifted_live_v1 with explicit numeric zero bias, rebuilt through normal seed/materialization rather than relabeling old certificates. No DB reads or writes."
     downstream:
     - scripts/fit_day0_remaining_center_bias.py
+  src/calibration/day0_dense_state_space_params.py:
+    zone: K3_extension
+    authority_role: day0_dense_state_space_params_loader
+    why: Read-only loader of the content-hashed FORECAST-class artifact config/day0_dense_state_space_params.json. A city/metric is served only for target dates after its training and page-retention evidence; malformed blocks are absent (legacy serves). No DB reads or writes.
+    downstream:
+    - src/data/day0_dense_evidence.py
+  src/calibration/day0_dense_state_space_fit.py:
+    zone: K3_extension
+    authority_role: day0_dense_state_space_estimation
+    why: Pure walk-forward estimation (ported from the dense-station backtest) of dense noise, drift, mean and OU parameters from training days. No IO.
+    downstream:
+    - scripts/fit_day0_dense_state_space.py
   src/calibration/day0_resolver_terminal_residual.py:
     zone: K3_extension
     authority_role: day0_resolver_terminal_residual
