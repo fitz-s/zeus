@@ -40,6 +40,11 @@ Scope limitation (Path A, accepted by operator 2026-05-18):
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
+import base64
+import hashlib
+import json
+import re
+from datetime import datetime, timezone
 from typing import Any, Callable, ClassVar, Literal, Optional
 
 import logging
@@ -58,6 +63,7 @@ def settlement_source_publication_grade(
     *, city: str, target_date: str, temperature_metric: str,
     market_slug: str | None, source_family: str | None = None,
     settlement_source: str | None = None, provenance: dict | None = None,
+    qualification_at: str | None = None,
 ) -> dict | None:
     """Separate HKO source publication eligibility from integer rounding/payout.
 
@@ -73,19 +79,171 @@ def settlement_source_publication_grade(
     is_hko = city.replace(" ", "").lower() == "hongkong" or any(
         "hko" in str(source or "").lower() for source in sources
     )
-    if not is_hko:
+    venue_claim = (evidence.get("claim_basis") == "venue_unique_integer_point_v1"
+                   or settlement_source == "polymarket_gamma" and evidence.get("venue_point_witness") is not None)
+    if not is_hko and not venue_claim:
         return None
-    # SCOPE: this HKO city/date/metric/entity/contract source grade only.
-    # DRAIN: original publication/accepted correction evidence, not repeated
-    # latest-endpoint fetches that cannot reconstruct first publication.
-    # RESET: a supported native witness parser for this exact tuple, following
-    # the existing DISPUTED reactivation law; another date/track cannot reset it.
-    return {
+    # SCOPE: this tuple's unproven decimal claim, not every HKO integer fact.
+    # DRAIN/RESET: possessed native Gamma evidence becomes strictly resolved
+    # with one YES point, independently proving its unique settlement integer.
+    # Decimal publication eligibility stays a separate UNKNOWN fact.
+    result = {
         "source_grade": "UNKNOWN",
         "reason": "hko_publication_witness_unavailable",
         "city": city, "target_date": target_date,
         "temperature_metric": temperature_metric, "market_slug": market_slug,
     }
+    point = gamma_unique_point_truth(
+        evidence.get("venue_point_witness"), city=city, target_date=target_date,
+        temperature_metric=temperature_metric, market_slug=market_slug,
+        qualification_at=qualification_at,
+    )
+    if point is not None:
+        result.update(venue_integer_grade="VERIFIED", venue_point=point, reason=None)
+    return result
+
+
+def gamma_capture_identity(witness: dict) -> str:
+    """Bind the retained entity and its capture clocks, never source-issued time."""
+    fields = ("entity_sha256", "capture_started_at_utc", "capture_received_at_utc",
+              "request_url", "request_params")
+    return hashlib.sha256(json.dumps({key: witness.get(key) for key in fields},
+                         sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def gamma_binary_outcome(market: dict) -> dict | None:
+    """Strict native closed/resolved binary fact; 0/1 are payout facts only."""
+    from src.contracts.settlement_outcome import classify_settlement_outcome, SettlementOutcome
+    def items(value):
+        return json.loads(value) if isinstance(value, str) else value
+    try:
+        if not isinstance(market, dict) or market.get("closed") is not True or classify_settlement_outcome(market) not in {
+            SettlementOutcome.VENUE_RESOLVED_WIN, SettlementOutcome.VENUE_RESOLVED_LOSE,
+        }:
+            return None
+        labels = items(market.get("outcomes"))
+        prices = items(market.get("outcomePrices"))
+        tokens = items(market.get("clobTokenIds"))
+        if not all(isinstance(values, list) and len(values) == 2
+                   for values in (labels, prices, tokens)):
+            return None
+        labels = [str(label).lower() for label in labels]
+        if labels not in (["yes", "no"], ["no", "yes"]):
+            return None
+        if any(isinstance(value, bool) for value in prices) or [float(p) for p in prices] not in (
+            [1.0, 0.0], [0.0, 1.0],
+        ):
+            return None
+        if not all(isinstance(token, str) and token.strip() for token in tokens) or tokens[0] == tokens[1]:
+            return None
+        condition = market.get("conditionId")
+        if not isinstance(condition, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", condition):
+            return None
+        yes = labels.index("yes")
+        return {"condition_id": condition, "yes_token_id": tokens[yes],
+                "yes_won": float(prices[yes]) == 1.0}
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def gamma_unique_point_truth(witness, *, city: str, target_date: str,
+                             temperature_metric: str, market_slug: str | None,
+                             qualification_at: str | None) -> dict | None:
+    """Reproduce a venue integer from an original native entity, never weather floor.
+
+    A hash/capture binds custody, not publication. Qualification is a separate
+    actual clock no earlier than possession or the native entity's revision.
+    Parsed objects and source-name/positive-grade flags authorize nothing.
+    """
+    from src.types.market import Bin
+    from types import SimpleNamespace
+    try:
+        if not isinstance(witness, dict) or city != "Hong Kong" or temperature_metric not in {"high", "low"}:
+            return None
+        if witness.get("request_url") != "https://gamma-api.polymarket.com/events":
+            return None
+        if witness.get("capture_identity_sha256") != gamma_capture_identity(witness):
+            return None
+        raw = base64.b64decode(witness["entity_bytes_b64"], validate=True)
+        if not raw or hashlib.sha256(raw).hexdigest() != witness["entity_sha256"]:
+            return None
+        clock = lambda value: datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        started, received, qualified = map(clock, (witness["capture_started_at_utc"],
+            witness["capture_received_at_utc"], qualification_at))
+        if any(value.tzinfo is None for value in (started, received, qualified)) or not (
+            started <= received <= qualified <= datetime.now(timezone.utc)
+        ):
+            return None
+        target = datetime.fromisoformat(target_date).date()
+        if target_date != target.isoformat():
+            return None
+        extreme = "highest" if temperature_metric == "high" else "lowest"
+        expected_slug = f"{extreme}-temperature-in-hong-kong-on-{target.strftime('%B').lower()}-{target.day}-{target.year}"
+        if market_slug != expected_slug:
+            return None
+        body = json.loads(raw)
+        if not isinstance(body, list):
+            return None
+        events = [event for event in body if isinstance(event, dict) and event.get("slug") == market_slug]
+        if len(events) != 1 or events[0].get("closed") is not True:
+            return None
+        event = events[0]
+        if event.get("title") != f"{extreme.capitalize()} temperature in Hong Kong on {target.strftime('%B')} {target.day}?":
+            return None
+        updated = clock(event["updatedAt"])
+        if updated.tzinfo is None or updated > received:
+            return None
+        markets = event.get("markets")
+        if not isinstance(markets, list) or not markets:
+            return None
+        facts = [gamma_binary_outcome(market) for market in markets]
+        if any(fact is None for fact in facts):
+            return None
+        if len({fact["condition_id"] for fact in facts}) != len(facts):
+            return None
+        winners = [(market, fact) for market, fact in zip(markets, facts) if fact["yes_won"]]
+        if len(winners) != 1:
+            return None
+        winner, fact = winners[0]
+        label = winner.get("groupItemTitle")
+        match = re.fullmatch(r"(-?\d+)°C", str(label))
+        if match is None:
+            return None  # NO-only point, range and shoulder prove no scalar.
+        value = float(match.group(1))
+        if winner.get("question") != f"Will the {extreme} temperature in Hong Kong be {label} on {target.strftime('%B')} {target.day}?":
+            return None
+        bin_ = Bin(value, value, "C", str(label))
+        if not bin_.is_point or bin_.settlement_values != [int(value)]:
+            return None
+        sem = SettlementSemantics.for_city(SimpleNamespace(settlement_source_type="hko", settlement_unit="C"))
+        if sem.assert_settlement_value(value, context="gamma_unique_point_truth") != value:
+            return None
+        return {**fact, "settlement_value": value, "winning_bin": label,
+                "unit": "C", "qualification_at": qualified.isoformat(),
+                "outcomes": facts,
+                "capture_identity_sha256": witness["capture_identity_sha256"]}
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
+
+
+def gamma_point_outcomes_match(point: dict, outcomes) -> bool:
+    """Only emit caller-requested payout rows independently reproduced in the entity."""
+    if outcomes is None:
+        return True
+    try:
+        native = {row["condition_id"]: row for row in point["outcomes"]}
+        seen = set()
+        for outcome in outcomes:
+            row = outcome if isinstance(outcome, dict) else vars(outcome)
+            condition = row.get("condition_id")
+            if condition in seen or condition not in native or type(row.get("yes_won")) is not bool:
+                return False
+            seen.add(condition)
+            if any(row.get(key) != native[condition][key] for key in ("yes_token_id", "yes_won")):
+                return False
+        return True
+    except (TypeError, KeyError, AttributeError):
+        return False
 
 
 def expected_settlement_station_id(city: Any) -> str:

@@ -416,20 +416,26 @@ def _fetch_open_settling_markets() -> list[dict]:
             )
             break
         try:
+            capture_started = datetime.now(timezone.utc)
+            request_params = {
+                "tag_id": _WEATHER_DAILY_TEMP_TAG_ID, "closed": "true",
+                "limit": _CLOSED_EVENTS_PAGE_LIMIT, "offset": offset,
+                "order": "endDate", "ascending": "false",
+            }
             resp = httpx.get(
                 f"{GAMMA_BASE}/events",
-                params={
-                    "tag_id": _WEATHER_DAILY_TEMP_TAG_ID,
-                    "closed": "true",
-                    "limit": _CLOSED_EVENTS_PAGE_LIMIT,
-                    "offset": offset,
-                    "order": "endDate",
-                    "ascending": "false",
-                },
+                params=request_params,
                 timeout=30.0,
             )
             resp.raise_for_status()
+            capture_received = datetime.now(timezone.utc)
             batch = resp.json()
+            from src.data.settlement_observation_selection import gamma_response_witness
+            witness = gamma_response_witness(resp, started_at=capture_started,
+                received_at=capture_received, request_params={str(k): str(v) for k, v in request_params.items()})
+            for event in batch:
+                if isinstance(event, dict):
+                    event["_venue_point_witness"] = witness
         except Exception as exc:
             if offset == 0:
                 logger.warning("harvester_truth_writer: Gamma fetch failed: %s", exc)
@@ -494,27 +500,17 @@ def _extract_resolved_market_outcomes(event: dict) -> list[dict]:
     from src.data.market_scanner import _parse_temp_range, infer_temperature_metric
     outcomes: list[dict] = []
     for market in event.get("markets", []) or []:
-        outcome_str = str(market.get("outcomePrices") or "")
-        tokens = market.get("clobTokenIds") or []
-        yes_price = None
-        try:
-            import ast
-            prices = ast.literal_eval(outcome_str) if outcome_str else []
-            yes_price = float(prices[0]) if prices else None
-        except Exception:
-            pass
+        from src.contracts.settlement_semantics import gamma_binary_outcome
+        fact = gamma_binary_outcome(market)
+        if fact is None:
+            continue
         question = str(market.get("question") or market.get("groupItemTitle") or "")
         lo, hi = _parse_temp_range(question)
-        yes_won = bool(yes_price is not None and yes_price >= 0.99)
-        condition_id = str(market.get("conditionId") or "")
-        yes_token_id = str(tokens[0]) if tokens else ""
         outcomes.append({
-            "condition_id": condition_id,
-            "yes_token_id": yes_token_id,
+            **fact,
             "range_label": question,
             "range_low": lo,
             "range_high": hi,
-            "yes_won": yes_won,
         })
     return outcomes
 
@@ -560,6 +556,7 @@ def _write_settlement_truth(
     resolved_market_outcomes: Optional[list[dict]] = None,
     temperature_metric: str | MetricIdentity = "high",
     pm_bin_unit: Optional[str] = None,
+    venue_point_witness: Optional[dict] = None,
 ) -> dict:
     """Write canonical-authority settlement truth to settlements table.
 
@@ -580,12 +577,27 @@ def _write_settlement_truth(
         city.settlement_source_type, "unknown"
     )
     metric_identity = _metric_identity_for(temperature_metric)
+    qualified_at = datetime.now(timezone.utc).isoformat()
     publication = settlement_source_publication_grade(
         city=city.name, target_date=target_date,
         temperature_metric=metric_identity.temperature_metric,
         market_slug=event_slug or None, source_family=db_source_type,
-        settlement_source=city.settlement_source, provenance=obs_row,
+        settlement_source=city.settlement_source,
+        provenance={**(obs_row or {}), "venue_point_witness": venue_point_witness},
+        qualification_at=qualified_at,
     )
+    venue_point = publication.get("venue_point") if publication is not None else None
+    if venue_point:
+        from src.contracts.settlement_semantics import gamma_point_outcomes_match
+        if (city.settlement_unit != venue_point["unit"]
+                or pm_bin_unit not in (None, venue_point["unit"])
+                or pm_bin_lo != venue_point["settlement_value"]
+                or pm_bin_hi != venue_point["settlement_value"]
+                or not gamma_point_outcomes_match(venue_point, resolved_market_outcomes)):
+            venue_point = None
+            publication.pop("venue_point", None)
+            publication.pop("venue_integer_grade", None)
+            publication["reason"] = "gamma_point_claim_identity_mismatch"
     if publication is not None:
         # Refuse before the legacy write AND before the stable NOOP path: an
         # old VERIFIED row cannot authenticate today's source publication.
@@ -599,14 +611,15 @@ def _write_settlement_truth(
                 ).fetchone() is not None
             except sqlite3.OperationalError:
                 pass
-        return {
-            **publication, "authority": SETTLEMENT_AUTHORITY_DISPUTED,
-            "status": "preserved_existing_fact" if preserved else "refused_unknown_source_publication",
-            "changed": False, "settlement_changed": False,
-            "settlement_value": None, "winning_bin": None,
-            "settlement_result": {"status": "refused_unknown_source_publication", "table": "settlement_outcomes"},
-            "market_events": {"status": "skipped_unverified_settlement", "table": "market_events"},
-        }
+        if preserved or venue_point is None:
+            return {
+                **publication, "authority": SETTLEMENT_AUTHORITY_DISPUTED,
+                "status": "preserved_existing_fact" if preserved else "refused_unknown_source_publication",
+                "changed": False, "settlement_changed": False,
+                "settlement_value": None, "winning_bin": None,
+                "settlement_result": {"status": "refused_unknown_source_publication", "table": "settlement_outcomes"},
+                "market_events": {"status": "skipped_unverified_settlement", "table": "market_events"},
+            }
     # M1 timing-semantics (2026-06-24): settled_at is the SETTLEMENT-AVAILABILITY time — the settling
     # observation's fetch time (when the daily-high outcome first became knowable), NEVER the batch
     # wall-clock. recorded_at is the SEPARATE now() write/reconstruction time. This mirrors the live
@@ -617,6 +630,9 @@ def _write_settlement_truth(
     # below (no genuine settlement time → not gradable), exactly as the
     # live harvester does.
     recorded_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    truth_source = "polymarket_gamma" if venue_point else city.settlement_source
+    if venue_point:
+        recorded_at = qualified_at
     settled_at = obs_row.get("fetched_at") if obs_row is not None else None
 
     authority = SETTLEMENT_AUTHORITY_DISPUTED
@@ -628,7 +644,7 @@ def _write_settlement_truth(
 
     observation_value = (
         obs_row.get(metric_identity.observation_field)
-        if obs_row is not None
+        if obs_row is not None and venue_point is None
         else None
     )
     if obs_row is None or observation_value is None:
@@ -729,6 +745,13 @@ def _write_settlement_truth(
                     else:
                         reason = "harvester_live_obs_outside_bin"
 
+    if venue_point:
+        authority = "VERIFIED"
+        settlement_value = venue_point["settlement_value"]
+        winning_bin = venue_point["winning_bin"]
+        settled_at = qualified_at
+        reason = None
+        data_version = "polymarket_gamma"
     # M1 guard (mirrors execution/harvester.py): a row with no genuine settlement-availability time
     # (no observation fetch time) cannot be graded — force DISPUTED
     # even if value-contained.
@@ -817,6 +840,11 @@ def _write_settlement_truth(
         "reconstructed_at": recorded_at,
         "audit_ref": "docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5",
     }
+    if venue_point:
+        provenance.update(claim_basis="venue_unique_integer_point_v1", source_grade="UNKNOWN",
+            venue_point_witness=venue_point_witness, venue_qualification_at=qualified_at,
+            venue_condition_id=venue_point["condition_id"],
+            reactivated_by="gamma_point:" + venue_point["capture_identity_sha256"])
     if reason is not None:
         provenance[SETTLEMENT_DISPUTE_REASON_KEY] = reason
 
@@ -835,7 +863,7 @@ def _write_settlement_truth(
             """,
             (
                 city.name, target_date, event_slug or None, winning_bin, settlement_value,
-                city.settlement_source, settled_at, authority,
+                truth_source, settled_at, authority,
                 pm_bin_lo, pm_bin_hi, city.settlement_unit, db_source_type,
                 metric_identity.temperature_metric,
                 metric_identity.physical_quantity,
@@ -858,7 +886,7 @@ def _write_settlement_truth(
             "market_slug": event_slug or None,
             "winning_bin": winning_bin,
             "settlement_value": settlement_value,
-            "settlement_source": city.settlement_source,
+            "settlement_source": truth_source,
             "settled_at": settled_at,
             "authority": authority,
             "provenance": provenance,
@@ -878,7 +906,7 @@ def _write_settlement_truth(
                 market_slug=event_slug or None,
                 winning_bin=winning_bin,
                 settlement_value=settlement_value,
-                settlement_source=city.settlement_source,
+                settlement_source=truth_source,
                 settled_at=settled_at,
                 authority=authority,
                 provenance=provenance,
@@ -935,6 +963,8 @@ def _write_settlement_truth(
         "reason": reason,
         "settlement_result": settlement_result,
         "market_events": market_events_result,
+        "settlement_source": truth_source,
+        **({"source_grade": "UNKNOWN", "venue_integer_grade": "VERIFIED"} if venue_point else {}),
     }
 
 
@@ -1030,7 +1060,7 @@ def write_settlement_truth_for_open_markets(
                 temperature_metric=temperature_metric,
                 column_names=observation_columns,
             )
-            if obs_row is None:
+            if obs_row is None and not (city.settlement_source_type == "hko" and event.get("_venue_point_witness")):
                 logger.debug(
                     "harvester_truth_writer: skipping %s %s — no source-correct obs yet",
                     city.name, target_date,
@@ -1059,6 +1089,7 @@ def write_settlement_truth_for_open_markets(
                 resolved_market_outcomes=resolved_market_outcomes,
                 temperature_metric=temperature_metric,
                 pm_bin_unit=winning_bin_unit,
+                venue_point_witness=event.get("_venue_point_witness"),
             )
             settlement_changed = write_result.get("settlement_changed", True)
             if not settlement_changed:

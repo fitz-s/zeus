@@ -28,6 +28,29 @@ PROOF_VERSION = "noaa_wrh_absence_proof_v2"
 PRODUCT = "weather.gov_wrh_timeseries"
 
 
+def gamma_response_witness(response, *, started_at, received_at, request_params) -> dict | None:
+    """Retain the normal response's decoded original bytes and immutable custody."""
+    import base64
+    import hashlib
+    from src.data.wu_hourly_client import capture_entity
+    from src.contracts.settlement_semantics import gamma_capture_identity
+    capture = capture_entity(response, started_at=started_at, finished_at=received_at,
+        request_url="https://gamma-api.polymarket.com/events", request_params=request_params,
+        native_unit="per_market_contract")
+    if capture.entity is None:
+        return None
+    witness = {
+        "entity_bytes_b64": base64.b64encode(capture.entity).decode("ascii"),
+        "entity_sha256": hashlib.sha256(capture.entity).hexdigest(),
+        "capture_started_at_utc": capture.started_at,
+        "capture_received_at_utc": capture.finished_at,
+        "request_url": capture.request_url, "request_params": capture.request_params,
+        "source_issued_at_utc": None,
+    }
+    witness["capture_identity_sha256"] = gamma_capture_identity(witness)
+    return witness
+
+
 def fallback_deadline(target_date: str | date) -> datetime:
     target = date.fromisoformat(str(target_date))
     return datetime.combine(target + timedelta(days=1), time(23, 59),

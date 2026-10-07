@@ -29,11 +29,153 @@ Test matrix
 from __future__ import annotations
 
 import sqlite3
+import base64
+import hashlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from src.config import City
 from src.ingest.harvester_truth_writer import _write_settlement_truth
+
+
+def _native_gamma_witness(raw=None):
+    """Replay possessed original bytes through real immutable entity capture."""
+    import httpx
+    from src.data.wu_hourly_client import capture_entity
+    if raw is None:
+        raw = (Path(__file__).resolve().parents[1] /
+               "docs/operations/current/evidence/gamma_hko_20260927_high.body").read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == "119cf8ac59d95b69837d91f13412b985e1f515330ecbd7f5c2892de5ea65e023"
+    now = datetime.now(timezone.utc)
+    capture = capture_entity(httpx.Response(200, content=raw), started_at=now,
+        finished_at=now, request_url="https://gamma-api.polymarket.com/events",
+        request_params={"slug": "highest-temperature-in-hong-kong-on-september-27-2026"},
+        native_unit="per_market_contract")
+    proof = dict(entity_bytes_b64=base64.b64encode(capture.entity).decode(),
+        entity_sha256=hashlib.sha256(capture.entity).hexdigest(),
+        capture_started_at_utc=capture.started_at, capture_received_at_utc=capture.finished_at,
+        request_url=capture.request_url, request_params=capture.request_params)
+    identity = {key: proof[key] for key in ("entity_sha256", "capture_started_at_utc",
+                "capture_received_at_utc", "request_url", "request_params")}
+    proof["capture_identity_sha256"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return proof
+
+
+@pytest.mark.parametrize("lane", ["ingest", "legacy"])
+@pytest.mark.parametrize("metric,target,value,body_sha", [
+    ("high", "2026-09-27", 32.0, "119cf8ac59d95b69837d91f13412b985e1f515330ecbd7f5c2892de5ea65e023"),
+    ("low", "2026-09-27", 27.0, "34f2fef7940c95a2cd81b68116ce03592316bf63ff5417beff0153581998f3bd"),
+    ("high", "2026-09-28", 32.0, "3000289d650415dba1053e0e6d785ec529bee4b1ae7b0e84ec9677bac7861408"),
+])
+def test_hko_actual_native_point_resets_unknown_without_verifying_decimal(tmp_path, lane, metric, target, value, body_sha):
+    from src.state.db import get_connection, init_schema, init_schema_forecasts
+    conn = get_connection(tmp_path / "private-reset.db")
+    init_schema(conn)
+    init_schema_forecasts(conn)
+    city = City(name="Hong Kong", lat=22.3, lon=114.2, timezone="Asia/Hong_Kong",
+                settlement_unit="C", cluster="HK", wu_station="HKO",
+                country_code="HK", settlement_source_type="hko")
+    writer = _write_settlement_truth
+    if lane == "legacy":
+        from src.execution.harvester import _write_settlement_truth as writer
+    raw = (Path(__file__).resolve().parents[1] / "docs/operations/current/evidence" /
+           f"gamma_hko_{target.replace('-', '')}_{metric}.body").read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == body_sha
+    proof = _native_gamma_witness(raw)
+    event = json.loads(base64.b64decode(proof["entity_bytes_b64"]))
+    event[0]["closed"] = False
+    unresolved = _native_gamma_witness(json.dumps(event).encode())
+    slug = event[0]["slug"]
+    result = writer(conn, city, target, value, value, event_slug=slug,
+                    venue_point_witness=unresolved, temperature_metric=metric)
+    assert result["authority"] == "DISPUTED"
+    assert result["source_grade"] == "UNKNOWN"
+    assert conn.execute("SELECT count(*) FROM settlement_outcomes").fetchone()[0] == 0
+    # Existing non-VERIFIED rows may reactivate with the independently proven basis.
+    conn.execute("INSERT INTO settlement_outcomes(city,target_date,temperature_metric,market_slug,authority) "
+                 "VALUES (?,?,?,?,?)", (city.name, target, metric, slug, "DISPUTED"))
+    # Latest decimal deliberately differs; unique32 comes solely from native YES point.
+    result = writer(conn, city, target, value, value, event_slug=slug,
+                    obs_row=_obs(99.7, "C"), venue_point_witness=proof, temperature_metric=metric)
+    assert result["authority"] == "VERIFIED", result
+    row = conn.execute("SELECT * FROM settlement_outcomes").fetchone()
+    assert row["settlement_value"] == value
+    assert row["settlement_source"] == "polymarket_gamma"
+    provenance = json.loads(row["provenance_json"])
+    assert provenance["source_grade"] == "UNKNOWN"
+    assert provenance["claim_basis"] == "venue_unique_integer_point_v1"
+    assert row["settled_at"] >= proof["capture_received_at_utc"]
+    assert provenance["venue_point_witness"] == proof
+    assert provenance["reactivated_by"] == "gamma_point:" + proof["capture_identity_sha256"]
+    changes = conn.total_changes
+    assert writer(conn, city, target, value, value, event_slug=slug,
+                  venue_point_witness=proof, temperature_metric=metric)["status"] == "preserved_existing_fact"
+    assert conn.total_changes == changes
+    conn.close()
+
+
+def test_hko_normal_fetch_preserves_raw_witness_and_public_tick_accepts_point(tmp_path, monkeypatch):
+    import httpx
+    from src.state.db import get_connection, init_schema, init_schema_forecasts
+    from src.ingest.harvester_truth_writer import write_settlement_truth_for_open_markets
+    raw = (Path(__file__).resolve().parents[1] /
+           "docs/operations/current/evidence/gamma_hko_20260927_high.body").read_bytes()
+    calls = []
+    def original_transport(url, **kwargs):
+        calls.append((url, kwargs))
+        assert url == "https://gamma-api.polymarket.com/events"
+        return httpx.Response(200, content=raw, request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "get", original_transport)
+    conn = get_connection(tmp_path / "private-normal-tick.db")
+    init_schema(conn)
+    init_schema_forecasts(conn)
+    result = write_settlement_truth_for_open_markets(conn)
+    assert result["settlements_written"] == 1, result
+    row = conn.execute("SELECT * FROM settlement_outcomes").fetchone()
+    provenance = json.loads(row["provenance_json"])
+    assert row["settlement_value"] == 32.0
+    assert row["settlement_source"] == "polymarket_gamma"
+    assert provenance["source_grade"] == "UNKNOWN"
+    proof = provenance["venue_point_witness"]
+    assert base64.b64decode(proof["entity_bytes_b64"]) == raw
+    assert proof["entity_sha256"] == "119cf8ac59d95b69837d91f13412b985e1f515330ecbd7f5c2892de5ea65e023"
+    assert proof["request_params"] == {str(k): str(v) for k, v in calls[0][1]["params"].items()}
+    assert row["settled_at"] >= proof["capture_received_at_utc"]
+    assert len(calls) == 1
+    conn.close()
+
+
+@pytest.mark.parametrize("lane", ["ingest", "legacy"])
+@pytest.mark.parametrize("bad", ["wrong_bounds", "wrong_condition", "wrong_unit", "wrong_track"])
+def test_hko_writers_reject_mismatched_native_claim_before_legacy_write(tmp_path, lane, bad):
+    from src.state.db import get_connection, init_schema, init_schema_forecasts
+    conn = get_connection(tmp_path / "private-writer-bad.db")
+    init_schema(conn)
+    init_schema_forecasts(conn)
+    city = City(name="Hong Kong", lat=22.3, lon=114.2, timezone="Asia/Hong_Kong",
+                settlement_unit="F" if bad == "wrong_unit" else "C", cluster="HK", wu_station="HKO",
+                country_code="HK", settlement_source_type="hko")
+    writer = _write_settlement_truth
+    if lane == "legacy":
+        from src.execution.harvester import _write_settlement_truth as writer
+    value = 33.0 if bad == "wrong_bounds" else 32.0
+    outcomes = ([{"condition_id": "wrong", "yes_token_id": "wrong", "yes_won": True}]
+                if bad == "wrong_condition" else None)
+    changes = conn.total_changes
+    result = writer(conn, city, "2026-09-27", value, value,
+        event_slug="highest-temperature-in-hong-kong-on-september-27-2026",
+        temperature_metric="low" if bad == "wrong_track" else "high",
+        venue_point_witness=_native_gamma_witness(), resolved_market_outcomes=outcomes)
+    assert result["authority"] == "DISPUTED", result
+    assert conn.execute("SELECT count(*) FROM settlements").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM settlement_outcomes").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM market_events").fetchone()[0] == 0
+    assert conn.total_changes == changes
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
