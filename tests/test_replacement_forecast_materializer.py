@@ -1952,6 +1952,29 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
                 assert row.temps_c == tuple([20. if city_name == "Hong Kong" else 10. + index * .5] * 25)
             assert persist_day0_hourly_vectors(vectors, target_date="2026-10-04", request_hash=request_hash,
                 now=fixture_clock[0], conn=s.conn) == len(provider_models)
+            target = dl.BayesPrecisionFusionDownloadTarget(city=city.name, metric=metric,
+                target_date=full_request.target_date.isoformat(), lead_days=1,
+                latitude=city.lat, longitude=city.lon, timezone_name=city.timezone)
+            daily_rows = []
+            for vector in vectors:
+                meta = json.loads(vector.source_run_meta_json)
+                original = meta[dl._BATCH_PHYSICAL_RESPONSE_KEY]
+                body = Path(original["artifact_path"]).read_bytes()
+                assert hashlib.sha256(body).hexdigest() == original["sha256"]
+                payload = json.loads(body)
+                payload[dl._BATCH_PHYSICAL_RESPONSE_KEY] = original
+                parsed = dl._parse_batched_single_runs_payload(payload, [vector.model],
+                    full_request.target_date, city.timezone, decision_at=captured)
+                high_c, low_c = parsed[vector.model]
+                daily_rows.append({"model": vector.model, "city": city.name,
+                    "target_date": str(full_request.target_date), "metric": metric,
+                    "source_cycle_time": meta["provider_source_cycle_time_utc"],
+                    "source_available_at": captured.isoformat(), "captured_at": captured.isoformat(),
+                    "lead_days": 1, "forecast_value_c": high_c if metric == "high" else low_c,
+                    "endpoint": "single_runs",
+                    **dl._bayes_precision_fusion_product_identity(vector.model, "single_runs", target),
+                    "_physical_response": parsed[dl._BATCH_PHYSICAL_RESPONSE_KEY][vector.model]})
+            assert dl._persist_rows(s.conn, daily_rows) == len(provider_models)
         day0_request = replace(full_request, computed_at=fixture_clock[0], expires_at=fixture_clock[0] + timedelta(hours=1),
             day0_observed_extreme_c=11., day0_observed_extreme_source="aviationweather_metar",
             day0_observed_extreme_observation_time=current_at, day0_observed_extreme_sample_count=17,

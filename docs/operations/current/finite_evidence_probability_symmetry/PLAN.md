@@ -21582,3 +21582,14 @@ before its existing decision cut. No production gate or old row changes.
 Validate normal-producer HIGH/LOW twins; retain the old failed XML. The accepted
 255P money epoch remains reusable only because the full-Y branch and all
 production dependencies stay unchanged, not as proof of these Day0 inputs.
+
+Supplemental same Day0 preparation BEFOREEDIT: the owning selector correctly
+rejects old ICON daily claim10 against the newly captured same-run/cell hourly
+body11.5. Read-only actual refusal evidence is retained in normal-twins-observer
+under /tmp/zeus-ABC-final.DjKzeB. ROOT authorizes using that exact new body and
+its normal capture descriptor through the existing BPF parser/_persist_rows to
+INSERT new daily facts in the same private FORECAST transaction. No old daily
+row/old certificate/25-point series/run/clock/full-Y early return or assertion
+changes. SCOPE is the new fixture entity's current facts; DRAIN is normal
+capture/parse/write; RESET is a new decision on the actually coherent new
+daily/hourly body. Both HIGH and LOW must execute; retain all failed XMLs.
