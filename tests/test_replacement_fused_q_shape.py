@@ -1,17 +1,25 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-19
+# Last reused or audited: 2026-10-07
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md
 """Current-evidence predictive-shape authority antibodies."""
 from __future__ import annotations
 
 import json
 import math
+import sqlite3
 import statistics
+from datetime import datetime, timedelta
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
 import src.data.replacement_forecast_materializer as mod
+from tests.test_replacement_forecast_materializer import (
+    _hko_native_surfaces,
+    _hko_source_surface,
+    _normal_native_originals_public_case,
+)
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     GRID_SURFACE_EVIDENCE_REVISION,
@@ -24,6 +32,33 @@ from src.data.replacement_forecast_cycle_policy import (
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     current_evidence_shape_semantics_mismatch,
 )
+
+
+@pytest.fixture
+def math_authority_inputs(tmp_path):
+    """Typed causal context, deliberately without captured physical originals."""
+    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
+    conn = sqlite3.connect(tmp_path / "zeus-forecasts.db")
+    conn.row_factory = sqlite3.Row
+    def inputs(shape):
+        cycle = datetime.fromisoformat(shape.source_cycle_time)
+        available = datetime.fromisoformat(shape.source_available_at)
+        target = cycle.astimezone(ZoneInfo("Asia/Shanghai")).date() + timedelta(days=1)
+        payload = {"timezone": "Asia/Shanghai", "utc_offset_seconds": 28800,
+            "hourly": {"time": [f"{target}T{hour:02d}:00" for hour in range(24)],
+                       "temperature_2m": [shape.ensemble_member_mean_c] * 24}}
+        anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(payload,
+            city_timezone="Asia/Shanghai", target_local_date=target, source_cycle_time=cycle)
+        return mod.ReplacementForecastMaterializeRequest(city="Shanghai", city_id="Shanghai",
+            city_timezone="Asia/Shanghai", target_date=target, temperature_metric="high",
+            baseline_source_run_id="math-only-no-originals", baseline_data_version=ECMWF_OPENDATA_HIGH_DATA_VERSION,
+            baseline_source_available_at=available, openmeteo_anchor=anchor,
+            openmeteo_source_run_id=None, openmeteo_source_available_at=available,
+            bins=(), source_cycle_time=cycle, computed_at=available + timedelta(seconds=1)), conn
+    try:
+        yield inputs
+    finally:
+        conn.close()
 
 
 def test_frozen_scheme_requires_two_current_provider_families() -> None:
@@ -154,7 +189,7 @@ def test_current_ensemble_center_disagreement_stays_in_predictive_shape() -> Non
     assert q_no_11 - 0.27 > 0.0
 
 
-def test_aligned_ensemble_center_preserves_within_between_decomposition() -> None:
+def test_aligned_ensemble_center_preserves_within_between_decomposition(math_authority_inputs) -> None:
     raw = tuple(range(-25, 26))
     scale = 0.32530930629305355 / statistics.pstdev(raw)
     members = tuple(11.0204 + value * scale for value in raw)
@@ -184,10 +219,11 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
 
     assert shape.ensemble_center_delta_c == pytest.approx(0.0, abs=1e-12)
     assert shape.predictive_sigma_c == pytest.approx(0.4085217065969294)
+    request, conn = math_authority_inputs(shape)
     # Numerical shape construction is useful offline, but geometry-free math
     # alone is never a live probability witness.
     assert mod._fusion_current_evidence_shape_has_live_authority(
-        SimpleNamespace(current_evidence_shape=shape.as_payload())
+        SimpleNamespace(current_evidence_shape=shape.as_payload()), request=request, conn=conn,
     ) is False
 
     from tests.test_replacement_forecast_materializer import _fixture_ens_surface_provenance
@@ -211,11 +247,11 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
     assert certified.predictive_sigma_c == shape.predictive_sigma_c
     assert certified.shape_hash != shape.shape_hash
     assert mod._fusion_current_evidence_shape_has_live_authority(
-        SimpleNamespace(current_evidence_shape=certified.as_payload())
-    ) is True
+        SimpleNamespace(current_evidence_shape=certified.as_payload()), request=request, conn=conn,
+    ) is False  # Geometry alone is not the original native role/provider proof.
 
 
-def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement() -> None:
+def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement(math_authority_inputs) -> None:
     """A location shift cannot turn conflicting live evidence into certainty."""
 
     raw = tuple(range(-25, 26))
@@ -254,9 +290,24 @@ def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement() -> No
         == STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
     )
     assert shape.between_cohort_status == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
+    request, conn = math_authority_inputs(shape)
     assert mod._fusion_current_evidence_shape_has_live_authority(
-        SimpleNamespace(current_evidence_shape=shape.as_payload())
+        SimpleNamespace(current_evidence_shape=shape.as_payload()), request=request, conn=conn,
     ) is False
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_normal_native_public_shape_has_commit_authority(tmp_path, monkeypatch):
+    """Normal originals and canonical public admission replace geometry-only truth."""
+    def qualified(*, conn, request, bundle, **_kwargs):
+        fusion = SimpleNamespace(**bundle.provenance_json["bayes_precision_fusion"])
+        assert mod._fusion_current_evidence_shape_has_live_authority(fusion, request=request, conn=conn)
+        assert fusion.current_evidence_shape["native_point_model"]["native_snapshot_id"] > 0
+        assert fusion.current_evidence_shape["semantics_revision"] == CURRENT_EVIDENCE_SEMANTICS_REVISION
+        assert len(fusion.current_evidence_shape["native_point_model"]["member_points_native"]) == 51
+        assert bundle.posterior_identity_hash and bundle.q
+        return bundle
+    _normal_native_originals_public_case(tmp_path, monkeypatch, "high", full_y_ready=qualified)
 
 
 def _shape_for_cycle_gate(
