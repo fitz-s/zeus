@@ -21532,3 +21532,19 @@ error at that unquoted colon. No validator, source routing, lifecycle, schema
 or provider authority changes are licensed by these registrations. Re-run
 actual full money and necessary coupled/closure nodes after the smallest fix;
 old failed XMLs remain failed, and final CLI/HEAD-secret wait for loader freeze.
+
+BEFOREEDIT — KORD fixture causal SQL write event (test-only): after the None
+repair, actual coupled replay reaches C's strict original closure. The normal
+vector capture is 2026-10-01T08:18Z, but _kord_causal_fast_inputs retains the
+prior fixture's SQL INSERT clock08:15Z until its caller later materializes at
+08:25Z. Read-only observer evidence in
+/tmp/zeus-ABC-final.DjKzeB/kord-probe/run.log:183-185 reproduces three exact
+MODEL_SURFACE_NOT_CAUSAL verdicts; no verdict or source was mocked. ROOT permits
+only this existing W3 helper to advance its private SQL writer to the actual
+vector_capture before normal persistence. HTTP/static/capture first clocks,
+arrays, model/run/point identity and production PIT gates stay unchanged; later
+materialization remains at the original08:25Z decision cut. This is fixture
+chronology, not a production defect or source clock backfill. SCOPE is this
+private fixture's new vector write event; DRAIN is its normal chronological
+capture/persistence; RESET is genuine original replay at the later cut. Source
+clock rejection antibodies remain mandatory. No loader or live action follows.

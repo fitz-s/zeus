@@ -51700,6 +51700,7 @@ def _kord_causal_fast_inputs(fixture,monkeypatch):
         ens,ens_identity = hourly.fetch_day0_source_clock_ensemble_vectors(city,now=vector_capture)
         assert len(ens) == 51
         assert {json.loads(row.source_run_meta_json)["request_hash"] for row in ens} == {ens_identity}
+        fixture.sql_clock[0] = vector_capture
         for rows,key,endpoint in ((vectors,identity,json.loads(vectors[0].source_run_meta_json)["endpoint"]),
                                   (ens,ens_identity,hourly.OPENMETEO_ENSEMBLE_URL)):
             assert hourly.persist_day0_hourly_vectors(rows,target_date=str(fixture.request.target_date),conn=conn,
