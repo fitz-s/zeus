@@ -20456,3 +20456,49 @@ needs actual same-node proof, not a new skip or weakened qualification. Run the
 one new final CLI only after pytest CPU is released, then exact-HEAD secrets and
 required changed-surface checks without further input/HEAD edits. Loading remains
 unapproved until ROOT accepts all required evidence and the exact final tip.
+
+### Required native-consumer fixture migration — BEFORE EDIT proposal
+
+Actual750b required runs are FAIL, not PASS: union1268P8F86.76s and full money
+247P3F10.74s. The eight union failures are in the unchanged no-bypass receipt,
+no-Platt and topology cases; direct receipt diagnostics reproduce
+REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE before their intended checks.
+Three cash failures reproduce REPLACEMENT_CURRENT_COORDINATE_IDENTITY_MISMATCH.
+The6f9 rollback restored both files to legacy toy posterior helpers; cash still
+injects q.95/fake candidate proofs and claims unwired legacy no-clamp authority.
+File-byte equivalence to02849 is not an actual baseline-node run, so no claim of
+pre-existing failure or production-regression absence is made from bytes alone.
+
+Proposed exact added test-only ownership, pending ROOT feedback:
+tests/engine/test_event_reactor_no_bypass.py and
+tests/money_path/test_finding_b_free_cash_bound.py. Restore only necessary prior
+a04-reviewed true normal-native/public/global-mean fixture paths and behavioral
+antibodies, adapting actual inputs if the new necessary-role contract requires
+it. Preserve every case's identity/clock/quote/FDR/Kelly/no-Platt purpose; never
+restore q.95/fake proof or positive unwired no-clamp behavior, mock READY, renew
+immutable source clocks, loosen production gates or change rejection expectations
+merely to green the suite. Old toy inputs remain explicit qualified-source
+refusal twins. SCOPE is these consumer fixtures; DRAIN/RESET is each independent
+private normal source/public preparation reaching its genuine authorizing state.
+No third test path or production change without a new bounded decision.
+
+Keep the two failed XMLs and the precise11-node list in the existing external
+required artifacts. Initial required PASS nodes may only be reused with explicit
+unchanged dependency/actual-case basis; unvisited5619-union tails stay unproved.
+After accepted fixture edits and antibodies, complete all mandatory coverage on
+one source epoch. Final CLI/secrets/push/load remain paused, and a true baseline
+classification needs a necessary same-node actual02849 execution, not a skip.
+
+ROOT accepted the precise two-test ownership and migration. Reused the prior
+a04-reviewed normal capture/public/global-mean consumer paths, retaining the
+real q, source/PIT/coordinate/clock identity, Platt fit spy and negative twins.
+Unwired cash authority is now an actual global-actuation refusal, not a legacy
+positive; source/price/topology attacks follow genuine qualified preparation.
+Actual changed-node check:15P0F/E/S169.73s, migration.xml under the existing
+/tmp/zeus-AB-final-0EcO4P artifacts; production src/scripts/config/architecture
+bytes remain750b. Only the two lifecycle comment dates were refreshed after
+that run; executable module AST and inputs are unchanged. This closes the
+identified11 fixture failures, not the unvisited mandatory tail. Freeze this
+test-only slice, then run the complete required union and money-path commands
+on the same source epoch with independent private namespaces; retain all
+failures and do not run final CLI/secrets or land until required is acceptable.
