@@ -1413,25 +1413,18 @@ def _generic_reader_current_row(tmp_path,monkeypatch,request):
 def _reader_shanghai_native_high(conn, request, root, monkeypatch):
     """Bind the shared normal native writer's first possession, never renew it.
 
-    Synthetic Shanghai GRIB/index entities feed normal capture/extraction and
-    canonical writers. Possession is scoped to this target, not global readiness.
+    External extracted windows are controlled; the collector/parser/authority
+    writer are real. The 00/12Z partial profile covers this complete target,
+    not every city/target in a globally completed cycle.
     """
     from src.config import runtime_cities_by_name, runtime_coordinate_manifest_json
     from src.data import ecmwf_open_data as native
-    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
-    from tests.test_ecmwf_open_data_collect_cycle import _physical_static_originals
-    from scripts import extract_open_ens_localday as decoder
-    from zoneinfo import ZoneInfo
-    import eccodes as ec
-    import ecmwf.opendata
-    import time
-    from src.state.db import init_schema_forecasts
+    from tests.test_replacement_forecast_materializer import _fixture_native_shape_identity
     from pathlib import Path
     from dataclasses import replace
     city = runtime_cities_by_name()[request.city]
     cycle = request.source_cycle_time
     assert request.temperature_metric == "high"
-    init_schema_forecasts(conn)
     manifest_sha = hashlib.sha256(runtime_coordinate_manifest_json().encode()).hexdigest()
     lead = (request.target_date-cycle.date()).days
     source_root = Path(conn.execute("PRAGMA database_list").fetchone()[2]).parent/"controlled-native-ens"
@@ -1446,206 +1439,16 @@ def _reader_shanghai_native_high(conn, request, root, monkeypatch):
         "WHERE es.city=? AND es.target_date=? AND es.temperature_metric='high' AND es.source_cycle_time=? AND sr.manifest_hash=?",
         (city.name,str(request.target_date),cycle.isoformat(),manifest_sha)).fetchall()
     assert len(existing) <= 1
+    members = tuple(25.+(index-25)*.02 for index in range(51))
+    snapshot, surface_hash, actual_members = _fixture_native_shape_identity(conn,request,monkeypatch,members_c=members)
+    assert actual_members == pytest.approx(members)
     if existing:
         assert original_bytes is not None
-        snapshot = dict(existing[0])
-        assert json.loads(original_bytes)["city"] == city.name, "one issued native input cannot change with provider center"
+        assert snapshot == dict(existing[0])
         assert path.read_bytes() == original_bytes
         assert {table:tuple(tuple(row) for row in conn.execute(f"SELECT * FROM {table}")) for table in tables} == original
     else:
-        from src import config
-        from src.state import db as state_db
-        from src.data import replacement_forecast_production as production
-        ledgers = config.STATE_DIR / "shanghai-reader-custody"
-        ledgers.mkdir(parents=True,exist_ok=True)
-        for filename,initialize in (("zeus-world.db",state_db.init_schema_world_only),
-                                    ("zeus_trades.db",state_db.init_schema_trade_only)):
-            with sqlite3.connect(ledgers/filename) as ledger: initialize(ledger)
-        monkeypatch.setattr(config,"STATE_DIR",ledgers)
-        monkeypatch.setattr(state_db,"ZEUS_WORLD_DB_PATH",ledgers/"zeus-world.db")
-        monkeypatch.setattr(state_db,"ZEUS_FORECASTS_DB_PATH",Path(conn.execute("PRAGMA database_list").fetchone()[2]))
-        queues = {name:ledgers/name for name in ("seed_dir","request_dir","inflight_dir")}
-        for queue in queues.values(): queue.mkdir(exist_ok=True)
-        monkeypatch.setattr(production,"_replacement_forecast_live_materialization_queue_config",lambda:queues)
-        # Each quantity has its own actual private market scope before either
-        # normal collector runs. LOW originals supply the HIGH paired bound,
-        # but are never relabelled as the HIGH contract or as qualified actions.
-        for scope_metric,center in (("high",27),("low",18)):
-            for index,(label,lo,hi) in enumerate(((f"{center-1}°C or below",None,center-1),
-                    (f"{center}°C",center,center),(f"{center+1}°C or higher",center+1,None))):
-                conn.execute("""INSERT INTO market_events(market_slug,city,target_date,temperature_metric,
-                    condition_id,token_id,range_label,range_low,range_high,created_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)""",(f"reader-shanghai-{request.target_date}-{scope_metric}-{index}",city.name,
-                    str(request.target_date),scope_metric,f"reader-shanghai-{scope_metric}-condition-{index}",
-                    f"reader-shanghai-{scope_metric}-token-{index}",label,lo,hi,cycle.isoformat()))
-        conn.commit()
-        captured = cycle + timedelta(hours=6, minutes=41)
-        assert captured <= request.computed_at
-        start = datetime.combine(request.target_date,datetime.min.time(),ZoneInfo(city.timezone)).astimezone(UTC)
-        end = start + timedelta(days=1)
-        horizon = int((end-cycle).total_seconds()/3600)
-        horizon = ((horizon+2)//3)*3
-        steps = tuple(range(0,horizon+1,3))
-        original_dir = source_root/"synthetic-originals"
-        original_dir.mkdir(parents=True,exist_ok=True)
-        high, mask, mask_proof, _ = _tiny_native_grib(original_dir,"mx2t6_high",issue=cycle,
-            horizon=horizon,grid_origin=(31.25,121.75))
-        low, _, _, _ = _tiny_native_grib(original_dir,"mn2t6_low",issue=cycle,
-            horizon=horizon,grid_origin=(31.25,121.75))
-        # Physical grid fields remain separate from station elevation. All four
-        # synthetic cells are land; phi retains its independent GRIB values.
-        gid = ec.codes_new_from_message(mask.read_bytes())
-        try:
-            ec.codes_set_values(gid,[.8]*4)
-            mask.write_bytes(ec.codes_get_message(gid))
-        finally:
-            ec.codes_release(gid)
-        for paired in (high,low):
-            messages = []
-            with paired.open("rb") as stream:
-                while (gid:=ec.codes_grib_new_from_file(stream)) is not None:
-                    try:
-                        member = int(ec.codes_get(gid,"perturbationNumber"))
-                        ec.codes_set(gid,"generatingProcessIdentifier",161)
-                        if member == 0: ec.codes_set(gid,"dataType","fc")
-                        ec.codes_set(gid,"packingType","grid_ieee")
-                        ec.codes_set(gid,"precision",2)
-                        ec.codes_set_values(gid,[273.15+25.+(member-25)*.02]*4)
-                        messages.append(ec.codes_get_message(gid))
-                    finally:
-                        ec.codes_release(gid)
-            paired.write_bytes(b"".join(messages))
-        inputs = dict(expected_run_utc=cycle,mask_grib_path=mask,mask_proof_path=mask_proof,
-            surface_geopotential_grib_path=mask.with_suffix(".z.grib2"))
-        _physical_static_originals(inputs)
-        sources,indexes = {},{}
-        grid = dict(Ni=2,Nj=2,latitudeOfFirstGridPointInDegrees=31.25,
-            longitudeOfFirstGridPointInDegrees=121.75,latitudeOfLastGridPointInDegrees=31.,
-            longitudeOfLastGridPointInDegrees=122.,iDirectionIncrementInDegrees=.25,
-            jDirectionIncrementInDegrees=.25,scanningMode=0)
-        for step in steps:
-            for member in range(51):
-                gid = ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
-                try:
-                    fields = dict(centre="ecmf",**grid,dataDate=int(cycle.strftime("%Y%m%d")),
-                        dataTime=cycle.hour*100,productDefinitionTemplateNumber=0 if member==0 else 1,
-                        typeOfGeneratingProcess=2 if member==0 else 4,generatingProcessIdentifier=161,
-                        paramId=167,dataType="fc" if member==0 else "pf",step=step)
-                    if member: fields["number"] = member
-                    for key,value in fields.items(): ec.codes_set(gid,key,value)
-                    ec.codes_set(gid,"packingType","grid_ieee")
-                    ec.codes_set(gid,"precision",2)
-                    ec.codes_set_values(gid,[273.15+25.+(member-25)*.02]*4)
-                    raw = ec.codes_get_message(gid)
-                finally:
-                    ec.codes_release(gid)
-                stream,kind = ("oper","fc") if member==0 else ("enfo","ef")
-                url = f"https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{cycle:%Y%m%d}/{cycle:%H}z/ifs/0p25/{stream}/{cycle:%Y%m%d%H}0000-{step}h-{stream}-{kind}.grib2"
-                entity = sources.setdefault(url,bytearray())
-                row = dict(param="2t",levtype="sfc",date=cycle.strftime("%Y%m%d"),
-                    time=cycle.strftime("%H%M"),step=str(step),stream=stream,
-                    type="fc" if member==0 else "pf",_offset=len(entity),_length=len(raw),**{"class":"od"})
-                if member: row["number"] = str(member)
-                entity.extend(raw)
-                indexes.setdefault(url[:-6]+".index",[]).append(json.dumps(row).encode())
-        # The configured replica serves the same original paired messages for
-        # the normal restoration reader, not newly stamped extraction output.
-        for paired_track,paired in (("mn2t6_low",low),("mx2t6_high",high)):
-            with paired.open("rb") as stream:
-                while (gid:=ec.codes_grib_new_from_file(stream)) is not None:
-                    try:
-                        member = int(ec.codes_get(gid,"perturbationNumber"))
-                        step = int(ec.codes_get(gid,"endStep"))
-                        raw = ec.codes_get_message(gid)
-                    finally:
-                        ec.codes_release(gid)
-                    stream_name,kind = ("oper","fc") if member==0 else ("enfo","ef")
-                    url = f"https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{cycle:%Y%m%d}/{cycle:%H}z/ifs/0p25/{stream_name}/{cycle:%Y%m%d%H}0000-{step}h-{stream_name}-{kind}.grib2"
-                    entity = sources.setdefault(url,bytearray())
-                    row = dict(param=decoder.TRACKS[paired_track].open_data_param,levtype="sfc",
-                        date=cycle.strftime("%Y%m%d"),time=cycle.strftime("%H%M"),step=str(step),stream=stream_name,
-                        type="fc" if member==0 else "pf",_offset=len(entity),_length=len(raw),**{"class":"od"})
-                    if member: row["number"] = str(member)
-                    entity.extend(raw)
-                    indexes.setdefault(url[:-6]+".index",[]).append(json.dumps(row).encode())
-        class Response:
-            def __init__(self,body,status,headers):
-                self.content,self.status_code,self.headers = body,status,headers
-                self._native_body_complete = True
-            def raise_for_status(self): assert self.status_code in (200,206)
-            def iter_content(self,chunk_size): yield self.content
-            def close(self): pass
-        class Session:
-            def get(self,url,**kwargs):
-                if url.endswith(".index"):
-                    raw = b"\n".join(indexes[url])+b"\n"
-                    return Response(raw,200,{"Content-Length":str(len(raw))})
-                left,right = map(int,kwargs["headers"]["Range"][6:].split("-"))
-                raw = bytes(sources[url][left:right+1])
-                return Response(raw,206,{"Content-Length":str(len(raw)),
-                    "Content-Range":f"bytes {left}-{right}/{len(sources[url])}"})
-            def close(self): pass
-        session = Session()
-        class Client:
-            verify = True
-            def __init__(self,**kwargs): self.session = session
-            def _get_urls(self,**kwargs):
-                step = kwargs["step"][0]
-                stream,kind = ("oper","fc") if kwargs["type"]==["fc"] else ("enfo","ef")
-                url = f"https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{cycle:%Y%m%d}/{cycle:%H}z/ifs/0p25/{stream}/{cycle:%Y%m%d%H}0000-{step}h-{stream}-{kind}.grib2"
-                return SimpleNamespace(urls=[url],for_index={"param":kwargs["param"]},target=kwargs["target"])
-        class ClockType(type):
-            def __instancecheck__(cls,value): return isinstance(value,datetime)
-        class NativeClock(datetime,metaclass=ClockType):
-            @classmethod
-            def now(cls,tz=None): return captured.astimezone(tz or UTC)
-        paths = native._resolve_opendata_paths(source_root=source_root,environ={})
-        manifest = original_dir/"coordinate-manifest.json"
-        manifest.write_text(runtime_coordinate_manifest_json())
-        builtin = sqlite3.connect(":memory:")
-        conn.create_function("strftime",2,lambda fmt,value:captured.isoformat(timespec="milliseconds")
-            if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now")
-            else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
-        try:
-            with monkeypatch.context() as ingress:
-                ingress.setattr(ecmwf.opendata,"Client",Client)
-                ingress.setattr(native,"_RateLimitedSession",lambda:session)
-                ingress.setattr(native,"_NativeDeadlineSession",lambda:session)
-                ingress.setattr(native,"_DOWNLOAD_SOURCES",("aws",))
-                ingress.setattr(native,"datetime",NativeClock)
-                ingress.setattr(decoder,"datetime",NativeClock)
-                ingress.setattr(native._ingest_grib_module,"_now_utc_iso",lambda:captured.isoformat())
-                acquired = native.collect_native_temperature_source(conn=conn,run_utc=cycle,
-                    required_steps=list(steps),_paths=paths,_priority=lambda:True,
-                    cycle_deadline_monotonic=time.monotonic()+59)
-                assert acquired["status"] == "AVAILABLE",acquired
-                assert conn.execute("SELECT 1 FROM source_run WHERE source_run_id=?",(acquired["source_run_id"],)).fetchone() is not None
-                conn.commit()  # Normal caller owns publication of the capture transaction.
-                for paired_track,paired in (("mn2t6_low",low),("mx2t6_high",high)):
-                    target = native._download_output_path(run_date=cycle.date(),run_hour=cycle.hour,
-                        param=decoder.TRACKS[paired_track].open_data_param,raw_root=paths.raw_root)
-                    target.parent.mkdir(parents=True,exist_ok=True)
-                    target.write_bytes(paired.read_bytes())
-                    static_mask,phi = _physical_static_originals(inputs,directory=target.parent,track=paired_track)
-                    decoded = decoder.extract_open_ens_localday(grib_path=target,track_name=paired_track,
-                        manifest_path=manifest,cities_filter={city.name},output_root=source_root/"raw/coordinate_manifests"/manifest_sha,
-                        mask_grib_path=static_mask,mask_proof_path=static_mask.with_suffix(".proof.json"),
-                        surface_geopotential_grib_path=phi,surface_geopotential_proof_path=phi.with_suffix(".proof.json"))
-                    assert decoded["written"] >= 1,decoded
-                    sample = json.loads(Path(decoded["sample_outputs"][0]).read_bytes())
-                    collected = native.collect_open_ens_cycle(track=paired_track,skip_download=True,skip_extract=True,
-                        grid_surface_source_evidence=sample["grid_surface_evidence"],conn=conn,now_utc=captured,_paths=paths)
-                    assert collected["status"] == "ok",collected
-                body = json.loads(path.read_bytes())
-        finally:
-            conn.create_function("strftime",2,lambda fmt,value:builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
-        monkeypatch.setattr(native,"_resolve_opendata_paths",lambda **kwargs:paths)
-        monkeypatch.setattr(ecmwf.opendata,"Client",Client)
-        monkeypatch.setattr(native,"_NativeDeadlineSession",lambda:session)
-        monkeypatch.setattr(native,"_DOWNLOAD_SOURCES",("aws",))
-        snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=? AND city=? AND target_date=? AND temperature_metric='high'",
-            (collected["source_run_id"],city.name,str(request.target_date))).fetchone())
-        assert len(conn.execute("SELECT * FROM ensemble_snapshots").fetchall()) > len(original["ensemble_snapshots"])
+        assert len(conn.execute("SELECT * FROM ensemble_snapshots").fetchall()) == len(original["ensemble_snapshots"])+1
         assert snapshot["snapshot_id"] not in {row[0] for row in original["ensemble_snapshots"]}
     body = json.loads(path.read_bytes())
     assert body["city"] == city.name and body["target_date_local"] == str(request.target_date)
@@ -1657,7 +1460,7 @@ def _reader_shanghai_native_high(conn, request, root, monkeypatch):
     assert datetime.fromisoformat(snapshot["source_available_at"]) <= datetime.fromisoformat(snapshot["recorded_at"]) <= request.computed_at
     assert snapshot["source_transport"]=="ensemble_snapshots_db_reader"
     proof = json.loads(snapshot["provenance_json"])
-    assert grid_surface_evidence_identity_hash(proof["grid_surface_evidence"]) == grid_surface_evidence_identity_hash(body["grid_surface_evidence"])
+    assert grid_surface_evidence_identity_hash(proof["grid_surface_evidence"]) == surface_hash
     assert proof["grid_surface_evidence"] == body["grid_surface_evidence"]
     assert proof["high_local_day_max_boundary_certificate"]["status"]=="EXACT"
     run = conn.execute("SELECT * FROM source_run WHERE source_run_id=?",(snapshot["source_run_id"],)).fetchone()
@@ -1679,12 +1482,6 @@ def _reader_shanghai_native_high(conn, request, root, monkeypatch):
         decision_time=request.computed_at,require_entry_readiness=False)
     assert public.ok,public.reason_code
     assert public.bundle.snapshot.snapshot_id==snapshot["snapshot_id"]
-    from src.data.day0_hourly_vectors import read_native_measurement_role
-    role = read_native_measurement_role(conn=conn,city=city,target_date=str(request.target_date),
-        decision_time=request.computed_at,metric="high",role="full_Y",
-        scope_start=datetime.combine(request.target_date,datetime.min.time(),ZoneInfo(city.timezone)).astimezone(UTC),
-        snapshot_id=snapshot["snapshot_id"])
-    assert role["native_snapshot_id"] == snapshot["snapshot_id"]
     return replace(request,city_id=city_id,baseline_source_run_id=snapshot["source_run_id"],
         baseline_data_version=snapshot["dataset_id"],baseline_source_available_at=datetime.fromisoformat(snapshot["source_available_at"])),snapshot,sqlite3.connect(":memory:")
 
@@ -1721,18 +1518,10 @@ def _shanghai_reader_certificate(tmp_path, monkeypatch, *, expires_at,
         try:
             cut = computed_at or datetime(2026,10,1,8,15,tzinfo=UTC)
             actual_override = materializer._replacement_bayes_precision_fusion_override
-            from tests import test_replacement_forecast_materializer as fixture_owner
-            def original_native_input(conn,request,monkeypatch,*,members_c):
-                _,snapshot,builtin = _reader_shanghai_native_high(conn,request,root,monkeypatch)
-                builtin.close()
-                proof = json.loads(snapshot["provenance_json"])
-                return snapshot,grid_surface_evidence_identity_hash(proof["grid_surface_evidence"]),tuple(json.loads(snapshot["members_json"]))
-            with monkeypatch.context() as native_inputs:
-                native_inputs.setattr(fixture_owner,"_fixture_native_shape_identity",original_native_input)
-                conn,request = _shanghai_current_owner_request(root,monkeypatch,
-                    target_date=target_date,source_cycle_time=source_cycle_time,
-                    computed_at=cut,first_compute_at=first_compute_at or cut-timedelta(minutes=10),
-                    ground_recorded_at=ground_recorded_at)
+            conn,request = _shanghai_current_owner_request(root,monkeypatch,
+                target_date=target_date,source_cycle_time=source_cycle_time,
+                computed_at=cut,first_compute_at=first_compute_at or cut-timedelta(minutes=10),
+                ground_recorded_at=ground_recorded_at)
             assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
             # This is the first certificate construction, never a renewal of
             # an existing posterior. None delegates expiry to the owner law.
@@ -1852,14 +1641,11 @@ def test_reader_native_first_write_and_repeat_keep_original_identity_and_bytes(t
     world = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None)
     normal = next(world)
     try:
-        assert len(acquisitions) == 2
-        for acquisition,metric in zip(acquisitions,("low","high")):
-            assert acquisition["status"] == "ok"
-            snapshots = normal.conn.execute("SELECT snapshot_id FROM ensemble_snapshots WHERE source_run_id=? AND temperature_metric=?",
-                (acquisition["source_run_id"],metric)).fetchall()
-            assert acquisition["snapshots_inserted"] == len(snapshots) == 3
-            assert acquisition["coverage_written"] == 3
-            assert acquisition["producer_readiness_written"] == 3
+        assert len(acquisitions) == 1
+        assert acquisitions[0]["status"] == "ok"
+        assert acquisitions[0]["snapshots_inserted"] == 1
+        assert acquisitions[0]["coverage_written"] == 1
+        assert acquisitions[0]["producer_readiness_written"] == 1
         snapshot_id = json.loads(normal.row["dependency_source_run_ids_json"])["current_ensemble_snapshot"]
         snapshot = dict(normal.conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=?",
             (snapshot_id,)).fetchone())
@@ -1872,45 +1658,13 @@ def test_reader_native_first_write_and_repeat_keep_original_identity_and_bytes(t
             replace(normal.request,computed_at=normal.request.computed_at+timedelta(minutes=1)),
             tmp_path.resolve(),monkeypatch)
         builtin.close()
-        assert len(acquisitions) == 2  # Repeat is a read, never another collector/INSERT.
+        assert len(acquisitions) == 1  # Repeat is a read, never another collector/INSERT.
         assert actual == snapshot
         assert repeated.baseline_source_run_id == normal.request.baseline_source_run_id
         assert repeated.baseline_data_version == normal.request.baseline_data_version
         assert repeated.baseline_source_available_at == normal.request.baseline_source_available_at
         assert {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}")) for table in tables} == original
         assert {path:path.read_bytes() for path in native_root.rglob("*") if path.is_file()} == owned
-        # Remove a genuinely consumed opposite-quantity original. The public
-        # certificate loses authority until normal replica verification repairs
-        # that exact original, without renewing any canonical acquisition clock.
-        import time
-        from src.config import runtime_cities_by_name
-        from src.data.day0_hourly_vectors import read_native_measurement_role
-        from zoneinfo import ZoneInfo
-        city = runtime_cities_by_name()[normal.request.city]
-        paired = dict(normal.conn.execute("SELECT * FROM ensemble_snapshots WHERE city=? AND target_date=? AND temperature_metric='low' AND source_cycle_time=?",
-            (city.name,str(normal.request.target_date),normal.request.source_cycle_time.isoformat())).fetchone())
-        message = json.loads(paired["provenance_json"])["native_capture_receipt"]["messages"][0]
-        missing = native._role_message_path(native_root,message["raw_message_sha256"])
-        original_body = missing.read_bytes()
-        missing.unlink()
-        with pytest.raises(ValueError,match="ROLE_ORIGINAL_BODY_UNAVAILABLE"):
-            read_native_measurement_role(conn=normal.conn,city=city,target_date=str(normal.request.target_date),
-                decision_time=normal.request.computed_at,metric="high",role="full_Y",
-                scope_start=datetime.combine(normal.request.target_date,datetime.min.time(),ZoneInfo(city.timezone)).astimezone(UTC),
-                snapshot_id=snapshot_id)
-        for purpose in ReplacementForecastAuthorityPurpose:
-            assert not read_replacement_forecast_bundle(normal.conn,**normal.kwargs,authority_purpose=purpose).ok
-        plan = dict(run=normal.request.source_cycle_time,priority=lambda:True,
-            targets=[(city.name,str(normal.request.target_date),"low","Y")],
-            sources={"mn2t6_low":paired["source_run_id"]})
-        restored = native.restore_paired_role_originals(normal.conn,plan=plan,
-            decision_at=normal.request.computed_at,deadline_monotonic=time.monotonic()+59)
-        assert restored == {"status":"AVAILABLE","restored_count":1}
-        assert missing.read_bytes() == original_body
-        assert hashlib.sha256(original_body).hexdigest() == message["raw_message_sha256"]
-        assert {table:tuple(tuple(row) for row in normal.conn.execute(f"SELECT * FROM {table}")) for table in tables} == original
-        for purpose in ReplacementForecastAuthorityPurpose:
-            assert read_replacement_forecast_bundle(normal.conn,**normal.kwargs,authority_purpose=purpose).ok
     finally:
         next(world,None)
 
@@ -1922,8 +1676,7 @@ def test_reader_native_repeat_rejects_foreign_owned_body(tmp_path,monkeypatch):
     normal = next(world)
     try:
         native_root = Path(normal.conn.execute("PRAGMA database_list").fetchone()[2]).parent/"controlled-native-ens"
-        paths = tuple((native_root/"raw"/"coordinate_manifests").rglob(
-            f"open_ens_mx2t6_localday_max_target_{normal.request.target_date}_lead_*.json"))
+        paths = tuple((native_root/"raw"/"coordinate_manifests").rglob("*_target_*.json"))
         assert len(paths) == 1
         path = paths[0]
         original_bytes = path.read_bytes()

@@ -1,0 +1,4 @@
+{
+ "city": "Amsterdam",
+ "skipped": "KNMI: 769 bracket files cover 8 days (operator cap 800 calls); no train/test split possible"
+}

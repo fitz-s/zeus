@@ -635,7 +635,9 @@ def _page_running_extremes_from_ledger(
     day_start = datetime.combine(
         target_day, datetime.min.time(), tzinfo=zone
     ).astimezone(timezone.utc)
-    day_end = day_start + timedelta(days=1)
+    day_end = datetime.combine(
+        target_day + timedelta(days=1), datetime.min.time(), tzinfo=zone
+    ).astimezone(timezone.utc)
     channel = f"noaa_wrh_{station.lower()}"
 
     owned = conn is None

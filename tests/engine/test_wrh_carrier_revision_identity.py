@@ -100,10 +100,10 @@ def _fast_tail_case(conn, city, now, *, metric="high", legacy=False):
         observation_conn=conn, decision_time=now, posterior_id=1,
         current_day0_facts=(fact, {**fact, "observed_extreme_native": 26., "observation_source": "aviationweather_metar"}))
     projected.update(metric=metric, target_date=target)
-    def replay():
+    def replay(payload=None):
         return adapter._day0_remaining_p_raw_vector(np.asarray([28., 30.]), city=city,
             settlement_semantics=semantics, bins=[SimpleNamespace(bin_id=str(i), low=low, high=high) for i, (low, high) in enumerate(native_bounds)],
-            payload=projected, extra_member_sigma=0., decision_time=now)
+            payload=projected if payload is None else payload, extra_member_sigma=0., decision_time=now)
     provenance = {**conditioning, "q_shape": "fused_day0_fast_residual_likelihood",
         "day0_provisional_observation": conditioning, "day0_preliminary_report_survival_likelihood": {}}
     return SimpleNamespace(state=state, carrier=carrier, payload=projected, replay=replay,
@@ -139,7 +139,7 @@ def test_native_wrh_revision_survives_persisted_carrier_replay(carrier_case):
     assert len(revision) == 64
     # A durable JSON round trip must retain the writer's exact hash inputs.
     persisted = json.loads(json.dumps(case.payload))
-    assert case.replay().tolist() == pytest.approx(case.expected_q)
+    assert case.replay(persisted).tolist() == pytest.approx(case.expected_q)
     assert adapter._day0_carrier_written_inputs(persisted)["current_path_state"] == case.state
 
 

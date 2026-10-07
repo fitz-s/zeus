@@ -1,74 +1,160 @@
 # finite_evidence_probability_symmetry -- Plan
 
-## 2026-10-07 independent-branch draft-PR continuation
+## 2026-10-07 offline integration of current observation drift
 
-The operator approved the previously proposed new GitHub branch and draft PR
-for the completed offline physical-evidence exit repair. This does not authorize
-merge, auto-merge, deployment, restart, trading, production DB access or work on
-the user's computer. Retained frozen candidate is `8997b7561`; current remote
-live is `a04f19478bc283a4d3611e0e196d2f7728a2a231`, advanced from `620a0b5f5`.
-The publication worktree starts from that exact current head and squash-applies
-the reviewed repair. All peer changes are preserved. Five code/test overlaps
-merged mechanically; the sole text conflict joins the independent new native
-held-point rationale with the repair's final-daily receipt rationale.
+This isolated candidate starts at frozen `47a6cd88f675419f138a5f1c5862613478ac00d0`
+and integrates upstream `e3411078c606ea28e094f4eb1ea9c043d4b9e812` (nine commits
+past `88e0e25e`). Preserve the upstream next-local-midnight geometry, real elapsed
+DST lead times, eligible-family KMA polling, KNMI key resolver and additive parser
+pins. Retain the full physical-exit/WRH custody/optional-carrier repair and native
+role rollback. The inclusive 0.05 floor and mandatory v6 ENS evidence are unchanged.
 
-Current-head workflow inspection is read-only. Branch push and draft PR run
-hosted static/test/report gates; the operational live-release gate is manual
-only. No workflow or CI authority is changed by this repair. Re-run affected
-source/execution/data relationships and independently review the current native
-source/custody/q seams before publication. Any newly proven compatibility defect
-gets a causal regression and narrow repair, not a relaxed source/identity gate.
-Existing synthetic-versus-live and baseline-failure limitations remain explicit.
+Resolve only four overlapping text surfaces: source_rationale joins the WRH and
+KNMI descriptions; requirements retains both existing official dependency blocks;
+the current-target and station-adapter test files retain both sets of antibodies.
+The upstream dense-station research artifacts and all other upstream changes are
+preserved without running their research or download scripts. This harmonizes the
+existing per-file registry under INV-06/14/47; no new provider or authority is added.
 
-Current-head rerun initially has 18 setup errors from undeclared ecCodes/ECMWF
-OpenData dependencies, distinct from nine old WRH fixture source-custody failures.
-The official PyPI wheels are installed in the isolated venv and the direct
-imports are declared exactly in requirements.txt. Native fixtures are refreshed
-through normal original capture/decoding; source guards are not stubbed out.
-The ten required data suites pass 386 on both untouched a04f and this candidate.
-The Wellington 24-versus-26 failure is also reproduced on untouched a04f.
+Run guarded offline affected source/clock/adapter/current-target tests and original
+physical/WRH acceptance controls against example-only settings and isolated fixture
+state. Record exact failures and dependency limits; prior baseline results are not
+new green evidence. Independent final review and parent approval own publication.
+No live environment, production state, venue action, deployment or restart is in scope.
 
-Independent shared fast-tail replay exposed a defect already in 8997: WRH
-source_revision_identity is dropped by persisted/current-state projections in
-the adapter and public bundle reader. Actual source/residual/carrier replay
-rejects its own identity; restoring only that field restores exact mixed q.
-A narrow propagation repair and full native replay negatives are in progress.
-The owned 8997 Library artifact is versioned with an explicit erratum; its old
-code and tests remain historical proof, not the current publication candidate.
+### Observation-drift validation record
 
-Publication runtime/test freeze is `3196897c8cf41e31f34a544e7b013c8a5d43207e`.
-The final nine-suite integrated run passes 865, with only the same Wellington
-24-versus-26 baseline failure and 11 skips (856.63 seconds under concurrent cloud
-load). This includes 23 new native WRH HIGH/LOW persisted/public-reader replay
-and tamper/legacy/fresh/frozen controls. Four exact baseline cases are RED before
-repair; 26 existing carrier controls also pass independently. The independent
-current-head overlap and frozen carrier review has no remaining Critical or
-Important finding within that bounded slice, not a whole-PR production pass.
+The source/test merge is `4061d727bf874a6846acf663f2c20d32e691e42e`, tree
+`ab6ae11870776b1f23d3711fe567049ddeaba94a`. Its parents are frozen `47a6cd88f`
+and upstream `e3411078c`. The final candidate still changes 44 files relative
+to that upstream tip. All upstream research artifacts and workflows, plus the
+seven untouched native-role rollback files, remain identical to upstream.
+Both conflicting test files retain every test function from both parents.
+The only production delta from frozen 47a6 is upstream's four changed files:
+day0_fast_obs, day0_oracle_anomaly, station_temperature_adapters and time_context.
+The current-target planner already had the same next-local-midnight correction.
 
-The nine WRH acceptance cases now use real synthetic native GRIB originals
-through ordinary capture/decoding/custody, with immutable forecast-row assertions.
-HKO updates retain raw CSV and actual fixture capture clocks. Two finite-window
-cases use the same 0.444 bid at both cuts, legal on the 0.001 tick grid: current
-rounding-safe unit proceeds 0.4193136 lie between held q 0.424400099194124 and
-0.4163514484965418. The two-share/one-share-minimum, JIT, confirmed partial,
-residual and stale-order/reentry assertions remain active. This is fixture
-alignment to current law; no live fee/probability guard is changed.
+Guarded core/acceptance/carrier/structural checks: 889 passed, one Wellington
+failure and 11 skipped. The failed node and assertion exactly match frozen 47a6.
+Required data checks: 386 passed. All 16 classifier-selected relationship suites
+pass 2,168 tests on this source/test freeze, with genuine retained XML. Counts
+overlap and are not additive. Full affected observation/clock/adapter/current-
+target suites: candidate 549 passed/34 failed/one skipped; untouched e341
+542 passed/the same 34 failed/one skipped. Every failed node and failure message
+matches after normalizing only checkout paths and runtime object addresses;
+there are no candidate-only failures. All 29 expanded cases from upstream's 17
+new DST/KMA/KNMI test functions pass. The initial candidate run had seven more
+failures because sparse checkout omitted tracked audit fixtures; that initial
+41-failure evidence is retained separately, and both paired final runs use the
+same materialized tracked fixtures without executing the research scripts.
 
-Hosted base a04f already has failing money-path-required and release runs.
-Decoded logs identify missing eccodes errors plus separate other failures;
-the native dependencies are declared here to execute those source fixtures.
-Do not misattribute all hosted failures to dependencies. The local semantic
-scan's 43 messages match untouched a04f exactly, but hosted a04f's single-live
-step succeeded; that comparison is local evidence, not the established hosted
-failure cause. Schema, semantic registration (no unknown objects), test-quality
-and scoped freshness/map/planning checks pass locally. Broader current-base
-release comparison and exact published-head CI results remain separately tracked.
+The one affected-suite skip is the KNMI recorded-provider parser case:
+`test_recorded_provider_response_and_ledger_validation[knmi_observations-knmi]`.
+The exact upstream netCDF4==1.7.4 and cftime==1.6.6 pins are retained alongside
+eccodes==2.49.0/ecmwf-opendata==0.3.34. This cloud environment lacks netCDF4/cftime;
+a proposed official-binary-wheel resolution was blocked by automatic approval
+review under its offline-scope interpretation. No installation, alternate route,
+escalation or retry followed. This parser/dependency verification is incomplete.
 
-Remote live was observed unchanged as a04f at 01:41 UTC; the new publication
-branch did not exist. Read-only workflow review found no branch/draft-PR path
-to repository-defined deployment or trading; live-release remains manual. Only
-new-branch publication and a draft PR are authorized. No merge, auto-merge,
-deployment, restart, production DB or live venue action is authorized.
+Schema fingerprint, money-path test-quality metadata, semantic object registration,
+required invariant coverage, source-rationale delta, and scoped planning/map/
+freshness checks pass. The full release selection was not rerun for this drift;
+prior 2697-pass/51-matched-baseline-failure evidence belongs to frozen 47a6 and does
+not make this integration globally green. The 34 affected-suite failures likewise
+remain unresolved baseline debt. Logs and XML are retained outside the temporary
+filesystem for independent review. No production readiness is inferred.
+
+## 2026-10-07 offline compatibility with the upstream native-role rollback
+
+PR535 preserves the exact approved tree for review; no merge or deployment is
+authorized. Live advanced to6f9bca665, restoring ten native-series runtime files
+and nine coupled tests to620a because its commit report says mandatory full-Y
+native completion blocked all current posterior serving. Production claims in
+that report are not independently verified here.
+
+This separate cloud-only candidate starts from6f9bca665 and reapplies only the
+original8997 physical-exit/current-WRH repair, then ports its independently
+proved persisted-carrier revision fix. Do not restore the reverted native-role
+series or require full-Y 2t completion to serve current v6 ENS evidence. Preserve
+all other upstream preflight/recovery/observation/CI changes. Revalidate source
+correction/EMPTY, identity transport, positive-q lawful exit and command/fill
+fences against the restored regime. Add a decisive partial/absent-native control
+for the existing serving shape; do not weaken general source or action guards.
+
+Parent review of scope and test results is required before any materially
+changed remote payload. Only offline compatibility edits/tests are active here;
+no branch update, merge, deploy, restart or production data action is authorized.
+
+### Bounded compatibility integration and CI disposition
+
+The retained `ecmwf_open_data` collector and GRIB readers still import official
+`ecmwf-opendata` and `eccodes`; their explicit pinned dependencies remain needed
+by current source-custody tests despite the native-role rollback. Adding their
+existing tested wheels restores reproducible imports, not a full-Y admission
+requirement. The latest base88e0 changes only two preflight-test skip lines; those
+upstream lines are preserved and do not change this repair’s runtime proof.
+
+Candidate `c7f092f245b71fb2465a66a6beada30eabce5972` combines the
+restored-regime optional-carrier fix, composite station-adapter registry and
+strengthened original acceptance. The seven unowned native-model files remain
+byte-identical to `6f9bca665`. Original acceptance passed 51 tests; the strengthened
+slice passed 55, including real v6 READY/public ENTRY and HELD/SELL with native
+2t absent or PARTIAL, and refusal when required v6 ENS evidence is missing.
+Carrier replay reproduced 17 failures and 6 passes before its patch, then all
+23 passed, with 42 existing controls. These are isolated synthetic fixtures.
+WRH's composed acceptance retains a controlled fusion seam, now explicitly
+named; the HKO absent/PARTIAL controls use the real fusion/materialization path.
+Independent combined review and required CI comparison remain in progress.
+
+The published draft's checks ran synthetic merge `aca9d8f` of `d973d221e`
+into `6f9bca665`, not the standalone approved tree. All 12 workflows reached a
+terminal state: eight successful, one draft-only skip, three failed. The source
+rationale gate's four `station_temperature` findings are fixed by registering
+its existing composite adapter; no runtime provider admission is granted, and
+unknown-provider rejection remains tested. Two selected relationship failures
+and the release/integration failures require matched-baseline classification;
+they are not declared historical merely because they are outside the new tests.
+
+The two exchange-reconciliation failures are independently reproduced on
+untouched6f9. Earlier295d8e458 removed unsafe absence-based administrative close;
+9eeae6855 added later definite-chain debt drainage. The one-file test repair
+now proves four retry-state/proof-loss combinations preserve canonical rows,
+events, economics and order ownership with idempotent review debt. Full exchange
+suite237 and focused12 pass; runtime handle_exit_pending_missing is unchanged.
+
+Paired full release selection on c7f and untouched6f9 completed with
+76 failed/2670 passed versus51 failed/2695 passed:50 shared,26 candidate-only,
+and one baseline-only SQLite deadline timing failure. The two-file fixture
+repair uses the actual current-product writer and retained body for London,
+canonical forecast ownership for Chicago with a foreign-owner negative, and
+complete empty schema/current-product facts for two Day0 kernel tests. All26
+differential failures plus13 strict source/custody/ownership controls pass39.
+No runtime guard changed. The AMBER test consumes a canonical-fact-built event;
+it does not certify scheduled trigger execution. The full final release
+selection completed with2697 passed and51 failed. The51 failed node IDs exactly
+match untouched6f9; no candidate-only failure remains. This is matched baseline
+classification, not a globally green gate or a diagnosis of all baseline failures.
+
+Three free-cash tests fail identically before and after this repair on6f9 due
+to stale fixture coordinate/source provenance; an incomplete fixture patch was
+reverted. They remain explicit baseline CI debt, not a claimed passed gate.
+Core runs pass791 with11 skips and one Wellington source-selection assertion
+also reproduced on untouched6f9; combined focused checks pass98, required data
+checks pass386, and the16 selected relationship suites pass2168. Counts overlap
+and must not be added as distinct coverage. Independent bounded checks pass41
+on ca14 and39 on f009; the final two-file fixture review reports no Critical or
+Important finding in its named slice. No live readiness follows. A combined
+final core run passes889 with11 skips and the same single Wellington baseline
+failure. Recovery after an execution-host change lost temporary logs; final
+core/data/release and independent evidence were saved durably. The earlier
+2168-pass selected relationship run remains a completed recorded result; its
+temporary XML was lost, so no missing XML is represented as preserved evidence.
+
+The registry harmonizes its existing per-file adapter rationale with the
+provider-key detector under FC-07 and INV-06/INV-14. Touched authority surfaces
+are source_rationale and test_topology; existing provider roles, detector and
+runtime source eligibility are unchanged. The integrator independently read
+the final two-file registry diff before acceptance.
 
 ## 2026-10-06 cloud-only physical-evidence exit repair
 
@@ -20417,3 +20503,40 @@ delta classifier and narrow changed-surface gates. Keep classifier integration
 requirements explicit; code/service-credit proof does not establish native
 role completion or new public v7/v35 consumption. No push/registered load until
 ROOT accepts the exact final checked tip; raw/config/ref evidence is preserved.
+
+## 2026-10-07 runtime restore to 620a0b5f5 (native-role v7 re-land blocked every posterior again)
+
+The forecast-live restart at 2026-10-06 21:18:25Z loaded 3c6c9a477, which carried
+66d90a6c7 ("restore qualified native roles", whose own message says "this
+candidate is not load-ready") and its follow-ons. The last forecast_posteriors
+row is posterior_id 758687, computed 21:17:56Z. After that, every materialization
+BLOCKED FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE (~750 per hour), so D+0..D+2
+probabilities aged to 4.5-5.8 h for all 94 families.
+
+Mechanism (replayed on live state): `_read_full_Y_evidence_shape` now requires
+`read_native_measurement_role(role="full_Y")`. That reader needs a complete
+`2t_instant_native_knots` scheduled run covering the whole target local day. Every
+live native run is PARTIAL (12Z 509/663, 18Z 46/561, 00Z 172/1377), so it raises
+NATIVE_2T_MEMBER_STEP_SET_INCOMPLETE. The shape reader returns None, and the
+v6 ENS shape that was serving is no longer consulted. This repeats the first
+re-land requirement below ("a native role that is absent leaves the existing
+shape path serving"), which the series did not meet.
+
+Proof: three live requests (Hong Kong 10-07 low/12Z carrier, Chicago 10-07
+high/18Z, London 10-08 high/18Z) dry-run on HEAD a04f19478 give BLOCKED
+CURRENT_SHAPE_ENS_UNAVAILABLE (2) or ERROR SNAPSHOT_RETRY_EXHAUSTED (1). On this
+restore all three give READY.
+
+Restore: the ten runtime files the native series owns
+(day0_hourly_vectors, ecmwf_open_data, replacement_forecast_bundle_reader,
+replacement_forecast_cycle_policy, replacement_forecast_materializer,
+event_reactor_adapter, tier0_auction_corpus, day0_authority,
+forecast_live_daemon, extract_open_ens_localday) return to their 620a0b5f5
+bytes, as do the nine series-coupled test files. All other commits since
+620a0b5f5 are kept: preflight/deploy gates, recovery, observation custody and
+CI. Their imports resolve against the restored bytes.
+
+Re-land requirements (unchanged, now binding): the full-Y native role is
+optional evidence. While the native run for the target day is PARTIAL or absent,
+the v6 ENS shape keeps serving. A live-request replay must show READY on the
+current queue before any forecast-live load.

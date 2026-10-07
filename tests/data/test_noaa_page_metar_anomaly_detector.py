@@ -198,3 +198,34 @@ def test_page_side_unavailable_does_not_flag():
     with module._WU_CHECK_MEMO_LOCK:
         assert city.name in module._WU_CHECK_FAILURE_MEMO
         assert city.name not in module._WU_CHECK_MEMO
+
+
+@pytest.mark.parametrize("target_date,hours", (("2026-03-29", 23), ("2026-10-25", 25)))
+def test_page_supplier_window_is_the_local_calendar_day_across_dst(target_date, hours):
+    """The page day closes at the next local midnight, not 24 h after the start.
+
+    Helsinki's 2026-03-29 is 23 h and 2026-10-25 is 25 h. A print at the last
+    local minute belongs to the target day; one at the next local midnight, and
+    one a minute before the day began, do not.
+    """
+    from zoneinfo import ZoneInfo
+
+    city = _city("Helsinki")
+    zone = ZoneInfo(str(city.timezone))
+    start = datetime.fromisoformat(target_date).replace(tzinfo=zone).astimezone(timezone.utc)
+    end = datetime.fromisoformat(
+        (datetime.fromisoformat(target_date) + timedelta(days=1)).date().isoformat()
+    ).replace(tzinfo=zone).astimezone(timezone.utc)
+    assert end - start == timedelta(hours=hours)
+    conn = _ledger()
+    _page_print(conn, city, publish=start - timedelta(minutes=1), value=-40.0)
+    _page_print(conn, city, publish=start, value=10.0)
+    _page_print(conn, city, publish=end - timedelta(minutes=1), value=20.0)
+    _page_print(conn, city, publish=end, value=99.0)
+
+    page = _page_running_extremes_from_ledger(city, target_date, conn=conn)
+
+    assert page is not None
+    high, low, last_publish, _coverage, samples = page
+    assert (high, low, samples) == (20.0, 10.0, 2)
+    assert last_publish == end - timedelta(minutes=1)

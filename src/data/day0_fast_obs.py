@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-16
+# Last reused or audited: 2026-10-07 (KMA polls every eligible RKSI/RKPK family, fast-obs G4)
 # Authority basis: day0 first-principles review 2026-06-10 §6.2 (live obs hook)
 #   + operator green-light 2026-06-10 (free METAR fast lane; no paid sources);
 #   NOAA/NWS station files provide current-exposure priority transport, cycle
@@ -863,7 +863,9 @@ def build_fast_station_residual_likelihood(
     local_start = datetime.combine(
         target_day, datetime.min.time(), tzinfo=tz
     ).astimezone(UTC)
-    local_end = local_start + timedelta(days=1)
+    local_end = datetime.combine(
+        target_day + timedelta(days=1), datetime.min.time(), tzinfo=tz
+    ).astimezone(UTC)
     # Bucketed by when the observation was TAKEN: a 23:50Z observation whose
     # mirror republishes it after local midnight belongs to the day it measured.
     settlement_values = [
@@ -3809,7 +3811,9 @@ class Day0FastObsEmitter:
                 day_start = datetime.combine(
                     target_day, datetime.min.time(), tzinfo=tz
                 ).astimezone(UTC)
-                day_end = day_start + timedelta(days=1)
+                day_end = datetime.combine(
+                    target_day + timedelta(days=1), datetime.min.time(), tzinfo=tz
+                ).astimezone(UTC)
                 rows = world_conn.execute(
                     """
                     SELECT publish_ts_utc, value_native, fetched_at_utc, raw_report
@@ -4143,8 +4147,12 @@ class Day0FastObsEmitter:
                     if (station := str(raw).strip().upper())
                 )
             )
+            # KMA is the first-party same-station feed for RKSI/RKPK. The
+            # cursor throttles each station to one request per minute, so it
+            # serves every eligible family, entry as well as held exposure.
             kma_station_ids = tuple(
-                station for station in priority_station_ids
+                station
+                for station in dict.fromkeys(str(raw).strip().upper() for raw in stations)
                 if station in KMA_PRIORITY_STATIONS
             )
             kma_client = None

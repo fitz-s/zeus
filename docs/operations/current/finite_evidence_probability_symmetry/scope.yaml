@@ -8,8 +8,10 @@ frontier:
 - exit economic symmetry
 - current wealth uncertainty representation
 in_scope:
-- tests/engine/test_wrh_carrier_revision_identity.py
 - requirements.txt
+- tests/money_path/test_finding_b_free_cash_bound.py
+- tests/engine/test_wrh_carrier_revision_identity.py
+- tests/topology/test_structural_blockers.py
 - tests/engine/test_physical_wrh_q_delivery.py
 - architecture/artifact_lifecycle.yaml
 - workspace_map.md

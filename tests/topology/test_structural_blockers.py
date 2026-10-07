@@ -1,5 +1,5 @@
 # Created: 2026-05-26
-# Last reused or audited: 2026-05-26
+# Last reused or audited: 2026-10-07
 # Authority basis: architecture/topology_enforcement.yaml
 #                  docs/operations/current/plans/ci_topology_refactor_refined.md Phase D
 """
@@ -19,6 +19,7 @@ violation) and one negative test (rule silent on clean input).
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -96,6 +97,32 @@ def test_source_rationale_delta_detects_new_provider_file(tmp_path: Path):
     )
     assert r.returncode == 1
     assert "newprov" in r.stdout
+
+
+def test_source_rationale_delta_registers_station_adapter_but_rejects_unknown(tmp_path: Path):
+    (tmp_path / "architecture").mkdir()
+    (tmp_path / "architecture" / "source_rationale.yaml").write_text(
+        (REPO_ROOT / "architecture" / "source_rationale.yaml").read_text()
+    )
+    consumer = tmp_path / "consumer.py"
+    consumer.write_text(
+        "from src.data.station_temperature_adapters import valid_station_print\n"
+    )
+    args = ("--repo-root", str(tmp_path), "--changed-files", "consumer.py", "--json")
+    registered = _run("check_source_rationale_delta.py", *args)
+    assert registered.returncode == 0, registered.stdout
+    assert json.loads(registered.stdout)["findings"] == []
+
+    consumer.write_text(
+        consumer.read_text() + "from src.data." + "unregistered_temperature_client import Client\n"
+    )
+    unknown = _run("check_source_rationale_delta.py", *args)
+    assert unknown.returncode == 1, unknown.stdout
+    assert json.loads(unknown.stdout)["findings"] == [{
+        "file": "consumer.py",
+        "detected_source": "unregistered_temperature",
+        "reason": "import of unregistered provider",
+    }]
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-06
-# Lifecycle: created=2026-09-29; last_reviewed=2026-10-06; last_reused=2026-10-06
-# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md native sample boolean boundary; operator re-admission of Moscow UUWW 2026-10-06 (artifacts/fast_obs_audit/ROUND4.md)
+# Last reused/audited: 2026-10-07
+# Lifecycle: created=2026-09-29; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md native sample boolean boundary; operator re-admission of Moscow UUWW 2026-10-06 (artifacts/fast_obs_audit/ROUND4.md); docs/reference/fast_obs_city_algorithm_matrix.md §5 G3a (KNMI key resolver)
 # Purpose: Pin station adapter parsing and registry source roles, including fast-admission proof law.
 # Reuse: Run when physical_current_sources, station_temperature_adapters, or the registry JSON changes.
 # Authority: REQ-20260929-223929-bf51a2; recorded provider responses, 2026-09-30 UTC.
@@ -1082,3 +1082,95 @@ def test_current_wrh_native_body_cache_and_dynamic_locks_are_bounded():
             for key in tuple(adapters._FETCH_KEY_LOCKS):
                 if key[0] == "wrh_current_snapshot":
                     adapters._FETCH_KEY_LOCKS.pop(key)
+
+
+# ---------------------------------------------------------------------------
+# KNMI key resolution (fast-obs gap G3a, 2026-10-07): env first, then the
+# gitignored config/knmi_secret.json; the key never reaches a log or an error.
+# ---------------------------------------------------------------------------
+
+_KNMI_FAKE_KEY = "knmi-test-key-0123456789"
+
+
+def _write_knmi_secret(root, payload):
+    (root / "config").mkdir(parents=True, exist_ok=True)
+    (root / "config" / "knmi_secret.json").write_text(json.dumps(payload))
+
+
+def test_knmi_key_env_wins_over_secret_file(tmp_path):
+    from src.data.station_temperature_adapters import resolve_knmi_api_key
+    _write_knmi_secret(tmp_path, {"knmi_api_key": "from-file"})
+    assert resolve_knmi_api_key(environ={"KNMI_API_KEY": " from-env "}, root=tmp_path) == "from-env"
+
+
+def test_knmi_key_falls_back_to_secret_file(tmp_path):
+    from src.data.station_temperature_adapters import resolve_knmi_api_key
+    _write_knmi_secret(tmp_path, {"knmi_api_key": "from-file"})
+    assert resolve_knmi_api_key(environ={"KNMI_API_KEY": "  "}, root=tmp_path) == "from-file"
+
+
+@pytest.mark.parametrize("content", [None, "{not json", "[]", '{"knmi_api_key": ""}', '{"other": "x"}'])
+def test_knmi_key_absent_or_malformed_secret_is_none(tmp_path, content):
+    from src.data.station_temperature_adapters import resolve_knmi_api_key
+    if content is not None:
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / "knmi_secret.json").write_text(content)
+    assert resolve_knmi_api_key(environ={}, root=tmp_path) is None
+
+
+def test_knmi_fetch_uses_resolved_key_and_never_logs_it(monkeypatch, caplog):
+    import httpx
+    import logging
+    from src.data import station_temperature_adapters as adapters
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "knmi_observations")
+    monkeypatch.setattr(adapters, "resolve_knmi_api_key", lambda: _KNMI_FAKE_KEY)
+    seen = []
+
+    def handler(request):
+        seen.append(request.headers.get("Authorization"))
+        return httpx.Response(500)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(httpx.HTTPStatusError) as exc:
+        adapters.fetch_station_temperature(route, start=NOW - timedelta(hours=2), end=NOW, client=client)
+    assert seen == [_KNMI_FAKE_KEY]
+    assert _KNMI_FAKE_KEY not in str(exc.value)
+    assert _KNMI_FAKE_KEY not in caplog.text
+
+
+def test_knmi_ingest_failure_log_carries_no_key(monkeypatch, caplog):
+    import httpx
+    import logging
+    import src.ingest_main as ingest
+    from src.config import cities_by_name
+    from src.data import station_temperature_adapters as adapters
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "knmi_observations")
+
+    def leaky(*_args, **_kwargs):
+        raise ValueError("KNMI rejected " + _KNMI_FAKE_KEY)
+
+    monkeypatch.setattr(adapters, "fetch_station_temperature", leaky)
+    caplog.set_level(logging.DEBUG)
+    result = ingest._day0_current_temperature_source_tick(cities_by_name["Amsterdam"], route)
+    assert result == {"status": "SOURCE_UNAVAILABLE"}
+    assert "PHYSICAL_CURRENT_FETCH_FAILED station=EHAM error=ValueError" in caplog.text
+    assert _KNMI_FAKE_KEY not in caplog.text
+
+
+def test_knmi_missing_key_error_names_no_secret(monkeypatch):
+    from src.data import station_temperature_adapters as adapters
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "knmi_observations")
+    monkeypatch.setattr(adapters, "resolve_knmi_api_key", lambda: None)
+    with pytest.raises(ValueError, match="^KNMI_API_KEY_UNAVAILABLE$"):
+        adapters.fetch_station_temperature(route, start=NOW - timedelta(hours=2), end=NOW)
+
+
+def test_knmi_grid_is_physical_only_dense_not_settlement_instants():
+    """KNMI publishes a 10-minute grid (:00/:10/...); EHAM METARs are :25/:55.
+    The route shares no instant with the settlement METAR, so it stays
+    physical-only and never authorizes a settlement fact."""
+    from src.data.physical_current_sources import SourceRole
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "knmi_observations")
+    assert route.station_id == "EHAM" and route.role is SourceRole.PHYSICAL_ONLY
+    assert not route.settlement_authorized

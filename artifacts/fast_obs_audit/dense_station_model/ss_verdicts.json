@@ -1,0 +1,400 @@
+{
+ "Helsinki": {
+  "source_incompatible": [],
+  "high": {
+   "verdict": "B_USABLE",
+   "strict": "PASS",
+   "ll_ok": true,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 12,
+   "ci": {
+    "mean": -0.0196,
+    "lo": -0.0249,
+    "hi": -0.0142,
+    "days": 44,
+    "decisions": 4752
+   },
+   "hc_A": {
+    "n": 1504,
+    "coverage": 0.3165,
+    "errors": 0,
+    "expected_errors": 7.893,
+    "error_rate": 0.0
+   },
+   "hc_B": {
+    "n": 1546,
+    "coverage": 0.3253,
+    "errors": 0,
+    "expected_errors": 7.1695,
+    "error_rate": 0.0
+   },
+   "fc_A": 0.0,
+   "fc_B": 0.0
+  },
+  "low": {
+   "verdict": "B_USABLE",
+   "strict": "FAIL",
+   "ll_ok": true,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 25,
+   "ci": {
+    "mean": -0.0151,
+    "lo": -0.0228,
+    "hi": -0.0082,
+    "days": 44,
+    "decisions": 4752
+   },
+   "hc_A": {
+    "n": 1811,
+    "coverage": 0.3811,
+    "errors": 0,
+    "expected_errors": 17.3789,
+    "error_rate": 0.0
+   },
+   "hc_B": {
+    "n": 1847,
+    "coverage": 0.3887,
+    "errors": 2,
+    "expected_errors": 17.4915,
+    "error_rate": 0.0011
+   },
+   "fc_A": 0.0,
+   "fc_B": 0.0004
+  }
+ },
+ "Munich": {
+  "source_incompatible": [],
+  "high": {
+   "verdict": "B_BETTER_NOT_SIGNIFICANT",
+   "strict": "PASS",
+   "ll_ok": false,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 8,
+   "ci": {
+    "mean": -0.0001,
+    "lo": -0.0008,
+    "hi": 0.0005,
+    "days": 42,
+    "decisions": 4536
+   },
+   "hc_A": {
+    "n": 1622,
+    "coverage": 0.3576,
+    "errors": 0,
+    "expected_errors": 4.3107,
+    "error_rate": 0.0
+   },
+   "hc_B": {
+    "n": 1620,
+    "coverage": 0.3571,
+    "errors": 0,
+    "expected_errors": 4.2989,
+    "error_rate": 0.0
+   },
+   "fc_A": 0.0,
+   "fc_B": 0.0
+  },
+  "low": {
+   "verdict": "B_BETTER_NOT_SIGNIFICANT",
+   "strict": "PASS",
+   "ll_ok": false,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 20,
+   "ci": {
+    "mean": -0.0003,
+    "lo": -0.0008,
+    "hi": 0.0001,
+    "days": 42,
+    "decisions": 4536
+   },
+   "hc_A": {
+    "n": 2614,
+    "coverage": 0.5763,
+    "errors": 6,
+    "expected_errors": 13.7428,
+    "error_rate": 0.0023
+   },
+   "hc_B": {
+    "n": 2614,
+    "coverage": 0.5763,
+    "errors": 6,
+    "expected_errors": 13.5935,
+    "error_rate": 0.0023
+   },
+   "fc_A": 0.0013,
+   "fc_B": 0.0013
+  }
+ },
+ "Tokyo": {
+  "source_incompatible": [],
+  "high": {
+   "verdict": "B_USABLE",
+   "strict": "PASS",
+   "ll_ok": true,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 17,
+   "ci": {
+    "mean": -0.0367,
+    "lo": -0.0515,
+    "hi": -0.0241,
+    "days": 44,
+    "decisions": 4752
+   },
+   "hc_A": {
+    "n": 1842,
+    "coverage": 0.3876,
+    "errors": 3,
+    "expected_errors": 10.7659,
+    "error_rate": 0.0016
+   },
+   "hc_B": {
+    "n": 1915,
+    "coverage": 0.403,
+    "errors": 3,
+    "expected_errors": 10.8621,
+    "error_rate": 0.0016
+   },
+   "fc_A": 0.0006,
+   "fc_B": 0.0006
+  },
+  "low": {
+   "verdict": "B_USABLE",
+   "strict": "FAIL",
+   "ll_ok": true,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 25,
+   "ci": {
+    "mean": -0.0179,
+    "lo": -0.03,
+    "hi": -0.0075,
+    "days": 44,
+    "decisions": 4752
+   },
+   "hc_A": {
+    "n": 1688,
+    "coverage": 0.3552,
+    "errors": 15,
+    "expected_errors": 17.7732,
+    "error_rate": 0.0089
+   },
+   "hc_B": {
+    "n": 1755,
+    "coverage": 0.3693,
+    "errors": 21,
+    "expected_errors": 17.7273,
+    "error_rate": 0.012
+   },
+   "fc_A": 0.0032,
+   "fc_B": 0.0044
+  }
+ },
+ "Singapore": {
+  "source_incompatible": [
+   "2026-09-20 high"
+  ],
+  "high": {
+   "verdict": "B_USABLE",
+   "strict": "FAIL",
+   "ll_ok": true,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 10,
+   "ci": {
+    "mean": -0.0153,
+    "lo": -0.0218,
+    "hi": -0.009,
+    "days": 42,
+    "decisions": 4536
+   },
+   "hc_A": {
+    "n": 2046,
+    "coverage": 0.4511,
+    "errors": 0,
+    "expected_errors": 5.1596,
+    "error_rate": 0.0
+   },
+   "hc_B": {
+    "n": 2110,
+    "coverage": 0.4652,
+    "errors": 1,
+    "expected_errors": 5.474,
+    "error_rate": 0.0005
+   },
+   "fc_A": 0.0,
+   "fc_B": 0.0002
+  },
+  "low": {
+   "verdict": "B_USABLE",
+   "strict": "PASS",
+   "ll_ok": true,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 18,
+   "ci": {
+    "mean": -0.0108,
+    "lo": -0.0209,
+    "hi": -0.0024,
+    "days": 32,
+    "decisions": 3456
+   },
+   "hc_A": {
+    "n": 1024,
+    "coverage": 0.2963,
+    "errors": 4,
+    "expected_errors": 11.7304,
+    "error_rate": 0.0039
+   },
+   "hc_B": {
+    "n": 1057,
+    "coverage": 0.3058,
+    "errors": 1,
+    "expected_errors": 12.1399,
+    "error_rate": 0.0009
+   },
+   "fc_A": 0.0012,
+   "fc_B": 0.0003
+  }
+ },
+ "Toronto": {
+  "source_incompatible": [],
+  "high": {
+   "verdict": "B_BETTER_NOT_SIGNIFICANT",
+   "strict": "FAIL",
+   "ll_ok": false,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 12,
+   "ci": {
+    "mean": -0.0056,
+    "lo": -0.0141,
+    "hi": 0.0032,
+    "days": 44,
+    "decisions": 4752
+   },
+   "hc_A": {
+    "n": 1715,
+    "coverage": 0.3609,
+    "errors": 3,
+    "expected_errors": 6.6297,
+    "error_rate": 0.0017
+   },
+   "hc_B": {
+    "n": 1745,
+    "coverage": 0.3672,
+    "errors": 5,
+    "expected_errors": 7.4185,
+    "error_rate": 0.0029
+   },
+   "fc_A": 0.0006,
+   "fc_B": 0.0011
+  },
+  "low": {
+   "verdict": "B_BETTER_NOT_SIGNIFICANT",
+   "strict": "PASS",
+   "ll_ok": false,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 36,
+   "ci": {
+    "mean": -0.0035,
+    "lo": -0.0077,
+    "hi": 0.0008,
+    "days": 44,
+    "decisions": 4752
+   },
+   "hc_A": {
+    "n": 2894,
+    "coverage": 0.609,
+    "errors": 0,
+    "expected_errors": 28.3125,
+    "error_rate": 0.0
+   },
+   "hc_B": {
+    "n": 2894,
+    "coverage": 0.609,
+    "errors": 0,
+    "expected_errors": 27.3704,
+    "error_rate": 0.0
+   },
+   "fc_A": 0.0,
+   "fc_B": 0.0
+  }
+ },
+ "Warsaw": {
+  "source_incompatible": [],
+  "high": {
+   "verdict": "B_USABLE",
+   "strict": "PASS",
+   "ll_ok": true,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 9,
+   "ci": {
+    "mean": -0.0024,
+    "lo": -0.0036,
+    "hi": -0.0013,
+    "days": 43,
+    "decisions": 4644
+   },
+   "hc_A": {
+    "n": 1868,
+    "coverage": 0.4022,
+    "errors": 3,
+    "expected_errors": 5.0481,
+    "error_rate": 0.0016
+   },
+   "hc_B": {
+    "n": 1878,
+    "coverage": 0.4044,
+    "errors": 3,
+    "expected_errors": 5.3687,
+    "error_rate": 0.0016
+   },
+   "fc_A": 0.0006,
+   "fc_B": 0.0006
+  },
+  "low": {
+   "verdict": "B_BETTER_NOT_SIGNIFICANT",
+   "strict": "FAIL",
+   "ll_ok": false,
+   "sem_ok": true,
+   "cal_ok": true,
+   "cal_bound": 11,
+   "ci": {
+    "mean": -0.0003,
+    "lo": -0.0013,
+    "hi": 0.0009,
+    "days": 43,
+    "decisions": 4644
+   },
+   "hc_A": {
+    "n": 2718,
+    "coverage": 0.5853,
+    "errors": 4,
+    "expected_errors": 6.5261,
+    "error_rate": 0.0015
+   },
+   "hc_B": {
+    "n": 2719,
+    "coverage": 0.5855,
+    "errors": 5,
+    "expected_errors": 6.5277,
+    "error_rate": 0.0018
+   },
+   "fc_A": 0.0009,
+   "fc_B": 0.0011
+  }
+ },
+ "Amsterdam": {
+  "skipped": "KNMI: 769 bracket files cover 8 days (operator cap 800 calls); no train/test split possible"
+ },
+ "Madrid": {
+  "skipped": "no dense archive (AEMET public XML exposes 24 h only)"
+ }
+}

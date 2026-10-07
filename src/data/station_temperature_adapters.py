@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-06 (metaviatelecom UUWW route re-admitted by operator decision)
+# Last reused/audited: 2026-10-07 (KNMI key resolver env->config/knmi_secret.json; fast-obs G3a)
 """Fixed-endpoint station observations with independent receipt and valid clocks.
 
 Provider names select parsers, never arbitrary URLs or executable config. Native
@@ -64,6 +64,31 @@ def native_sample_value(sample, unit: str) -> float:
             raise ValueError("STATION_NATIVE_UNIT_MISMATCH")
         return float(sample.value_native)
     return float(sample.temperature_c) if unit == "C" else float(sample.temperature_c) * 1.8 + 32.0
+
+
+_KNMI_API_KEY_ENV = "KNMI_API_KEY"
+_KNMI_SECRET_CONFIG = "config/knmi_secret.json"
+
+
+def resolve_knmi_api_key(*, environ=None, root=None) -> str | None:
+    """KNMI Open Data key: env ``KNMI_API_KEY``, then gitignored
+    ``config/knmi_secret.json`` (``{"knmi_api_key": "..."}``), else None.
+
+    The key is never logged and never enters a print or its provenance.
+    """
+    env = os.environ if environ is None else environ
+    key = str(env.get(_KNMI_API_KEY_ENV, "") or "").strip()
+    if key:
+        return key
+    from pathlib import Path
+    path = (root or Path(__file__).resolve().parents[2]) / _KNMI_SECRET_CONFIG
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return str(data.get("knmi_api_key") or "").strip() or None
 
 
 _RESPONSE_BYTE_LIMIT = 10_000_000
@@ -543,7 +568,7 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
             params.update(startDate=start.astimezone(UTC).strftime("%Y%m%d"), endDate=end.astimezone(UTC).strftime("%Y%m%d"))
         headers.update(WU_HEADERS)
     elif route.provider == "knmi_observations":
-        key = os.environ.get("KNMI_API_KEY")
+        key = resolve_knmi_api_key()
         if not key:
             raise ValueError("KNMI_API_KEY_UNAVAILABLE")
         base = "https://api.dataplatform.knmi.nl/open-data/v1/datasets/10-minute-in-situ-meteorological-observations/versions/1.0/files"

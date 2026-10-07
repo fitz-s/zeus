@@ -41,6 +41,10 @@ machine manifests, tests, and executable source.
   the authority that asymmetric loss must be expressed as per-city Kelly
   multipliers (NOT as DDD floor overrides); LANDED 2026-05-03 in
   `src/strategy/kelly.py`; wiring at evaluator.py is operator-owned
+- `fast_obs_city_algorithm_matrix.md` when changing a Day0 observation channel,
+  the fast-admission registry, or a city's settlement source; per-city map of
+  which observation channel feeds which Day0 algorithm, with a dated gap list
+  (snapshot, recheck before relying on it)
 - `modules/AGENTS.md` when the task is module-sensitive and needs a dense module
   book route
 - `modules/state.md`, `modules/engine.md`, `modules/data.md`,
@@ -84,6 +88,7 @@ which module reference matters.
 | `zeus_calibration_weighting_authority.md` | Mathematical authority for calibration weight semantics (LOW track binary→continuous, per-city eligibility, ΔT-magnitude forbidden in production); empirical basis PoC v4+v5 on 1.7M pairs |
 | `zeus_kelly_asymmetric_loss_reference.md` | Per-city asymmetric loss preferences via Kelly multipliers (NOT DDD floor); LANDED 2026-05-03 in `src/strategy/kelly.py`; open wiring at evaluator.py is operator-owned deliberate two-stage rollout |
 | `zeus_vendor_change_response_registry.md` | 14-layer vendor dependency surface map + T1-T5 response playbooks for PM source switch, WU silent mutation, Lagos-class failure, Shenzhen-class onboarding, vendor outage |
+| `fast_obs_city_algorithm_matrix.md` | Per-city (54) map of observation channels to Day0 algorithm classes (settlement channel, fast admission, KMA, HKO 1-min, AWC mirror, physical-only), with code anchors and a dated live-writer/gap snapshot |
 | `modules/AGENTS.md` | Router for dense module books under `docs/reference/modules/` |
 | `modules/state.md` | Dense state truth / lifecycle / projection module book |
 | `modules/engine.md` | Dense engine orchestration / replay / sequencing module book |

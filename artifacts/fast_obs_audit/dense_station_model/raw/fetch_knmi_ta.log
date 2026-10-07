@@ -1,0 +1,8 @@
+[knmi] files=100 attempts=101 remaining=900
+[knmi] files=200 attempts=201 remaining=800
+[knmi] files=300 attempts=301 remaining=700
+[knmi] files=400 attempts=401 remaining=600
+[knmi] files=500 attempts=501 remaining=500
+[knmi] files=600 attempts=601 remaining=400
+[knmi] files=700 attempts=701 remaining=300
+KNMI files 769 api attempts 770 ok calls 769 limit 1000 errors 0 []

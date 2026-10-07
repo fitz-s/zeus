@@ -1,5 +1,5 @@
 # Created: 2026-09-27
-# Last reused or audited: 2026-10-06
+# Last reused or audited: 2026-09-27
 # Authority basis: correction design review REQ-20260925-223704 §2 (persist every
 #   cut before its winner/no-winner branch; raw q before any rejection), §3
 #   (complete ordered raw YES simplex + synchronized market snapshot; missing or
@@ -36,7 +36,6 @@ import hashlib
 import json
 import logging
 import math
-import re
 import sqlite3
 import sys
 import threading
@@ -122,58 +121,6 @@ def _point_trace_warning(message: str, *args: object) -> None:
         pass
 
 
-def _point_role_projection(domain: object) -> dict:
-    """Bounded mathematical inputs only; never a replayed source qualification.
-
-    SCOPE: this optional trace. DRAIN: normal capture retries valid inputs.
-    RESET: a finite bounded projection. Refusal never alters action q/receipts.
-    """
-    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
-    if (type(domain) is not dict or domain.get("schema") != "day0_measurement_domain_shapes_v1"
-            or domain.get("unit") not in {"C", "F"}
-            or domain.get("semantics_revision") != DAY0_PROBABILITY_SEMANTICS_REVISION):
-        raise ValueError("POINT_ROLE_PROJECTION_INVALID")
-    projection = {key: domain[key] for key in ("schema", "unit", "semantics_revision")}
-    for key in ("prefix_information_kind", "conditioning_likelihood_scope"):
-        if key in domain:
-            if type(domain[key]) is not str:
-                raise ValueError("POINT_ROLE_PROJECTION_INVALID")
-            projection[key] = domain[key]
-    for name, role in (("X", "remaining_X"), ("Y", "full_Y")):
-        if name not in domain:
-            continue
-        shape = domain[name]
-        if type(shape) is not dict or shape.get("role") != role:
-            raise ValueError("POINT_ROLE_PROJECTION_INVALID")
-        points, bounds = shape.get("member_points_native"), shape.get("member_interval_bounds_native")
-        centers, families = shape.get("provider_centers_native"), shape.get("provider_families")
-        if (type(points) is not list or len(points) != 51
-                or type(bounds) is not list or len(bounds) != 51
-                or type(centers) is not list or not 0 < len(centers) <= 64
-                or type(families) is not list or len(families) != len(centers)
-                or any(type(f) is not str or not f or len(f) > 128 for f in families)
-                or len(set(families)) != len(families)
-                or any(type(b) is not list or len(b) != 2 for b in bounds)):
-            raise ValueError("POINT_ROLE_PROJECTION_INVALID")
-        numbers = [*points, *centers, *(v for b in bounds for v in b)]
-        if any(type(v) not in {int, float} or not math.isfinite(v) for v in numbers):
-            raise ValueError("POINT_ROLE_PROJECTION_INVALID")
-        if any(not low <= point <= high for point, (low, high) in zip(points, bounds)):
-            raise ValueError("POINT_ROLE_PROJECTION_INVALID")
-        projected = {"role": role, "member_points_native": list(points),
-            "member_interval_bounds_native": [list(b) for b in bounds],
-            "provider_centers_native": list(centers), "provider_families": list(families)}
-        for key in ("prefix_information_kind", "conditioning_likelihood_scope"):
-            if key in shape:
-                if type(shape[key]) is not str:
-                    raise ValueError("POINT_ROLE_PROJECTION_INVALID")
-                projected[key] = shape[key]
-        projection[name] = projected
-    if "X" not in projection:
-        raise ValueError("POINT_ROLE_PROJECTION_INVALID")
-    return projection
-
-
 def freeze_held_sell_point_trace(trace: Mapping[str, object]) -> bytes:
     """Freeze optional point diagnostics, never an action/probability authority.
 
@@ -220,7 +167,6 @@ def freeze_held_sell_point_trace(trace: Mapping[str, object]) -> bytes:
             "path_error_sigma_c", "instrument_sigma_c", "bin_bounds_c", "remaining_center_bias_native",
             "operator", "settlement", "resolver_terminal", "carrier_to_witness", "n_point",
             "n_samples", "base_yes_q", "support_mask",
-            "domain_role_shapes", "domain_role_content_sha256", "domain_role_projection_sha256",
         }):
             return _point_trace_unavailable("POINT_KERNEL_FIELDS_INVALID",trace)
         from src.data.day0_hourly_vectors import (
@@ -234,17 +180,6 @@ def freeze_held_sell_point_trace(trace: Mapping[str, object]) -> bytes:
                             DAY0_REMAINING_CARRIER_OPERATOR_V3,
                             DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER}:
             return _point_trace_unavailable("UNSUPPORTED_POINT_KERNEL",trace)
-        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION, day0_probability_semantics_revision
-        domain = kernel.get("domain_role_shapes")
-        if domain is None:
-            if day0_probability_semantics_revision(trace.get("q_version")) == DAY0_PROBABILITY_SEMANTICS_REVISION:
-                return _point_trace_unavailable("POINT_ROLE_PROJECTION_MISSING", trace)
-        else:
-            projection = _point_role_projection(domain)
-            if (projection != domain
-                    or hashlib.sha256(_canonical(projection)).hexdigest() != kernel.get("domain_role_projection_sha256")
-                    or re.fullmatch(r"[0-9a-f]{64}", str(kernel.get("domain_role_content_sha256"))) is None):
-                return _point_trace_unavailable("POINT_ROLE_PROJECTION_INVALID", trace)
         raw = _canonical(dict(trace))
         if len(raw) > _POINT_TRACE_CANONICAL_LIMIT:
             return _point_trace_unavailable("TRACE_CANONICAL_SIZE_LIMIT",trace)
@@ -292,18 +227,6 @@ def replay_held_sell_point_trace(raw: bytes) -> tuple[float, ...]:
         resolver_terminal=(Day0ResolverTerminalInput.from_payload(kernel["resolver_terminal"])
                            if kernel.get("resolver_terminal") is not None else None),
     )
-    domain = kernel.get("domain_role_shapes")
-    if domain is not None:
-        projection = _point_role_projection(domain)
-        if (projection != domain
-                or hashlib.sha256(_canonical(projection)).hexdigest() != kernel.get("domain_role_projection_sha256")
-                or re.fullmatch(r"[0-9a-f]{64}", str(kernel.get("domain_role_content_sha256"))) is None):
-            raise ValueError("HELD_POINT_TRACE_ROLE_PROJECTION_INVALID")
-        parameters["identity_inputs"]["domain_role_shapes"] = projection
-    else:
-        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION, day0_probability_semantics_revision
-        if day0_probability_semantics_revision(trace.get("q_version")) == DAY0_PROBABILITY_SEMANTICS_REVISION:
-            raise ValueError("HELD_POINT_TRACE_ROLE_PROJECTION_MISSING")
     carrier = build_day0_remaining_probability_carrier(**parameters)
     projection = tuple(kernel.get("carrier_to_witness") or range(len(carrier["q"])))
     if sorted(projection) != list(range(len(carrier["q"]))):

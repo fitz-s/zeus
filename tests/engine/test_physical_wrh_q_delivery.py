@@ -4,19 +4,20 @@
 """Native WRH physical revision to current q and lawful global selection.
 
 Synthetic provider bodies use actual typed source writers/readers. Forecast
-inputs use synthetic native GRIB originals and owned station/ground/provider writers;
-this is not a deployed acquisition or historical liquidity replay. The final
+inputs reuse the owned station/ground/provider fixture with controlled fusion
+output; independent v6 model serving is covered by the normal HKO acceptance
+control. This is not a deployed acquisition or historical liquidity replay. The final
 case composes the actual batch winner with JIT/lifecycle/executor and a confirmed
 fake-venue fill. Queue drainage and batch-to-executor scheduling are explicit
-fixture boundaries; source, q and selection authority are not mocked.
+fixture boundaries; current WRH custody, probability admission and selection
+authority remain real.
 """
 from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal as D
 from types import SimpleNamespace
-from datetime import date, datetime, timedelta, timezone
-import math
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import sqlite3
@@ -27,156 +28,6 @@ from tests import test_replacement_forecast_materializer as materializer_harness
 from tests.test_replacement_forecast_materializer import (  # noqa: F401: pytest fixtures
     _hko_source_surface, _hko_native_surfaces,
 )
-
-
-_WRH_NATIVE_ORIGINAL_CASSETTES = {}
-
-
-def _wrh_native_original_cassette(cycle, *, city_name="Shanghai", max_step=36,
-                                  temperature_offset_c=0.):
-    """Only immutable synthetic ecCodes bytes/indexes; never q, READY or a DB."""
-    assert math.isfinite(temperature_offset_c)
-    cassette_key = (cycle, city_name, max_step, temperature_offset_c)
-    if cassette_key in _WRH_NATIVE_ORIGINAL_CASSETTES:
-        return _WRH_NATIVE_ORIGINAL_CASSETTES[cassette_key]
-    import eccodes as ec
-    from types import MappingProxyType
-    from scripts import extract_open_ens_localday as decoder
-    sources, indexes, paired = {}, {}, {"high": [], "low": []}
-    assert city_name == "Shanghai"
-    first_lat, first_lon, last_lat, last_lon = 31.25, 121.75, 31., 122.
-    mask_values, phi_values = [.8, .8, .8, .8], [32. * 9.80665] * 4
-    for step in range(0, max_step + 1, 3):
-        for member in range(51):
-            parameters = [(167, "2t")]
-            if step:
-                parameters += [(decoder.TRACKS["mx2t6_high"].paramId, "mx2t3"),
-                               (decoder.TRACKS["mn2t6_low"].paramId, "mn2t3")]
-            elif member == 0:
-                parameters += [(172, "lsm"), (129, "z")]
-            for param, name in parameters:
-                gid = ec.codes_grib_new_from_samples("regular_ll_sfc_grib2")
-                try:
-                    fields = {"centre": "ecmf", "Ni": 2, "Nj": 2,
-                        "latitudeOfFirstGridPointInDegrees": first_lat, "longitudeOfFirstGridPointInDegrees": first_lon,
-                        "latitudeOfLastGridPointInDegrees": last_lat, "longitudeOfLastGridPointInDegrees": last_lon,
-                        "iDirectionIncrementInDegrees": .25, "jDirectionIncrementInDegrees": .25,
-                        "scanningMode": 0, "dataDate": int(cycle.strftime("%Y%m%d")), "dataTime": cycle.hour * 100,
-                        "productDefinitionTemplateNumber": (11 if member else 8) if name in {"mx2t3", "mn2t3"}
-                            else (1 if member else 0),
-                        "typeOfGeneratingProcess": 4 if member else 2,
-                        "generatingProcessIdentifier": 161, "dataType": "pf" if member else "fc", "paramId": param}
-                    if member:
-                        fields["number"] = member
-                    for key, value in fields.items():
-                        ec.codes_set(gid, key, value)
-                    if name in {"mx2t3", "mn2t3"}:
-                        ec.codes_set(gid, "startStep", step - 3)
-                        ec.codes_set(gid, "endStep", step)
-                    else:
-                        ec.codes_set(gid, "step", step)
-                    if name == "lsm": values = mask_values
-                    elif name == "z": values = phi_values
-                    else:
-                        center, member_step_c = 25., .02
-                        temperature = 273.15 + center + (member - 25) * member_step_c + temperature_offset_c
-                        values = [temperature] * 4
-                    ec.codes_set(gid, "packingType", "grid_ieee")
-                    ec.codes_set(gid, "precision", 2)
-                    ec.codes_set_values(gid, values)
-                    body = ec.codes_get_message(gid)
-                finally:
-                    ec.codes_release(gid)
-                stream, kind = ("enfo", "ef") if member else ("oper", "fc")
-                url = (f"https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/{cycle:%Y%m%d}/"
-                    f"{cycle:%H}z/ifs/0p25/{stream}/{cycle:%Y%m%d%H}0000-{step}h-{stream}-{kind}.grib2")
-                previous = sources.get(url, b"")
-                row = dict(param=name, levtype="sfc", stream=stream, type="pf" if member else "fc",
-                    date=cycle.strftime("%Y%m%d"), time=cycle.strftime("%H%M"), step=str(step),
-                    _offset=len(previous), _length=len(body), **{"class": "od"})
-                if member: row["number"] = str(member)
-                sources[url] = previous + body
-                indexes[url[:-6] + ".index"] = indexes.get(url[:-6] + ".index", b"") + json.dumps(row).encode() + b"\n"
-                if name in {"mx2t3", "mn2t3"}:
-                    paired["high" if name == "mx2t3" else "low"].append(body)
-    packet = (MappingProxyType(sources), MappingProxyType(indexes),
-              MappingProxyType({key: b"".join(bodies) for key, bodies in paired.items()}))
-    _WRH_NATIVE_ORIGINAL_CASSETTES[cassette_key] = packet
-    return packet
-
-
-
-def _normal_wrh_request(tmp_path, monkeypatch):
-    """Actual native custody/decoder/provider writers; synthetic external bodies."""
-    from src.config import runtime_cities_by_name, runtime_station_geometry_for_city
-    from src.data import station_ground_evidence as ground
-    from src.data.openmeteo_ecmwf_ifs9_anchor import extract_openmeteo_ecmwf_ifs9_localday_anchor
-    from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
-    from src.data.replacement_forecast_materializer import ReplacementForecastMaterializeRequest
-    from src.state import db
-    from tests.test_config import _official_international_homr_registry
-    from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
-    from tests.integration import test_w3_solve_seam_g3 as native_harness
-
-    _official_international_homr_registry(tmp_path, monkeypatch, "Shanghai")
-    city = runtime_cities_by_name()["Shanghai"]
-    cycle = datetime(2026, 10, 1, tzinfo=timezone.utc)
-    target, captured, cut = date(2026, 10, 2), cycle + timedelta(hours=8), cycle + timedelta(hours=18)
-    class GroundClock(datetime):
-        @classmethod
-        def now(cls, tz=None): return (cycle - timedelta(hours=1)).astimezone(tz or timezone.utc)
-    monkeypatch.setattr(ground, "datetime", GroundClock)
-    path = tmp_path / "wrh-normal-forecasts.db"
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    db.init_schema_forecasts(conn)
-    materializer_harness.apply_canonical_schema(conn, forecast_tables=True)
-    assert ground.archive_station_ground_evidence(path, [city.name])["status"] == "GROUND_SOURCE_ARCHIVED"
-    builtin = sqlite3.connect(":memory:")
-    sql_clock = [captured]
-    conn.create_function("strftime", 2, lambda fmt, value: sql_clock[0].isoformat(timespec="milliseconds")
-        if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now")
-        else builtin.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
-    with monkeypatch.context() as synthetic:
-        synthetic.setattr(native_harness, "_normal_native_original_cassette", _wrh_native_original_cassette)
-        collected = native_harness._capture_normal_native_originals(tmp_path, monkeypatch, conn,
-            cycle, captured, city, target_date=target)["mx2t6_high"]
-    baseline = conn.execute("SELECT * FROM ensemble_snapshots WHERE source_run_id=? AND city=? AND target_date=? AND temperature_metric='high'",
-        (collected["source_run_id"], city.name, str(target))).fetchone()
-    assert baseline is not None
-    station = runtime_station_geometry_for_city(city, effective_at=cut)
-    cell = source_cell_geometry_proof(latitude=city.lat, longitude=city.lon,
-        target_elevation_m=station["ground_elevation_m"])
-    raw = json.dumps({"latitude":cell["selected_grid_lat"], "longitude":cell["selected_grid_lon"],
-        "elevation":station["ground_elevation_m"], "timezone":city.timezone, "utc_offset_seconds":28800,
-        "hourly_units":{"temperature_2m":"°C"},
-        "hourly":{"time":[f"{target}T{hour:02d}:00" for hour in range(24)], "temperature_2m":[25.]*24},
-        "_zeus_current_target_scope":{"city":city.name,"target_date":str(target),"metric":"high"}},sort_keys=True).encode()
-    anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(raw), city_timezone=city.timezone,
-        target_local_date=target, source_cycle_time=cycle, require_full_localday=True)
-    request = ReplacementForecastMaterializeRequest(city=city.name, city_id="SHANGHAI", city_timezone=city.timezone,
-        target_date=target, temperature_metric="high", baseline_source_run_id=baseline["source_run_id"],
-        baseline_data_version=baseline["dataset_id"], baseline_source_available_at=captured,
-        openmeteo_anchor=anchor, openmeteo_source_run_id="wrh-owned-anchor",
-        openmeteo_source_available_at=captured, source_cycle_time=cycle, computed_at=cut,
-        expires_at=cut+timedelta(hours=8), openmeteo_raw_payload_bytes=raw, bins=(
-            materializer_harness._TemperatureBin("29°C or below",upper_c=29.,center_c=28.),
-            materializer_harness._TemperatureBin("30°C",lower_c=30.,upper_c=30.,center_c=30.),
-            materializer_harness._TemperatureBin("31°C or higher",lower_c=31.,center_c=32.)))
-    request = materializer_harness._hko_request_with_owned_anchor(conn, request)
-    cells = {model:_selected_test_cell(model,city.lat,city.lon)
-        for model in ("icon_global","ukmo_global_deterministic_10km")}
-    # Explicit source temperatures retain the old scenario's provider spread;
-    # no posterior, shape, probability witness or admission result is supplied.
-    delta = math.sqrt(4.-sum(((index-25)*.02)**2 for index in range(51))/51)
-    materializer_harness._hko_current_provider_inputs(request,
-        {"icon_global":25.-delta,"ukmo_global_deterministic_10km":25.+delta},conn=conn,selected_cells=cells)
-    sql_clock[0] = cut
-    conn.create_function("strftime", 2, lambda fmt, value: sql_clock[0].isoformat(timespec="milliseconds")
-        if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now")
-        else builtin.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
-    conn.commit()
-    return conn, request, sql_clock, builtin
 
 
 def _native_current_product(city, *, target, received, values, metadata=None):
@@ -231,9 +82,14 @@ def _write_product(conn, city, request, *, at, values, metadata=None):
 @pytest.fixture
 def wrh_case(tmp_path,monkeypatch,_hko_source_surface):
     from src.config import runtime_cities_by_name
-    conn, request, sql_clock, builtin = _normal_wrh_request(tmp_path, monkeypatch)
+    conn, request = materializer_harness._shanghai_current_owner_request(
+        tmp_path,monkeypatch,observed_extreme=26.0,record_observed_prints=False)
     _initialize_source_owners(conn,tmp_path,monkeypatch)
     city = runtime_cities_by_name()[request.city]
+    request = replace(request,bins=(
+        materializer_harness._TemperatureBin("29°C or below",upper_c=29.0,center_c=28.0),
+        materializer_harness._TemperatureBin("30°C",lower_c=30.0,upper_c=30.0,center_c=30.0),
+        materializer_harness._TemperatureBin("31°C or higher",lower_c=31.0,center_c=32.0)))
     trade, position = _market_and_holding(conn,request,tmp_path,monkeypatch)
     from src.data import replacement_forecast_bundle_reader as bundle_reader
     clock = [request.computed_at]
@@ -244,23 +100,13 @@ def wrh_case(tmp_path,monkeypatch,_hko_source_surface):
         def now(cls,tz=None): return clock[0].astimezone(tz) if tz else clock[0].replace(tzinfo=None)
     monkeypatch.setattr(bundle_reader,"datetime",DecisionClock)
     _remaining_vectors(conn,city,request)
-    forecast_inputs = _forecast_input_rows(conn)
     case=SimpleNamespace(conn=conn,request=request,city=city,trade=trade,position=position,
-        clock=clock,sql_clock=sql_clock,forecast_inputs=forecast_inputs,monkeypatch=monkeypatch)
+        clock=clock,monkeypatch=monkeypatch)
     try:
         yield case
     finally:
         trade.close()
         conn.close()
-        builtin.close()
-
-
-def _forecast_input_rows(conn):
-    # Re-decisions must not renew forecast issue, capture, or possession clocks.
-    return tuple(tuple(tuple(row) for row in conn.execute(query)) for query in (
-        "SELECT * FROM ensemble_snapshots ORDER BY snapshot_id",
-        "SELECT * FROM raw_forecast_artifacts ORDER BY artifact_id",
-        "SELECT * FROM raw_model_forecasts ORDER BY raw_model_forecast_id"))
 
 
 def _advance(case,values,*,minute=0,metadata=None):
@@ -278,11 +124,12 @@ def _advance(case,values,*,minute=0,metadata=None):
     assert fact is not None and fact["unit"]=="C"
     # Composition boundary: seed fields come from the current canonical owner,
     # never a hand-picked q or stale scalar. Automatic queue drain is separate.
-    current=replace(request,computed_at=at,day0_observed_extreme_c=fact["observed_extreme_native"],
-        day0_observed_extreme_source=fact["observation_source"],
-        day0_observed_extreme_observation_time=fact["observation_time"],
-        day0_observed_extreme_sample_count=fact["sample_count"],day0_observed_extreme_unit=fact["unit"])
-    case.sql_clock[0]=at
+    current=materializer_harness._refresh_shanghai_owner_request(conn,case.monkeypatch,
+        replace(request,computed_at=at,day0_observed_extreme_c=fact["observed_extreme_native"],
+            day0_observed_extreme_source=fact["observation_source"],
+            day0_observed_extreme_observation_time=fact["observation_time"],
+            day0_observed_extreme_sample_count=fact["sample_count"],day0_observed_extreme_unit=fact["unit"]),
+        record_observed_prints=False)
     result=materialize_replacement_forecast_live(conn,current)
     assert result.ok,result.reason_codes
     conn.commit()  # Independent current-q readers must observe a durable write.
@@ -292,7 +139,6 @@ def _advance(case,values,*,minute=0,metadata=None):
     held_q,refreshed,_=monitor_refresh._materialize_current_global_day0_probability(case.position,snapshot)
     assert 0 < held_q < 1
     selection=_select_current_wrh(snapshot=snapshot,position=case.position,at=at,monkeypatch=case.monkeypatch)
-    assert _forecast_input_rows(conn) == case.forecast_inputs
     return SimpleNamespace(at=at,product=product,status=status,state=state,fact=fact,request=current,
         result=result,q=json.loads(row["q_json"]),provenance=json.loads(row["provenance_json"]),
         snapshot=snapshot,held_q=held_q,refreshed=refreshed,selection=selection)

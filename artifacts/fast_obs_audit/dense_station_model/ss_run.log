@@ -1,0 +1,8 @@
+Helsinki train/test 125 54 picked one|shrunk runtime 113.5 verdict {'high': 'B_USABLE', 'low': 'B_NOT_USABLE'}
+Munich train/test 140 60 picked one|shrunk runtime 174.3 verdict {'high': 'B_BETTER_NOT_SIGNIFICANT', 'low': 'B_BETTER_NOT_SIGNIFICANT'}
+Tokyo train/test 136 59 picked two|shrunk runtime 126.4 verdict {'high': 'B_USABLE', 'low': 'B_NOT_USABLE'}
+Singapore train/test 133 57 picked one|shrunk runtime 144.8 verdict {'high': 'B_USABLE', 'low': 'B_USABLE'}
+Toronto train/test 203 88 picked one|shrunk runtime 92.6 verdict {'high': 'B_NOT_USABLE', 'low': 'B_BETTER_NOT_SIGNIFICANT'}
+Warsaw train/test 140 61 picked one|shrunk runtime 101.2 verdict {'high': 'B_USABLE', 'low': 'B_NOT_USABLE'}
+Amsterdam SKIPPED KNMI: 769 bracket files cover 8 days (operator cap 800 calls); no train/test split possible
+Madrid SKIPPED no dense archive (AEMET public XML exposes 24 h only)

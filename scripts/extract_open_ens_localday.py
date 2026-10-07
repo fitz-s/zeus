@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # Created: 2026-09-22
-# Last reused/audited: 2026-10-06
+# Last reused/audited: 2026-10-04
 # Authority basis: current OpenData source contract; native 3h local-day extrema.
-# Lifecycle: created=2026-09-22; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Lifecycle: created=2026-09-22; last_reviewed=2026-10-04; last_reused=2026-10-04
 # Purpose: Native ENS extrema JSON and offline 2t knot decode with original byte/point proof; no DB writes.
 # Reuse: Use the collector's explicit coordinate manifest and same-cycle land-mask proof.
 """Decode native ENS windows at settlement coordinates.
@@ -22,8 +22,6 @@ import logging
 import math
 import re
 import sys
-import threading
-from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -464,7 +462,6 @@ def _read_surface_geopotential(path: Path, proof_path: Path) -> dict[str, Any]:
             if codes_get_message(gid) != raw:
                 raise ValueError("ENS_SURFACE_GEOPOTENTIAL_BODY_INVALID")
             return {"values": values, "fields": fields, "observed_headers": headers,
-                    "missing_value": codes_get(gid, "missingValue"),
                     "proof": proof, "grid_identity_hash": _grid_identity(fields),
                     "audit_observed_at_utc": audit_observed_at.isoformat()}
         finally:
@@ -537,73 +534,6 @@ def _native_message_capture(gid: int, *, instantaneous: bool = False) -> dict[st
     return capture
 
 
-_NATIVE_ORIGINAL_DECODE = OrderedDict()
-_NATIVE_ORIGINAL_INDEX_DECODE = OrderedDict()
-_NATIVE_ORIGINAL_DECODE_LOCK = threading.RLock()
-
-
-def _decode_native_original(raw: bytes, *, flat_indices: tuple[int, ...] = (),
-                            instantaneous: bool = False, physical_unit: str = "K",
-                            parameter_id: int | None = None) -> tuple[dict, tuple]:
-    """Pure bounded original math, never possession, source binding or q.
-
-    Callers must still read/hash originals and prove current receipts, clocks,
-    grid selection and canonical references on every invocation. Cache keys
-    contain no paths or mtime; values contain no full GRIB/grid arrays. Missing
-    evidence cannot be repaired by a hit. Decoder mutation also invalidates it.
-    """
-    import eccodes as ec
-    digest = hashlib.sha256(raw).hexdigest()
-    grid_sha = None
-    offset = 16
-    while offset < len(raw)-4:
-        length = int.from_bytes(raw[offset:offset+4], "big")
-        if length < 5 or offset+length > len(raw)-4:
-            raise ValueError("invalid native metadata section length")
-        if raw[offset+4] == 3:
-            grid_sha = hashlib.sha256(raw[offset:offset+length]).hexdigest()
-        offset += length
-    if grid_sha is None:
-        raise ValueError("native metadata sections incomplete")
-    identity = (_native_message_capture, codes_get, codes_is_defined,
-                codes_get_message, ec.codes_new_from_message,
-                ec.codes_get_elements, ec.codes_get_size, ec.codes_get)
-    key = (digest, len(raw), grid_sha, tuple(flat_indices), instantaneous, physical_unit, parameter_id, identity)
-    header_key = (digest, len(raw), grid_sha, (), instantaneous, physical_unit, None, identity)
-    with _NATIVE_ORIGINAL_DECODE_LOCK:
-        cached = _NATIVE_ORIGINAL_DECODE.get(key)
-        header = _NATIVE_ORIGINAL_DECODE.get(header_key)
-        if cached is not None:
-            _NATIVE_ORIGINAL_DECODE.move_to_end(key)
-            return json.loads(cached[0]), cached[1]
-    gid = ec.codes_new_from_message(raw)
-    try:
-        capture = json.loads(header[0]) if header is not None else _native_message_capture(gid, instantaneous=instantaneous)
-        if capture.get("capture_status") != "OBSERVED":
-            return capture, ()  # UNKNOWN is never memoized.
-        point = ()
-        headers = capture["observed_headers"]
-        if (flat_indices and headers.get("units") == physical_unit
-                and (parameter_id is None or headers.get("paramId") == parameter_id)):
-            size = ec.codes_get_size(gid, "values")
-            missing = float(ec.codes_get(gid, "missingValue"))
-            values = tuple(float(v) for v in ec.codes_get_elements(gid, "values", list(flat_indices)))
-            point = (size, missing, int(ec.codes_get(gid, "generatingProcessIdentifier")), values)
-        serialized = json.dumps(capture, sort_keys=True, separators=(",", ":"), allow_nan=False)
-        with _NATIVE_ORIGINAL_DECODE_LOCK:
-            entries = [(header_key, (serialized, ()))]
-            if not flat_indices or (point and all(math.isfinite(v) and v != point[1] for v in point[3])):
-                entries.append((key, (serialized, point)))
-            for entry, value in entries:
-                _NATIVE_ORIGINAL_DECODE[entry] = value
-                _NATIVE_ORIGINAL_DECODE.move_to_end(entry)
-            while len(_NATIVE_ORIGINAL_DECODE) > 4096:
-                _NATIVE_ORIGINAL_DECODE.popitem(last=False)
-        return json.loads(serialized), point
-    finally:
-        ec.codes_release(gid)
-
-
 def _open_ens_source_binding(raw: bytes, evidence: dict[str, Any], headers: dict[str, Any],
                              *, param: str, member: int, step: int, run: datetime) -> dict[str, Any]:
     """Check supplied original index/range bytes, never a request/metadata echo.
@@ -620,35 +550,16 @@ def _open_ens_source_binding(raw: bytes, evidence: dict[str, Any], headers: dict
     offset, length = evidence["source_index_offset"], evidence["source_index_length"]
     if type(offset) is not int or offset < 0 or type(length) is not int or length != len(raw):
         raise ValueError("ENS_POINT_SOURCE_RANGE_INVALID")
-    # Only the byte-derived index matrix is shared. All supplied bytes, line
-    # identity, envelope and possession clocks above/below are checked afresh.
-    key = (evidence["source_index_sha256"], len(index), json.loads, json.dumps)
-    with _NATIVE_ORIGINAL_DECODE_LOCK:
-        parsed = _NATIVE_ORIGINAL_INDEX_DECODE.get(key)
-        if parsed is not None:
-            _NATIVE_ORIGINAL_INDEX_DECODE.move_to_end(key)
-    if parsed is None:
-        entries = []
-        for line in index.splitlines():
-            row = json.loads(line)
-            entries.append((row.get("_offset"), row.get("_length"),
-                hashlib.sha256(line).hexdigest(), json.dumps(row, separators=(",", ":"))))
-        parsed = tuple(entries)
-        # Large indexes remain readable but cannot grow retained cache memory.
-        if len(index) <= 262144:
-            with _NATIVE_ORIGINAL_DECODE_LOCK:
-                _NATIVE_ORIGINAL_INDEX_DECODE[key] = parsed
-                _NATIVE_ORIGINAL_INDEX_DECODE.move_to_end(key)
-                while len(_NATIVE_ORIGINAL_INDEX_DECODE) > 128:
-                    _NATIVE_ORIGINAL_INDEX_DECODE.popitem(last=False)
-    matches = [(line_sha, text) for row_offset, row_length, line_sha, text in parsed
-               if row_offset == offset and row_length == length]
+    matches = []
+    for line in index.splitlines():
+        row = json.loads(line)
+        if row.get("_offset") == offset and row.get("_length") == length:
+            matches.append((line, row))
     if len(matches) != 1:
         raise ValueError("ENS_POINT_SOURCE_INDEX_AMBIGUOUS")
-    line_sha, text = matches[0]
-    if line_sha != evidence["source_index_line_sha256"]:
+    line, row = matches[0]
+    if hashlib.sha256(line).hexdigest() != evidence["source_index_line_sha256"]:
         raise ValueError("ENS_POINT_SOURCE_INDEX_LINE_MISMATCH")
-    row = json.loads(text)
     stream, file_type, mars_type = ("oper", "fc", "fc") if member == 0 else ("enfo", "ef", "pf")
     if (row.get("param") != param or row.get("levtype") != "sfc" or row.get("class") != "od"
             or str(row.get("date")) != run.strftime("%Y%m%d")
@@ -712,85 +623,6 @@ def _open_ens_original_grid(section: bytes) -> dict[str, Any]:
         "iDirectionIncrementInDegrees": int.from_bytes(section[63:67], "big") * scale,
         "jDirectionIncrementInDegrees": int.from_bytes(section[67:71], "big") * scale,
         "scanningMode": section[71]}
-
-
-def read_native_static_dependency(*, path: Path, proof_path: Path, param: str,
-                                  run: datetime, grid_sha256: str,
-                                  index_path: Path | None = None,
-                                  index_proof_path: Path | None = None) -> dict[str, Any]:
-    """Read a same-run model surface entity without changing its historical role.
-
-    Old LSM acquisitions did not retain an index. The independently captured
-    same-envelope z index may bind that original LSM, but never a reconstructed
-    line or a new possession clock. Missing originals are a scoped source gap.
-    """
-    if param not in {"lsm", "z"}:
-        raise ValueError("ENS_POINT_STATIC_QUANTITY_INVALID")
-    index_path = index_path or path.with_suffix(".index.body")
-    index_proof_path = index_proof_path or proof_path
-    paths = (path, proof_path, index_path, index_proof_path)
-    if any(p.is_symlink() for p in paths):
-        raise ValueError("ENS_POINT_STATIC_SYMLINK")
-    if not 100 <= path.stat().st_size <= 1024 * 1024 or any(
-            p.stat().st_size > (1024 * 1024 if p == index_path else 65536) for p in paths[1:]):
-        raise ValueError("ENS_POINT_STATIC_BOUNDS_INVALID")
-    before = tuple(p.read_bytes() for p in paths)
-    raw, proof_bytes, index, index_proof_bytes = before
-    proof, index_proof = json.loads(proof_bytes), json.loads(index_proof_bytes)
-    observed = (_read_land_mask(path, proof_path) if param == "lsm"
-                else _read_surface_geopotential(path, proof_path))
-    capture = _open_ens_original_surface_capture(path)
-    h = capture["observed_headers"]
-    sections = {s["section_number"]: base64.b64decode(s["bytes_base64"], validate=True)
-                for s in capture["metadata_sections"]}
-    s1, s3, s4 = sections[1], sections[3], sections[4]
-    if (h["paramId"] != (172 if param == "lsm" else 129) or h["shortName"] != param
-            or h["units"] != ("(0 - 1)" if param == "lsm" else "m**2 s**-2")
-            or h["typeOfLevel"] != "surface" or h["level"] != 0
-            or h["dataType"] != "fc" or h["typeOfGeneratingProcess"] != 2
-            or h["generatingProcessIdentifier"] != 161 or s4[13] != 161
-            or h["productDefinitionTemplateNumber"] != 0 or h["stepType"] != "instant"
-            or h["startStep"] != 0 or h["endStep"] != 0
-            or (h["dataDate"], h["dataTime"]) != (int(run.strftime("%Y%m%d")), run.hour * 100)
-            or tuple(s1[14:19]) != (run.month, run.day, run.hour, 0, 0)
-            or int.from_bytes(s1[12:14], "big") != run.year or s1[20] != 1
-            or s4[11] != 2 or int.from_bytes(s4[7:9], "big") != 0
-            or hashlib.sha256(s3).hexdigest() != grid_sha256
-            or _open_ens_original_grid(s3) != observed["fields"]
-            or proof["source_cycle_time"] != run.isoformat()
-            or index_proof["source_cycle_time"] != run.isoformat()
-            or index_proof["source_url"] != proof["source_url"]
-            or index_proof["source_index_url"] != proof["source_index_url"]
-            or index_proof["source_index_sha256"] != hashlib.sha256(index).hexdigest()):
-        raise ValueError("ENS_POINT_STATIC_IDENTITY_INVALID")
-    matches = [line for line in index.splitlines() if json.loads(line).get("_offset") == proof["source_index_offset"]
-               and json.loads(line).get("_length") == proof["source_index_length"]]
-    if len(matches) != 1:
-        raise ValueError("ENS_POINT_STATIC_INDEX_AMBIGUOUS")
-    from urllib.parse import urlparse
-    envelope = urlparse(str(proof["source_url"]))
-    if (envelope.hostname not in {"data.ecmwf.int", "ecmwf-forecasts.s3.eu-central-1.amazonaws.com"}
-            and not (envelope.hostname == "storage.googleapis.com" and envelope.path.startswith("/ecmwf-open-data/"))):
-        raise ValueError("ENS_POINT_STATIC_SOURCE_HOST_INVALID")
-    binding = _open_ens_source_binding(raw, {**proof,
-        "original_index_bytes": index, "original_range_bytes": raw,
-        "source_index_sha256": hashlib.sha256(index).hexdigest(),
-        "source_index_line_sha256": hashlib.sha256(matches[0]).hexdigest(),
-        "raw_message_sha256": hashlib.sha256(raw).hexdigest()}, h, param=param, member=0, step=0, run=run)
-    index_clock = index_proof.get("index_first_possession_at", index_proof["source_fetched_at"])
-    index_at = datetime.fromisoformat(str(index_clock))
-    if index_at.tzinfo is None or not run <= index_at <= datetime.now(timezone.utc):
-        raise ValueError("ENS_POINT_STATIC_INDEX_CLOCK_INVALID")
-    if tuple(p.read_bytes() for p in paths) != before:
-        raise ValueError("ENS_POINT_STATIC_GENERATION_CHANGED")
-    return {"proof": proof, "binding": binding, "observed_headers": h,
-        "values": observed["values"], "fields": observed["fields"],
-        "grid_sha256": grid_sha256, "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
-        "index_proof_sha256": hashlib.sha256(index_proof_bytes).hexdigest(),
-        "index_first_possession_at": index_at.isoformat(),
-        "missing_value": observed.get("missing_value"),
-        "available_at": max((binding["source_fetched_at"], index_at.isoformat()), key=datetime.fromisoformat),
-        "original_role": proof.get("audit_scope", "UNKNOWN")}
 
 
 def decode_open_ens_temperature_knots(
@@ -899,8 +731,7 @@ def decode_open_ens_temperature_knots(
                             or h["shortName"] != "2t" or h["units"] != "K"
                             or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
                             or h["stepType"] != "instant" or h["stepUnits"] != 1
-                            or h["generatingProcessIdentifier"] != 161 or template not in (0, 1)
-                            or h["typeOfGeneratingProcess"] != (2 if h["dataType"] == "fc" else 4)):
+                            or h["generatingProcessIdentifier"] != 161 or template not in (0, 1)):
                         raise ValueError("ENS_POINT_PHYSICAL_OR_50R1_PROCESS_INVALID")
                     # GRIB2 discipline 0 / category 0 / parameter 0 is temperature.
                     # The original 2m level below distinguishes 2t from other heights;

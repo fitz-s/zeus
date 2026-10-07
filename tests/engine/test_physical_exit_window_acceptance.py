@@ -563,6 +563,101 @@ def _high_source_case(tmp_path, monkeypatch, _hko_clock_native_sources):
         next(source, None)
 
 
+@pytest.mark.parametrize("native_state", ("ABSENT", "PARTIAL"))
+def test_restored_v6_serves_current_q_without_complete_native_2t(
+    _normal_hko_concentrated_sell, monkeypatch, native_state, record_property,
+):
+    """Real v6 serving and action admission, with explicit synthetic sources.
+
+    The normal HKO fixture owns station/provider originals and the declared
+    target ENS receipt. No model, shape reader or admission guard is replaced.
+    A leftover incomplete full-Y native 2t run is not a new v6 prerequisite.
+    """
+    from src.data import replacement_forecast_materializer as materializer
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data.replacement_forecast_cycle_policy import CURRENT_EVIDENCE_SEMANTICS_REVISION
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    from src.state.source_run_repo import write_source_run
+
+    case = _normal_hko_concentrated_sell
+    fixture, conn = case.fixture, case.fixture.conn
+    request = fixture.request
+    assert CURRENT_EVIDENCE_SEMANTICS_REVISION == "ensemble_center_scenarios_v6"
+    assert materializer._replacement_bayes_precision_fusion_override.__name__ == "_replacement_bayes_precision_fusion_override"
+    assert materializer._read_current_evidence_shape.__name__ == "_read_current_evidence_shape"
+    assert conn.execute("SELECT COUNT(*) FROM source_run WHERE observation_field='2t'").fetchone()[0] == 0
+    if native_state == "PARTIAL":
+        # Reproduce only the old writer's failed canonical run receipt. There
+        # are no original 2t bytes and no complete full-Y license in this case.
+        run_id = (f"ecmwf_open_data:2t_instant_native_knots:{request.source_cycle_time:%Y%m%dT%H%MZ}:"
+                  f"grid:{'b' * 64}:ifs50r1:origin:scheduled_live")
+        write_source_run(conn, source_run_id=run_id,
+            source_id="ecmwf_open_data", track="2t_instant_native_knots",
+            release_calendar_key="ecmwf_open_data", source_cycle_time=request.source_cycle_time,
+            temperature_metric=None, physical_quantity="native_2m_temperature_instantaneous_knots",
+            observation_field="2t", data_version="ecmwf_ifs50r1_2t_native_source_v1",
+            expected_members=51, observed_members=1, expected_steps_json=[0, 3, 6],
+            observed_steps_json=[0], expected_count=153, observed_count=1,
+            status="PARTIAL", completeness_status="PARTIAL", partial_run=True,
+            reason_code="NATIVE_2T_INCOMPLETE_OR_INVALID_ORIGINAL")
+        partial = conn.execute("SELECT status,completeness_status,partial_run FROM source_run WHERE observation_field='2t'").fetchone()
+        assert tuple(partial) == ("PARTIAL", "PARTIAL", 1)
+    at = fixture.cut + timedelta(seconds=1)
+    fixture.sql_clock[0] = at
+    current_request = replace(request, computed_at=at)
+    identity = materializer.read_current_evidence_snapshot_identity(conn, current_request,
+        metric=request.temperature_metric)
+    assert identity is not None
+    result = materializer.materialize_replacement_forecast_live(conn, current_request)
+    assert result.ok, result.reason_codes
+    assert result.posterior_id != fixture.result.posterior_id
+    conn.commit()
+    row = conn.execute("SELECT q_json,provenance_json FROM forecast_posteriors WHERE posterior_id=?",
+        (result.posterior_id,)).fetchone()
+    q = json.loads(row["q_json"])
+    shape = json.loads(row["provenance_json"])["bayes_precision_fusion"]["current_evidence_shape"]
+    assert shape["semantics_revision"] == "ensemble_center_scenarios_v6"
+    assert shape["member_count"] == 51
+    assert all(0 <= value <= 1 for value in q.values()) and sum(q.values()) == pytest.approx(1)
+    ready = latest_replacement_readiness(conn, city=request.city, target_date=str(request.target_date),
+        temperature_metric=request.temperature_metric, decision_time=at)
+    assert ready is not None and ready.status == "READY"
+
+    class ClockType(type):
+        def __instancecheck__(cls, value): return isinstance(value, datetime)
+    class CurrentClock(datetime, metaclass=ClockType):
+        @classmethod
+        def now(cls, tz=None): return at.astimezone(tz) if tz else at.replace(tzinfo=None)
+    monkeypatch.setattr(reader, "datetime", CurrentClock)
+    for purpose in (reader.ReplacementForecastAuthorityPurpose.ENTRY,
+                    reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION):
+        served = reader.read_replacement_forecast_bundle(conn, baseline_bundle=None, readiness=ready,
+            city=request.city, target_date=str(request.target_date), temperature_metric=request.temperature_metric,
+            decision_time=at, require_baseline_bundle=False, enforce_raw_input_hwm=True, authority_purpose=purpose)
+        assert served.ok, (purpose, served.reason_code)
+        assert served.bundle.posterior_id == result.posterior_id and served.bundle.q == q
+    selected = _current_source_cut(case, event=case.event, at=at, monkeypatch=monkeypatch, bid=".50")
+    assert selected.actuations and selected.selection.decision.candidate.action == "SELL"
+    assert selected.selection.decision.candidate.execution_mode == "TAKER_LIMIT"
+    current_q = S.family_payoff_point_q(selected.probability, bin_id=case.selected.bin_id, side=case.selected.side)
+    assert 0 < current_q < .50 and current_q == pytest.approx(case.q)
+
+    # Keep the actual v6 admission fence: removing its required current ENS
+    # shape must block new materialization despite a READY posterior in the DB.
+    conn.execute("DELETE FROM ensemble_snapshots WHERE source_run_id=?", (request.baseline_source_run_id,))
+    bad_request = replace(current_request, computed_at=at + timedelta(seconds=1))
+    assert materializer.read_current_evidence_snapshot_identity(conn, bad_request,
+        metric=request.temperature_metric) is None
+    count = conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0]
+    blocked = materializer.materialize_replacement_forecast_live(conn, bad_request)
+    assert not blocked.ok, blocked
+    assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == count
+    record_property("restored_v6_serving", json.dumps({"metric": request.temperature_metric,
+        "native_2t_state": native_state, "semantics_revision": shape["semantics_revision"],
+        "readiness": ready.status, "q": current_q, "action": "SELL", "bid": ".50",
+        "entry_and_held_bundle": "READY", "missing_v6_ens_blockers": list(blocked.reason_codes)}))
+
+
 def _current_source_cut(case, *, event, at, monkeypatch, bid):
     """Actual live adapter callbacks and batch selector, controlled wealth/book."""
     from src.engine import global_batch_runtime as runtime, global_auction_universe as universe
@@ -631,17 +726,15 @@ def _current_source_cut(case, *, event, at, monkeypatch, bid):
 
 
 def _finite_source_exit(case, monkeypatch, tmp_path, *, cancel_remainder=False):
-    # One fixed synthetic book straddles the current native-source redecision:
-    # .444 has a fragment-safe fee bound of .4193136, between the before/after
-    # source probabilities. The old .44 book correctly remains HOLD at both cuts.
-    initial = _current_source_cut(case, event=case.event, at=case.fixture.cut, monkeypatch=monkeypatch, bid=".444")
+    # Keep the original v6 synthetic book fixed across both source cuts.
+    initial = _current_source_cut(case, event=case.event, at=case.fixture.cut, monkeypatch=monkeypatch, bid=".44")
     assert initial.selection.decision.candidate is None
     assert initial.actuations == []
     new_event, current_prepared, now, after = _apply_physical_observation(case, extreme=32.999)
     assert 0 < after < case.q
     if cancel_remainder:
         _cancel_existing_source_remainder(case, monkeypatch, now=now, probability=current_prepared.probability_witness)
-    changed = _current_source_cut(case, event=new_event, at=now, monkeypatch=monkeypatch, bid=".444")
+    changed = _current_source_cut(case, event=new_event, at=now, monkeypatch=monkeypatch, bid=".44")
     assert changed.actuations, (after, changed.selection.decision.rejection_reasons,
                                   changed.selection.decision.candidate_evaluations)
     selected = changed.selection.decision
@@ -654,7 +747,7 @@ def _finite_source_exit(case, monkeypatch, tmp_path, *, cancel_remainder=False):
     assert selected.shares == D("2") >= changed.curve.min_order_size == D("1")
     assert selected.shares < D("5")
     safe_unit_proceeds = S._global_sell_rounding_safe_proceeds(selected.candidate, D("1"))
-    assert safe_unit_proceeds == D(".4193136")
+    assert safe_unit_proceeds == D(".41536")
     assert D(str(after)) < safe_unit_proceeds < D(str(case.q))
 
     # The source arrives at +70s. This synthetic native book remains above the
@@ -668,7 +761,7 @@ def _finite_source_exit(case, monkeypatch, tmp_path, *, cancel_remainder=False):
                        freshness_deadline=submitted_at + timedelta(seconds=30))
     market = replace(market, snapshot=snapshot)
     def venue_book(at):
-        bid = ".444" if at < window_end else ".04"
+        bid = ".44" if at < window_end else ".04"
         return {"asset_id": candidate.token_id, "tick_size": ".001", "min_order_size": "1",
                 "bids": [{"price": bid, "size": "2"}, {"price": ".05" if at < window_end else ".03", "size": "3"}],
                 "asks": [{"price": ".45", "size": "5"}]}
@@ -695,8 +788,14 @@ def _finite_source_exit(case, monkeypatch, tmp_path, *, cancel_remainder=False):
     return new_event, submitted_at, finite_case
 
 
-def test_event_clock_hold_then_physical_deterioration_selects_early_taker(_high_source_case, monkeypatch, tmp_path):
-    _finite_source_exit(_high_source_case, monkeypatch, tmp_path)
+def test_event_clock_hold_then_physical_deterioration_selects_early_taker(
+    _high_source_case, monkeypatch, tmp_path, record_property,
+):
+    _, submitted_at, current = _finite_source_exit(_high_source_case, monkeypatch, tmp_path)
+    record_property("restored_v6_finite_exit", json.dumps({"before_q": _high_source_case.q,
+        "current_q": current.q, "bid": ".44", "rounding_safe_unit_proceeds": ".41536",
+        "confirmed_at": submitted_at.isoformat(), "book_window_end": current.window_end.isoformat(),
+        "confirmed_shares": str(current.ranked.decision.shares), "residual_shares": "3"}))
 
 
 def test_same_family_hedge_can_make_hold_win_despite_positive_cash_edge():
@@ -737,7 +836,7 @@ def _cancel_existing_source_remainder(case, monkeypatch, *, now, probability):
     snapshot = replace(case.snapshot, snapshot_id="preexisting-buy-remainder", condition_id=binding.condition_id,
         yes_token_id=binding.yes_token_id, no_token_id=binding.no_token_id,
         token_map_raw={"YES": binding.yes_token_id, "NO": binding.no_token_id},
-        orderbook_top_bid=D(".444"), orderbook_top_ask=D(".60"), min_tick_size=D(".001"),
+        orderbook_top_bid=D(".44"), orderbook_top_ask=D(".60"),
         captured_at=now - timedelta(minutes=2), freshness_deadline=now + timedelta(minutes=2))
     source_harness.insert_snapshot(case.trade, snapshot)
     monkeypatch.setattr("src.data.polymarket_client.resolve_funder_address", lambda: "0x" + "12" * 20)
@@ -769,7 +868,7 @@ def _cancel_existing_source_remainder(case, monkeypatch, *, now, probability):
     row = dict(case.trade.execute("SELECT * FROM executable_market_snapshots WHERE snapshot_id=?", (snapshot.snapshot_id,)).fetchone())
     # value_standing_entry reads the canonical serialized full-depth field.
     row["orderbook_depth_json"] = json.dumps({"asset_id": candidate.token_id,
-        "asks": [{"price": ".60", "size": "5"}], "bids": [{"price": ".444", "size": "5"}]})
+        "asks": [{"price": ".60", "size": "5"}], "bids": [{"price": ".44", "size": "5"}]})
     value = staleness_cancel.value_standing_entry(
         {"command_id":"rest-before-deterioration","venue_order_id":"prior-rest-order",
          "token_id":candidate.token_id,"snapshot_id":snapshot.snapshot_id,"size":"1.6","matched_size":"0",
