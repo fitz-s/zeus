@@ -1937,6 +1937,34 @@ def _drain_native_temperature_source(conn, *, now_utc: datetime, deadline_monoto
         "reason": "NATIVE_2T_TARGET_OR_MANDATORY_PLAN_UNKNOWN"}
 
 
+def _native_temperature_service_receipt(receipt) -> dict:
+    """Scheduling credit only; an attempt clock is not source possession."""
+    if receipt is None:
+        return {}
+    try:
+        meta = json.loads(receipt["meta_json"])
+        if not isinstance(meta, dict):
+            return {}
+        if "service_started_at" in meta:
+            started = _parse_utc_timestamp(meta["service_started_at"])
+            if started is None or meta.get("service_transport_kind") not in {"native", "paired"}:
+                return {}
+            return {key: meta.get(key) for key in (
+                "service_started_at", "service_transport_kind", "service_mandatory_attempt")}
+        # Old RUNNING was written before lock acquisition. BUSY never acquired
+        # it. Only an original positive collector result proves legacy service.
+        if receipt["status"] == "RUNNING" or receipt["reason_code"] == "NATIVE_2T_SINGLEFLIGHT_BUSY":
+            return {}
+        kind = meta.get("transport_kind")
+        positive = (meta.get("paired_status") if kind == "paired" else meta.get("collector_status"))
+        if positive not in {"INCOMPLETE", "AVAILABLE"} or _parse_utc_timestamp(receipt["started_at"]) is None:
+            return {}
+        return {"service_started_at": receipt["started_at"], "service_transport_kind": kind or "native",
+            "service_mandatory_attempt": meta.get("mandatory_attempt")}
+    except (TypeError, ValueError, KeyError):
+        return {}
+
+
 def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadline_monotonic: float,
         _current_check: tuple[dict, dict] | None = None) -> dict | None:
     """Drain source debt fairly without borrowing another poll's budget.
@@ -1955,6 +1983,9 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     role qualification, and a paired turn cannot mint a native SUCCESS.
     A same-frame unreleased check, after current probe and mandatory retries,
     permits the same phase drain for legal prior Y; the next tick probes again.
+    BUSY is a real attempt diagnostic, not a served phase. Only the original
+    collector's successful lock acquisition credits LRU/phase/mandatory attempt;
+    releasing that lock lets the next normal tick retry the unserved debt.
     """
     from src.data.ecmwf_open_data import collect_native_temperature_source, restore_paired_role_originals
     from src.data.release_calendar import FetchDecision
@@ -1994,15 +2025,18 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
         if mandatory is not None else None)
     phase_turn = completed_mandatory or checked_unreleased
     job_name = "forecast_live_native_2t_" + track
-    previous = conn.execute("SELECT meta_json FROM job_run WHERE job_name=? AND source_id=? "
+    previous = conn.execute("SELECT started_at,status,reason_code,meta_json FROM job_run WHERE job_name=? AND source_id=? "
         "AND track='2t_instant_native_knots' ORDER BY started_at DESC,rowid DESC LIMIT 1",
         (job_name, "ecmwf_open_data")).fetchone()
     if previous is not None and not phase_turn:
-        try:
-            if json.loads(previous["meta_json"]).get("mandatory_attempt") == attempt:
-                return None
-        except (TypeError, ValueError):
-            pass
+        served = conn.execute("""SELECT started_at,status,reason_code,meta_json FROM job_run
+            WHERE job_name=? AND source_id='ecmwf_open_data' AND track='2t_instant_native_knots'
+              AND CASE WHEN json_valid(meta_json)
+                THEN json_extract(meta_json,'$.service_mandatory_attempt') END = json(?) LIMIT 1""",
+            (job_name, json.dumps(attempt, separators=(",", ":")))).fetchone()
+        if (_native_temperature_service_receipt(served).get("service_mandatory_attempt") == attempt
+                or _native_temperature_service_receipt(previous).get("service_mandatory_attempt") == attempt):
+            return None
     candidates = []
     for order, plan in enumerate(_native_temperature_transport_plans(conn, now_utc=now_utc,
             full_y_only=not completed_mandatory)):
@@ -2012,14 +2046,15 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
         scope = {"run": plan["run"].isoformat(), "targets": plan["targets"], "required_steps": plan["steps"]}
         scope_json = json.dumps(scope, sort_keys=True, separators=(",", ":"))
         scope_hash = hashlib.sha256(scope_json.encode()).hexdigest()
-        receipt = conn.execute("SELECT rowid,started_at,meta_json FROM job_run WHERE job_run_id=? AND job_name=? "
+        receipt = conn.execute("SELECT rowid,started_at,status,reason_code,meta_json FROM job_run WHERE job_run_id=? AND job_name=? "
             "AND source_id='ecmwf_open_data' AND track='2t_instant_native_knots' AND scheduled_for=? "
             "AND release_calendar_key=? AND expected_scope_json=?",
             (job_name + ":" + scope_hash, job_name, plan["run"].isoformat(),
              "ecmwf_open_data:native_2t:" + scope_hash, scope_json)).fetchone()
-        started = _parse_utc_timestamp(receipt["started_at"]) if receipt else None
+        service = _native_temperature_service_receipt(receipt)
+        started = _parse_utc_timestamp(service.get("service_started_at"))
         rank = (plan["future"], started is not None, started or datetime.min.replace(tzinfo=timezone.utc),
-            receipt["rowid"] if receipt else 0, order)
+            receipt["rowid"] if receipt and started is not None else 0, order)
         candidates.append((rank, plan, scope, scope_hash, receipt))
     for _, plan, scope, scope_hash, receipt in sorted(candidates, key=lambda candidate: candidate[0]):
         # Expired admission permits only a complete, verified original cache
@@ -2032,12 +2067,7 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
             continue
         transport_kind = None
         if phase_turn:
-            previous_kind = None
-            if receipt is not None:
-                try:
-                    previous_kind = json.loads(receipt["meta_json"]).get("transport_kind")
-                except (TypeError, ValueError):
-                    pass
+            previous_kind = _native_temperature_service_receipt(receipt).get("service_transport_kind")
             transport_kind = "paired" if previous_kind == "native" else "native"
             if cached["status"] == "AVAILABLE":
                 transport_kind = "paired"
@@ -2047,19 +2077,36 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
             scheduled_for=plan["run"], source_id="ecmwf_open_data", track="2t_instant_native_knots",
             release_calendar_key="ecmwf_open_data:native_2t:" + scope_hash,
             started_at=_utcnow(), expected_scope_json=scope)
-        meta = {"mandatory_attempt": attempt, "qualification_status": "UNKNOWN"}
+        meta = {"mandatory_attempt": attempt, "qualification_status": "UNKNOWN",
+            **_native_temperature_service_receipt(receipt)}
+        if receipt is not None:
+            try:
+                prior_busy = json.loads(receipt["meta_json"]).get("last_busy_attempt")
+                if isinstance(prior_busy, dict):
+                    meta["last_busy_attempt"] = prior_busy
+            except (TypeError, ValueError, AttributeError):
+                pass
         if checked_unreleased:
             meta["current_availability_check"] = {"job_run_id": _job_run_id(identity), "status": "not_released"}
         if transport_kind is not None:
             meta["transport_kind"] = transport_kind
         write_job_run(conn, **journal, status="RUNNING", meta_json=meta)
         conn.commit()  # FORECAST owner; native inventory owns its own transaction.
+        def acquired(kind):
+            # Called inside the unchanged source lock's finally protection,
+            # after its absolute deadline check and before any transport I/O.
+            meta.update(service_started_at=_utcnow().isoformat(), service_transport_kind=kind,
+                service_mandatory_attempt=attempt)
+            write_job_run(conn, **journal, status="RUNNING", meta_json=meta)
+            conn.commit()
         try:
             paired = paired_cache if transport_kind == "native" else restore_paired_role_originals(
-                conn, plan=plan, decision_at=now_utc, deadline_monotonic=deadline_monotonic)
+                conn, plan=plan, decision_at=now_utc, deadline_monotonic=deadline_monotonic,
+                _on_acquired=lambda: acquired("paired"))
             result = cached if transport_kind == "paired" else collect_native_temperature_source(
                 conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
-                cycle_deadline_monotonic=deadline_monotonic, _priority=plan["priority"])
+                cycle_deadline_monotonic=deadline_monotonic, _priority=plan["priority"],
+                _on_acquired=lambda: acquired("native"))
             result = {**result, "paired_originals": paired}
             if transport_kind is not None:
                 result["transport_kind"] = transport_kind
@@ -2073,6 +2120,28 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
         status = {"AVAILABLE": "SUCCESS", "INCOMPLETE": "PARTIAL"}.get(result["status"], "FAILED")
         if phase_turn and status == "SUCCESS" and result.get("paired_originals", {}).get("status") != "AVAILABLE":
             status = "PARTIAL"
+        # A concurrent busy observer must not disappear when the owner later
+        # completes this exact scope. Keep its truthful bounded diagnostic,
+        # independently of the owner's original service/possession clocks.
+        latest = conn.execute("SELECT started_at,status,reason_code,meta_json FROM job_run WHERE job_run_id=?",
+            (journal["job_run_id"],)).fetchone()
+        if latest is not None:
+            latest_service = _native_temperature_service_receipt(latest)
+            latest_started = _parse_utc_timestamp(latest_service.get("service_started_at"))
+            own_started = _parse_utc_timestamp(meta.get("service_started_at"))
+            if latest_started is not None and (own_started is None or latest_started > own_started):
+                meta.update(latest_service)
+            try:
+                last_busy = json.loads(latest["meta_json"]).get("last_busy_attempt")
+                if isinstance(last_busy, dict):
+                    meta["last_busy_attempt"] = last_busy
+            except (TypeError, ValueError, AttributeError):
+                pass
+        if (result.get("reason") == "NATIVE_2T_SINGLEFLIGHT_BUSY"
+                or result.get("paired_originals", {}).get("reason") == "NATIVE_2T_SINGLEFLIGHT_BUSY"):
+            meta["last_busy_attempt"] = {"started_at": journal["started_at"].isoformat(),
+                "finished_at": _utcnow().isoformat(), "transport_kind": transport_kind,
+                "reason": "NATIVE_2T_SINGLEFLIGHT_BUSY"}
         write_job_run(conn, **journal, status=status, finished_at=_utcnow(),
             source_run_id=result.get("source_run_id"), reason_code=result.get("reason"),
             affected_scope_json={"observed_count": result.get("observed_count", 0)},

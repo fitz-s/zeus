@@ -2497,7 +2497,7 @@ _native_temperature_source_lock = threading.Lock()
 
 
 def restore_paired_role_originals(conn, *, plan: dict, decision_at: datetime,
-        deadline_monotonic: float, _paths: OpenDataPaths | None = None) -> dict:
+        deadline_monotonic: float, _paths: OpenDataPaths | None = None, _on_acquired: Any = None) -> dict:
     """Restore only byte-identical canonical captures, never re-ingest a run.
 
     SCOPE: selected source/city/date/metric and original SHA. DRAIN: the existing
@@ -2515,6 +2515,9 @@ def restore_paired_role_originals(conn, *, plan: dict, decision_at: datetime,
     missing = {}
     checked = {}
     try:
+        if _on_acquired is not None:
+            _remaining_step_timeout(deadline_monotonic)
+            _on_acquired()
         run = plan["run"]
         if (decision_at.tzinfo is None or decision_at.utcoffset() != timedelta(0)
                 or decision_at > datetime.now(timezone.utc) or run.tzinfo is None
@@ -2749,7 +2752,7 @@ def _promote_native_mirror_part(path: Path, cache: Path, run: datetime) -> dict:
 
 def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: datetime,
         required_steps: list[int], cycle_deadline_monotonic: float,
-        _priority: Any, _paths: OpenDataPaths | None = None) -> dict:
+        _priority: Any, _paths: OpenDataPaths | None = None, _on_acquired: Any = None) -> dict:
     """Drain current target knots on the ordinary scheduler's remaining budget.
 
     SCOPE: optional native product/run/member-step, never mandatory H/L or q.
@@ -2775,6 +2778,9 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
         return {**report, "reason": "NATIVE_2T_SINGLEFLIGHT_BUSY"}
     session = None
     try:
+        if _on_acquired is not None:
+            _remaining_step_timeout(cycle_deadline_monotonic)
+            _on_acquired()
         paths = _paths or _resolve_opendata_paths()
         cache = paths.raw_root / "raw" / "ecmwf_open_ens" / "native_2t_scheduled" / f"{run_utc:%Y%m%dT%HZ}"
         manifest = cache / "source-manifest.json"

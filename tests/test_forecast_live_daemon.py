@@ -1158,11 +1158,18 @@ def unreleased_prior_native_poll(normal_native_poll, tmp_path, monkeypatch):
         scope = {"run": plan["run"].isoformat(), "targets": plan["targets"], "required_steps": plan["steps"]}
         digest = hashlib.sha256(json.dumps(scope, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         name = "forecast_live_native_2t_" + track
+        service_clocks = []
+        paired = source.restore_paired_role_originals(s.conn, plan=plan, decision_at=utc[0],
+            deadline_monotonic=mono[0] + 59., _paths=s.paths,
+            _on_acquired=lambda: service_clocks.append(utc[0].isoformat()))
+        assert paired["status"] == "UNKNOWN" and service_clocks == [utc[0].isoformat()]
         write_job_run(s.conn, job_run_id=name + ":" + digest, job_name=name, plane="forecast",
             scheduled_for=plan["run"], source_id="ecmwf_open_data", track="2t_instant_native_knots",
-            release_calendar_key="ecmwf_open_data:native_2t:" + digest, status="RUNNING",
-            started_at=utc[0] - timedelta(minutes=1), expected_scope_json=scope,
-            meta_json={"transport_kind": "paired", "qualification_status": "UNKNOWN"})
+            release_calendar_key="ecmwf_open_data:native_2t:" + digest, status="FAILED",
+            started_at=utc[0], finished_at=utc[0], expected_scope_json=scope,
+            meta_json={"transport_kind": "paired", "qualification_status": "UNKNOWN",
+                "service_started_at": service_clocks[0], "service_transport_kind": "paired",
+                "service_mandatory_attempt": None, "paired_status": paired["status"]})
     s.conn.commit()
     class InlineExecutor:
         def submit(self, runner, track):
@@ -1306,6 +1313,132 @@ def test_unreleased_fair_turn_requires_current_exact_check(normal_native_poll, m
         _current_check=None if mismatch == "no_check" else (checked, outcome))
     assert result is None and s.calls == []
     assert before == tuple(s.conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (daemon._job_run_id(identity),)).fetchone())
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+def test_normal_busy_receipt_does_not_serve_or_flip_native_phase(normal_native_poll, monkeypatch, track):
+    """Real shared Lock rejection is diagnostic, not a served source turn."""
+    s, daemon = normal_native_poll, normal_native_poll.daemon
+    utc = [s.now]
+    monkeypatch.setattr(daemon, "_utcnow", lambda: utc[0])
+    source_before = [tuple(row) for row in s.conn.execute("SELECT * FROM source_run ORDER BY source_run_id")]
+    assert s.module._native_temperature_source_lock.acquire(blocking=False)
+    try:
+        first = daemon._run_journaled_opendata_track_if_due(track)
+        assert first["native_temperature_source"]["reason"] == "NATIVE_2T_SINGLEFLIGHT_BUSY", first
+        assert s.calls == []
+        busy = s.conn.execute("SELECT * FROM job_run WHERE job_name=? ORDER BY started_at DESC LIMIT 1",
+            ("forecast_live_native_2t_" + track,)).fetchone()
+        assert busy["reason_code"] == "NATIVE_2T_SINGLEFLIGHT_BUSY" and busy["started_at"] == utc[0].isoformat()
+        assert json.loads(busy["meta_json"]).get("service_started_at") is None
+    finally:
+        s.module._native_temperature_source_lock.release()
+    utc[0] += timedelta(minutes=1)
+    second = daemon._run_journaled_opendata_track_if_due(track)
+    native = second["native_temperature_source"]
+    assert native["transport_kind"] == "native", native
+    assert native["status"] == "AVAILABLE" and native["observed_count"] == 459, native
+    served = s.conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (busy["job_run_id"],)).fetchone()
+    meta = json.loads(served["meta_json"])
+    assert meta["service_started_at"] == utc[0].isoformat() and meta["service_transport_kind"] == "native"
+    assert meta["last_busy_attempt"]["started_at"] == busy["started_at"]
+    assert source_before == [tuple(row) for row in s.conn.execute("SELECT * FROM source_run WHERE track!='2t_instant_native_knots' ORDER BY source_run_id")]
+
+
+@pytest.mark.parametrize("phase", ("native", "paired"))
+@pytest.mark.parametrize("fault", ("busy", "expired", "callback_failure", "acquired"))
+def test_source_actual_slot_callback_is_deadline_bound_and_releases_lock(normal_native_poll, phase, fault):
+    import time
+    s = normal_native_poll
+    called = []
+    def callback():
+        assert not s.module._native_temperature_source_lock.acquire(blocking=False)
+        called.append("actual-slot")
+        if fault == "callback_failure":
+            raise ValueError("PRIVATE_SERVICE_PERSISTENCE_FAILURE")
+    deadline = time.monotonic() + (-1 if fault == "expired" else 59)
+    def collect():
+        if phase == "native":
+            return s.module.collect_native_temperature_source(**{**s.args,
+                "required_steps": [0, 3], "cycle_deadline_monotonic": deadline, "_on_acquired": callback})
+        plan = s.daemon._native_temperature_transport_plans(s.conn, now_utc=s.now)[0]
+        return s.module.restore_paired_role_originals(s.conn, plan=plan, decision_at=s.now,
+            deadline_monotonic=deadline, _paths=s.paths, _on_acquired=callback)
+    before = [tuple(row) for row in s.conn.execute("SELECT * FROM source_run ORDER BY source_run_id")]
+    if fault == "busy":
+        assert s.module._native_temperature_source_lock.acquire(blocking=False)
+        try:
+            result = collect()
+            assert result["reason"] == "NATIVE_2T_SINGLEFLIGHT_BUSY"
+        finally:
+            s.module._native_temperature_source_lock.release()
+    else:
+        result = collect()
+    assert called == ([] if fault in {"busy", "expired"} else ["actual-slot"])
+    if fault != "acquired":
+        assert s.calls == []
+        assert result["status"] in {"UNKNOWN", "DEFERRED"}
+        assert before == [tuple(row) for row in s.conn.execute("SELECT * FROM source_run ORDER BY source_run_id")]
+    assert s.module._native_temperature_source_lock.acquire(blocking=False)
+    s.module._native_temperature_source_lock.release()
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("mandatory_status", ("FAILED", "PARTIAL"))
+@pytest.mark.parametrize("transport", ("partial", "503"))
+def test_busy_does_not_consume_failed_prior_service_opportunity(unreleased_prior_native_poll, monkeypatch, track, mandatory_status, transport):
+    p = unreleased_prior_native_poll
+    daemon, s = p.daemon, p.s
+    identity = p.current[track]
+    daemon._write_job_run(s.conn, identity=identity, status=mandatory_status, now_utc=p.utc[0],
+        started_at=p.utc[0], lock_acquired_at=p.utc[0], result={"status": mandatory_status.lower()})
+    s.conn.commit()
+    def turn():
+        return daemon._native_temperature_fair_turn(s.conn, track=track, now_utc=p.utc[0],
+            deadline_monotonic=p.mono[0] + 59.)
+    assert p.source._native_temperature_source_lock.acquire(blocking=False)
+    try:
+        busy = turn()
+        assert busy["native_temperature_source"]["reason"] == "NATIVE_2T_SINGLEFLIGHT_BUSY"
+        assert p.events == []
+    finally:
+        p.source._native_temperature_source_lock.release()
+    p.utc[0] += timedelta(minutes=1)
+    p.controls["cut_range"] = True
+    p.controls["cut"], p.controls["ranges"] = p.mono[0] + 59., 0
+    if transport == "503":
+        import requests
+        def unavailable(*args, **kwargs):
+            response = requests.Response()
+            response.status_code, response._content = 503, b"private unavailable"
+            response._content_consumed = True
+            return response
+        monkeypatch.setattr(s.session, "get", unavailable)
+    served = turn()
+    native = served["native_temperature_source"]
+    assert native["status"] == ("INCOMPLETE" if transport == "partial" else "DEFERRED"), served
+    if transport == "503":
+        assert "503" in native["reason"]
+    before = len(p.events)
+    assert turn() is None  # Only the actual slot consumed this mandatory attempt.
+    assert len(p.events) == before
+
+
+@pytest.mark.parametrize("phase", ("native", "paired"))
+@pytest.mark.parametrize("legacy", ("busy", "running", "positive"))
+def test_native_service_receipt_legacy_requires_proven_slot(phase, legacy):
+    from src.ingest import forecast_live_daemon as daemon
+    receipt = {"started_at": "2026-10-06T23:52:00+00:00",
+        "status": "RUNNING" if legacy == "running" else "PARTIAL",
+        "reason_code": "NATIVE_2T_SINGLEFLIGHT_BUSY" if legacy == "busy" else None,
+        "meta_json": json.dumps({"transport_kind": phase,
+            "collector_status": "INCOMPLETE", "paired_status": "AVAILABLE", "mandatory_attempt": ["exact"]})}
+    service = daemon._native_temperature_service_receipt(receipt)
+    if legacy == "positive":
+        assert service["service_started_at"] == receipt["started_at"]
+        assert service["service_transport_kind"] == phase
+    else:
+        assert service == {}
 
 
 import src.main as main
