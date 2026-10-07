@@ -21486,3 +21486,23 @@ reload actors. Private money/merged/classifier checks may run on the combined
 candidate; final CLI/HEAD-secret and landing wait for any loader-risk disposition
 and a final immutable input freeze. No current source, MAIN or certificate load
 is implied by this local integration.
+
+BEFOREEDIT — loader replay ordering, independently verified HIGH/INV-47:
+the new replay gate returns on all BLOCKED before source prerequisite BOOT,
+while dry-run only computes/rolls back existing DB/raw and cannot acquire or
+publish missing native evidence. This leaves no RESET for a source defect
+whose normal DRAIN needs the new producer. ROOT authorizes native's isolated
+writer slice in scripts/deploy_live.py and the actual existing
+tests/test_ops_scripts_smoke.py (tests/ops/test_deploy_live.py does not exist).
+Keep static producer/config/schema prerequisites first, then the existing
+source-only reload and loaded-SHA/HB proof, then bounded replay. Preserve every
+MAIN warm/qualification/PRESTOP/CAS/capital/quote handoff gate before MAIN STOP;
+no skip/force flag, manual actor reload, source clock change or weaker verdict.
+SCOPE is this registered restart dependency order. DRAIN is the normal newly
+booted source producer and existing capture/materialization loop. RESET is real
+replay readiness followed by all existing MAIN gates. Test live-trading and
+standalone FORECAST twins: source pending may BOOT but never STOP MAIN; static
+invalid may not BOOT; ready proceeds through the unchanged MAIN gates. A/B/C
+source hashes remain frozen; private money/coupled checks may proceed while
+the ordering slice and independent review finish. Final CLI/HEAD-secret wait
+for its final source/input freeze; no landing or loading is implied.
