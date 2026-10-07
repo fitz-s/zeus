@@ -1921,9 +1921,15 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
                     lon = profile["lon_min"] + round((city.lon-profile["lon_min"])/profile["dx"]) * profile["dx"]
                 else:
                     x, y = surface._project(profile, latitude=city.lat, longitude=city.lon)
-                    x = profile["origin_x"] + round((x-profile["origin_x"])/profile["dx"]) * profile["dx"]
-                    y = profile["origin_y"] + round((y-profile["origin_y"])/profile["dy"]) * profile["dy"]
-                    lat, lon = surface._project(profile, x=x, y=y)
+                    f32 = surface._float32
+                    indices = []
+                    for value, axis, step in ((x, "x", "dx"), (y, "y", "dy")):
+                        q = f32(f32(value-profile[f"origin_{axis}"])/profile[step])
+                        indices.append(math.floor(q+.5) if q >= 0 else math.ceil(q-.5))
+                    lat, lon = surface._project(profile,
+                        x=f32(f32(f32(indices[0])*profile["dx"])+profile["origin_x"]),
+                        y=f32(f32(f32(indices[1])*profile["dy"])+profile["origin_y"]))
+                    lon = f32(math.fmod(f32(lon+180), 360)-180)
             index = provider_models.index(model)
             payload = {"latitude": lat, "longitude": lon, "elevation": 32.,
                 "timezone": city.timezone,
