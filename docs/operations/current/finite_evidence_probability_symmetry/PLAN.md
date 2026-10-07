@@ -20424,3 +20424,35 @@ ROOT rather than bypassing it. No further input/HEAD changes during those gates.
 Only ROOT's acceptance of the exact frozen tip can authorize normal FF landing
 and one registered PRESTOP-qualified restart. No manual source GET, seed/wake,
 SDK/live DB action, raw staging or unrelated baseline repair is authorized.
+
+### Fresh peer local-midnight coupling and final required scope
+
+Fresh fetch/ls-remote at2026-10-07T07:13:53Z found origin/live and live disk
+02849df393452ec63c046ab292deb01e9b5d7e0b, after3c66f43ade186110053cc20ed336355fa69b2ec8.
+These peers correct four Day0/window/lead-time source functions to next local
+midnight and true UTC elapsed duration. Their eight paths do not intersect the
+A/B owned paths. Merge-tree had no conflict; normal rebase preserved every peer
+byte and A/B frozen source/test hashes. This is a real caller dependency change,
+not permission to reuse the old15a CLI input signature. Old CLI0/170.394s and
+HEAD ancestry secret0 remain receipts for15a only, not this rebased candidate.
+
+Actual new-source coupling checks:21P0F/E/S41.38s across peer DST23h/25h fact
+windows, fast-residual H/L/ledger hydration, real UTC lead time, A native clip
+geometry/right-closure/DST twins and a real HKO X-only public consumer. Receipt
+/tmp/zeus-AB-final-0EcO4P/peer-role.xml SHA46cef9b17cb4ccb015ef4878a111156490c7691c1c814a07d98fbfdfcadbc182.
+SCOPE is exact city/local-date/window; DRAIN is normal fresh source/decision
+processing; RESET preserves half-open next-midnight boundaries without renewing
+source clocks, adding a day, or dropping a required native role.
+
+ROOT confirms literal required execution: semantic classifier43 module selectors
+union the release gate's25 selectors, deduplicated into63 selectors, with the
+owning --maxfail=8/--timeout=300 command; integrationTRUE separately requires the
+complete tests/money_path command with --maxfail=5/--timeout=300. Collection
+actually yielded5619 unique nodes. Do not substitute author52/merged checks for
+these full required runs. Two jobs use independent private STATE/TMP and only
+read the ignored example-derived config, denied external network, BLAS/OMP/MKL1.
+Any material failure is retained and narrowly attributed; an unchanged baseline
+needs actual same-node proof, not a new skip or weakened qualification. Run the
+one new final CLI only after pytest CPU is released, then exact-HEAD secrets and
+required changed-surface checks without further input/HEAD edits. Loading remains
+unapproved until ROOT accepts all required evidence and the exact final tip.
