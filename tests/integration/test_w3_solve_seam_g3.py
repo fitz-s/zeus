@@ -8757,11 +8757,28 @@ def test_day0_partial_exact_fallback_rebuilds_when_remaining_vectors_are_unavail
 
 @pytest.mark.parametrize("metric", ["high", "low"])
 def test_day0_metar_missing_revision_evidence_cannot_authorize_entry(monkeypatch, metric):
+    import src.data.replacement_forecast_bundle_reader as bundle_reader
+    import src.data.replacement_forecast_readiness as readiness_reader
     from src.events.day0_authority import DAY0_PROVISIONAL_CURRENT_SNAPSHOT, day0_evidence_finality
 
     fixture = _day0_partial_exact_fixture(metric=metric)
+    bundle = _day0_ready_bundle(fixture)
+    bundle.provenance_json["day0_provisional_observation"] = {
+        "active": True, "metric": metric, "source": "ogimet_metar_ltfm",
+        "observation_time": fixture.fact["observation_time"],
+        "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
+    }
+    monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
+    monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
     try:
         assert day0_evidence_finality({"settlement_source": "ogimet_metar_ltfm"}) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+        # The full preparation stops at the earlier absent current-source fact;
+        # the separate boundary probe below establishes missing revision refusal.
+        with pytest.raises(ValueError, match="GLOBAL_DAY0_CURRENT_OBSERVATION_MISSING"):
+            era._prepare_current_global_probability_family(
+                fixture.event, forecast_conn=fixture.forecast, topology_conn=fixture.forecast,
+                observation_conn=fixture.observations, decision_time=fixture.decision_at,
+                max_age=_dt.timedelta(seconds=30), allow_partial_deterministic=True)
         # Probe the actual ENTRY source gate directly: no source-fact or
         # conditioning double can masquerade as same-station revision history.
         with pytest.raises(ValueError, match="METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE") as caught:
@@ -50397,6 +50414,190 @@ def _hko_clock_native_sources(tmp_path, monkeypatch):
             next(static,None)
     finally:
         next(native,None)
+
+
+def _normal_native_role_inputs(tmp_path, monkeypatch, *, conn, city, cycle, target,
+                               capture_at, metric, center_c, member_step_c=0):
+    """Controlled GRIB originals through normal capture, decoder and role reader.
+
+    City/run/grid/member values are encoded before HTTP/index custody. These
+    are relationship-test source inputs, not official weather or sensor truth.
+    """
+    import eccodes as ec
+    from pathlib import Path
+    from datetime import datetime, timedelta, timezone
+    from src.data import ecmwf_open_data as native
+    from src.config import runtime_coordinate_manifest_json
+    from src.data.forecast_target_contract import compute_target_local_day_window_utc
+    from src.data.replacement_forecast_materializer import read_current_evidence_snapshot_identity
+    from src.data.day0_hourly_vectors import read_native_measurement_role
+    from tests import test_ecmwf_open_data_collect_cycle as transport
+    from tests.test_ingest_grib_source_run_context import _tiny_native_grib
+    from scripts import extract_open_ens_localday as decoder
+
+    window = compute_target_local_day_window_utc(city_timezone=city.timezone, target_local_date=target)
+    horizon = int(math.ceil((window.end_utc-cycle).total_seconds()/10800))*3
+    steps = tuple(range(0, horizon+1, 3))
+    north, west = math.ceil(city.lat*4)/4, math.floor(city.lon*4)/4 % 360
+    grid = {"latitudeOfFirstGridPointInDegrees": north,
+            "latitudeOfLastGridPointInDegrees": north-.25,
+            "longitudeOfFirstGridPointInDegrees": west,
+            "longitudeOfLastGridPointInDegrees": west+.25}
+    real_set, real_values = ec.codes_set, ec.codes_set_values
+    def encoded_header(gid, key, value):
+        if key in grid:
+            value = grid[key]
+        elif key == "dataDate":
+            value = int(cycle.strftime("%Y%m%d"))
+        elif key == "dataTime":
+            value = cycle.hour*100
+        result = real_set(gid, key, value)
+        if key == "paramId" and value in {167, 228026, 228027}:
+            real_set(gid, "generatingProcessIdentifier", 161)
+            real_set(gid, "packingType", "grid_ieee")
+            real_set(gid, "precision", 2)
+        return result
+    def encoded_values(gid, values):
+        if ec.codes_get(gid, "paramId") in {167, 228026, 228027}:
+            member = int(ec.codes_get(gid, "number")) if ec.codes_is_defined(gid, "number") else 0
+            values = np.full(len(values), 273.15+center_c+member*member_step_c)
+        return real_values(gid, values)
+    class OriginalDate(datetime):
+        def __new__(cls, year, month, day, *args, **kwargs):
+            if (year, month, day) == (2026, 10, 3):
+                year, month, day = cycle.year, cycle.month, cycle.day
+            # Return the base datetime: timedelta arithmetic on the encoded
+            # run must not reapply the fixture constructor's date substitution.
+            return datetime(year, month, day, *args, **kwargs)
+    original_knots = transport._native_temperature_knots_fixture
+    def knots(directory, **kwargs):
+        inputs = original_knots(directory, **kwargs)
+        # Finish the controlled source index before any HTTP capture, not by
+        # relabeling a possessed body's run or renewing its original clocks.
+        for evidence in inputs["message_source_evidence"].values():
+            row = json.loads(evidence["original_index_bytes"])
+            row["date"] = cycle.strftime("%Y%m%d")
+            encoded = json.dumps(row).encode()+b"\n"
+            evidence.update(original_index_bytes=encoded,
+                source_index_sha256=hashlib.sha256(encoded).hexdigest(),
+                source_index_line_sha256=hashlib.sha256(encoded.rstrip(b"\n")).hexdigest())
+        return inputs
+    class CollectorClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+    class CollectorClock(datetime, metaclass=CollectorClockType):
+        @classmethod
+        def now(cls, tz=None):
+            return capture_at.astimezone(tz or timezone.utc)
+    root = tmp_path / f"native-{city.name.lower().replace(' ', '-')}-{metric}-{cycle:%Y%m%d%H}"
+    root.mkdir()
+    with monkeypatch.context() as original:
+        original.setattr(ec, "codes_set", encoded_header)
+        original.setattr(ec, "codes_set_values", encoded_values)
+        original.setattr(transport, "datetime", OriginalDate)
+        original.setattr(transport, "_native_temperature_knots_fixture", knots)
+        captured = transport._normal_native_http(root, monkeypatch, steps=steps, hour=cycle.hour)
+        captured.conn.close()
+        captured.conn = conn
+        captured.args["conn"] = conn
+        original.setattr(native, "datetime", CollectorClock)
+        original.setattr(native._ingest_grib_module, "_now_utc_iso", lambda: capture_at.isoformat())
+        capture_result = native.collect_native_temperature_source(**{**captured.args,
+            "cycle_deadline_monotonic": None})
+        assert capture_result["status"] == "AVAILABLE", capture_result
+        paths = captured.paths
+        monkeypatch.setattr(native, "_resolve_opendata_paths", lambda **kwargs: paths)
+        manifest_json = runtime_coordinate_manifest_json()
+        manifest_sha = hashlib.sha256(manifest_json.encode()).hexdigest()
+        manifest = root / "coordinate-manifest.json"
+        manifest.write_text(manifest_json)
+        static_dir = root / "static"
+        static_dir.mkdir()
+        static = knots(static_dir, steps=(0, 3), hour=cycle.hour)
+        collected = {}
+        for axis, track_name in (("high", "mx2t6_high"), ("low", "mn2t6_low")):
+            directory = root / track_name
+            directory.mkdir()
+            raw, _, _, _ = _tiny_native_grib(directory, track_name, issue=cycle, horizon=horizon)
+            track = decoder.TRACKS[track_name]
+            destination = native._download_output_path(run_date=cycle.date(), run_hour=cycle.hour,
+                param=track.open_data_param, raw_root=paths.raw_root)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(raw.read_bytes())
+            mask, phi = transport._physical_static_originals(static, directory=destination.parent, track=track_name)
+            decoded = decoder.extract_open_ens_localday(grib_path=destination, track_name=track_name,
+                manifest_path=manifest, cities_filter={city.name},
+                output_root=paths.raw_root / "raw/coordinate_manifests" / manifest_sha,
+                mask_grib_path=mask, mask_proof_path=mask.with_suffix(".proof.json"),
+                surface_geopotential_grib_path=phi, surface_geopotential_proof_path=phi.with_suffix(".proof.json"))
+            assert decoded["written"] >= 1, decoded
+            sample = json.loads(Path(decoded["sample_outputs"][0]).read_text())
+            collected[axis] = native.collect_open_ens_cycle(track=track_name, skip_download=True,
+                skip_extract=True, conn=conn, now_utc=capture_at, _paths=paths,
+                grid_surface_source_evidence=sample["grid_surface_evidence"])
+            assert collected[axis]["status"] == "ok", collected[axis]
+    snapshot = dict(conn.execute("SELECT * FROM ensemble_snapshots WHERE city=? AND target_date=? "
+        "AND temperature_metric=? ORDER BY snapshot_id DESC LIMIT 1", (city.name, str(target), metric)).fetchone())
+    readback_at = capture_at+timedelta(minutes=2)
+    request = SimpleNamespace(city=city.name, city_timezone=city.timezone, target_date=target,
+        source_cycle_time=cycle, computed_at=readback_at, baseline_data_version=snapshot["dataset_id"])
+    selected = read_current_evidence_snapshot_identity(conn, request, metric=metric)
+    assert selected is not None
+    role = read_native_measurement_role(conn=conn, city=city, target_date=str(target), metric=metric,
+        role="full_Y", scope_start=window.start_utc, decision_time=readback_at,
+        snapshot_id=selected.snapshot_id, _paths=paths)
+    assert role["native_snapshot_id"] == snapshot["snapshot_id"]
+    conn.commit()
+    return SimpleNamespace(snapshot=snapshot, collected=collected[metric], paths=paths,
+        role=role, readback_at=readback_at, window=window)
+
+
+@pytest.mark.parametrize("city_name,metric", [("Hong Kong", "high"), ("Chicago", "low"), ("Shanghai", "high")])
+def test_normal_native_role_inputs_bind_original_city_and_capture(tmp_path, monkeypatch, city_name, metric):
+    from datetime import date, datetime, timedelta, timezone
+    from src.config import runtime_cities_by_name
+    from src.state.db import get_connection, init_schema_forecasts
+    from src.data import ecmwf_open_data as native
+    from src.data.day0_hourly_vectors import read_native_measurement_role
+
+    city = runtime_cities_by_name()[city_name]
+    cycle = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    captured = cycle+timedelta(hours=8, minutes=5)
+    conn = get_connection(tmp_path / "native-roles.db")
+    init_schema_forecasts(conn)
+    conn.create_function("strftime", 2, lambda fmt, value: captured.isoformat(timespec="milliseconds"))
+    try:
+        fixture = _normal_native_role_inputs(tmp_path, monkeypatch, conn=conn, city=city,
+            cycle=cycle, target=date(2026, 10, 2), capture_at=captured,
+            metric=metric, center_c=19., member_step_c=.01)
+        assert fixture.snapshot["city"] == city_name
+        assert fixture.snapshot["source_cycle_time"] == cycle.isoformat()
+        assert len(fixture.role["member_points_native"]) == 51
+        args = dict(conn=conn, city=city, target_date="2026-10-02", metric=metric,
+            role="full_Y", scope_start=fixture.window.start_utc, decision_time=fixture.readback_at,
+            snapshot_id=fixture.snapshot["snapshot_id"], _paths=fixture.paths)
+        message = fixture.role["native_scope"]["temperature_messages"][0]
+        from pathlib import Path
+        original = Path(message["path"]) if message.get("path") else native._role_message_path(
+            fixture.paths.raw_root, message["raw_message_sha256"])
+        assert hashlib.sha256(original.read_bytes()).hexdigest() == message["raw_message_sha256"]
+        quarantined = original.with_suffix(".private-missing")
+        original.rename(quarantined)
+        try:
+            with pytest.raises(ValueError, match="MEASUREMENT_ROLE_NATIVE_POINT_UNAVAILABLE"):
+                read_native_measurement_role(**args)
+        finally:
+            quarantined.rename(original)
+        clock = fixture.snapshot["recorded_at"]
+        conn.execute("UPDATE ensemble_snapshots SET recorded_at='bad' WHERE snapshot_id=?", (args["snapshot_id"],))
+        try:
+            with pytest.raises(ValueError, match="MEASUREMENT_ROLE_NATIVE_POINT_UNAVAILABLE"):
+                read_native_measurement_role(**args)
+        finally:
+            conn.execute("UPDATE ensemble_snapshots SET recorded_at=? WHERE snapshot_id=?", (clock, args["snapshot_id"]))
+        assert read_native_measurement_role(**args)["member_points_native"] == fixture.role["member_points_native"]
+    finally:
+        conn.close()
 
 
 def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, prior_hour=12,
