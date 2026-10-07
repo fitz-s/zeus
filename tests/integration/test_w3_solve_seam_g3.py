@@ -55212,6 +55212,7 @@ def test_missing_station_ground_family_keeps_qualified_held_taker_and_resets_nor
     import src.config as config
     from src.data import station_ground_evidence as ground
     from src.data import replacement_forecast_materializer as materializer
+    from src.data import ecmwf_open_data as native, replacement_forecast_bundle_reader as reader
     from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
     from src.state.db import init_schema_trade_only, init_schema_world_only
     from src.engine.global_auction_universe import _rebind_probability_witness_tokens
@@ -55220,9 +55221,14 @@ def test_missing_station_ground_family_keeps_qualified_held_taker_and_resets_nor
 
     at = _dt.datetime(2026,10,1,8,15,tzinfo=_dt.timezone.utc)
     healthy = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    native_paths = {"Chicago": healthy.native_input.paths}
     shanghai = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None,
         computed_at=at,first_compute_at=at-_dt.timedelta(minutes=10))
     affected = next(shanghai)
+    native_paths["Shanghai"] = native._resolve_opendata_paths()
+    assert native_paths["Chicago"].raw_root != native_paths["Shanghai"].raw_root
+    for paths in native_paths.values():
+        assert paths.raw_root.resolve().is_relative_to(tmp_path.resolve())
     # The reader fixture's broad 'warm' interval is a source component, not
     # an executable Celsius market. Build a new certificate through the normal
     # materializer for actual one-degree outcome tokens; keep its old row.
@@ -55287,11 +55293,22 @@ def test_missing_station_ground_family_keeps_qualified_held_taker_and_resets_nor
             callbacks[name] = captured_hooks[-1]
         def prepare(event,cut,*,held=False):
             name = json.loads(event.payload_json)["city"]
-            return callbacks[name]["prepare_held_event" if held else "prepare_event"](event,cut)
+            class ClockType(type):
+                def __instancecheck__(cls, value): return isinstance(value, _dt.datetime)
+            class ReaderClock(_dt.datetime, metaclass=ClockType):
+                @classmethod
+                def now(cls, tz=None): return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+            # These are two private source roots, unlike production's one root.
+            # Replay each family's own originals at its actual caller cut;
+            # neither its source clocks nor its qualification result is changed.
+            with monkeypatch.context() as consume:
+                consume.setattr(native, "_resolve_opendata_paths", lambda **_kwargs: native_paths[name])
+                consume.setattr(reader, "datetime", ReaderClock)
+                return callbacks[name]["prepare_held_event" if held else "prepare_event"](event,cut)
         for name,event in events.items():
             for held in (False,True):
                 positive = prepare(event,at,held=held)
-                assert positive.prepared_global_family is not None,positive.reason
+                assert positive.prepared_global_family is not None,(name,held,positive.reason)
         healthy_row = dict(healthy.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
             (healthy.result.posterior_id,)).fetchone())
         affected_row = dict(affected.row)
