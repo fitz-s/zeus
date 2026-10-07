@@ -1316,6 +1316,51 @@ def test_unreleased_fair_turn_requires_current_exact_check(normal_native_poll, m
 
 
 @pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
+@pytest.mark.parametrize("late_write", ("initial", "final"))
+def test_native_busy_late_writer_preserves_other_connection_service(normal_native_poll, monkeypatch, track, late_write):
+    """A real BUSY observer cannot erase another connection's acquired slot."""
+    from src.state import job_run_repo
+    s, daemon = normal_native_poll, normal_native_poll.daemon
+    path = s.conn.execute("PRAGMA database_list").fetchone()[2]
+    owner = sqlite3.connect(path)
+    owner.row_factory = sqlite3.Row
+    original = job_run_repo.write_job_run
+    written = []
+    service = dict(service_started_at=(s.now + timedelta(seconds=1)).isoformat(),
+        service_transport_kind="paired", service_mandatory_attempt=["real-other-attempt"])
+    other_busy = dict(started_at=s.now.isoformat(), finished_at=(s.now + timedelta(seconds=2)).isoformat(),
+        transport_kind="paired", reason="NATIVE_2T_SINGLEFLIGHT_BUSY")
+    before = [tuple(row) for row in s.conn.execute("SELECT * FROM source_run ORDER BY source_run_id")]
+    atomic = getattr(daemon, "_write_native_temperature_attempt", None)
+    def observer_write(conn, **kwargs):
+        selected = kwargs["status"] == ("RUNNING" if late_write == "initial" else "FAILED")
+        if selected and not written:
+            assert not conn.in_transaction
+            original(owner, **{**kwargs, "status": "RUNNING", "meta_json": {
+                **kwargs["meta_json"], **service, "last_busy_attempt": other_busy}})
+            owner.commit()
+            written.append(True)
+        return atomic(conn, **kwargs) if atomic is not None else original(conn, **kwargs)
+    monkeypatch.setattr(daemon if atomic is not None else job_run_repo,
+        "_write_native_temperature_attempt" if atomic is not None else "write_job_run", observer_write)
+    assert s.module._native_temperature_source_lock.acquire(blocking=False)
+    try:
+        result = daemon._run_journaled_opendata_track_if_due(track)
+        assert result["native_temperature_source"]["reason"] == "NATIVE_2T_SINGLEFLIGHT_BUSY"
+    finally:
+        s.module._native_temperature_source_lock.release()
+        owner.close()
+    assert written == [True] and s.calls == []
+    row = s.conn.execute("SELECT * FROM job_run WHERE job_name=?", ("forecast_live_native_2t_" + track,)).fetchone()
+    meta = json.loads(row["meta_json"])
+    assert {key: meta.get(key) for key in service} == service
+    assert meta["last_busy_attempt"] == other_busy
+    assert row["started_at"] == s.now.isoformat()  # Never backdate the observer attempt.
+    assert before == [tuple(row) for row in s.conn.execute("SELECT * FROM source_run ORDER BY source_run_id")]
+    assert not s.conn.in_transaction
+
+
+@pytest.mark.parametrize("track", ("mx2t6_high", "mn2t6_low"))
 def test_normal_busy_receipt_does_not_serve_or_flip_native_phase(normal_native_poll, monkeypatch, track):
     """Real shared Lock rejection is diagnostic, not a served source turn."""
     s, daemon = normal_native_poll, normal_native_poll.daemon

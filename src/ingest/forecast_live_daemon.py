@@ -1965,6 +1965,51 @@ def _native_temperature_service_receipt(receipt) -> dict:
         return {}
 
 
+def _write_native_temperature_attempt(conn, *, meta_json: dict, _service: dict | None = None, **journal) -> dict:
+    """Merge exact-scope scheduling credit in one short DB-only transaction.
+
+    SCOPE: this native job key, never source qualification. DRAIN: normal slot
+    acquisition; BUSY diagnostics cannot erase a concurrent owner's service.
+    RESET: committed service/diagnostic metadata; no transaction spans I/O.
+    """
+    from src.state.job_run_repo import write_job_run
+    if conn.in_transaction:
+        raise ValueError("NATIVE_SERVICE_JOURNAL_TRANSACTION_ALREADY_OPEN")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        latest = conn.execute("""SELECT started_at,status,reason_code,meta_json FROM job_run
+            WHERE job_run_id=? AND job_name=? AND source_id=? AND track=? AND scheduled_for=?
+              AND release_calendar_key=? AND expected_scope_json=?""",
+            (journal["job_run_id"], journal["job_name"], journal["source_id"], journal["track"],
+             journal["scheduled_for"].isoformat(), journal["release_calendar_key"],
+             json.dumps(journal["expected_scope_json"], sort_keys=True, separators=(",", ":")))).fetchone()
+        # Inherited metadata was read before BEGIN and is not a new acquired
+        # event. Always take that complete group from the protected current row.
+        meta = {key: value for key, value in meta_json.items() if not key.startswith("service_")}
+        service = _native_temperature_service_receipt(latest)
+        previous_started = _parse_utc_timestamp(service.get("service_started_at"))
+        acquired_started = _parse_utc_timestamp((_service or {}).get("service_started_at"))
+        if acquired_started is not None and (previous_started is None or acquired_started >= previous_started):
+            service = _service
+        meta.update(service)
+        if latest is not None:
+            try:
+                busy = json.loads(latest["meta_json"]).get("last_busy_attempt")
+                old_finished = _parse_utc_timestamp(busy.get("finished_at")) if isinstance(busy, dict) else None
+                incoming = meta.get("last_busy_attempt")
+                new_finished = _parse_utc_timestamp(incoming.get("finished_at")) if isinstance(incoming, dict) else None
+                if old_finished is not None and (new_finished is None or old_finished >= new_finished):
+                    meta["last_busy_attempt"] = busy
+            except (TypeError, ValueError, AttributeError):
+                pass
+        write_job_run(conn, **journal, meta_json=meta)
+        conn.commit()
+        return meta
+    except BaseException:
+        conn.rollback()
+        raise
+
+
 def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadline_monotonic: float,
         _current_check: tuple[dict, dict] | None = None) -> dict | None:
     """Drain source debt fairly without borrowing another poll's budget.
@@ -1989,7 +2034,6 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
     """
     from src.data.ecmwf_open_data import collect_native_temperature_source, restore_paired_role_originals
     from src.data.release_calendar import FetchDecision
-    from src.state.job_run_repo import write_job_run
 
     identity = _forecast_work_identity(track, now_utc=now_utc)
     if identity["decision"] is not FetchDecision.FETCH_ALLOWED or _is_source_paused(str(identity["source_id"])):
@@ -2090,15 +2134,14 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
             meta["current_availability_check"] = {"job_run_id": _job_run_id(identity), "status": "not_released"}
         if transport_kind is not None:
             meta["transport_kind"] = transport_kind
-        write_job_run(conn, **journal, status="RUNNING", meta_json=meta)
-        conn.commit()  # FORECAST owner; native inventory owns its own transaction.
+        meta = _write_native_temperature_attempt(conn, **journal, status="RUNNING", meta_json=meta)
         def acquired(kind):
             # Called inside the unchanged source lock's finally protection,
             # after its absolute deadline check and before any transport I/O.
-            meta.update(service_started_at=_utcnow().isoformat(), service_transport_kind=kind,
+            service = dict(service_started_at=_utcnow().isoformat(), service_transport_kind=kind,
                 service_mandatory_attempt=attempt)
-            write_job_run(conn, **journal, status="RUNNING", meta_json=meta)
-            conn.commit()
+            meta.update(_write_native_temperature_attempt(conn, **journal, status="RUNNING",
+                meta_json=meta, _service=service))
         try:
             paired = paired_cache if transport_kind == "native" else restore_paired_role_originals(
                 conn, plan=plan, decision_at=now_utc, deadline_monotonic=deadline_monotonic,
@@ -2120,34 +2163,16 @@ def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadli
         status = {"AVAILABLE": "SUCCESS", "INCOMPLETE": "PARTIAL"}.get(result["status"], "FAILED")
         if phase_turn and status == "SUCCESS" and result.get("paired_originals", {}).get("status") != "AVAILABLE":
             status = "PARTIAL"
-        # A concurrent busy observer must not disappear when the owner later
-        # completes this exact scope. Keep its truthful bounded diagnostic,
-        # independently of the owner's original service/possession clocks.
-        latest = conn.execute("SELECT started_at,status,reason_code,meta_json FROM job_run WHERE job_run_id=?",
-            (journal["job_run_id"],)).fetchone()
-        if latest is not None:
-            latest_service = _native_temperature_service_receipt(latest)
-            latest_started = _parse_utc_timestamp(latest_service.get("service_started_at"))
-            own_started = _parse_utc_timestamp(meta.get("service_started_at"))
-            if latest_started is not None and (own_started is None or latest_started > own_started):
-                meta.update(latest_service)
-            try:
-                last_busy = json.loads(latest["meta_json"]).get("last_busy_attempt")
-                if isinstance(last_busy, dict):
-                    meta["last_busy_attempt"] = last_busy
-            except (TypeError, ValueError, AttributeError):
-                pass
         if (result.get("reason") == "NATIVE_2T_SINGLEFLIGHT_BUSY"
                 or result.get("paired_originals", {}).get("reason") == "NATIVE_2T_SINGLEFLIGHT_BUSY"):
             meta["last_busy_attempt"] = {"started_at": journal["started_at"].isoformat(),
                 "finished_at": _utcnow().isoformat(), "transport_kind": transport_kind,
                 "reason": "NATIVE_2T_SINGLEFLIGHT_BUSY"}
-        write_job_run(conn, **journal, status=status, finished_at=_utcnow(),
+        _write_native_temperature_attempt(conn, **journal, status=status, finished_at=_utcnow(),
             source_run_id=result.get("source_run_id"), reason_code=result.get("reason"),
             affected_scope_json={"observed_count": result.get("observed_count", 0)},
             meta_json={**meta, "collector_status": collector_status,
                 "paired_status": result.get("paired_originals", {}).get("status")})
-        conn.commit()
         return {"status": "current_cycle_already_journaled" if completed_mandatory else "native_temperature_optional_turn",
             "source": "ecmwf_open_data", "track": track,
             "mandatory_job_run_id": _job_run_id(identity), "mandatory_status": mandatory["status"] if mandatory is not None else None,
