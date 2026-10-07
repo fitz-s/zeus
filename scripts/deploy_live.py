@@ -4580,6 +4580,9 @@ def _add_baseline_worktree(root: Path, sha: str) -> Path:
     return tree
 
 
+_REPLAY_SNAPSHOT_CONTENTION = "REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED"
+
+
 def _replay_differential(
     root: Path, request_dir: Path, picked: dict[tuple[str, ...], str], base_tree: Path,
     *, timeout_s: float,
@@ -4593,12 +4596,27 @@ def _replay_differential(
     base_env = {**os.environ, "ZEUS_PRIMARY_ROOT": str(root)}
     rows: list[str] = []
     base_ready = target_ready = 0
-    for family, name in picked.items():
-        target = _replay_forecast_request(request_dir / name, timeout_s=timeout_s)
-        base = _replay_forecast_request(
+
+    def replay_target():
+        return _replay_forecast_request(request_dir / name, timeout_s=timeout_s)
+
+    def replay_base():
+        return _replay_forecast_request(
             request_dir / name, timeout_s=timeout_s, code_root=base_tree, env=base_env
         )
-        if "CONSUMED" in (target[0], base[0]):
+
+    for family, name in picked.items():
+        target, base = replay_target(), replay_base()
+        # The live writer keeps committing while both trees replay, so either side
+        # can lose its read snapshot. That says nothing about the code; replay that
+        # side once more, and drop the family if the contention persists.
+        if target[1] == _REPLAY_SNAPSHOT_CONTENTION:
+            target = replay_target()
+        if base[1] == _REPLAY_SNAPSHOT_CONTENTION:
+            base = replay_base()
+        if "CONSUMED" in (target[0], base[0]) or _REPLAY_SNAPSHOT_CONTENTION in (
+            target[1], base[1]
+        ):
             continue
         base_ready += base[0] == "READY"
         target_ready += target[0] == "READY"
@@ -4681,7 +4699,9 @@ def _forecast_live_replay_gate(
         if left:
             lines.append(f"WARNING baseline worktree {base_tree} was not removed")
         if not rows:
-            return True, "\n  ".join(lines + ["queued requests were consumed during replay"])
+            return True, "\n  ".join(
+                lines + ["no comparable replay: requests consumed or read snapshots contended"]
+            )
         verdict = ""
         if target_ready < base_ready:
             verdict = ": REFUSE, target replays fewer READY than the running code"

@@ -10211,9 +10211,53 @@ def test_replay_gate_differential_row_reports_the_non_ready_sides_reason(monkeyp
 
     ok, detail = dl._forecast_live_replay_gate()
 
+    # Persistent snapshot contention on one side is no verdict on the code: the
+    # family is dropped from both counts, and a sample of only such rows passes.
     assert ok is True
-    assert "H/2026-10-07/high baseline=ERROR target=READY REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED" in detail
-    assert "READY baseline=0/6 target=6/6" in detail
+    assert "H/2026-10-07/high" not in detail
+    assert "no comparable replay" in detail
+
+
+def test_replay_gate_differential_reports_a_real_non_ready_reason(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_diff_reason_real", "deploy_live.py")
+    _diff_gate(dl, monkeypatch, tmp_path)
+
+    def replay(path, *, timeout_s, code_root=None, env=None):
+        if code_root is None:
+            return "BLOCKED", "FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE"
+        return "READY", "REPLACEMENT_DEPENDENCIES_READY"
+
+    monkeypatch.setattr(dl, "_replay_forecast_request", replay)
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is False
+    assert "baseline=READY target=BLOCKED FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE" in detail
+
+
+def test_replay_gate_differential_retries_snapshot_contention_once_per_side(monkeypatch, tmp_path):
+    """2026-10-07 19:24Z: a good tip was refused twice because only the target
+    side lost its read snapshot to the live writer (target 2/3 vs baseline 3/3)."""
+    dl = _load("deploy_live_replay_diff_contention", "deploy_live.py")
+    _diff_gate(dl, monkeypatch, tmp_path)
+    calls: dict[tuple[str, bool], int] = {}
+
+    def replay(path, *, timeout_s, code_root=None, env=None):
+        key = (path.name, code_root is None)
+        calls[key] = calls.get(key, 0) + 1
+        if code_root is None and calls[key] == 1:
+            return "ERROR", "REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED"
+        return "READY", "REPLACEMENT_DEPENDENCIES_READY"
+
+    monkeypatch.setattr(dl, "_replay_forecast_request", replay)
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True
+    assert "SNAPSHOT_RETRY_EXHAUSTED" not in detail
+    assert all(n == 2 for (name, target), n in calls.items() if target)
+    assert all(n == 1 for (name, target), n in calls.items() if not target)
+    assert "READY baseline=6/6 target=6/6" in detail
 
 
 def test_replay_gate_differential_all_consumed_passes(monkeypatch, tmp_path):
@@ -10222,7 +10266,7 @@ def test_replay_gate_differential_all_consumed_passes(monkeypatch, tmp_path):
 
     ok, detail = dl._forecast_live_replay_gate()
 
-    assert ok is True and "consumed during replay" in detail
+    assert ok is True and "no comparable replay" in detail
 
 
 def test_replay_gate_same_sha_uses_absolute_rule_and_builds_no_worktree(monkeypatch, tmp_path):
