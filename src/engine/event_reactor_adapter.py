@@ -48947,8 +48947,6 @@ def _rebuild_decision_time_day0_carrier(
         DAY0_MONOTONE_SETTLEMENT_BOUND,
         day0_evidence_finality,
     )
-    from src.signal.ensemble_signal import sigma_instrument_for_city
-
     source = _day0_probability_conditioning_source(payload).lower()
     finality = day0_evidence_finality(payload)
     if not _day0_is_shared_provisional_carrier_source(source) or finality not in {
@@ -48998,40 +48996,57 @@ def _rebuild_decision_time_day0_carrier(
         value * native_scale + native_offset for value in final_values_c
     )
     domain_shapes = payload.get("_edli_day0_measurement_domain_shapes")
-    if domain_shapes is not None:
-        if forecast_conn is None:
-            raise ValueError("DAY0_CURRENT_ROLE_REBUILD_CONNECTION_UNAVAILABLE")
-        from src.data.replacement_forecast_materializer import _day0_measurement_domain_shapes
-        boundary_native = _day0_probability_boundary_native(
-            payload, str(family.metric).strip().lower(), city=city, unit=carrier_unit)
-        role_request = SimpleNamespace(city=str(family.city), city_timezone=city.timezone,
-            target_date=str(family.target_date), computed_at=decision_time,
-            day0_observed_extreme_source=_day0_probability_conditioning_source(payload),
-            day0_observed_extreme_observation_time=payload.get("observation_time"),
-            day0_observed_extreme_c=(None if boundary_native is None
-                else (boundary_native - native_offset) / native_scale),
-            day0_observed_extreme_unit="C")
-        # Replay original run/body/PIT; derive the role window and provider
-        # mismatch from this decision, never relabel a prior derived shape.
-        domain_shapes = _day0_measurement_domain_shapes(forecast_conn, role_request,
-            metric=str(family.metric).strip().lower(), future=values_c,
-            station_evidence=payload.get("_edli_day0_station_extreme_providers") or (),
-            source_conn=world_conn, native_scope_identities=domain_shapes)
-        payload["_edli_day0_measurement_domain_shapes"] = domain_shapes
-    extra_sigma_native = 0.0 if domain_shapes is not None else _day0_extra_member_sigma_native(
-        payload=payload,
-        family=family,
-        unit=carrier_unit,
-        decision_time=decision_time,
-        members_native=(*values_native, *final_values_native),
-    )
-    if not math.isfinite(extra_sigma_native) or extra_sigma_native < 0.0:
-        raise ValueError("DAY0_HELD_SHARED_CARRIER_SIGMA_INVALID")
-    path_error_sigma_c = (
-        extra_sigma_native
-        if carrier_unit == "C"
-        else extra_sigma_native * 5.0 / 9.0
-    )
+    if forecast_conn is None:
+        raise ValueError("DAY0_CURRENT_ROLE_REBUILD_CONNECTION_UNAVAILABLE")
+    from src.data.replacement_forecast_materializer import _day0_measurement_domain_shapes
+    boundary_native = _day0_probability_boundary_native(
+        payload, str(family.metric).strip().lower(), city=city, unit=carrier_unit)
+    role_request = SimpleNamespace(city=str(family.city), city_timezone=city.timezone,
+        target_date=str(family.target_date), computed_at=decision_time,
+        day0_observed_extreme_source=_day0_probability_conditioning_source(payload),
+        day0_observed_extreme_observation_time=payload.get("observation_time"),
+        day0_observed_extreme_c=(None if boundary_native is None
+            else (boundary_native - native_offset) / native_scale),
+        day0_observed_extreme_unit="C")
+    if domain_shapes is None:
+        # SCOPE: this current statistical family, including independent HELD A'.
+        # DRAIN: normal original/vector capture and seed materialization supply
+        # complete role evidence. RESET: this same-frame factory verifies it;
+        # missing roles never regain modern authority via common/city sigma.
+        witness = payload.get("_edli_day0_remaining_vector_witness")
+        if (not isinstance(witness, Mapping)
+                or witness.get("city") != str(family.city)
+                or witness.get("target_date") != str(family.target_date)
+                or witness.get("metric") != str(family.metric).strip().lower()
+                or witness.get("causal_as_of_utc") != decision_time.astimezone(UTC).isoformat()):
+            raise ValueError("DAY0_CURRENT_ROLE_REBUILD_VECTOR_WITNESS_UNAVAILABLE")
+        cycles = witness.get("provider_source_cycle_time_by_model_utc")
+        cycle_text = cycles.get("ecmwf_ifs") if isinstance(cycles, Mapping) else None
+        if not isinstance(cycle_text, str):
+            raise ValueError("DAY0_CURRENT_ROLE_REBUILD_SOURCE_CYCLE_UNAVAILABLE")
+        try:
+            carrier_cycle = datetime.fromisoformat(cycle_text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("DAY0_CURRENT_ROLE_REBUILD_SOURCE_CYCLE_INVALID") from exc
+        if carrier_cycle.tzinfo is None or carrier_cycle.astimezone(UTC) > decision_time.astimezone(UTC):
+            raise ValueError("DAY0_CURRENT_ROLE_REBUILD_SOURCE_CYCLE_INVALID")
+        from src.data.replacement_forecast_source_run_identity import expected_replacement_dependency_identity_by_role
+        baseline = expected_replacement_dependency_identity_by_role(
+            str(family.metric).strip().lower(), city=str(family.city))["baseline_b0"].data_version
+        if not baseline:
+            raise ValueError("DAY0_CURRENT_ROLE_REBUILD_SOURCE_IDENTITY_UNAVAILABLE")
+        role_request.source_cycle_time = carrier_cycle
+        role_request.baseline_data_version = baseline
+    # Rebuild from original run/body/PIT and current vectors, whether a prior
+    # role exists to pin or the independent current HELD path needs a new one.
+    domain_shapes = _day0_measurement_domain_shapes(forecast_conn, role_request,
+        metric=str(family.metric).strip().lower(), future=values_c,
+        station_evidence=payload.get("_edli_day0_station_extreme_providers") or (),
+        source_conn=world_conn, native_scope_identities=domain_shapes)
+    if not isinstance(domain_shapes, Mapping):
+        raise ValueError("DAY0_CURRENT_ROLE_REBUILD_UNAVAILABLE")
+    payload["_edli_day0_measurement_domain_shapes"] = domain_shapes
+    path_error_sigma_c = 0.0
     bounds = tuple(
         (
             None if candidate.bin.low is None else float(candidate.bin.low),
@@ -49141,7 +49156,7 @@ def _rebuild_decision_time_day0_carrier(
         # native-unit values/bounds. Keep the persisted witness canonical in C,
         # then apply the same native scale used by the consumer.
         path_error_sigma_c=path_error_sigma_c * native_scale,
-        instrument_sigma_c=(0.0 if domain_shapes is not None else float(sigma_instrument_for_city(city).to(carrier_unit).value)),
+        instrument_sigma_c=0.0,
         bin_bounds_c=tuple(tuple(pair) for pair in bounds),
         n_point=ensemble_n_mc(),
         n_samples=500,

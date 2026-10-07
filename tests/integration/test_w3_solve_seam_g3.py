@@ -52844,14 +52844,14 @@ def test_partial_current_replay_reads_the_cohort_at_the_frozen_tau(tmp_path,monk
 
 @pytest.mark.parametrize("action",("BUY","SELL"))
 @pytest.mark.parametrize("fault",("recorded_row_deleted","inplace_body_same_mtime","consumed_read_locked"))
-def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeypatch,fault,action,_noaa_native_sources):
-    """Round-4: a lost consumed proof refused the winner at preflight
-    (BATCH_BLOCKED ...consumed_proof_unverifiable) but evicted nothing, so the
-    next prepare_event/prepare_held_event reissued the dead posterior from the
-    family cache until max_age. The actual receipt's reason now evicts both
-    lanes, for a BUY (generic receipt core) and for a held SELL
-    (_submit_current_global_sell, its own GLOBAL_SELL_CURRENT_AUTHORITY_FAILED
-    wrapper); a transient consumed-proof read (lock) refuses without eviction.
+def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeypatch,fault,action,_hko_clock_native_sources,
+                                                              _metric="high",_physical_twins=True):
+    """Current HKO purposes naturally store when their own strong gates permit.
+
+    Both action routes refuse missing consumed proof and evict the actual HELD
+    entries; a transient read lock refuses without evicting them. Day0 callback
+    prepares still refresh rather than reissue a stale cached q. Restoring the same
+    original evidence resets fresh consumption, not its source clock or q.
     """
     import os
     from pathlib import Path
@@ -52859,8 +52859,31 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
     from src.data import replacement_forecast_bundle_reader as reader
     from src.data import replacement_input_hwm as hwm
     from src.state import db as db_module
-    from src.state.db import init_schema_trade_only
-    fixture = _kord_normal_prior_fixture(tmp_path,monkeypatch,target_date=_dt.date(2026,10,2))
+    from src.state.db import init_schema_trade_only, init_schema_world_only
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    from src.data import day0_hourly_vectors as hourly
+    carrier_calls = []
+    original_carrier = hourly.build_day0_remaining_probability_carrier
+    def observe_carrier(**kwargs):
+        result = original_carrier(**kwargs)
+        observed = copy.deepcopy(kwargs)
+        observed["_test_caller"] = inspect.currentframe().f_back.f_code.co_name
+        carrier_calls.append(observed)
+        return result
+    monkeypatch.setattr(hourly,"build_day0_remaining_probability_carrier",observe_carrier)
+    fixture = _hko_clock_normal_materializer_fixture(tmp_path,monkeypatch,_metric)
+    init_schema_world_only(fixture.conn)
+    fixture.conn.commit()
+    # The actual holding batch may refresh Gamma's pending-family topology.
+    # Answer at its HTTP boundary without manufacturing additional markets.
+    import httpx
+    def gamma_transport(url, **kwargs):
+        assert url == "https://gamma-api.polymarket.com/events", url
+        return httpx.Response(200,json=[],request=httpx.Request("GET",url))
+    monkeypatch.setattr("src.data.market_scanner._gamma_transport_get",gamma_transport)
     ro = trade = restore_body = None
     try:
         at = fixture.cut
@@ -52872,19 +52895,12 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
         monkeypatch.setattr(reader,"datetime",ReaderClock)
         row = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
             (fixture.result.posterior_id,)).fetchone())
-        payload = asdict(ForecastSnapshotReadyPayload(city="Chicago",target_date="2026-10-02",metric="low",
-            source_id="replacement_0_1",source_run_id=row["posterior_identity_hash"],
-            cycle=fixture.request.source_cycle_time.isoformat(),track="replacement_0_1_openmeteo_bayes_fusion",
-            snapshot_id=f"posterior-{row['posterior_id']}",snapshot_hash=row["posterior_identity_hash"],
-            captured_at=at.isoformat(),available_at=at.isoformat(),required_fields_present=True,
-            required_steps_present=True,member_count=51,min_members_floor=51,completeness_status="COMPLETE",
-            required_steps=[],observed_steps=[],expected_members=51,source_run_status="COMPLETE",
-            source_run_completeness_status="COMPLETE",coverage_completeness_status="COMPLETE",
-            coverage_readiness_status="LIVE_ELIGIBLE"))
-        payload["city_timezone"] = fixture.city.timezone
-        event = make_opportunity_event(event_type="EDLI_REDECISION_PENDING",entity_key="Chicago|2026-10-02|low",
-            source="consumed-proof-eviction",observed_at=at.isoformat(),available_at=at.isoformat(),
-            received_at=at.isoformat(),payload=payload,causal_snapshot_id=f"posterior-{row['posterior_id']}")
+        observation = observation_instant_row_to_day0_observation(dict(fixture.conn.execute(
+            "SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1"
+        ).fetchone()),metric=_metric)
+        event = build_day0_extreme_updated_event(observation=observation,
+            settlement_semantics=SettlementSemantics.for_city(fixture.city),
+            decision_time=at,received_at=at.isoformat())
         def read_only():
             conn = sqlite3.connect(f"file:{fixture.db}?mode=ro",uri=True)
             conn.row_factory = sqlite3.Row
@@ -52908,7 +52924,8 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
                 executor_submit=lambda *a,**k: pytest.fail("executor must never run"),
             ).process_global_batch((event,),at)
         callbacks = hooks[-1]
-        assert era._global_probability_refresh_family_keys((event,)) == frozenset()
+        assert era._global_probability_refresh_family_keys((event,)) == frozenset({
+            era.weather_family_id(city=fixture.city.name,target_date=row["target_date"],metric=_metric)})
         def clear_memos():
             hwm.clear_consumed_proof_memo()
             reader._LIVE_GRADE_MEMO.clear()
@@ -52917,6 +52934,10 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
         held = callbacks["prepare_held_event"](event,at)
         assert entry.prepared_global_family is not None, entry.reason
         assert held.prepared_global_family is not None, held.reason
+        assert not entry.prepared_global_family.candidate_payoff_q_lcb_caps
+        assert entry.prepared_global_family.probability_witness.exact_payoff_witness is None
+        assert not held.prepared_global_family.candidate_payoff_q_lcb_caps
+        assert held.prepared_global_family.probability_witness.exact_payoff_witness is None
         if action == "BUY":
             witness = entry.prepared_global_family.probability_witness
             tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
@@ -52947,15 +52968,29 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
             assert healthy.status == "STABLE", healthy
             assert healthy.binding_token.receipt.reason == "GLOBAL_SELL_PREFLIGHT_STABLE"
             assert healthy.binding_token.receipt.proof_accepted is True
-            for use in (era._CurrentProbabilityUse.ENTRY,era._CurrentProbabilityUse.HELD_MONITOR):
-                era._store_global_probability_family_cache(
-                    inspect.getclosurevars(callbacks["preflight_winner"]).nonlocals["probability_cache_namespace"],
-                    family_key=actuation.decision.candidate.family_key,event_id=event.event_id,
-                    family_binding_hash="binding",prepared=held.prepared_global_family,probability_use=use)
+        namespace = inspect.getclosurevars(callbacks["preflight_winner"]).nonlocals["probability_cache_namespace"]
+        for use, prepared in ((era._CurrentProbabilityUse.ENTRY,entry.prepared_global_family),
+                              (era._CurrentProbabilityUse.HELD_MONITOR,held.prepared_global_family)):
+            era._store_global_probability_family_cache(namespace,
+                family_key=prepared.probability_witness.family_key,event_id=event.event_id,
+                family_binding_hash=prepared.probability_witness.family_binding_identity,
+                prepared=prepared,probability_use=use)
         cached = dict(era._GLOBAL_PROBABILITY_FAMILY_CACHE)
         assert {use for _family,use in cached} == {"entry","held_monitor"}
+        for use, prepared in ((era._CurrentProbabilityUse.ENTRY,entry.prepared_global_family),
+                              (era._CurrentProbabilityUse.HELD_MONITOR,held.prepared_global_family)):
+            hit = era._probe_global_probability_family_cache(namespace,
+                family_key=prepared.probability_witness.family_key,event_id=event.event_id,
+                causal_snapshot_id=event.causal_snapshot_id,captured_at_utc=at,probability_use=use)
+            assert hit is not None and hit.posterior_id == row["posterior_id"]
+            np.testing.assert_array_equal(hit.probability_witness.yes_point_q,
+                prepared.probability_witness.yes_point_q)
         victim = int(json.loads(row["provenance_json"])["bayes_precision_fusion"]["current_value_serving"]
             ["icon_global"]["raw_model_forecast_id"])
+        columns = [r[1] for r in fixture.conn.execute("PRAGMA table_xinfo(raw_model_forecasts)") if r[6] == 0]
+        original_row = tuple(fixture.conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+            (victim,)).fetchone())
+        real_consumed_reader = serving.read_consumed_instrument_values
         if fault == "recorded_row_deleted":
             fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(victim,))
             fixture.conn.commit()
@@ -52992,7 +53027,8 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
             assert receipt.proof_accepted is False
             assert receipt.reason.startswith({"BUY":"GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:ValueError:",
                 "SELL":"GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"}[action]
-                + "GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:"
+                + {"BUY":"GLOBAL_CURRENT_REPLACEMENT_BUNDLE_BLOCKED:REPLACEMENT_RAW_INPUT_HWM:",
+                   "SELL":"GLOBAL_ACTUATION_HELD_PINNED_CARRIER_BLOCKED:REPLACEMENT_PINNED_RAW_INPUT_HWM:"}[action]
                 + ("basis=current_value_serving_consumed_proof_unverifiable:model=icon_global:" if evicts
                     else "basis=consumed_physical_proof_read_unavailable:")), receipt.reason
             result = callbacks["preflight_winner"](winner,actuation,at,authority)
@@ -53001,11 +53037,188 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
             for lane in ("prepare_event","prepare_held_event"):
                 replay = callbacks[lane](event,at+_dt.timedelta(seconds=1))
                 served = replay.prepared_global_family
-                if evicts:
+                if lane == "prepare_event":
                     assert served is None, (temperature,lane,replay.reason)
+                    assert ("consumed_proof_unverifiable" if evicts
+                            else "consumed_physical_proof_read_unavailable") in replay.reason
                 else:
-                    assert served is not None and served.posterior_id == row["posterior_id"], (lane,replay.reason)
+                    # The daily-row fault does not erase the independent
+                    # current hourly/native originals. HELD may rebuild a new
+                    # typed-role certificate, never reissue the bad posterior
+                    # or price a modern label with legacy shared/instrument σ.
+                    assert served is not None, replay.reason
+                    assert served.posterior_id is None
+                    assert served.probability_witness.source_truth_identity != held.prepared_global_family.probability_witness.source_truth_identity
+                    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION, day0_probability_semantics_revision
+                    assert day0_probability_semantics_revision(served.probability_witness.q_version) == DAY0_PROBABILITY_SEMANTICS_REVISION
+                    inputs = carrier_calls[-1]
+                    roles = inputs["identity_inputs"]["domain_role_shapes"]
+                    assert roles["schema"] == "day0_measurement_domain_shapes_v1"
+                    assert inputs["path_error_sigma_c"] == inputs["instrument_sigma_c"] == 0.0
+                    for name in ("X","Y"):
+                        assert len(roles[name]["member_points_native"]) == 51
+                        assert roles[name]["native_snapshot_id"] > 0
+                    assert roles["Y"]["provider_inputs"][0]["raw_model_forecast_id"] != victim
+                    assert {e["model"] for e in roles["X"]["provider_inputs"]} == {
+                        "icon_global","ukmo_global_deterministic_10km","ecmwf_ifs"}
+                    np.testing.assert_array_equal(served.probability_witness.yes_point_q,
+                        held.prepared_global_family.probability_witness.yes_point_q)
+        if fault == "recorded_row_deleted" and action == "BUY":
+            # Independent HELD recovery must still possess every original in
+            # its newly selected X closure. Restore the daily row first: these
+            # physical failures must not be hidden by its earlier HWM refusal.
+            from src.data import ecmwf_open_data as native
+            from scripts import extract_open_ens_localday as decoder
+            from src.data.replacement_forecast_readiness import latest_replacement_readiness
+            fixture.conn.execute(f"INSERT INTO raw_model_forecasts ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",original_row)
+            fixture.conn.commit()
+            readiness = latest_replacement_readiness(fixture.conn,city=fixture.city.name,
+                target_date=row["target_date"],temperature_metric=_metric,decision_time=at)
+            def public_read(purpose):
+                return reader.read_replacement_forecast_bundle(ro,baseline_bundle=None,readiness=readiness,
+                    city=fixture.city.name,target_date=row["target_date"],temperature_metric=_metric,
+                    decision_time=at,require_baseline_bundle=False,enforce_raw_input_hwm=True,
+                    raw_input_hwm_conn=ro,authority_purpose=purpose)
+            purposes = tuple(reader.ReplacementForecastAuthorityPurpose)
+            for purpose in purposes:
+                normal = public_read(purpose)
+                assert normal.ok, (purpose,normal.reason_code)
+            sell_winner,sell_actuation,_sell_authority,_sell_binding = _held_sell_through_actual_batch(
+                monkeypatch,trade=trade,forecast_conn=ro,event=event,at=at,
+                callbacks=callbacks,held_receipt=held)
+            _install_held_sell_venue(monkeypatch,actuation=sell_actuation)
+            def sell_submit(*,preflight_only,preflight_receipt=None):
+                return era._submit_current_global_sell(sell_winner,decision_time=at,
+                    global_actuation=sell_actuation,trade_conn=trade,global_claim_conn=trade,
+                    forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                    preflight_only=preflight_only,preflight_receipt=preflight_receipt)
+            sell_preflight = sell_submit(preflight_only=True)
+            assert sell_preflight.proof_accepted and sell_preflight.reason == "GLOBAL_SELL_PREFLIGHT_STABLE", sell_preflight
+            assert sell_preflight.global_jit_candidate is not None
+            x_role = roles["X"]
+            snapshot_id = x_role["native_snapshot_id"]
+            snapshot = dict(fixture.conn.execute(
+                "SELECT * FROM ensemble_snapshots WHERE snapshot_id=?",(snapshot_id,)).fetchone())
+            run = _dt.datetime.fromisoformat(snapshot["source_cycle_time"])
+            raw_root = fixture.native_input.paths.raw_root
+            def original_paths(track, digest):
+                aggregate = native._download_output_path(run_date=run.date(),run_hour=run.hour,
+                    param=decoder.TRACKS[track].open_data_param,raw_root=raw_root)
+                return [p for p in (aggregate,native._role_message_path(raw_root,digest)) if p.exists()]
+            primary_track = "mx2t6_high" if _metric == "high" else "mn2t6_low"
+            paired_track = "mn2t6_low" if _metric == "high" else "mx2t6_high"
+            primary_paths = original_paths(primary_track,x_role["native_interval_original_sha256"][0])
+            assert primary_paths
+            paired = x_role["paired_interval_originals"][0]
+            paired_paths = original_paths(paired_track,paired["raw_message_sha256"])
+            assert paired_paths
+            directory = native._download_output_path(run_date=run.date(),run_hour=run.hour,
+                param=decoder.TRACKS["mx2t6_high"].open_data_param,raw_root=raw_root).parent
+            static_paths = [directory/f".{track}_{run:%Y%m%d}_{run:%H}z_lsm.grib2"
+                for track in decoder.TRACKS]
+            static_paths = [p for p in static_paths if p.exists()]
+            assert static_paths
+            for kind, paths in (("primary",primary_paths),("paired",paired_paths),
+                                ("static",static_paths),("clock",[])):
+                originals = [(p,p.read_bytes(),p.stat()) for p in paths]
+                parked = []
+                try:
+                    for p, _body, _stat in originals:
+                        quarantine = p.with_name(p.name+".private-role-fault")
+                        assert not quarantine.exists()
+                        p.rename(quarantine)
+                        parked.append((p,quarantine))
+                    if kind == "clock":
+                        fixture.conn.execute("UPDATE ensemble_snapshots SET recorded_at=? WHERE snapshot_id=?",
+                            ((at+_dt.timedelta(seconds=2)).isoformat(),snapshot_id))
+                        fixture.conn.commit()
+                    clear_memos()
+                    era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+                    for purpose in purposes:
+                        missing = public_read(purpose)
+                        assert not missing.ok, (kind,purpose,missing.reason_code)
+                    jit = era._build_event_bound_no_submit_receipt_core(event,trade_conn=trade,
+                        decision_time=at,get_current_level=lambda: era.RiskLevel.GREEN,
+                        forecast_conn=ro,topology_conn=ro,calibration_conn=ro,
+                        global_actuation=actuation,reserve_on_pass=False)
+                    assert not jit.proof_accepted, (kind,jit.reason)
+                    assert jit.reason.startswith("GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"), jit.reason
+                    # This is the final SELL entry, with its actual stable
+                    # preflight token, not a claim that preflight submits.
+                    sell_jit = sell_submit(preflight_only=False,preflight_receipt=sell_preflight)
+                    assert not sell_jit.proof_accepted, (kind,sell_jit.reason)
+                    assert sell_jit.reason.startswith("GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:"), sell_jit.reason
+                    calls_before = len(carrier_calls)
+                    for lane in ("prepare_event","prepare_held_event"):
+                        missing = callbacks[lane](event,at+_dt.timedelta(seconds=1))
+                        assert missing.prepared_global_family is None, (kind,lane,missing.reason)
+                        assert "UNAVAILABLE" in missing.reason or "BLOCKED" in missing.reason, missing.reason
+                    assert not any(call["_test_caller"] == "_rebuild_decision_time_day0_carrier"
+                        for call in carrier_calls[calls_before:]), kind
+                finally:
+                    for p, quarantine in parked:
+                        quarantine.rename(p)
+                    if kind == "clock":
+                        fixture.conn.execute("UPDATE ensemble_snapshots SET recorded_at=? WHERE snapshot_id=?",
+                            (snapshot["recorded_at"],snapshot_id))
+                        fixture.conn.commit()
+                for p, body_bytes, stat in originals:
+                    assert p.read_bytes() == body_bytes
+                    assert p.stat().st_mtime_ns == stat.st_mtime_ns
+                clear_memos()
+                for purpose in purposes:
+                    reset_public = public_read(purpose)
+                    assert reset_public.ok, (kind,purpose,reset_public.reason_code)
+                assert era._current_global_actuation_prepared_family(event,global_actuation=actuation,
+                    forecast_conn=ro,topology_conn=ro,observation_conn=ro,
+                    decision_time=at)[0].probability_witness is selected
+                restored_sell = sell_submit(preflight_only=True)
+                assert restored_sell.proof_accepted, (kind,restored_sell.reason)
+                from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+                jit_rebound = restored_sell.global_jit_candidate
+                if isinstance(jit_rebound,era._GlobalJitHandoff):
+                    jit_rebound = jit_rebound.candidate
+                authority = GlobalSellExecutionAuthority.from_current(
+                    actuation=sell_actuation,jit_candidate=jit_rebound)
+                assert authority.actuation is sell_actuation
+                reset = callbacks["prepare_held_event"](event,at+_dt.timedelta(seconds=1))
+                assert reset.prepared_global_family is not None, (kind,reset.reason)
+                reset_roles = carrier_calls[-1]["identity_inputs"]["domain_role_shapes"]
+                assert reset_roles["X"] == x_role
+                np.testing.assert_array_equal(reset.prepared_global_family.probability_witness.yes_point_q,
+                    held.prepared_global_family.probability_witness.yes_point_q)
+            assert dict(fixture.conn.execute("SELECT * FROM ensemble_snapshots WHERE snapshot_id=?",
+                (snapshot_id,)).fetchone()) == snapshot
+        if fault == "recorded_row_deleted" and action != "BUY":
+            fixture.conn.execute(f"INSERT INTO raw_model_forecasts ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",original_row)
+            fixture.conn.commit()
+        elif restore_body is not None:
+            restore_body()
+            restore_body = None
+        else:
+            monkeypatch.setattr(serving,"read_consumed_instrument_values",real_consumed_reader)
+        clear_memos()
+        era._GLOBAL_PROBABILITY_FAMILY_CACHE.clear()
+        for lane, baseline in (("prepare_event",entry),("prepare_held_event",held)):
+            reset = callbacks[lane](event,at)
+            assert reset.prepared_global_family is not None, reset.reason
+            assert reset.prepared_global_family.posterior_id == row["posterior_id"]
+            np.testing.assert_array_equal(reset.prepared_global_family.probability_witness.yes_point_q,
+                baseline.prepared_global_family.probability_witness.yes_point_q)
+        assert tuple(fixture.conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+            (victim,)).fetchone()) == original_row
+        assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone()) == row
         assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+        if fault == "recorded_row_deleted" and action == "BUY" and _physical_twins:
+            # Reuse only the normal fixture machinery, with a fresh LOW DB and
+            # actual mn/paired-mx originals; no relabelled HIGH role or q cache.
+            twin_root = tmp_path/"low-physical-twin"
+            twin_root.mkdir()
+            with monkeypatch.context() as twin:
+                test_actual_consumed_proof_refusal_evicts_both_cached_lanes(
+                    twin_root,twin,fault,action,_hko_clock_native_sources,
+                    _metric="low",_physical_twins=False)
     finally:
         if restore_body is not None:
             restore_body()
@@ -53014,7 +53227,6 @@ def test_actual_consumed_proof_refusal_evicts_both_cached_lanes(tmp_path,monkeyp
         if trade is not None:
             trade.close()
         fixture.conn.close()
-        fixture.builtin.close()
 
 
 @pytest.mark.parametrize("fault",("recorded_row_deleted","consumed_read_locked"))
@@ -53166,12 +53378,14 @@ def _advance_icon_and_rematerialize(fixture,monkeypatch,first,*,hours,minutes,mo
 @pytest.mark.parametrize("scheme",("partial","full"))
 @pytest.mark.parametrize("fault",("cohort_row_deleted","cohort_body_same_mtime"))
 def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkeypatch,fault,scheme,action,_noaa_native_sources):
-    """Round-4: the consumed verdict re-proved only current_value_serving. A
+    """Future native confidence enclosures are deliberately not cacheable.
+
+    Round-4: the consumed verdict re-proved only current_value_serving. A
     posterior whose between-cohort spread input (the old ICON row, not a serving
     center) was deleted or changed in place kept PREPARED on ENTRY and HELD, and
     its BUY actuation replay passed. Every recorded serving role is now re-proven,
-    so all three refuse with the consumed-proof basis, warm and cold, and the
-    refusal evicts both cached lanes. ``full`` is the ordinary scheme whose
+    so all three refuse with the consumed-proof basis, with warm and cold proof
+    memos, while neither purpose stores a capped native witness. ``full`` is the ordinary scheme whose
     between-only row no other check covers (not current, no configured cohort):
     before this change its BUY passed the actuation replay and the authority
     wrapper alike.
@@ -53232,6 +53446,9 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
         held = callbacks["prepare_held_event"](event,cut)
         assert entry.prepared_global_family.posterior_id == row["posterior_id"], entry.reason
         assert held.prepared_global_family.posterior_id == row["posterior_id"], held.reason
+        for prepared in (entry.prepared_global_family,held.prepared_global_family):
+            assert len(prepared.candidate_payoff_q_lcb_caps) == 6
+            assert prepared.probability_witness.exact_payoff_witness is None
         if action == "BUY":
             witness = entry.prepared_global_family.probability_witness
             tokens = {b.condition_id:(b.yes_token_id,f"no-{i}") for i,b in enumerate(witness.bindings)}
@@ -53268,7 +53485,10 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
                     family_key=actuation.decision.candidate.family_key,event_id=event.event_id,
                     family_binding_hash="binding",prepared=held.prepared_global_family,probability_use=use)
         cached = dict(era._GLOBAL_PROBABILITY_FAMILY_CACHE)
-        assert {use for _family,use in cached} == {"entry","held_monitor"}
+        assert not cached
+        columns = [r[1] for r in fixture.conn.execute("PRAGMA table_xinfo(raw_model_forecasts)") if r[6] == 0]
+        original_row = tuple(fixture.conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+            (victim,)).fetchone())
         if fault == "cohort_row_deleted":
             fixture.conn.execute("DELETE FROM raw_model_forecasts WHERE raw_model_forecast_id=?",(victim,))
             fixture.conn.commit()
@@ -53313,6 +53533,24 @@ def test_a_lost_cohort_input_refuses_the_posterior_on_every_lane(tmp_path,monkey
             result = callbacks["preflight_winner"](winner,actuation,cut,authority)
             assert (result.status,result.reason) == ("BATCH_BLOCKED",receipt.reason), result
             assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
+        if fault == "cohort_row_deleted":
+            fixture.conn.execute(f"INSERT INTO raw_model_forecasts ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",original_row)
+            fixture.conn.commit()
+        else:
+            restore_body()
+            restore_body = None
+        clear_memos()
+        for lane, baseline in (("prepare_event",entry),("prepare_held_event",held)):
+            reset = callbacks[lane](event,cut+_dt.timedelta(seconds=1))
+            assert reset.prepared_global_family is not None, reset.reason
+            assert reset.prepared_global_family.posterior_id == row["posterior_id"]
+            np.testing.assert_array_equal(reset.prepared_global_family.probability_witness.yes_point_q,
+                baseline.prepared_global_family.probability_witness.yes_point_q)
+        assert not era._GLOBAL_PROBABILITY_FAMILY_CACHE
+        assert tuple(fixture.conn.execute("SELECT * FROM raw_model_forecasts WHERE raw_model_forecast_id=?",
+            (victim,)).fetchone()) == original_row
+        assert dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (row["posterior_id"],)).fetchone()) == row
         assert trade.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
     finally:
         if restore_body is not None:
