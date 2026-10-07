@@ -83,33 +83,51 @@ def _table(conn: sqlite3.Connection, name: str) -> str | None:
 
 
 def _forecast_path(conn, *, city: str, target: date, tz: ZoneInfo, start_utc: datetime,
-                   minutes: np.ndarray, decision: datetime) -> tuple[np.ndarray, str]:
-    """Hourly ecmwf_ifs path at the decision, linearly interpolated on the 5-min grid."""
+                   minutes: np.ndarray, decision: datetime) -> tuple[np.ndarray, list[str]]:
+    """Hourly ecmwf_ifs path on the 5-min grid from captures received by the decision.
+
+    Each capture starts at its run's initialisation, so the newest one rarely reaches back to
+    local midnight minus PRE_MIN.  Every grid time takes the newest capture (captured_at <=
+    decision) whose span contains it, interpolated linearly inside that capture: the freshest
+    causal forecast everywhere, with no extrapolation."""
     table = _table(conn, "day0_hourly_vectors")
     if table is None:
         raise DenseUnavailable("VECTOR_TABLE_MISSING")
-    row = conn.execute(
+    rows = conn.execute(
         f"SELECT vector_id, timezone_name, times_json, temps_c_json FROM {table} "
         "WHERE model = ? AND city = ? AND target_date = ? AND julianday(captured_at) <= julianday(?) "
-        "ORDER BY julianday(captured_at) DESC LIMIT 1",
+        "ORDER BY julianday(captured_at) DESC, vector_id DESC",
         (FORECAST_MODEL, city, target.isoformat(), decision.isoformat()),
-    ).fetchone()
-    if row is None:
-        raise DenseUnavailable("VECTOR_MISSING")
-    vtz = ZoneInfo(str(row[1]))
-    xs, ys = [], []
-    for raw, temp in zip(json.loads(row[2]), json.loads(row[3])):
-        if temp is None:
-            continue
-        moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        moment = moment.replace(tzinfo=vtz) if moment.tzinfo is None else moment
-        xs.append(moment.astimezone(UTC).timestamp())
-        ys.append(float(temp))
-    xs_a, ys_a = np.asarray(xs), np.asarray(ys)
+    ).fetchall()
     sec = start_utc.timestamp() + minutes * 60.0
-    if xs_a.size < 2 or not np.isfinite(ys_a).all() or xs_a.min() > sec[0] or xs_a.max() < sec[-1]:
+    out = np.full(sec.size, np.nan)
+    used: list[str] = []
+    for vector_id, timezone_name, times_json, temps_json in rows:
+        vtz = ZoneInfo(str(timezone_name))
+        xs, ys = [], []
+        for raw, temp in zip(json.loads(times_json), json.loads(temps_json)):
+            if temp is None or not math.isfinite(float(temp)):
+                continue
+            moment = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            moment = moment.replace(tzinfo=vtz) if moment.tzinfo is None else moment
+            xs.append(moment.astimezone(UTC).timestamp())
+            ys.append(float(temp))
+        if len(xs) < 2:
+            continue
+        xs_a, ys_a = np.asarray(xs), np.asarray(ys)
+        order = np.argsort(xs_a)
+        xs_a, ys_a = xs_a[order], ys_a[order]
+        if np.any(np.diff(xs_a) > 3600.0 + 1e-6):
+            continue  # a gap in the hourly series: not a coherent path
+        fill = np.isnan(out) & (sec >= xs_a[0]) & (sec <= xs_a[-1])
+        if fill.any():
+            out[fill] = np.interp(sec[fill], xs_a, ys_a)
+            used.append(str(vector_id))
+        if not np.isnan(out).any():
+            break
+    if np.isnan(out).any():
         raise DenseUnavailable("VECTOR_WINDOW_INCOMPLETE")
-    return np.interp(sec, xs_a, ys_a), str(row[0])
+    return out, used
 
 
 def _metar_rows(conn, table, *, city, station, channels, lo, hi, decision):
@@ -171,8 +189,8 @@ def gather_day(conn, *, params, city_obj, metric: str, target: date, decision: d
         raise DenseUnavailable("DECISION_OUTSIDE_LOCAL_DAY")
     day_minutes = (end - start).total_seconds() / 60.0
     minutes = ds.grid_minutes(day_minutes)
-    forecast, vector_id = _forecast_path(conn, city=params.city, target=target, tz=tz, start_utc=start,
-                                         minutes=minutes, decision=decision)
+    forecast, vector_ids = _forecast_path(conn, city=params.city, target=target, tz=tz, start_utc=start,
+                                          minutes=minutes, decision=decision)
     hour = np.asarray([(start + timedelta(minutes=float(m))).astimezone(tz).hour for m in minutes], int)
     table = _table(conn, "observation_prints")
     if table is None:
@@ -239,7 +257,7 @@ def gather_day(conn, *, params, city_obj, metric: str, target: date, decision: d
                        page=page, provisional=provisional, dense=dense, schedule=schedule,
                        speci_from=to_min(decision), context=pre)
     digest = {
-        "vector_id": vector_id,
+        "vector_ids": vector_ids,
         "forecast_sha256": hashlib.sha256(np.round(forecast, 6).tobytes()).hexdigest(),
         "page": [list(r) for r in day.page],
         "provisional": [list(r) for r in day.provisional],
@@ -375,6 +393,9 @@ def dense_remaining_carrier(*, metric: str, bin_bounds: Sequence[tuple[float | N
     rng = np.random.default_rng(int(identity[:16], 16))
     pick = rng.integers(0, len(variants), n_samples)
     samples = np.asarray(variants)[pick]
+    support = ds.semantic_support(day, bounds)
+    digest["semantic_support"] = list(support)
+    digest["semantic_boundary"] = day.boundary_absorbing
     carrier = {
         "q": [float(x) for x in point],
         "samples": [[float(x) for x in row] for row in samples],

@@ -319,3 +319,112 @@ def test_route_declares_metar_instants_and_rejects_others():
     assert not jma.settlement_instant(datetime(2026, 10, 7, 6, 10, tzinfo=UTC))
     fmi = next(s for s in sources if s.source_channel == "fmi_airport_temperature")
     assert not fmi.settlement_instant(datetime(2026, 10, 7, 6, 20, tzinfo=UTC))
+
+
+# ---------------------------------------------------------------- live-shaped regressions
+
+TOKYO = SimpleNamespace(name="Tokyo", timezone="Asia/Tokyo", wu_station="RJTT", settlement_source_type="noaa",
+                        settlement_unit="C")
+TOKYO_SEM = SettlementSemantics.for_city(TOKYO)
+TOKYO_BINS = ((None, 20.0),) + tuple((float(k), float(k)) for k in range(21, 30)) + ((30.0, None),)
+
+
+def _tokyo_conn():
+    import gzip
+    from pathlib import Path
+
+    blob = json.loads(gzip.open(Path(__file__).parent / "fixtures" / "day0_dense" / "tokyo_2026-10-07.json.gz",
+                                "rt").read())
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    ensure_table(c)
+    c.execute("CREATE TABLE day0_hourly_vectors (vector_id TEXT, model TEXT, city TEXT, target_date TEXT, "
+              "timezone_name TEXT, captured_at TEXT, times_json TEXT, temps_c_json TEXT)")
+    c.executemany("INSERT INTO day0_hourly_vectors VALUES (?,?,?,?,?,?,?,?)", [tuple(v) for v in blob["vectors"]])
+    for city, station, channel, published, value, unit, fetched, raw in blob["prints"]:
+        append_print(c, city=city, station_id=station, source_channel=channel, publish_ts_utc=published,
+                     value_native=value, unit=unit, fetched_at_utc=fetched, raw_report=raw)
+    return c
+
+
+def _tokyo_artifact(tmp_path, monkeypatch):
+    block = city_params_block()
+    block.update(station="RJTT", timezone="Asia/Tokyo", routine_minutes=[0, 30],
+                 dense_channel="jma_amedas_temperature", provisional_route_channels=["jma_amedas_temperature"],
+                 page_retention={"s": 0.99, "last_local_date": "2026-10-05"})
+    block["model"] = {"latent": {"tau": 354.0, "s2": 1.47, "s2_static": 0.07},
+                      "mean": {"mu_hour": [0.0] * 24, "beta": -1.26},
+                      "noise": {"b_hour": [0.05] * 24, "s1": 0.02, "s2": 0.02, "pi": 0.0, "quantum": 0.1,
+                                "tau_e": 1.0, "sd2": 0.0}}
+    payload = {"schema_version": 1, "artifact": "day0_dense_state_space_params", "data_version": "test",
+               "training_cutoff": "2026-10-05", "cities": {"Tokyo": block}}
+    payload["content_hash"] = params_mod.canonical_hash(payload)
+    path = tmp_path / "params.json"
+    path.write_text(json.dumps(payload))
+    real = params_mod.dense_params_for
+    monkeypatch.setattr(params_mod, "dense_params_for", lambda c, m, d, path=path: real(c, m, d, path))
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Tokyo": TOKYO})
+    evidence._CACHE.clear()
+
+
+def _tokyo_carrier(conn, monkeypatch, *, state_at: datetime, decision: datetime):
+    monkeypatch.setattr(evidence, "_read_connection", _fixed(conn))
+    value = print_value(conn, "jma_amedas_temperature", state_at)
+    inputs = day0_remaining_carrier_identity_inputs(city="Tokyo", unit="C", decision_time_utc=decision.isoformat(),
+                                                    station_id="RJTT", preliminary_survival_identity="cd" * 32)
+    inputs["current_path_state"] = {"value_native": value, "observed_at_utc": state_at.isoformat(),
+                                    "source": "jma_amedas_temperature"}
+    return build_day0_remaining_probability_carrier(
+        future_extremes_c=(23.0, 23.5), boundary_scenarios=((None, 0.4), (25.0, 0.6)), metric="high",
+        path_error_sigma_c=0.8, instrument_sigma_c=0.3, bin_bounds_c=TOKYO_BINS, n_point=2000, n_samples=500,
+        identity_inputs=inputs, settlement_semantics=TOKYO_SEM, operator=DAY0_REMAINING_CARRIER_OPERATOR_V2)
+
+
+def test_tokyo_760918_metar_instant_route_value_moves_mass_without_structural_zero(tmp_path, monkeypatch):
+    """Tokyo 2026-10-07 HIGH (posterior 760918, 07:59Z): JMA 25.2 at the 06:00Z METAR instant, AWC
+    METARs 25 at 05:00/05:30/06:00Z, no page row yet.  Served q gave 0.64 to bins <= 24.  The dense law
+    puts nearly all mass at >= 25, yet only a page row may make a bin exactly zero."""
+    _tokyo_artifact(tmp_path, monkeypatch)
+    conn = _tokyo_conn()
+    out = _tokyo_carrier(conn, monkeypatch, state_at=datetime(2026, 10, 7, 7, 40, tzinfo=UTC),
+                         decision=datetime(2026, 10, 7, 7, 59, 35, tzinfo=UTC))
+    assert out["operator"] == evidence.DAY0_DENSE_STATE_SPACE_OPERATOR
+    q = dict(zip(TOKYO_BINS, out["q"]))
+    below = sum(p for b, p in q.items() if b[1] is not None and b[1] <= 24)
+    assert below < 0.05
+    # Mirrors and the route are statistical evidence: the semantic certificate allows every bin.
+    assert all(out["dense_evidence"]["semantic_support"])
+    assert out["dense_evidence"]["semantic_boundary"] is None
+    # A page row at 25 makes bins <= 24 structurally zero.
+    append_print(conn, city="Tokyo", station_id="RJTT", source_channel="noaa_wrh_rjtt",
+                 publish_ts_utc="2026-10-07T06:00:00+00:00", value_native=25.0, unit="C",
+                 fetched_at_utc="2026-10-07T07:40:00+00:00", raw_report="RJTT 070600Z 35005KT 9999 25/10 Q1013")
+    evidence._CACHE.clear()
+    paged = _tokyo_carrier(conn, monkeypatch, state_at=datetime(2026, 10, 7, 7, 40, tzinfo=UTC),
+                           decision=datetime(2026, 10, 7, 7, 59, 35, tzinfo=UTC))
+    pq = dict(zip(TOKYO_BINS, paged["q"]))
+    support = dict(zip(TOKYO_BINS, paged["dense_evidence"]["semantic_support"]))
+    assert paged["dense_evidence"]["semantic_boundary"] == 25
+    assert all(not support[b] and pq[b] == 0.0 for b in TOKYO_BINS if b[1] is not None and b[1] <= 24)
+    assert all(support[b] for b in TOKYO_BINS if b[1] is None or b[1] >= 25)
+    conn.close()
+
+
+def test_lucknow_0906_gross_mirror_row_sets_no_structural_zero():
+    """Lucknow 2026-09-06 HIGH: AWC/Ogimet/IMD carry 37 at 07:30Z; the page keeps rows <= 31; settled 31."""
+    sem = SettlementSemantics(resolution_source="noaa_VILK", measurement_unit="C", precision=1.0,
+                              rounding_rule="wmo_half_up", finalization_time="12:00:00Z")
+    D = 1440.0
+    g = ds.grid_minutes(D)
+    f = 27.0 + 4.0 * np.sin(2 * math.pi * ((g % 1440) / 1440 - 0.375))
+    hour = ((g % 1440) // 60).astype(int)
+    page = [(float(t), int(sem.round_single(f[ds._slot(t)]))) for t in range(0, 13 * 60, 30)]
+    model = ds.DenseModel(ds.DenseLatent(300.0, 1.5), None, ds.DenseMean(tuple([0.0] * 24), 0.0))
+    day = ds.build_day(metric="high", day_minutes=D, forecast=f, hour=hour, page=page,
+                       provisional=[(13 * 60.0, 37, 0.98)], dense=(), schedule=[float(t) for t in range(0, 1440, 30)],
+                       speci_from=13 * 60 + 5.0)
+    bins = ((None, 28.0),) + tuple((float(k), float(k)) for k in range(29, 38)) + ((38.0, None),)
+    q = dict(zip(bins, ds.bin_probabilities(model, day, bins)))
+    page_max = day.boundary_absorbing
+    assert all(p > 0.0 for b, p in q.items() if b[1] is not None and page_max <= b[1] < 37)
+    assert q[(31.0, 31.0)] > 0.2

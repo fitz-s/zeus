@@ -431,6 +431,23 @@ def extreme_cdf(model: DenseModel, day: DenseDay, thresholds: Sequence[int], *,
     return np.clip((post / post.sum()) @ np.asarray(gs), 0.0, 1.0)
 
 
+def semantic_support(day: DenseDay, bins: Sequence[tuple[float | None, float | None]]) -> tuple[bool, ...]:
+    """Per bin, whether the settlement page's own rows still allow it (the semantic certificate).
+
+    False only where a received page row excludes the bin.  This is separate from statistical
+    confidence: a probability that underflows to 0.0 under the model is not a semantic zero."""
+    boundary = day.boundary_absorbing
+    out = []
+    for low, high in bins:
+        if boundary is None:
+            out.append(True)
+        elif day.metric == "high":
+            out.append(high is None or int(round(high)) >= boundary)
+        else:
+            out.append(low is None or int(round(low)) <= boundary)
+    return tuple(out)
+
+
 def bin_probabilities(model: DenseModel, day: DenseDay, bins: Sequence[tuple[float | None, float | None]], *,
                       preimage: tuple[float, float] = (-0.5, 0.5), cell: float = CELL_C) -> np.ndarray:
     """Settlement-bin probabilities for an ordered integer partition with open shoulders.
@@ -440,19 +457,17 @@ def bin_probabilities(model: DenseModel, day: DenseDay, bins: Sequence[tuple[flo
     if not day.page and not day.provisional and not day.pending and model.speci_rate_per_min == 0.0:
         raise ValueError("DAY0_DENSE_NO_DATA_OUTCOME")
     G = dict(zip(ks, extreme_cdf(model, day, ks, preimage=preimage, cell=cell).tolist()))
-    boundary = day.boundary_absorbing
+    allowed = semantic_support(day, bins)
     high = day.metric == "high"
     q = np.zeros(len(bins))
     for i, (low, high_) in enumerate(bins):
         if high:
             top = 1.0 if high_ is None else G[int(round(high_))]
             bot = 0.0 if low is None else G[int(round(low)) - 1]
-            excluded = boundary is not None and high_ is not None and int(round(high_)) < boundary
         else:
             top = 1.0 if low is None else G[int(round(low))]
             bot = 0.0 if high_ is None else G[int(round(high_)) + 1]
-            excluded = boundary is not None and low is not None and int(round(low)) > boundary
-        q[i] = 0.0 if excluded else max(top - bot, 0.0)
+        q[i] = max(top - bot, 0.0) if allowed[i] else 0.0
     total = q.sum()
     if not total > 0:
         raise ValueError("DAY0_DENSE_BIN_TOPOLOGY_INVALID")
