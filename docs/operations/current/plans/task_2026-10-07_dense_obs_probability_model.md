@@ -119,10 +119,16 @@ Otherwise the legacy code runs with identical arguments and gives byte-identical
 
 ### Steps (each a commit)
 1. [x] design (this section) 4f2446661; corrected (B_A page-only, per-row retention marks)
-2. [ ] operator module + unit tests (synthetic recovery, semantic zero, DST, reduction)
-3. [ ] fit module + refit script + params artifact
-4. [ ] evidence/dispatch + builder integration + revision + allow-lists + Helsinki carrier integration test
-5. [ ] G1/G2/G8 + regression tests (Tokyo 760918 METAR-instant floor; Tokyo 10-04 LOW non-METAR no floor)
+2. [x] operator module + unit tests b8a1e31a3
+3. [x] fit module + refit script f6852da68 (params artifact: fit in progress)
+4. [x] evidence/dispatch + builder integration + revision v36/v35 + allow-lists + integration tests 310567d72
+5. [x] G1/G2/G8 (in 310567d72) + regression tests
 6. [ ] replay proof (live, read-only) + performance + registries (source_rationale, script_manifest, test_topology)
 
 Rollback: revert the branch commits. No schema or DB change. Legacy paths are unchanged when the artifact is absent.
+
+### Progress notes (2026-10-07)
+- Information set: the dense carrier gathers evidence received by tau, the current-state print's first receipt, so writer, strict replay and held rebuild agree. Staleness is judged at tau.
+- Page retention measured from WORLD (AWC instant vs noaa_wrh row, page-covered days 09-13..10-05): Helsinki 0.962 (1085/1127), Tokyo 0.990, Singapore 0.992, Toronto 0.987, Lucknow 0.981 (11 integer differences), Moscow 0.898, Ankara 0.991, Istanbul 0.930. The misses cluster on 2026-09-20 (multi-station page dropout); independence is optimistic there.
+- Baseline (origin/live bc024fedd), 84 modules touching changed surfaces: 8441 tests, 681 failing in 49 modules (pre-existing).
+- Next: replay proof script (shipped carrier, live DBs mode=ro), perf, registries.
