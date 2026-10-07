@@ -196,6 +196,10 @@ def gamma_unique_point_truth(witness, *, city: str, target_date: str,
         markets = event.get("markets")
         if not isinstance(markets, list) or not markets:
             return None
+        for market in markets:
+            updated = clock(market["updatedAt"])
+            if updated.tzinfo is None or updated > received:
+                return None
         facts = [gamma_binary_outcome(market) for market in markets]
         if any(fact is None for fact in facts):
             return None
