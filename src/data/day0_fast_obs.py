@@ -863,7 +863,9 @@ def build_fast_station_residual_likelihood(
     local_start = datetime.combine(
         target_day, datetime.min.time(), tzinfo=tz
     ).astimezone(UTC)
-    local_end = local_start + timedelta(days=1)
+    local_end = datetime.combine(
+        target_day + timedelta(days=1), datetime.min.time(), tzinfo=tz
+    ).astimezone(UTC)
     # Bucketed by when the observation was TAKEN: a 23:50Z observation whose
     # mirror republishes it after local midnight belongs to the day it measured.
     settlement_values = [
@@ -3809,7 +3811,9 @@ class Day0FastObsEmitter:
                 day_start = datetime.combine(
                     target_day, datetime.min.time(), tzinfo=tz
                 ).astimezone(UTC)
-                day_end = day_start + timedelta(days=1)
+                day_end = datetime.combine(
+                    target_day + timedelta(days=1), datetime.min.time(), tzinfo=tz
+                ).astimezone(UTC)
                 rows = world_conn.execute(
                     """
                     SELECT publish_ts_utc, value_native, fetched_at_utc, raw_report

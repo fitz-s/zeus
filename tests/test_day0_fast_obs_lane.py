@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-10-03
-# Lifecycle: created=2026-06-10; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused/audited: 2026-10-07
+# Lifecycle: created=2026-06-10; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Defend causal same-station Day0 observations, source clocks and held q binding.
 # Reuse: Inspect raw source/event identity, unit laws and private SQLite fixtures before reuse.
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
@@ -7118,3 +7118,108 @@ def test_kma_complete_cor_response_recovers_prior_durable_conflict() -> None:
         )
     finally:
         conn.close()
+
+
+# ===========================================================================
+# Local-day windows end at the next LOCAL midnight, not 24 h after the start
+# ===========================================================================
+
+# Europe/Helsinki DST days: (target date, local-day start Z, next local midnight Z, hours).
+# Spring 2026-03-29 skips 03:00 -> 04:00 (23 h); autumn 2026-10-25 repeats 03:00-04:00 (25 h).
+_HELSINKI_DST_DAYS = (
+    ("2026-03-29", datetime(2026, 3, 28, 22, 0, tzinfo=UTC), datetime(2026, 3, 29, 21, 0, tzinfo=UTC), 23),
+    ("2026-10-25", datetime(2026, 10, 24, 21, 0, tzinfo=UTC), datetime(2026, 10, 25, 22, 0, tzinfo=UTC), 25),
+)
+
+
+@pytest.mark.parametrize("target_date,start,end,hours", _HELSINKI_DST_DAYS)
+def test_helsinki_dst_day_fixture_matches_the_zone_database(target_date, start, end, hours):
+    tz = ZoneInfo("Europe/Helsinki")
+    day = date.fromisoformat(target_date)
+    assert datetime.combine(day, datetime.min.time(), tzinfo=tz).astimezone(UTC) == start
+    assert datetime.combine(day + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(UTC) == end
+    assert end - start == timedelta(hours=hours)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("target_date,start,end,hours", _HELSINKI_DST_DAYS)
+def test_fast_residual_settlement_extreme_window_is_the_local_calendar_day(
+    monkeypatch, target_date, start, end, hours, metric,
+) -> None:
+    from src import config as config_module
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+    monkeypatch.setitem(
+        config_module.cities_by_name,
+        "Helsinki DST",
+        SimpleNamespace(
+            settlement_source_type="wu_icao",
+            wu_station="TEST",
+            settlement_unit="C",
+            timezone="Europe/Helsinki",
+        ),
+    )
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    sign = 1.0 if metric == "high" else -1.0
+
+    def put(channel, at, value, raw=""):
+        assert append_print(
+            conn, city="Helsinki DST", station_id="TEST", source_channel=channel,
+            publish_ts_utc=at.isoformat(), value_native=value, unit="C",
+            fetched_at_utc=(at + timedelta(minutes=1)).isoformat(), raw_report=raw,
+        )
+
+    # 21 matched settlement/fast pairs, all inside the local day, residual 0.
+    for k in range(21):
+        at = start + timedelta(hours=k)
+        put("wu_icao_history", at, 5.0)
+        put(FAST_OBS_SOURCE_ID, at, 5.0, f"TEST {at:%d%H%M}Z 05/00")
+    # Settlement prints straddling both edges of the local day.  Only the
+    # last local minute is inside; the next local midnight itself is outside.
+    put("wu_icao_history", start - timedelta(minutes=1), sign * 98.0)
+    put("wu_icao_history", end - timedelta(minutes=1), sign * 50.0)
+    put("wu_icao_history", end, sign * 99.0)
+
+    cutoff = end + timedelta(hours=2)
+    likelihood = build_fast_station_residual_likelihood(
+        conn,
+        city="Helsinki DST",
+        target_date=target_date,
+        metric=metric,
+        observed_source=FAST_OBS_SOURCE_ID,
+        observation_time=cutoff,
+        decision_time=cutoff + timedelta(minutes=5),
+    )
+    assert likelihood is not None
+    assert likelihood.matched_pairs == 21
+    assert likelihood.settlement_extreme_c == sign * 50.0, (
+        f"{target_date} is {hours} h: the window must close at {end.isoformat()}"
+    )
+
+
+@pytest.mark.parametrize("target_date,start,end,hours", _HELSINKI_DST_DAYS)
+def test_ledger_hydration_window_is_the_local_calendar_day(target_date, start, end, hours) -> None:
+    from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+    city = SimpleNamespace(name="Helsinki", timezone="Europe/Helsinki")
+    source = FastObsSource(source_id=FAST_OBS_SOURCE_ID, station_id="EFHK", authority="test")
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    in_day = (start, start + timedelta(hours=hours // 2), end - timedelta(minutes=1))
+    outside = (start - timedelta(minutes=1), end)
+    for at in in_day + outside:
+        assert append_print(
+            conn, city="Helsinki", station_id="EFHK", source_channel=FAST_OBS_SOURCE_ID,
+            publish_ts_utc=at.isoformat(), value_native=5.0, unit="C",
+            fetched_at_utc=(at + timedelta(minutes=1)).isoformat(),
+            raw_report=f"METAR EFHK {at:%d%H%M}Z 05/00",
+        )
+
+    emitter = Day0FastObsEmitter(fetcher=lambda stations, **kw: [], min_fetch_interval_s=0.0)
+    hydrated = emitter.hydrate_from_ledger(conn, ((city, source, target_date),))
+
+    assert hydrated == len(in_day), (
+        f"{target_date} is {hours} h: the window must close at {end.isoformat()}"
+    )
+    assert sorted(report.obs_time for report in emitter._cached_reports) == sorted(in_day)
