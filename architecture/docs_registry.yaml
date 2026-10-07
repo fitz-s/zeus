@@ -2025,6 +2025,24 @@ entries:
   contains_volatile_metrics: false
   current_tense_allowed: false
   refresh_source: manual_operator_audit
+- path: docs/reference/fast_obs_city_algorithm_matrix.md
+  doc_class: reference
+  default_read: false
+  direct_reference_allowed: true
+  current_role: per-city observation-channel to Day0-algorithm map with code anchors and a dated live-writer/gap snapshot
+  canonical_replaced_by: []
+  next_action: keep
+  lifecycle_state: durable
+  coverage_scope: exact
+  parent_coverage_allowed: false
+  truth_profile: durable_reference
+  freshness_class: audit_bound
+  supersedes: []
+  superseded_by: []
+  may_live_in_reference: true
+  contains_volatile_metrics: true
+  current_tense_allowed: false
+  refresh_source: code_and_manifest
 - path: docs/authority/statistical_calibration_authority_2026-06-12.txt
   doc_class: authority
   default_read: false

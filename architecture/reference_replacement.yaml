@@ -339,3 +339,19 @@ entries:
       companion yaml entry. Content is current; all cited files exist. Conditional
       load for any work touching vendor dependencies or source-change response.
       AGENTS.md conditional reads block already listed this doc correctly.
+  - path: docs/reference/fast_obs_city_algorithm_matrix.md
+    default_read: false
+    replacement_status: not_replaced
+    delete_allowed: false
+    replaced_by: []
+    unique_remaining:
+      - per-city (54) observation channel to Day0 algorithm class map
+      - Day0 source finality/carrier routing table for every observation channel
+      - dated live-writer counts and gap list G1-G8 (snapshot, recheck before use)
+    allowed_action: keep_conditional
+    rationale: >
+      Added 2026-10-07 by the fast-observation city matrix audit. Code,
+      config/cities.json, config/physical_current_sources.json and the canonical
+      DBs remain authority; the dated counts are a checked=2026-W41 snapshot.
+      Conditional load for Day0 observation-channel, fast-admission registry or
+      city settlement-source work.
