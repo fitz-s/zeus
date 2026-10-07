@@ -88,6 +88,13 @@ replacement for the actual source decoder.
    hourly vectors, calibration and forecast posteriors belong to FORECAST.
    Do not relocate the raw publication ledger under a generic statement that
    all observations are in FORECAST. [R6]
+7. `src/data/day0_fast_obs.py:863-872` converts the target day's local midnight
+   to UTC, then adds 24 hours to obtain its end. On a 23-hour spring day this
+   can include the next day's first hour; on a 25-hour autumn day it excludes
+   the target day's final hour. Construct the next local midnight before UTC
+   conversion, as section 2.1 and the reference DST test do. This is a concrete
+   existing boundary defect, documented here without changing production code.
+   Helsinki 2026-03-29 and 2026-10-25 reproduce the two one-hour errors. [R7]
 
 The supplied 38/177 is 21.47%, not one in seven. The NOAA-era 6/43 is 13.95%,
 approximately one in seven. An era boundary is a different target law; pooling
