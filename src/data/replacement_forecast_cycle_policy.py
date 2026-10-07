@@ -692,6 +692,7 @@ def tradeable_grade_coverage_sql(
     the table alias with a trailing dot already applied by the caller's existing
     convention (for example, ``"p."``).
     """
+    from src.data.day0_dense_evidence import DAY0_DENSE_STATE_SPACE_OPERATOR
     from src.data.day0_hourly_vectors import (
         DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
         DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3,
@@ -809,12 +810,15 @@ def tradeable_grade_coverage_sql(
         "AND (("
         f"{carrier_identity_type} IS NULL AND {carrier_operator_type} IS NULL AND "
         f"COALESCE(json_extract({provenance_expr}, '$.q_shape'), '') "
-        "NOT IN ('day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', 'day0_remaining_shared_carrier_v3')"
+        "NOT IN ('day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', 'day0_remaining_shared_carrier_v3', "
+        "'day0_remaining_shared_carrier_dense_v1')"
         ") OR ("
         f"{carrier_identity_type} = 'text' AND "
         f"length(trim(COALESCE({carrier_identity_value}, ''))) > 0 AND "
         f"{carrier_operator_type} = 'text' AND "
-        f"(({carrier_operator_value} = '{DAY0_REMAINING_CARRIER_OPERATOR_V2}' AND "
+        f"(({carrier_operator_value} = '{DAY0_DENSE_STATE_SPACE_OPERATOR}' AND "
+        f"{carrier_shape_value} = 'day0_remaining_shared_carrier_dense_v1') OR "
+        f"({carrier_operator_value} = '{DAY0_REMAINING_CARRIER_OPERATOR_V2}' AND "
         f"({carrier_shape_type} IS NULL OR {carrier_shape_type} = 'null' OR {carrier_shape_value} NOT IN ('day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', 'day0_remaining_shared_carrier_v3') OR {carrier_shape_value} = 'day0_remaining_shared_carrier_v2') AND "
         f"({provider_type} IS NULL OR {provider_type} = 'null' OR ({provider_type} = 'array' AND "
         "json_array_length(" + provenance_expr + ", '$.day0_remaining_carrier_station_extreme_providers') = 0)) AND "
@@ -862,7 +866,7 @@ def tradeable_grade_coverage_sql(
         f"json_type({provenance_expr}, '$.day0_remaining_bias_artifact') IS NULL AND "
         f"COALESCE({carrier_shape_value}, '') NOT IN ("
         "'day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', "
-        "'day0_remaining_shared_carrier_v3', 'day0_remaining_shared_carrier_resolver_v1', "
+        "'day0_remaining_shared_carrier_v3', 'day0_remaining_shared_carrier_resolver_v1', 'day0_remaining_shared_carrier_dense_v1', "
         "'fused_day0_fast_residual_likelihood')) OR ("
         f"{policy_type} = 'text' AND {policy_value} = '{DAY0_REMAINING_CENTER_POLICY}' AND "
         f"{bias_type} IN ('integer', 'real') AND {bias_value} = 0))"
@@ -881,7 +885,7 @@ def tradeable_grade_coverage_sql(
         f"AND (({mixture_policy_type} IS NULL AND {carrier_identity_type} IS NULL "
         f"AND {policy_type} IS NULL AND COALESCE({carrier_shape_value}, '') NOT IN ("
         "'day0_remaining_shared_carrier_v1', 'day0_remaining_shared_carrier_v2', "
-        "'day0_remaining_shared_carrier_v3', 'day0_remaining_shared_carrier_resolver_v1', "
+        "'day0_remaining_shared_carrier_v3', 'day0_remaining_shared_carrier_resolver_v1', 'day0_remaining_shared_carrier_dense_v1', "
         "'fused_day0_fast_residual_likelihood')) OR ("
         f"{mixture_policy_type} = 'text' AND {mixture_policy_value} = '{DAY0_PROBABILITY_MIXTURE_POLICY}'))"
     )

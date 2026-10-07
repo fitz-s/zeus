@@ -1754,6 +1754,29 @@ def build_day0_remaining_probability_carrier(
                 for b, w in scenarios
             )):
         raise ValueError("DAY0_REMAINING_CARRIER_INPUT_INVALID")
+    # Dense-observation state-space law: the live operator for qualified cities
+    # (fitted parameters, a fresh dense channel today, valid inputs).  Anything
+    # else returns None and the legacy operators below run on unchanged inputs.
+    from src.data.day0_dense_evidence import (
+        DAY0_DENSE_STATE_SPACE_OPERATOR,
+        dense_remaining_carrier,
+    )
+
+    dense = dense_remaining_carrier(
+        metric=metric,
+        bin_bounds=bounds,
+        identity_inputs=identity_inputs,
+        settlement_semantics=settlement_semantics,
+        n_samples=n_samples,
+        resolver_terminal=resolver_terminal,
+    )
+    if dense is not None:
+        return dense
+    if operator == DAY0_DENSE_STATE_SPACE_OPERATOR:
+        # SCOPE: this persisted dense certificate. DRAIN: the seed/materialization
+        # loop writes a current certificate. RESET: the dense preconditions hold
+        # again, or a legacy certificate replaces it.
+        raise ValueError("DAY0_DENSE_STATE_SPACE_REPLAY_UNAVAILABLE")
     selected_operator = (
         DAY0_REMAINING_CARRIER_OPERATOR_V3
         if operator is None and final_centers.size

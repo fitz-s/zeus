@@ -22,6 +22,7 @@ from src.contracts.ensemble_snapshot_provenance import (
     split_coordinate_bound_data_version,
 )
 from src.contracts.settlement_semantics import SettlementSemantics
+from src.data.day0_dense_evidence import DAY0_DENSE_STATE_SPACE_OPERATOR
 from src.data.day0_hourly_vectors import (
     DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
     DAY0_REMAINING_CARRIER_OPERATOR_V2,
@@ -131,6 +132,7 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
             "day0_remaining_shared_carrier_v2",
             "day0_remaining_shared_carrier_v3",
             "day0_remaining_shared_carrier_resolver_v1",
+            "day0_remaining_shared_carrier_dense_v1",
         )
     ):
         return None
@@ -147,6 +149,7 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
         "day0_remaining_shared_carrier_resolver_v1": (
             DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER
         ),
+        "day0_remaining_shared_carrier_dense_v1": DAY0_DENSE_STATE_SPACE_OPERATOR,
     }
     q_shape = provenance.get("q_shape")
     expected_operator = shared_shape_operators.get(q_shape)
@@ -156,8 +159,12 @@ def _day0_carrier_identity_reason(provenance: Mapping[str, Any]) -> str | None:
         DAY0_REMAINING_CARRIER_OPERATOR_V2,
         DAY0_REMAINING_CARRIER_OPERATOR_V3,
         DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        DAY0_DENSE_STATE_SPACE_OPERATOR,
     }:
         return "REPLACEMENT_DAY0_CARRIER_OPERATOR_NOT_CURRENT"
+    if operator == DAY0_DENSE_STATE_SPACE_OPERATOR:
+        # The dense law prices the tape itself; provider extremes are provenance only.
+        return None
     providers = provenance.get("day0_remaining_carrier_station_extreme_providers", ())
     final = provenance.get("day0_remaining_carrier_final_extremes_c", ())
     if operator == DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER:
@@ -687,7 +694,10 @@ def _held_pinned_provenance_reason(
     if not expected_unit or str(provisional.get("unit") or "").strip().upper() != expected_unit:
         return "REPLACEMENT_PINNED_DAY0_UNIT_MISMATCH"
     source = str(provisional.get("source") or "").strip().lower()
-    from src.events.day0_authority import day0_is_noaa_preliminary_source
+    from src.events.day0_authority import (
+        day0_is_fast_admission_route_source,
+        day0_is_noaa_preliminary_source,
+    )
     settlement_source_type = str(
         getattr(city_obj, "settlement_source_type", "") or ""
     ).strip().lower()
@@ -738,7 +748,8 @@ def _held_pinned_provenance_reason(
             or settlement_source_type not in {"noaa", "wu_icao"}
             or not day0_is_noaa_preliminary_source(source)
             or not expected_station
-            or source not in expected_source_pair.values()
+            or (source not in expected_source_pair.values()
+                and not day0_is_fast_admission_route_source(source))
         ):
             return "REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH"
         if str(likelihood.get("semantics") or "").strip() not in {
@@ -795,6 +806,7 @@ def _held_pinned_carrier_fields_reason(
             DAY0_REMAINING_CARRIER_OPERATOR_V2,
             DAY0_REMAINING_CARRIER_OPERATOR_V3,
             DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+            DAY0_DENSE_STATE_SPACE_OPERATOR,
         }
         or int(provenance.get("day0_remaining_carrier_sample_count") or 0) != 500
     ):

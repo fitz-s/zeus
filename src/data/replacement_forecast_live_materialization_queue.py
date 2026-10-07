@@ -2274,8 +2274,11 @@ def _settlement_seed_retires_fast_tail(
         return False
     if not (math.isfinite(settlement_c) and math.isfinite(fast_c)):
         return False
+    from src.config import runtime_cities_by_name
+
     return not fast_extreme_supersedes_settlement(
-        metric=metric, fast_extreme_c=fast_c, settlement_extreme_c=settlement_c
+        metric=metric, fast_extreme_c=fast_c, settlement_extreme_c=settlement_c,
+        city=runtime_cities_by_name().get(str(seed.get("city") or "")),
     )
 
 

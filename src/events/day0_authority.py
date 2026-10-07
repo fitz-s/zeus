@@ -42,11 +42,16 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # config switch is on, every Day0 q in the process carries the resolver
 # revision (a provisional carrier that cannot compose fails closed rather than
 # fall back).
+# v36/v35 (2026-10-07): qualified cities price Day0 with the dense-observation
+# state-space law (src/data/day0_dense_state_space.py), whose content identity
+# binds the clock-dependent evidence state; fast-admission routes reach q as
+# provisional METAR-instant evidence instead of an unconditioned fused normal.
+# One process-wide revision: every Day0 q_version binder uses one constant.
 DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = (
-    "day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
+    "day0_settlement_channel_revision_model_v36_dense_state_space_page_only_boundary_observation_clock_city_instrument_native_boundary_v1"
 )
 DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
-    "day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
+    "day0_resolver_terminal_composition_v35_dense_state_space_page_only_boundary_observation_clock_city_instrument_native_boundary_v1"
 )
 
 
@@ -137,7 +142,7 @@ def current_day0_probability_mixture_policy_has_authority(
         or isinstance(shape, str) and shape in {
             "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2",
             "day0_remaining_shared_carrier_v3", "day0_remaining_shared_carrier_resolver_v1",
-            "fused_day0_fast_residual_likelihood",
+            "day0_remaining_shared_carrier_dense_v1", "fused_day0_fast_residual_likelihood",
         }
     )
 
@@ -163,6 +168,7 @@ def current_day0_remaining_center_policy_has_authority(
     operator_declared = operator_key in provenance
     carrier_fields = (identity_key,)
     if edli:
+        from src.data.day0_dense_evidence import DAY0_DENSE_STATE_SPACE_OPERATOR
         from src.data.day0_hourly_vectors import (
             DAY0_REMAINING_CARRIER_OPERATOR_V2,
             DAY0_REMAINING_CARRIER_OPERATOR_V3,
@@ -175,7 +181,7 @@ def current_day0_remaining_center_policy_has_authority(
         operator = provenance.get(operator_key)
         operator_declared = isinstance(operator, str) and operator in {
             DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3,
-            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER, DAY0_DENSE_STATE_SPACE_OPERATOR,
         }
         carrier_fields += (
             "_edli_day0_remaining_carrier_q", "_edli_day0_remaining_probability_samples",
@@ -192,7 +198,7 @@ def current_day0_remaining_center_policy_has_authority(
     )) or operator_declared or isinstance(shape, str) and shape in {
         "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2",
         "day0_remaining_shared_carrier_v3", "day0_remaining_shared_carrier_resolver_v1",
-        "fused_day0_fast_residual_likelihood",
+        "day0_remaining_shared_carrier_dense_v1", "fused_day0_fast_residual_likelihood",
     }
     if not declared:
         return True
@@ -250,7 +256,26 @@ def day0_is_noaa_preliminary_source(source: object) -> bool:
             "observation_prints:aviationweather_metar",
             "observation_prints:ogimet_metar_",
         )
-    )
+    ) or day0_is_fast_admission_route_source(normalized)
+
+
+def day0_is_fast_admission_route_source(source: object) -> bool:
+    """Whether a source is a fast-admission METAR-content route (registry ``fast_admission``).
+
+    Its rows mirror the station's METAR at METAR instants, so it belongs to the
+    same provisional family as AWC/Ogimet: statistical evidence weighted by the
+    page's report-survival likelihood, never the settlement product itself
+    (Lucknow 2026-09-06: a 37 C METAR that the page dropped; settled 31).
+    """
+
+    from src.data.station_temperature_adapters import CHANNELS
+
+    normalized = str(source or "").strip().lower().removeprefix("observation_prints:")
+    route_channels = {
+        CHANNELS[provider]
+        for provider in ("jma_amedas", "eccc_swob", "mgm_metar", "imd_olbs_metar", "metaviatelecom_metar")
+    }
+    return normalized in route_channels
 
 
 def day0_is_carrier_source(source: object) -> bool:
@@ -309,6 +334,8 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     # Raw station reports and mirrors can contain prints omitted by the
     # resolver's NOAA WRH page product. Publication maturity or a calibrated
     # station margin cannot establish membership in that settlement product.
+    # Fast-admission routes are mirrors too: provisional at every instant,
+    # never MONOTONE_SETTLEMENT_BOUND (that is the noaa_wrh page alone).
     if day0_is_noaa_preliminary_source(source) or source.startswith(
         ("same_station_fast_tail", "observation_prints:same_station_fast_tail")
     ):

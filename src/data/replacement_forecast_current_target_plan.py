@@ -1539,6 +1539,12 @@ def _latest_authorized_day0_fact(
                                 observed_at=route_observed_at,
                                 value=value,
                             )
+                            # G2: a fast admission is settlement content only at its
+                            # proven METAR instants; other rows stay physical.
+                            or (
+                                require_settlement_channel
+                                and not station_route.settlement_instant(route_observed_at)
+                            )
                         ):
                             continue
                     if channel == "aviationweather_metar":

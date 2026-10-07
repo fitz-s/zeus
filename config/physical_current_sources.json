@@ -352,7 +352,11 @@
         },
         "limitation": "Measured transitions, not all-time latency domination."
       },
-      "role": "fast_admission"
+      "role": "fast_admission",
+      "metar_instant_minutes": [
+        0,
+        30
+      ]
     },
     {
       "provider": "eccc_swob",
@@ -437,7 +441,10 @@
         },
         "limitation": "Measured transitions, not all-time latency domination."
       },
-      "role": "fast_admission"
+      "role": "fast_admission",
+      "metar_instant_minutes": [
+        0
+      ]
     },
     {
       "provider": "imgw_synop",
@@ -2200,7 +2207,11 @@
           }
         }
       },
-      "role": "fast_admission"
+      "role": "fast_admission",
+      "metar_instant_minutes": [
+        0,
+        30
+      ]
     },
     {
       "provider": "imd_olbs_metar",
@@ -2288,7 +2299,11 @@
           }
         }
       },
-      "role": "fast_admission"
+      "role": "fast_admission",
+      "metar_instant_minutes": [
+        0,
+        30
+      ]
     },
     {
       "provider": "mgm_metar",
@@ -2381,7 +2396,11 @@
         }
       },
       "scope_note": "Same station, exact UTC observation instant, contract value. No final daily-product substitution.",
-      "role": "fast_admission"
+      "role": "fast_admission",
+      "metar_instant_minutes": [
+        20,
+        50
+      ]
     },
     {
       "provider": "mgm_metar",
@@ -2474,7 +2493,11 @@
         }
       },
       "scope_note": "Same station, exact UTC observation instant, contract value. No final daily-product substitution.",
-      "role": "fast_admission"
+      "role": "fast_admission",
+      "metar_instant_minutes": [
+        20,
+        50
+      ]
     }
   ]
 }

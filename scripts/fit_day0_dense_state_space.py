@@ -72,8 +72,11 @@ CITIES = {
     "Singapore": dict(icao="WSSS", tz="Asia/Singapore", archive=DAE / "nea_s24_wsss.csv.gz", step=1,
                       dense_channel="nea_sg_air_temperature", dense_max_age_minutes=15.0, routes=(),
                       speci_policy="measured"),
-    "Toronto": dict(icao="CYYZ", tz="America/Toronto", archive=None, step=60, dense_channel=None,
-                    dense_max_age_minutes=0.0, routes=("eccc_swob_temperature",), speci_policy="measured"),
+    # ECCC 51459 equals the METAR body integer at every instant (7416/7416): the observation is
+    # the METAR itself (no dense channel).  Its hourly archive estimates the latent and mean only.
+    "Toronto": dict(icao="CYYZ", tz="America/Toronto", archive=DAE / "eccc_cyyz_hourly.csv.gz", step=60,
+                    dense_channel=None, dense_max_age_minutes=0.0, routes=("eccc_swob_temperature",),
+                    speci_policy="measured"),
 }
 
 
@@ -321,7 +324,7 @@ def fit_city(city: str, train_last: str, retention_last: str, variants: int, wor
     if len(train) < 30:
         raise ValueError(f"{city}: only {len(train)} usable training days")
     cad = 30.0 if len(meta["routine_minutes"]) == 2 else 60.0
-    with_noise = cfg["archive"] is not None
+    with_noise = cfg["dense_channel"] is not None
     speci_rate = 0.0 if cfg["speci_policy"].startswith("none") else meta["n_speci"] / (meta["metar_hours"] * 60.0)
     truth = load_truth(city)
     days = [r["day"] for r in train]

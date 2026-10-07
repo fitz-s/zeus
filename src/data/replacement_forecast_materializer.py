@@ -1656,7 +1656,9 @@ def _day0_noaa_preliminary_carrier(
             "awc": "aviationweather_metar",
             "ogimet": f"ogimet_metar_{station.lower()}",
         }
-        if source not in expected_source_pair.values():
+        from src.events.day0_authority import day0_is_fast_admission_route_source
+
+        if source not in expected_source_pair.values() and not day0_is_fast_admission_route_source(source):
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_CHANNEL_INVALID")
         identity_fields = (
             "semantics",
@@ -1794,6 +1796,8 @@ def _day0_noaa_preliminary_carrier(
         remaining_center_bias_native=0.0,
     )
     carrier["current_path_state"] = current_state.identity()
+    if "dense_evidence" in carrier:
+        likelihood = {**likelihood, "dense_evidence": carrier["dense_evidence"]}
     clock_evidence = getattr(current_state, "clock_evidence", None)
     if isinstance(clock_evidence, Mapping):
         carrier["current_temperature_clock_evidence"] = dict(clock_evidence)
@@ -1807,10 +1811,13 @@ def _day0_shared_carrier_q_shape(
     carrier: Mapping[str, object], station_extremes: Sequence[object]
 ) -> str:
     """Name the shared carrier by the operator that built it."""
+    from src.data.day0_dense_evidence import DAY0_DENSE_STATE_SPACE_OPERATOR
     from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER
 
     if carrier["operator"] == DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER:
         return "day0_remaining_shared_carrier_resolver_v1"
+    if carrier["operator"] == DAY0_DENSE_STATE_SPACE_OPERATOR:
+        return "day0_remaining_shared_carrier_dense_v1"
     return (
         "day0_remaining_shared_carrier_v3"
         if station_extremes
