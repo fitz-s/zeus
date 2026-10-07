@@ -21012,3 +21012,149 @@ gaps remain separate; no push/load, manual source GET, seed/wake or raw staging
 is authorized by these code/test checks. Later gate receipts stay in existing
 external logs until ROOT's exact-tip acceptance so this scanner input is not
 rewritten merely to report results.
+
+### Required first-pass disposition and bounded fixture followups (2026-10-07)
+
+Actual frozen283c union ended5196P8F0E/S at maxfail8, not a full required
+pass: /tmp/zeus-final-native-role.MVzzmG/union.xml SHA256
+aadfc7336236c754f852992d486b138a06d3ff2a7251bab1388903b7fd225b44.
+Money completed255P0F/E/S separately. The unexecuted union tail remains a gap;
+one collection will identify its exact node-ID difference from all5204 executed
+XML nodes, followed by one non-failfast diagnostic tail with no repeated prefix.
+Combined evidence must not be described as one full-command rc0.
+
+BEFOREEDIT: native owns only tests/test_day0_remaining_day_pricing.py's seven
+failed functions and necessary file-local pure-math/normal-HKO preparation.
+Connectionless object/four-member cases retain their pure-kernel/bin-order/
+within-between/written-witness claims and modern typed refusal. Both HKO replay
+positives use the frozen normal-original preparation, real materializer/public
+connection/frame and source clocks; station/unit/body-clock negative controls
+remain. Refute the old TelAviv live claim rather than fabricating roles. No
+production/shared-helper changes or fake READY/probability constants.
+
+BEFOREEDIT: B owns only local hunks in
+tests/integration/test_w3_solve_seam_g3.py::test_missing_station_ground_family_keeps_qualified_held_taker_and_resets_normally.
+Capture each city's own KORD/Shanghai native paths; local prepare contexts bind
+the owning path resolver and reader clock to the actual caller cut. Preserve
+the baseline failure, establish healthy dual-city positives, quarantine exact
+Shanghai ground originals, refuse only that family while Chicago held/taker
+remains lawful, then restore the same immutable originals for RESET. Do not
+change bytes/clocks/identities, shared helpers, source grading or production.
+SCOPE is each tested family; DRAIN is normal original preparation/restoration;
+RESET is actual qualified same-original consumption, not a mocked verdict.
+
+Source adapterfc340 remains frozen and independently reviewed. These two
+test-only followups start from283c in disjoint children, preserve original
+failure XMLs, and return ordinary scoped commits. CLI/landing/loading wait for
+failure disposition and exact final input proof; raw/config/refs remain intact.
+
+Actual one-collection tail at283c:5674 collected, all5204 first-pass node IDs
+matched exactly and deselected,470 remaining executed once without maxfail.
+Result438P32F0E/S57.13s, /tmp/zeus-final-native-role.MVzzmG/exact-tail/tail.xml
+SHA256a5f8dc35e3e64f54927676b729ef60e9dda571215e4e1ba3f57228b7ea3429c7.
+Node-index.json preserves both exact sets; overlap is zero. Combined coverage
+is5634P40F across two explicit executions, not a full required command pass.
+All32 new failures are pricing's one parameterized
+test_noaa_actual_producer_consumer_reuses_canonical_path_sigma, with
+DAY0_CURRENT_ROLE_REBUILD_CONNECTION_UNAVAILABLE. Its additional function
+scope needs ROOT disposition before edits; do not weaken modern role source
+proof or mislabel its former connectionless scalar probe as real qualification.
+
+Fresh origin/live is e3411078c606ea28e094f4eb1ea9c043d4b9e812, advanced from
+24d65 by five commits. Observation peers9c8a586/ee8d369 modify KMA eligible
+family polling and KNMI config-secret fallback respectively, plus requirements
+and existing source/test registries; the three remaining commits only update
+the fast-observation matrix. A/B owned source paths have no direct overlap.
+Current required283c receipts remain their actual older peer epoch; final
+rebase/integration and changed-input checks must preserve this peer work.
+
+BEFOREEDIT supplemental ROOT-approved pricing scope: extend native's same
+test-only ownership to
+test_noaa_actual_producer_consumer_reuses_canonical_path_sigma (32 parameters)
+and necessary file-local representative preparation. Retain NOAA C/F and H/L
+pure math, sign/ordering/shape/witness equivalence and current typed refusal;
+do not relabel connectionless legacy probes as actual role authority. Add the
+minimum genuine TelAviv/Atlanta native/public role positives using the frozen
+parameterized primitive's original-format geometry/cycle/date encoding before
+capture. No HKO relabeling, source/shared-helper changes, receipt clock renewal
+or grade/READY doubles. Existing seven-node scope and negative twins remain.
+Exact tail identifies this one common constructor boundary; ROOT authorizes
+the necessary migration, not automatic producer/role gate relaxation.
+
+Normal peer integration completed: rebase onto e341 produced66f7e809, with
+all15 task-owned source/script paths byte-identical to283c; only the peer's
+two observation sources change src tree98db1217 to5f198a4e. Scripts tree
+f3d71bd0 remains identical; tests5419f37e to279c6630 changes only peer tests.
+PLAN-only stash d5dd15dc29b1adf0d45b07dda9151b909b25fc6d was applied without
+altering itsf0384ff4 content hash; stash and raw custody are retained.
+Accepted B ground-family commit0b597 was picked as7db5007093e6b0dbb4502324607c53a0f6ec5fda,
+only its authorized function changes; W3 SHA94cd9a938b98c434b0d1c233c7281f6da52b8ed3910a98e9d77bc58332cdc082.
+Its actual1P36.00s XML64080e9fb58a6d434ad25b99b2dab9fe203fe234939ab76e0a2f274b2adbd945
+closes the first-pass ground fixture failure, not the whole union.
+
+Peer affected controls actually passed15P0F/E/S2.14s in a private namespace
+with external networking denied: KMA entry/held/allowlist/prefetch and KNMI
+key precedence/malformed/missing/log isolation/source-role twins. XML
+/tmp/zeus-final-native-role.MVzzmG/peer-rebase/peer.xml SHA256
+fdc6c4366f707c1f267c43abf1765b79554ca32f46bf74675123f12d94f30e78.
+Existing venv imports netCDF4=1.7.4 and cftime=1.6.6; nothing installed and no
+secret read. Refreshed classifier remainsP0/integrationTRUE/unregistered0,
+45classifier+25release deduplicated65. Preparation initially rejected a short
+HEAD identity, then accepted the exact full HEAD; neither command executes a
+new whole required suite. Final pricing source-equivalent node/AST proof and
+the final HEAD CLI/secret checks still wait for the scoped fixture freeze.
+
+### Final scoped closure and explicit composite required proof
+
+ROOT accepted pricing-only e5e3d721, independently reviewed by XY0C/I, and
+the parent picked it as99654314fe79bfb1e266ffeea7724b7218b01d3d. Pricing
+SHA256d28cac0018e937ecbdedcaded18dd1d4ea89060d1a92b1b35aca8d5da0608eb0;
+adapterfc340 and all task-owned source/script inputs remain unchanged. Fresh
+origin/live remains e341; no load/push/runtime qualification is claimed.
+
+Exact AST impact: only seven pricing test functions plus three added helpers
+change; those helpers are referenced only by the seven functions, not autouse
+fixtures/module setup/other tests. Module globals and existing collection
+decorators are identical. W3 changes only the accepted ground-family function.
+All other selected test files are byte-identical; the two new peer test files
+are outside this65-selector union. The5674 original node IDs remain the same.
+Of5634 old passes, three belong to the changed validation-mode function and
+must not be silently reused. Thus5631 unaffected passes retain their exact
+node/function/helper/source basis;43 affected nodes require scoped closure.
+
+Parent actually reran the five lightweight numerical/dispatch functions,
+including valid/none/raises/mismatch twins:8P0F/E/S4.08s on99654314, XML
+/tmp/zeus-final-native-role.MVzzmG/final-affected/affected.xml SHA256
+b50ab12ab5ff98b5ec002718fa61e8afd67554e83373366cb2dfe1d6de2feb4e.
+This supersedes the five early numerical passes and covers all three affected
+old-pass negatives after the final helper change. Accepted normal HKO2P XML
+fe73c347d7886ba81ede426ae60b754cdb001883baa061998a391d49cd733a9a,
+NOAA32P selected from preserved mixed32P2F XML
+f256d566bcefc8305a7503fa843e141e2a7442b5494304811c6802ea87de8f01,
+and ground1P XML64080e9fb58a6d434ad25b99b2dab9fe203fe234939ab76e0a2f274b2adbd945
+complete all43 distinct affected nodes. HKO proves actual public ENTRY/HELD
+replay; NOAA four representative C/F H/L cases prove normal native/source-role
+math/PIT only, not full replacement readiness. Toy cases retain typed refusal
+and explicitly offline numerical assertions rather than action authority.
+
+Machine artifact /tmp/zeus-final-native-role.MVzzmG/composite-coverage.json
+SHA2561975ea391a506506007c4f63927428d6f5b1508e975305b84bace0cca9f31ebe
+maps every required node to original PASS or current accepted scoped XML,
+with43/43 affected closed and zero uncovered nodes. This is a composite
+evidence proof spanning named epochs, not a fabricated once-whole rc0: preserve
+the actual first-pass5196P8F and exact-tail438P32F receipts. Whole money's
+actual255P0F/E/S XML048dca61aceb3588c5637e1cb2f84aecbaf5d18217bc8b8e452c9b964e645814
+remains source/test-equivalent; neither scoped test migration touches money
+tests/helpers or its normal EGLC source inputs. Peer source changes are limited
+to KMA Korean-station selection and the KNMI physical route; the actual15
+peer controls defend both changed branches/allowlist/source-role boundaries.
+
+Freeze this necessary PLAN closeout before one actual final CLI180s cap and
+HEAD-ancestry secret scan, refreshed classifier/schema/quality/invariant
+coverage/changed-document checks. Final static receipts remain external so
+no later appearance-only PLAN commit invalidates this input signature. Any
+new material failure remains a real gap; baseline optional corpus guard and
+official decimal first-publication/station-equivalence gaps are not relabeled
+as passed required/runtime qualification. ROOT must accept the exact final
+tip before normal FF landing or one registered loader; raw/config/refs/user
+state and the recoverable index-lock package remain preserved.
