@@ -31,7 +31,10 @@ COMMANDS
         live-trading restarts also reload the live prerequisite sidecars before
         preflight, and still require scripts/check_live_restart_preflight.py to pass.
         forecast-live reloads first dry-run replay the newest queued requests on
-        the target code and REFUSE unless one is READY; pass
+        the target code and on the code forecast-live is running now (its
+        heartbeat git_head), and REFUSE when the target replays fewer READY
+        than the running code or none at all; with no usable running SHA the
+        rule falls back to requiring one READY. Pass
         --skip-forecast-replay-gate to override with a loud warning.
 
 SAFETY
@@ -58,6 +61,7 @@ import json
 import math
 import os
 import plistlib
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -4471,16 +4475,21 @@ def _probability_upgrade_pre_stop_gate(
     return result.ok, detail
 
 
-def _replay_forecast_request(path: Path, *, timeout_s: float) -> tuple[str, str]:
-    """Dry-run one queued request through the materializer CLI on the live checkout.
+def _replay_forecast_request(
+    path: Path, *, timeout_s: float,
+    code_root: Path | None = None, env: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Dry-run one queued request through the materializer CLI.
 
+    Runs the live checkout's CLI, or ``code_root``'s when given (the baseline
+    worktree), with ``env`` as the child environment (default: inherited).
     Returns (status, reason); status is "UNPARSEABLE" when no result JSON came
     back and "CONSUMED" when the queue already took the request. The CLI
     rewrites ``<input>.stage`` (the queue's retained_turn and last_failure live
     there), so it runs on a copy in a temp dir, with relative ``*_json`` fields
     anchored to the original request directory.
     """
-    root = Path(_require_live_repo())
+    root = Path(code_root) if code_root is not None else Path(_require_live_repo())
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
@@ -4499,7 +4508,8 @@ def _replay_forecast_request(path: Path, *, timeout_s: float) -> tuple[str, str]
                 [sys.executable, "-B",
                  str(root / "scripts" / "materialize_replacement_forecast_live.py"),
                  "--input-json", str(copy)],
-                cwd=root, capture_output=True, text=True, timeout=timeout_s, check=False,
+                cwd=root, env=env, capture_output=True, text=True, timeout=timeout_s,
+                check=False,
             )
     except (OSError, ValueError, AttributeError, subprocess.TimeoutExpired) as exc:
         return "UNPARSEABLE", f"{type(exc).__name__}: {exc}"
@@ -4518,23 +4528,115 @@ def _replay_forecast_request(path: Path, *, timeout_s: float) -> tuple[str, str]
     return status, ",".join(declined or codes[:1]) or str(result.get("error") or "")
 
 
-def _forecast_live_replay_gate(
-    *, sample: int = 10, timeout_s: float = 150.0,
-) -> tuple[bool, str]:
-    """SCOPE: can the target checkout materialize any queued live request.
+def _running_forecast_live_sha() -> str:
+    """git_head the forecast-live heartbeat reports; "" when absent or not a hex SHA."""
+    filename, _time_keys = PREREQUISITE_CODE_HEARTBEATS[DAEMONS["forecast-live"]]
+    payload = _load_json(Path(_require_live_repo()) / "state" / filename)
+    sha = str(payload.get("git_head") or "").strip().lower()
+    return sha if 7 <= len(sha) <= 40 and set(sha) <= set("0123456789abcdef") else ""
 
-    Replays queued requests newest first, one per distinct city/date/metric, up
-    to ``sample``, stopping at the first READY. Each is a dry run: read snapshot,
-    compute, rollback; no wake is published. A bad tip answers BLOCKED for every
-    request, and a crashed or unparseable replay (e.g. an import error) never
-    counts as READY, so both fail closed. An empty queue passes: it must never
-    block a restart. ``sample`` is 10, not 3: on healthy code only about a third
-    of queued requests replay READY (the rest are stale-request data blocks or
-    snapshot contention), so a short sample would refuse healthy restarts.
+
+def _remove_baseline_worktree(root: Path, tree: Path) -> bool:
+    """Delete the baseline worktree and its git metadata; True when files remain."""
+    with suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "remove", "--force", str(tree)],
+            capture_output=True, text=True, timeout=60.0, check=False,
+        )
+    shutil.rmtree(tree, ignore_errors=True)  # git left files, or never registered the tree
+    with suppress(OSError, subprocess.SubprocessError):
+        subprocess.run(
+            ["git", "-C", str(root), "worktree", "prune"],
+            capture_output=True, text=True, timeout=60.0, check=False,
+        )
+    return tree.exists()
+
+
+def _add_baseline_worktree(root: Path, sha: str) -> Path:
+    """Detached worktree of ``sha`` plus the ignored config files a checkout lacks."""
+    tree = Path(tempfile.mkdtemp(prefix="forecast-replay-baseline-"))
+    try:
+        add = subprocess.run(
+            ["git", "-C", str(root), "worktree", "add", "-q", "--detach", str(tree), sha],
+            capture_output=True, text=True, timeout=120.0, check=False,
+        )
+        if add.returncode != 0:
+            tail = (add.stderr.strip().splitlines() or ["no output"])[-1]
+            raise RuntimeError(f"git worktree add rc={add.returncode}: {tail[:200]}")
+        ignored = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z", "--others", "--ignored",
+             "--exclude-standard", "config"],
+            capture_output=True, text=True, timeout=20.0, check=False,
+        )
+        if ignored.returncode != 0:
+            raise RuntimeError(f"git ls-files rc={ignored.returncode}")
+        for rel in filter(None, ignored.stdout.split("\0")):
+            if not (tree / rel).exists():
+                (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / rel, tree / rel)
+    except BaseException:
+        _remove_baseline_worktree(root, tree)
+        raise
+    return tree
+
+
+def _replay_differential(
+    root: Path, request_dir: Path, picked: dict[tuple[str, ...], str], base_tree: Path,
+    *, timeout_s: float,
+) -> tuple[list[str], int, int]:
+    """Replay each request on the target and the baseline tree: (rows, base_ready, target_ready).
+
+    The baseline reads the live state through ZEUS_PRIMARY_ROOT and its own code
+    from ``base_tree``. A request the queue consumed on either side leaves both
+    counts.
     """
-    request_dir = (
-        Path(_require_live_repo()) / "state" / "replacement_forecast_live" / "requests"
-    )
+    base_env = {**os.environ, "ZEUS_PRIMARY_ROOT": str(root)}
+    rows: list[str] = []
+    base_ready = target_ready = 0
+    for family, name in picked.items():
+        target = _replay_forecast_request(request_dir / name, timeout_s=timeout_s)
+        base = _replay_forecast_request(
+            request_dir / name, timeout_s=timeout_s, code_root=base_tree, env=base_env
+        )
+        if "CONSUMED" in (target[0], base[0]):
+            continue
+        base_ready += base[0] == "READY"
+        target_ready += target[0] == "READY"
+        reason = next((why for status, why in (target, base) if status != "READY" and why), "")
+        rows.append(
+            f"{'/'.join(family)} baseline={base[0]} target={target[0]}"
+            + (f" {reason}" if reason else "")
+        )
+    return rows, base_ready, target_ready
+
+
+def _forecast_live_replay_gate(
+    *, sample: int | None = None, timeout_s: float = 150.0,
+) -> tuple[bool, str]:
+    """SCOPE: does the target checkout materialize queued live requests as well
+    as the code forecast-live is running now.
+
+    Replays queued requests newest first, one per distinct city/date/metric.
+    Each is a dry run: read snapshot, compute, rollback; no wake is published.
+    A crashed or unparseable replay (e.g. an import error) never counts as
+    READY. An empty queue passes: it must never block a restart.
+
+    Differential rule, when the forecast-live heartbeat git_head differs from
+    the target: a fixed ``sample`` (default 6), no early exit, replayed on the
+    target and on a temporary worktree of the running SHA. REFUSE when the
+    target has fewer READY than the running code, or none. An absolute ">=1
+    READY" bar cannot tell a tip that serves one family from one that serves
+    all (2026-10-07 16:50Z: one family replayed READY, then live committed no
+    posterior in 17 runs).
+
+    Absolute rule, when the running SHA is missing, equals the target, or its
+    worktree cannot be built: up to ``sample`` (default 10, not 3: on healthy
+    code only about a third of queued requests replay READY, the rest are
+    stale-request data blocks or snapshot contention) stopping at the first
+    READY; REFUSE when none is.
+    """
+    root = Path(_require_live_repo())
+    request_dir = root / "state" / "replacement_forecast_live" / "requests"
     found: list[tuple[float, str]] = []
     try:
         entries = list(os.scandir(request_dir))
@@ -4548,16 +4650,49 @@ def _forecast_live_replay_gate(
             found.append((entry.stat().st_mtime, entry.name))
         except OSError:
             continue  # the queue moved it between listing and stat
-    picked: dict[tuple[str, ...], str] = {}
+    queued: dict[tuple[str, ...], str] = {}
     for _mtime, name in sorted(found, reverse=True):
-        picked.setdefault(tuple(name.split(".", 3)[:3]), name)
-        if len(picked) == sample:
-            break
-    if not picked:
+        queued.setdefault(tuple(name.split(".", 3)[:3]), name)
+    if not queued:
         return True, "forecast-live replay gate: no queued requests to replay"
-    rows: list[str] = []
+
+    base_sha = _running_forecast_live_sha()
+    target_sha = head_sha(short=False) if base_sha else ""
+    base_tree: Path | None = None
+    note = "running forecast-live SHA unknown (heartbeat git_head missing or unparseable): absolute rule"
+    if _git_head_matches(target_sha, base_sha):
+        note = f"running forecast-live already at target {base_sha[:9]}: absolute rule"
+    elif base_sha:
+        try:
+            base_tree = _add_baseline_worktree(root, base_sha)
+        except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+            note = (f"WARNING baseline worktree for {base_sha[:9]} unavailable "
+                    f"({type(exc).__name__}: {exc}): absolute rule")
+
+    if base_tree is not None:
+        try:
+            rows, base_ready, target_ready = _replay_differential(
+                root, request_dir, dict(list(queued.items())[: sample or 6]), base_tree,
+                timeout_s=timeout_s,
+            )
+        finally:
+            left = _remove_baseline_worktree(root, base_tree)
+        lines = [f"forecast-live replay gate: running {base_sha[:9]} vs target {target_sha[:9]}"]
+        if left:
+            lines.append(f"WARNING baseline worktree {base_tree} was not removed")
+        if not rows:
+            return True, "\n  ".join(lines + ["queued requests were consumed during replay"])
+        verdict = ""
+        if target_ready < base_ready:
+            verdict = ": REFUSE, target replays fewer READY than the running code"
+        elif target_ready == 0:
+            verdict = ": REFUSE, target replays no READY"
+        lines += rows + [f"READY baseline={base_ready}/{len(rows)} target={target_ready}/{len(rows)}{verdict}"]
+        return not verdict, "\n  ".join(lines)
+
+    rows = []
     ready = False
-    for family, name in picked.items():
+    for family, name in list(queued.items())[: sample or 10]:
         status, reason = _replay_forecast_request(request_dir / name, timeout_s=timeout_s)
         if status == "CONSUMED":
             continue
@@ -4567,7 +4702,7 @@ def _forecast_live_replay_gate(
             break
     if not rows:
         return True, "forecast-live replay gate: queued requests were consumed during replay"
-    return ready, "forecast-live replay gate:\n  " + "\n  ".join(rows)
+    return ready, "\n  ".join(["forecast-live replay gate: " + note, *rows])
 
 
 def _cmd_restart_locked(args: argparse.Namespace) -> int:

@@ -18,6 +18,7 @@ import plistlib
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10055,6 +10056,330 @@ def test_forecast_live_replay_gate_ignores_requests_consumed_mid_replay(monkeypa
 
     assert ok is True
     assert "consumed during replay" in detail
+
+
+# -- differential rule: target vs the code forecast-live is running now --------
+
+_DIFF_CITIES = ["A", "B", "C", "D", "E", "F", "G", "H"]  # oldest first; newest = H
+
+
+def _diff_gate(
+    dl, monkeypatch, tmp_path, *, base_sha="a" * 40, target_sha="b" * 40,
+    base_ready=(), target_ready=(), consumed_base=(), consumed_target=(),
+    add_worktree=None, replay_raises=None,
+):
+    """Differential-gate fixture: no real git or materializer runs.
+
+    Returns (calls, worktrees): every (city, tree) replay, and the worktree
+    helper events ("add"/"remove") in order.
+    """
+    _replay_queue(dl, monkeypatch, tmp_path, [
+        f"{c}.2026-10-07.high.2026100{i}T000000Z.enqueue-{i}.json"
+        for i, c in enumerate(_DIFF_CITIES)
+    ])
+    if base_sha is not None:
+        (tmp_path / "state" / "forecast-live-heartbeat.json").write_text(
+            json.dumps({"git_head": base_sha})
+        )
+    tree = tmp_path / "baseline-tree"
+    calls, worktrees = [], []
+
+    def add(root, sha):
+        worktrees.append(("add", sha))
+        if add_worktree is not None:
+            raise add_worktree
+        return tree
+
+    def replay(path, *, timeout_s, code_root=None, env=None):
+        city = path.name.split(".")[0]
+        side = "baseline" if code_root is not None else "target"
+        calls.append((city, side, path.name, code_root, env))
+        if replay_raises is not None and len(calls) == replay_raises[0]:
+            raise replay_raises[1]
+        if city in (consumed_base if side == "baseline" else consumed_target):
+            return "CONSUMED", ""
+        ready = base_ready if side == "baseline" else target_ready
+        return ("READY", "") if city in ready else ("BLOCKED", "FUSION_DECLINED:X")
+
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: target_sha)
+    monkeypatch.setattr(dl, "_add_baseline_worktree", add, raising=False)
+    monkeypatch.setattr(
+        dl, "_remove_baseline_worktree",
+        lambda root, t: worktrees.append(("remove", t)) or False, raising=False,
+    )
+    monkeypatch.setattr(dl, "_replay_forecast_request", replay)
+    return calls, worktrees
+
+
+def test_replay_gate_differential_refuses_when_target_serves_fewer_than_running_code(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_replay_diff_refuse", "deploy_live.py")
+    # Newest six are H..C. Running code replays 4 of them READY, the target 1.
+    calls, worktrees = _diff_gate(
+        dl, monkeypatch, tmp_path, base_ready={"H", "G", "F", "E"}, target_ready={"H"},
+    )
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is False
+    assert "H/2026-10-07/high baseline=READY target=READY" in detail
+    assert "G/2026-10-07/high baseline=READY target=BLOCKED FUSION_DECLINED:X" in detail
+    assert "READY baseline=4/6 target=1/6" in detail and "REFUSE" in detail
+    assert worktrees == [("add", "a" * 40), ("remove", tmp_path / "baseline-tree")]
+    assert len(calls) == 12  # fixed sample of 6 on both trees, no early exit on the first READY
+
+
+@pytest.mark.parametrize("base_ready, target_ready", [
+    ({"H", "G", "F"}, {"H", "G", "F"}),
+    ({"H", "G"}, {"H", "G", "F", "E"}),
+    ({"H"}, {"C"}),  # same count on different families still passes
+])
+def test_replay_gate_differential_passes_when_target_matches_or_beats_running_code(
+    monkeypatch, tmp_path, base_ready, target_ready
+):
+    dl = _load("deploy_live_replay_diff_pass", "deploy_live.py")
+    _diff_gate(dl, monkeypatch, tmp_path, base_ready=base_ready, target_ready=target_ready)
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True
+    assert "REFUSE" not in detail
+
+
+def test_replay_gate_differential_refuses_when_target_serves_nothing_even_if_running_code_does_not(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_replay_diff_floor", "deploy_live.py")
+    _diff_gate(dl, monkeypatch, tmp_path, base_ready=(), target_ready=())
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is False
+    assert "READY baseline=0/6 target=0/6" in detail and "target replays no READY" in detail
+
+
+def test_replay_gate_differential_replays_the_same_newest_six_files_on_both_trees(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_replay_diff_sample", "deploy_live.py")
+    calls, _ = _diff_gate(dl, monkeypatch, tmp_path, base_ready={"H"}, target_ready={"H"})
+
+    dl._forecast_live_replay_gate(timeout_s=9.0)
+
+    target = [name for _c, side, name, *_ in calls if side == "target"]
+    baseline = [name for _c, side, name, *_ in calls if side == "baseline"]
+    assert target == baseline and len(target) == 6
+    assert [n.split(".")[0] for n in target] == ["H", "G", "F", "E", "D", "C"]
+    # Baseline runs the worktree's own code with the live state dir; target is untouched.
+    for _city, side, _name, code_root, env in calls:
+        if side == "baseline":
+            assert code_root == tmp_path / "baseline-tree"
+            assert env["ZEUS_PRIMARY_ROOT"] == str(tmp_path)
+        else:
+            assert code_root is None and env is None
+
+
+def test_replay_gate_differential_excludes_consumed_requests_from_both_counts(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_replay_diff_consumed", "deploy_live.py")
+    # Baseline READY on H and G; G is consumed on the target side, H on the baseline side.
+    # Without pairwise exclusion the baseline would count 1 and the target 0 or 2.
+    _diff_gate(
+        dl, monkeypatch, tmp_path, base_ready={"H", "G", "F"}, target_ready={"F"},
+        consumed_target={"G"}, consumed_base={"H"},
+    )
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True
+    assert "READY baseline=1/4 target=1/4" in detail
+    assert "H/" not in detail and "G/" not in detail
+
+
+def test_replay_gate_differential_row_reports_the_non_ready_sides_reason(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_diff_reason", "deploy_live.py")
+    _diff_gate(dl, monkeypatch, tmp_path)
+
+    def replay(path, *, timeout_s, code_root=None, env=None):
+        if code_root is None:
+            return "READY", "REPLACEMENT_DEPENDENCIES_READY"
+        return "ERROR", "REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED"
+
+    monkeypatch.setattr(dl, "_replay_forecast_request", replay)
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True
+    assert "H/2026-10-07/high baseline=ERROR target=READY REPLACEMENT_FORECAST_SNAPSHOT_RETRY_EXHAUSTED" in detail
+    assert "READY baseline=0/6 target=6/6" in detail
+
+
+def test_replay_gate_differential_all_consumed_passes(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_diff_allgone", "deploy_live.py")
+    _diff_gate(dl, monkeypatch, tmp_path, consumed_target=set(_DIFF_CITIES))
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True and "consumed during replay" in detail
+
+
+def test_replay_gate_same_sha_uses_absolute_rule_and_builds_no_worktree(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_diff_same", "deploy_live.py")
+    sha = "c" * 40
+    calls, worktrees = _diff_gate(
+        dl, monkeypatch, tmp_path, base_sha=sha[:9], target_sha=sha, target_ready={"G"},
+    )
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True and worktrees == []
+    assert [c[0] for c in calls] == ["H", "G"]  # absolute rule stops at the first READY
+    assert all(side == "target" for _c, side, *_ in calls)
+    assert "already at target" in detail and "absolute rule" in detail
+
+
+@pytest.mark.parametrize("heartbeat_sha", [None, "", "not-a-sha", "abc", 12345])
+def test_replay_gate_missing_or_unparseable_running_sha_uses_absolute_rule(
+    monkeypatch, tmp_path, heartbeat_sha
+):
+    dl = _load("deploy_live_replay_diff_nosha", "deploy_live.py")
+    calls, worktrees = _diff_gate(dl, monkeypatch, tmp_path, base_sha=None, target_ready=set())
+    if heartbeat_sha is not None:
+        (tmp_path / "state" / "forecast-live-heartbeat.json").write_text(
+            json.dumps({"git_head": heartbeat_sha})
+        )
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is False and worktrees == []  # no READY anywhere: the existing floor
+    assert len(calls) == 8 and all(side == "target" for _c, side, *_ in calls)
+    assert "running forecast-live SHA unknown" in detail
+
+
+def test_replay_gate_missing_heartbeat_file_uses_absolute_rule(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_diff_nohb", "deploy_live.py")
+    _, worktrees = _diff_gate(dl, monkeypatch, tmp_path, base_sha=None, target_ready={"H"})
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True and worktrees == []
+    assert "H/2026-10-07/high READY" in detail
+
+
+def test_replay_gate_worktree_failure_falls_back_to_absolute_rule_with_warning(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_replay_diff_wtfail", "deploy_live.py")
+    calls, worktrees = _diff_gate(
+        dl, monkeypatch, tmp_path, target_ready={"F"},
+        add_worktree=RuntimeError("git worktree add rc=128: fatal: invalid reference"),
+    )
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True
+    assert "WARNING baseline worktree for aaaaaaaaa unavailable" in detail
+    assert "invalid reference" in detail and "absolute rule" in detail
+    assert [c[0] for c in calls] == ["H", "G", "F"]
+    assert all(side == "target" for _c, side, *_ in calls)
+    assert worktrees == [("add", "a" * 40)]  # add_worktree cleans up after itself
+
+
+def test_replay_gate_worktree_timeout_falls_back_to_absolute_rule(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_diff_wttimeout", "deploy_live.py")
+    _diff_gate(
+        dl, monkeypatch, tmp_path, target_ready=set(),
+        add_worktree=subprocess.TimeoutExpired(["git", "worktree", "add"], 120.0),
+    )
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is False  # absolute rule, nothing READY
+    assert "WARNING baseline worktree" in detail and "TimeoutExpired" in detail
+
+
+def test_replay_gate_removes_baseline_worktree_when_a_replay_raises(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_diff_raises", "deploy_live.py")
+    _, worktrees = _diff_gate(
+        dl, monkeypatch, tmp_path, base_ready={"H"}, target_ready={"H"},
+        replay_raises=(4, KeyboardInterrupt("operator abort")),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        dl._forecast_live_replay_gate()
+
+    assert worktrees == [("add", "a" * 40), ("remove", tmp_path / "baseline-tree")]
+
+
+def test_replay_gate_empty_queue_builds_no_worktree(monkeypatch, tmp_path):
+    dl = _load("deploy_live_replay_diff_empty", "deploy_live.py")
+    _, worktrees = _diff_gate(dl, monkeypatch, tmp_path)
+    for f in (tmp_path / "state" / "replacement_forecast_live" / "requests").iterdir():
+        f.unlink()
+
+    ok, detail = dl._forecast_live_replay_gate()
+
+    assert ok is True and "no queued requests" in detail and worktrees == []
+
+
+def test_replay_forecast_request_with_code_root_runs_that_trees_materializer(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_replay_cli_coderoot", "deploy_live.py")
+    monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path / "live"))
+    request = tmp_path / "Paris.2026-10-07.high.20261007T010000Z.enqueue-a.json"
+    request.write_text("{}")
+    base = tmp_path / "base"
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen.update(cmd=cmd, **kwargs)
+        return subprocess.CompletedProcess(cmd, 0, '{"status": "READY"}\n', "")
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_run)
+
+    status = dl._replay_forecast_request(
+        request, timeout_s=3.0, code_root=base, env={"ZEUS_PRIMARY_ROOT": "/live"},
+    )
+
+    assert status == ("READY", "")
+    assert seen["cmd"][2] == str(base / "scripts" / "materialize_replacement_forecast_live.py")
+    assert seen["cwd"] == base and seen["env"] == {"ZEUS_PRIMARY_ROOT": "/live"}
+
+
+def test_baseline_worktree_helpers_add_copy_ignored_config_and_remove(tmp_path):
+    dl = _load("deploy_live_replay_diff_realgit", "deploy_live.py")
+    repo = tmp_path / "repo"
+    (repo / "config").mkdir(parents=True)
+    (repo / ".gitignore").write_text("config/secret.json\n")
+    (repo / "config" / "tracked.json").write_text("{}")
+    (repo / "config" / "secret.json").write_text('{"k": 1}')
+
+    def git(*a):
+        return subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("add", ".")
+    git("commit", "-q", "-m", "base")
+    sha = git("rev-parse", "HEAD")
+
+    tree = dl._add_baseline_worktree(repo, sha)
+
+    assert (tree / "config" / "tracked.json").exists()
+    assert (tree / "config" / "secret.json").read_text() == '{"k": 1}'
+    assert git("rev-parse", "HEAD") == sha and str(tree.resolve()) in git("worktree", "list")
+    assert dl._remove_baseline_worktree(repo, tree) is False
+    assert not tree.exists() and str(tree.resolve()) not in git("worktree", "list")
+
+    before = set(Path(tempfile.gettempdir()).glob("forecast-replay-baseline-*"))
+    with pytest.raises(RuntimeError, match="git worktree add"):
+        dl._add_baseline_worktree(repo, "0" * 40)
+    assert set(Path(tempfile.gettempdir()).glob("forecast-replay-baseline-*")) == before
 
 
 def test_deploy_live_forecast_live_restart_refused_when_replay_gate_fails(monkeypatch, capsys):
