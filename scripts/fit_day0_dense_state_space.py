@@ -282,9 +282,10 @@ def decision_day(rec: dict, t0: float, metric: str, with_dense: bool) -> ds.Dens
     page = [(float(t), int(k)) for t, k in zip(d.metar_t[msel], d.metar_k[msel]) if 0 <= t < d.day_minutes]
     pre = [(float(t), int(k)) for t, k in zip(d.metar_t[msel], d.metar_k[msel]) if t < 0]
     dense = [(float(t), float(x)) for t, x in zip(d.dense_t, d.dense_x) if t <= t0] if with_dense else []
+    # The archived tape is complete up to t0: one page window over [0, t0].
     return ds.build_day(metric=metric, day_minutes=d.day_minutes, forecast=d.forecast, hour=d.hour,
                         page=page, provisional=(), dense=dense, schedule=rec["schedule"], speci_from=t0,
-                        context=pre)
+                        context=pre, page_windows=((0.0, max([t for t, _ in page], default=-1.0)),))
 
 
 def _score_job(args):

@@ -477,13 +477,16 @@ def bin_probabilities(model: DenseModel, day: DenseDay, bins: Sequence[tuple[flo
 def build_day(*, metric: str, day_minutes: float, forecast: Iterable[float], hour: Iterable[int],
               page: Iterable[tuple[float, int]], provisional: Iterable[tuple[float, int, float]],
               dense: Iterable[tuple[float, float]], schedule: Iterable[float], speci_from: float,
-              context: Iterable[tuple[float, int]] = ()) -> DenseDay:
+              context: Iterable[tuple[float, int]] = (),
+              page_windows: Iterable[tuple[float, float]] | None = None) -> DenseDay:
     """Assemble a DenseDay at one decision.
 
-    Same-slot rows of one class merge into the hull of their integers.  A provisional row is
-    superseded by a page row at its slot and resolved-dropped when the page already has a later
-    row.  A scheduled instant is pending only when it has no row of either class and the page
-    has no later row (the page skipped it)."""
+    Same-slot rows of one class merge into the hull of their integers.  ``page_windows`` are the
+    spans each received page fetch returned (first to last row of one fetch); absent, the page's
+    own span.  Inside a window the page is resolved: a provisional row at a page slot is
+    superseded, one at a slot the page lacks was dropped, and a scheduled instant without a page
+    row is not on the tape.  Outside every window the page has not spoken: provisional rows stay
+    retention marks and unreceived scheduled instants are pending."""
 
     def merge(rows):
         out: dict[int, list] = {}
@@ -500,11 +503,18 @@ def build_day(*, metric: str, day_minutes: float, forecast: Iterable[float], hou
 
     page_slots = merge(page)
     context_slots = merge(context)
-    last_page = max((v[0] for v in page_slots.values()), default=-math.inf)
-    prov_slots = {g: v for g, v in merge(provisional).items() if g not in page_slots and v[0] > last_page}
+    if page_windows is None:
+        times = [v[0] for v in page_slots.values()]
+        page_windows = ((min(times), max(times)),) if times else ()
+    windows = tuple((float(a), float(b)) for a, b in page_windows)
+
+    def resolved(t: float) -> bool:
+        return any(a - GRID_MIN / 2 <= t <= b + GRID_MIN / 2 for a, b in windows)
+
+    prov_slots = {g: v for g, v in merge(provisional).items() if g not in page_slots and not resolved(v[0])}
     occupied = set(page_slots) | set(prov_slots)
     pending = tuple(sorted(float(t) for t in schedule
-                           if 0 <= t < day_minutes and t > last_page and _slot(float(t)) not in occupied))
+                           if 0 <= t < day_minutes and not resolved(float(t)) and _slot(float(t)) not in occupied))
     return DenseDay(metric=metric, day_minutes=float(day_minutes), forecast=tuple(float(v) for v in forecast),
                     hour=tuple(int(h) for h in hour),
                     page=tuple(sorted((v[0], v[1], v[2]) for v in page_slots.values())),

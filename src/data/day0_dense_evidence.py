@@ -251,13 +251,28 @@ def gather_day(conn, *, params, city_obj, metric: str, target: date, decision: d
         raise DenseUnavailable("QUALIFYING_CHANNEL_ABSENT_OR_STALE")
     schedule = [t for t in np.arange(0.0, day_minutes, 1.0)
                 if int(((start + timedelta(minutes=float(t))).astimezone(UTC).minute)) in routine]
+    windows: dict[str, list[float]] = {}
+    for published, fetched in conn.execute(
+        f"SELECT publish_ts_utc, fetched_at_utc FROM {table} WHERE city = ? AND source_channel = ? "
+        "AND julianday(publish_ts_utc) >= julianday(?) AND julianday(publish_ts_utc) < julianday(?) "
+        f"AND {RECEIPT_US_SQL} <= ?",
+        (params.city, page_channel, start.isoformat(), end.isoformat(), receipt_us(decision)),
+    ).fetchall():
+        try:
+            t = to_min(_utc(published))
+        except (TypeError, ValueError):
+            continue
+        span = windows.setdefault(str(fetched), [t, t])
+        span[0], span[1] = min(span[0], t), max(span[1], t)
+    page_windows = tuple(sorted((a, b) for a, b in windows.values()))
     day = ds.build_day(metric=metric, day_minutes=day_minutes, forecast=forecast, hour=hour,
                        page=page, provisional=provisional, dense=dense, schedule=schedule,
-                       speci_from=to_min(decision), context=pre)
+                       speci_from=to_min(decision), context=pre, page_windows=page_windows)
     digest = {
         "vector_ids": vector_ids,
         "forecast_sha256": hashlib.sha256(np.round(forecast, 6).tobytes()).hexdigest(),
         "page": [list(r) for r in day.page],
+        "page_windows": [list(w) for w in page_windows],
         "provisional": [list(r) for r in day.provisional],
         "context": [list(r) for r in day.context],
         "dense_sha256": hashlib.sha256(json.dumps(day.dense).encode()).hexdigest(),

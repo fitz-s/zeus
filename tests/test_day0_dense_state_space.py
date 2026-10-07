@@ -302,3 +302,19 @@ def test_matches_backtest_grid_oracle_on_identical_inputs():
         hi = 10 ** 6 if high is None else int(high)
         ref.append(sum(v for k, v in pk.items() if lo <= k <= hi))
     assert np.max(np.abs(q - np.asarray(ref))) < 1e-3  # measured 2.6e-4
+
+
+def test_partial_page_fetch_does_not_resolve_earlier_instants():
+    """Helsinki 2026-10-07: the intraday page fetch returned 17:20-19:50 local only; the morning's
+    mirrored 14 C METARs (13:50-16:50 local) were outside it and must stay on the tape."""
+    f = diurnal(center=11.0, amp=3.0)
+    morning = [(t, 14 if 13 * 60 <= t else int(R(f[ds._slot(t)])), 0.99) for t in SCHED if t <= 16 * 60 + 50]
+    page = [(t, 13) for t in SCHED if 17 * 60 <= t <= 19 * 60 + 50]
+    day = ds.build_day(metric="high", day_minutes=D, forecast=f, hour=HOUR, page=page, provisional=morning,
+                       dense=(), schedule=SCHED, speci_from=20 * 60.0, page_windows=((17 * 60 + 20.0, 19 * 60 + 50.0),))
+    assert len(day.provisional) == len(morning)
+    q = dict(zip(bins_around(10, 16), ds.bin_probabilities(model(NOISE), day, bins_around(10, 16))))
+    assert q[(14.0, 14.0)] > 0.9
+    covered = ds.build_day(metric="high", day_minutes=D, forecast=f, hour=HOUR, page=page, provisional=morning,
+                           dense=(), schedule=SCHED, speci_from=20 * 60.0, page_windows=((0.0, 19 * 60 + 50.0),))
+    assert covered.provisional == ()  # a fetch spanning them resolves them as dropped
