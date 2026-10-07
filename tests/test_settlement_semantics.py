@@ -29,6 +29,29 @@ from src.contracts.settlement_semantics import (
 )
 
 
+@pytest.mark.parametrize("unit,rule", [("C", "oracle_truncate"), ("F", "wmo_half_up")])
+def test_frozen_settlement_semantics_does_not_read_current_city(monkeypatch, unit, rule):
+    from src.contracts.settlement_semantics import SettlementSemantics
+    payload = dict(resolution_source="frozen_station", measurement_unit=unit,
+        precision=1., rounding_rule=rule, finalization_time="12:00:00Z")
+    monkeypatch.setattr(SettlementSemantics, "for_city", classmethod(
+        lambda *_: (_ for _ in ()).throw(AssertionError("current city drift"))))
+    restored = SettlementSemantics.from_frozen_payload(payload)
+    assert restored.measurement_unit == unit and restored.rounding_rule == rule
+    assert restored.round_single(28.7) == (28. if rule == "oracle_truncate" else 29.)
+
+
+@pytest.mark.parametrize("field,value", [("precision", float("nan")), ("precision", 0.),
+    ("precision", True), ("rounding_rule", "unknown"), ("measurement_unit", "K"),
+    ("finalization_time", "25:00:00Z"), ("resolution_source", ""), ("extra", 1)])
+def test_frozen_settlement_semantics_refuses_invalid_fields(field, value):
+    from src.contracts.settlement_semantics import SettlementSemantics
+    payload = dict(resolution_source="frozen_station", measurement_unit="C",
+        precision=1., rounding_rule="wmo_half_up", finalization_time="12:00:00Z")
+    payload[field] = value
+    with pytest.raises(ValueError): SettlementSemantics.from_frozen_payload(payload)
+
+
 @pytest.mark.parametrize("metric", ["high", "low"])
 def test_hko_selection_keeps_original_metric_provenance_without_publication_authority(metric):
     from src.config import City

@@ -221,6 +221,14 @@ def _capture_held_point_kernel(inputs, carrier, *, projection=None) -> None:
             carrier_to_witness=list(projection) if projection is not None else list(range(len(carrier["q"]))),
             n_point=inputs["n_point"], n_samples=inputs["n_samples"],
         )
+        roles = (inputs.get("identity_inputs") or {}).get("domain_role_shapes")
+        if roles is not None:
+            from src.engine.tier0_auction_corpus import _canonical, _project_held_point_roles
+            role_projection = _project_held_point_roles(roles,
+                unit=semantics.measurement_unit,
+                has_y=len(inputs["final_extreme_centers_c"]) > 0)
+            kernel["domain_role_shapes"] = role_projection
+            kernel["domain_role_shapes_sha256"] = hashlib.sha256(_canonical(role_projection)).hexdigest()
         raw = json.dumps(kernel, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         if len(raw) > 16*1024:
             capture["unavailable"] = b"POINT_KERNEL_SIZE_LIMIT"

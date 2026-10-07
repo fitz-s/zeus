@@ -937,7 +937,7 @@ files:
     zone: K0_frozen_kernel
     authority_role: settlement_rounding_law
     why: Settlement rounding contract (wmo_half_up + oracle_truncate) for DB writes and MC simulation. for_city() factory
-      routes HKO to oracle_truncate, all others to wmo_half_up.
+      routes HKO to oracle_truncate, all others to wmo_half_up. from_frozen_payload strictly restores the five already-captured settlement fields for diagnostic replay without consulting current city configuration or changing live dispatch.
     hazards:
     - WMO_ROUNDING_LAW
     - ORACLE_TRUNCATION_BIAS
@@ -2204,7 +2204,7 @@ files:
   src/engine/tier0_auction_corpus.py:
     zone: K2_runtime
     authority_role: auction_learning_corpus_writer
-    why: Builds the complete per-cut learning corpus from the cut's frozen witness/book/evaluation inputs (no I/O), holds it in a bounded in-process queue, and writes it after the batch's receipts commit in its own fail-soft transaction, so the corpus can never cost a receipt or delay a submit; raw q per leg comes from the family witness itself, never a sealed correction, so pre-scoring rejections keep their q. Evidence only; no trading decision reads it. Optional held-point replay validates the bounded native X/Y math-role projection and hash under the existing 16KiB/queue limits; old absent roles remain historical diagnostics only and current missing/malformed roles are typed unavailable. The corpus stores no raw/PIT blobs and grants no source or action authority.
+    why: Builds the complete per-cut learning corpus from the cut's frozen witness/book/evaluation inputs (no I/O), holds it in a bounded in-process queue, and writes it after the batch's receipts commit in its own fail-soft transaction, so the corpus can never cost a receipt or delay a submit; raw q per leg comes from the family witness itself, never a sealed correction, so pre-scoring rejections keep their q. Evidence only; no trading decision reads it. Optional held-point capture/freeze/replay validates the bounded source-derived native X/Y math-role projection and hash under the existing 16KiB/queue limits and restores frozen settlement fields through their strict owning factory; old absent roles remain historical diagnostics only and current missing/malformed roles are typed unavailable. The corpus stores no raw/PIT blobs and grants no source or action authority.
     downstream:
     - src/engine/global_batch_runtime.py
     - src/execution/post_trade_capital.py

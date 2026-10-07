@@ -378,6 +378,28 @@ class SettlementSemantics:
     rounding_rule: RoundingRule
     finalization_time: str  # "12:00:00Z"
 
+    @classmethod
+    def from_frozen_payload(cls, payload: Any) -> "SettlementSemantics":
+        """Restore captured contract semantics, never today's city configuration."""
+        fields = {"resolution_source", "measurement_unit", "precision",
+                  "rounding_rule", "finalization_time"}
+        if (not isinstance(payload, dict) or set(payload) != fields
+                or not isinstance(payload["resolution_source"], str)
+                or not 0 < len(payload["resolution_source"]) <= 256
+                or payload["measurement_unit"] not in ("C", "F")
+                or type(payload["precision"]) not in (int, float)
+                or not np.isfinite(payload["precision"]) or payload["precision"] <= 0
+                or payload["rounding_rule"] not in ("wmo_half_up", "floor", "ceil", "oracle_truncate")
+                or not isinstance(payload["finalization_time"], str)):
+            raise ValueError("FROZEN_SETTLEMENT_SEMANTICS_INVALID")
+        clock = payload["finalization_time"]
+        if (len(clock) != 9 or clock[2] != ":" or clock[5] != ":" or clock[8] != "Z"
+                or not all(clock[a:b].isascii() and clock[a:b].isdigit()
+                           for a, b in ((0, 2), (3, 5), (6, 8)))
+                or int(clock[:2]) > 23 or int(clock[3:5]) > 59 or int(clock[6:8]) > 59):
+            raise ValueError("FROZEN_SETTLEMENT_SEMANTICS_INVALID")
+        return cls(**payload)
+
     def round_values(
         self, values: Any
     ) -> "np.ndarray[Any, np.dtype[Any]]":

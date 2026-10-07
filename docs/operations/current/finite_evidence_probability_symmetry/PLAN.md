@@ -20667,3 +20667,37 @@ AST outside the owned helper/new antibody is identical. Production bytes remain
 78a; these tests establish relationship-test source qualification, not current
 official station equivalence or live loaded qualification. B's common HK/KORD
 repair and the final mandatory commands remain open; no CLI/secret/landing yet.
+
+BEFOREEDIT: ROOT authorizes the verified optional held-point trace repair in
+src/engine/event_reactor_adapter.py, src/engine/tier0_auction_corpus.py and
+src/contracts/settlement_semantics.py, with antibodies in the existing
+tests/test_tier0_auction_corpus.py and tests/test_settlement_semantics.py and
+only their existing source_rationale rows. Capture currently omits native
+domain_role_shapes, freeze disallows that field, and replay supplies only unit;
+the owning V3 builder therefore correctly refuses a changed point composition.
+SCOPE is optional diagnostic capture/replay, not probability or action authority.
+DRAIN/RESET is a bounded finite source-derived X/Y mathematical projection
+through capture/freeze/replay into the same public builder, with original
+revision/unit/provider/51-point/bound identities and exact point comparison.
+Missing, malformed, over-budget or mismatched modern roles remain diagnostic
+UNAVAILABLE; no shared-width fallback or old-trace backfill. Restore the frozen
+five settlement fields through a strict from_frozen_payload factory, without
+reading current city configuration or changing live for_city semantics.
+Rollback these three source changes together; retain actual trace RED evidence.
+Focused H/L, X-only/F/zero-width, tamper/budget and frozen-city-drift antibodies
+precede source freeze/review and the final original required commands. B owns
+the W3 module; parent does not edit it. Pricing's two shared-dependent nodes
+are now actual2P27.03s in pricing-dependent.xml on8fd66, not a new574-module run.
+
+Trace slice execution: new actual capture H/L RED2F2.40s (trace-red.xml SHA
+8ee9f218a3682dac6a4c996df72c49718f548bae031a9c7f7083567da48071e6)
+reproduces the absent domain_role_shapes field. Final two existing modules are
+97P1F6.47s, trace-final.xml SHA
+acb34d7da4e853dbc30ae17a932239ca656f763104b08b540a35943e5e137baa;
+all new role/frozen/optional-failure controls pass. The remaining literal
+constructor guard names unchanged replacement_forecast_materializer.py:6723
+and:7459 forecast_preimage calls, not the repaired corpus call. ROOT/XY retain
+this distinct named issue; no fourth source edit or skip is authorized here.
+Planning-lock and map-maintenance return ok/no issues, compile5 and diffcheck
+pass. Full mandatory commands and real HKO trace consumer rechecks remain
+downstream of B's still-running module and review; these97 do not replace them.
