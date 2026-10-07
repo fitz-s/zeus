@@ -21207,3 +21207,162 @@ Data process is adding a deploy_live.py gate that refuses a forecast-live reload
 queued-request replay gives zero READY.
 
 Evidence: today native capture job_run rows exist only for 01-02Z and 13-14Z (the two v7 load windows); all PARTIAL or FAILED.
+
+### Post-load bounded source-drain and current-event repairs — BEFOREEDIT
+
+checked=2026-W41; basis=actual b01 loader/native/public-fixture receipts;
+until=recheck-on-use. The b01 registered loader returned PRESTOP rc1 without
+stopping MAIN. At14:28:22Z, all seven original families still reference old v6
+posteriors763126/763276/763241/763134/763282/763259/763138 without native point
+roles. Each has a normal worker14:26–14:27 BLOCKED receipt for
+CURRENT_SHAPE_ENS_UNAVAILABLE/CAPTURE:STALE_HISTORY_ONLY. Old readiness READY
+is not current public qualification. MAIN9870 remains old; source74404/74498
+heartbeats bind b01. Direct receipt is
+/tmp/zeus-final-native-role.MVzzmG/load-b01/seven-scope-direct-receipt.json
+SHA2565f70faabff6d6b5aac501ea98055add2cd5a0bcf02beca5b57581db071024824.
+One public read completed but its subsequent launchctl serialization failed
+inside the sandbox; that unsaved verdict is a gap and is not rerun or claimed.
+
+ROOT-authorized A writer owns only src/data/ecmwf_open_data.py and
+tests/test_ecmwf_open_data_collect_cycle.py. Real isolated collector14:22:19–
+14:23:23 validated509 canonical records twice and346 stage records, taking
+63.904s and reaching zero first-missing GETs before the59s absolute deadline.
+SCOPE: incomplete native inventory for the exact run/model/required subset.
+DRAIN: expired cache-only probe may negatively defer on an obvious missing
+required body/proof; complete cache still receives strict validation. Within
+one actual turn only, reuse a just-validated record when all four immutable
+body/proof/index/exact-receipt objects retain exact regular-file identity and
+dev/inode/size/mtime/ctime fences; any mutation, alias or identity change forces
+strict reads. Full SHA, prefix comparison, grid/member/run/unit, PIT and current
+qualification are not cached or weakened. RESET: the first missing original
+becomes reachable inside the original cut, durable resume advances normally,
+and strict complete-subset qualification later succeeds. Test real collector
+entry, missing-GET reachability without external HTTP, mutation/key/cross-turn
+refusal, unchanged source clocks and complete-cache/default controls. No new
+budget, daemon path, schema, q authority or raw custody change.
+
+ROOT-authorized B writer owns scripts/check_live_restart_preflight.py only at
+_probability_upgrade_current_inputs and its existing
+tests/test_check_live_restart_preflight.py antibodies. XY's faithful normal
+KORD fixture has real public v7/v35 ENTRY/HELD/JIT success, canonical X print41
+and current raw METAR identity matching the event, yet the gate incorrectly
+reuses old-pin composite source/time predicates and reports
+CURRENT_DAY0_EVENT_MISMATCH. Actual probe XML
+/tmp/zeus-current-input-gate.mmoJ3H/probe.xml SHA256
+627fcf1631fbebd2cbc369402a5f93e99345b52b3df1e94352a888ad94370561.
+SCOPE: current independent event/source closure in this preflight function.
+DRAIN: validate current METAR station/body/temp/unit/valid-time and causal
+publication closure from its own immutable source evidence; preserve sealed X,
+all-provider strong reads, source hashes and PIT. Old-pin strict predicates
+remain unchanged and cannot be relaxed to admit a different stale certificate.
+RESET: a genuine same-frame current source/event match passes, while wrong
+station/body/time/unit/future publication and old-pin mismatches still refuse.
+Test the actual normal-role mixed-fast path and its high/low/clock negatives;
+never mock READY or turn event temperature into an observation scalar.
+
+Supplemental B BEFOREEDIT: ROOT permits the existing third test file
+tests/integration/test_w3_solve_seam_g3.py only within
+test_noaa_kord_fast_public_q_reaches_actual_held_and_jit, adding the actual
+preflight current-input antibody to this normal KORD public-role fixture.
+Capture its original mismatch as RED, then prove the corrected independent
+current source closure as GREEN without changing shared helpers, matrix,
+canonical event spot/body/valid-time/PIT, or old-pin predicates. The event
+extreme is not the current spot scalar. This test scope has no A writer overlap.
+
+### Provider-vector original closure — C BEFOREEDIT
+
+ROOT approves a disjoint writable C executor, with physical_shape_closure as
+read-only design/review owner. Exact source scope is
+src/data/bayes_precision_fusion_download.py and src/data/day0_hourly_vectors.py;
+existing antibodies are tests/test_bayes_precision_fusion_download.py and
+tests/data/test_day0_capture_equivalence_endpoint_fallback.py. No overlap with
+A's ECMWF source or B's preflight function. Use an independent child from the
+current landed b01; parent owns PLAN/integration, never live source edits.
+
+Verified code defect: normal transport possesses real immutable response bytes
+and __physical_response_capture_v1, but hourly metadata assembly at3468/3178
+drops the descriptor. Subsequent readers consume arrays/run/request hashes
+without replaying the body or its returned point. A controlled ICON original
+with returned coordinates changed to(-70,0) still yields an accepted equal
+vector under the old parser; its payload hash changes, so this is not a hash
+collision. Actual production wrong-point response remains UNKNOWN, separate
+from the verified missing code-level closure.
+
+SCOPE: exact city/target-day/model/vector original and its consuming cut.
+DRAIN: preserve the existing capture descriptor through metadata, reuse existing
+artifact/HTTP registration without new raw-value rows, and persist descriptor
+with the vector in the canonical FORECAST transaction. The owning reader must
+replay actual body/hash, requested and returned locations, model/run/unit,
+arrays, possession/written clocks and PIT using the original evidence, not a
+descriptor label or request coordinate as proof. Keep transport120h and
+consumer72h windows independent. Missing originals produce family-scoped
+typed UNAVAILABLE, not global RED. Do not backfill old20 records, renew first
+possession, invent issued clocks, migrate schema, add files or require frozen
+provenance to chase the newest reader.
+RESET: normal capture and materialization produce a genuine original closure
+which the same-cut reader validates; immutable restoration of the same source
+evidence re-admits the family. Focus actual normal body/point readback, wrong
+returned point, body/array/hash/unit/model/run mismatch, missing descriptor,
+written/possession/future-PIT and unchanged-first-clock controls. Original
+capture and consumption authority remain separate; test fixtures do not prove
+online station equivalence or current q readiness. C must freeze source/test
+hashes and actual RED/GREEN before parent integration and final changed-surface
+checks; no push or registered loader while any of A/B/C remains unaccepted.
+
+These disjoint children freeze ordinary commits for parent-only integration.
+Before landing, refresh origin, preserve peer edits/raw123/config/refs, verify
+changed-function impact and run proportionate required/static checks once on
+the final source/PLAN inputs. Review and ROOT exact-tip acceptance precede any
+normal FF landing and registered loader. No loader retry, manual seed/wake,
+source GET, DB write/copy or per-actor manual restart is authorized here.
+
+### ROOT-accepted path-level contract restoration — BEFOREEDIT
+
+Fresh origin/live2e04f7c13a7189fd60257e437996d5fc02c42d6b is a direct child of
+b01dde19748761a887df895eca86e6d6c3a81eca. Its ten probability sources and twelve
+tests are exact e341 bytes; owning AGENTS/authority remain unchanged. The peer's
+27-line PLAN explanation above is preserved as its reported intent, not a new
+human authorization or current law amendment. Current user instructions ask to
+investigate rollback/loading and continue this task. No contradictory human
+instruction or associated PR was found in the bounded current-thread/API read;
+that is not a claim that every external channel was searched.
+
+ROOT accepts restoration of only these existing b01 source blobs:
+scripts/extract_open_ens_localday.py;
+src/data/ecmwf_open_data.py; src/data/day0_hourly_vectors.py;
+src/data/replacement_forecast_materializer.py;
+src/data/replacement_forecast_cycle_policy.py;
+src/data/replacement_forecast_bundle_reader.py;
+src/engine/event_reactor_adapter.py; src/engine/tier0_auction_corpus.py;
+src/events/day0_authority.py; src/ingest/forecast_live_daemon.py.
+Corresponding exact b01 antibody blobs are:
+tests/engine/test_event_reactor_no_bypass.py;
+tests/integration/test_w3_solve_seam_g3.py;
+tests/money_path/test_finding_b_free_cash_bound.py;
+tests/test_check_live_restart_preflight.py;
+tests/test_day0_remaining_day_pricing.py;
+tests/test_ecmwf_open_data_collect_cycle.py; tests/test_forecast_live_daemon.py;
+tests/test_replacement_forecast_bundle_reader.py;
+tests/test_replacement_forecast_materializer.py;
+tests/test_replacement_fused_q_shape.py; tests/test_settlement_semantics.py;
+tests/test_tier0_auction_corpus.py.
+Use apply_patch in the task parent after normal rebase and mechanical PLAN
+union, never whole git revert/reset/live editing. Verify all22 blobs exactb01,
+retain peer/settlement/control/capture sources outside this list and raw123 in
+original untracked custody. Restore typed independent X/Y physical/PIT roles,
+separate point/band law, trace/frozen/axis callers and normal collection, while
+retaining the legal current-evidence three-component global variance formula.
+
+SCOPE: restored current probability/acquisition contract and its exact antibodies.
+DRAIN: layer A deadline-starvation delta and B current-event delta on this
+restored local freeze; C's original b01 base is superseded by this same restored
+freeze, not the e341 implementation. C owns its four approved paths thereafter.
+RESET: current-role originals and normal materialization/public consumers pass
+their existing strong gates, not a legacy READY alternative. Restore-only
+bytes retain the accepted b01 composite5674/money255 evidence basis explicitly
+as prior-epoch proof; new A/B/C functions need actual affected controls and
+independent named review. Freeze final PLAN/source inputs before one required
+CLI/HEAD-secret/changed-surface batch; exact-tip acceptance must precede normal
+FF landing or registered loader. No source request, venue action or source
+clock invention is part of restoration. Any contrary human directive or new
+semantic peer conflict stops integration for ROOT judgment.
