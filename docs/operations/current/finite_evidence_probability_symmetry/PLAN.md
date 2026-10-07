@@ -20000,3 +20000,87 @@ H/L prior-scope controls. Earlier unaffected checks retain their original
 epoch and scoped dependency basis; they do not establish live source-role or
 new MAIN/public v7/v35 readiness. Landing and registered restart still require
 ROOT acceptance of the exact checked tip.
+
+### Landed d32 runtime qualification — operating receipt
+
+d32d3414ecab314ddf043c891fa6a7fc99f011e9 was normally pushed and live-FFed.
+Its sole registered loader returned rc1/105.91s before STOP; at23:50:25.427268Z
+the actual11 held scopes were9 NOT_LIVE_GRADE plus2 expired HKOct6 proofs.
+MAIN9870 stayed alive and CAS released restart_refused. Loader log is
+/tmp/zeus-deploy-d32.EO4rcx/loader.log,
+SHA05fedb2a809a83f1b396ff2881407b92432badab9debfceed766954f86a0b3a9.
+Source HBs bind INGEST32458 and FORECAST32494 to d32; no new MAIN/v7 consumer
+claim follows. The23:55:09 Austin-only RO cut still found posterior758679/v6
+from21:17 and a pending23:46 request; request-READY and stored old READY are
+not current probability qualification, and no exact new worker completion was
+established. Native's23:55:13/23:56:14 bounded cuts prove prior00 LOW's normal
+54s turn, paired AVAILABLE and native PARTIAL, but zero published-raw increment:
+Austin H/L full-Y has22/510 member-steps,488 missing, with max first possession
+still22:29:34.453530Z. Do not substitute inventory recorded_at or claim that
+new source clocks already supersede the current request cut. Remaining chain:
+normal Y00 originals/physical proof -> normal causal redecision -> worker new
+revision -> public qualification -> registered MAIN load. Exact stage/cursor
+drainage is under bounded read-only investigation; no lock fix, manual seed,
+source GET, second loader retry or qualification bypass is authorized here.
+This operating receipt describes the landed d32 runtime cut, not a successful
+MAIN upgrade; it does not alter the already checked d32 CLI/secret epoch.
+
+### Busy attempt versus acquired service — BEFORE EDIT
+
+ROOT accepts native's verified0HTTP counterexample: three BUSY attempts rotate
+00paired ->12paired ->00native while RUNNING/FAILED overwrite job.started_at,
+falsely consuming LRU/phase/F-P service. Native solely owns the child slice
+src/ingest/forecast_live_daemon.py, src/data/ecmwf_open_data.py and existing
+tests/test_forecast_live_daemon.py. An optional internal on-acquired callback
+inside the original Lock/finally protection, only after successful acquisition
+with remaining cut, records actual service before HTTP. Keep real attempt
+timestamps and BUSY diagnostics; existing metadata service time/kind/mandatory
+attempt separately governs LRU/phase/F-P opportunity. Unknown legacy BUSY or
+RUNNING grants no credit; only clearly acquired positive legacy outcomes may
+migrate conservatively. SCOPE one exact source-debt turn; DRAIN same-cut attempts
+on other legal scopes when the first is BUSY; RESET actual acquired service,
+not0HTTP contention. Require real-function/real-Lock antibodies for BUSY no
+credit, successful native/paired credit, restart/F-P guard and deadline/no
+double-phase twins. Preserve locks,59s/4RPS, source clocks/raw/proofs/public
+qualification; no new lane/file/operator flag. Parent owns PLAN/integration,
+held owns independent review. No source GET, wake, qualification recompute or
+loader retry accompanies implementation.
+
+### Acquired-service same-key lost update — BEFORE EDIT
+
+Held's a0fb review is REQUEST_CHANGES: an older observer can overwrite a newer
+owner's service group at the blind initial RUNNING write or final SELECT/write;
+job_run_repo replaces the whole meta_json, so non-atomic reads do not protect
+the acquired-slot evidence. The merged7P receipt remains valid only for its
+tested branches, not this two-connection race. ROOT approves native only
+src/ingest/forecast_live_daemon.py and tests/test_forecast_live_daemon.py for a
+private short writer: BEGIN IMMEDIATE -> latest same exact job/source/track/run/
+release-key/scope read -> merge latest actual service and latest BUSY groups ->
+existing write_job_run -> commit, or rollback on failure. Initial RUNNING,
+acquired callback and final receipt all use that atomic writer; no transaction
+crosses HTTP. Keep ecmwf source hash eeba0b117fbd8d3805fbc97c7fc5eba5caa0952e025abdf76a7bb2dd3804d829,
+job_run_repo, schema, locks,59s/4RPS, physical originals and source clocks intact.
+Require actual two-connection late-initial/late-final RED/GREEN H/L twins plus
+real-Lock, callback-release and F/P controls. SCOPE one exact journal identity;
+DRAIN same normal calls with atomic metadata preservation; RESET a real newer
+service cannot be erased by a late BUSY observer. Parent owns integration/PLAN,
+native child owns these two paths, held re-reviews the final freeze. CLI, push
+and loader remain paused until this Important is closed.
+
+Held independently CLOSED the lost-update Important and APPROVED combined
+a0fb329732e7faea46583f1be30af0079200c7f3 ->7946a7a2963b145acad705d51b46ee23dee7b0f6
+0C/I. The exact followup delta applies cleanly after parent a0fb's cherry-pick;
+daemon f2281671b60daf388550b50d04a5ef2e74028c1adb1c2a9520a53f9936612092,
+test10fac05e5576d10c282407acc78a074321c43d79a3ed5cd1f20115b8d3e0f824,
+and unchanged ecmwf eeba0b117fbd8d3805fbc97c7fc5eba5caa0952e025abdf76a7bb2dd3804d829
+match the frozen child. Four real interleavings plus14 affected controls are18
+unique passes in that final author epoch; original mixed11P/4F and later4P
+remain separately recorded, not relabeled as one green matrix. The parent
+checks the four two-connection and two real-Lock H/L boundaries; source-only
+default-no-callback and callback-failure checks retain their unchanged ecmwf
+dependency and original merged7P receipt, not a new whole-suite execution.
+This closeout freezes the PLAN before one final actual CLI/HEAD ancestry secret,
+delta classifier and narrow changed-surface gates. Keep classifier integration
+requirements explicit; code/service-credit proof does not establish native
+role completion or new public v7/v35 consumption. No push/registered load until
+ROOT accepts the exact final checked tip; raw/config/ref evidence is preserved.
