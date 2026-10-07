@@ -21548,3 +21548,23 @@ chronology, not a production defect or source clock backfill. SCOPE is this
 private fixture's new vector write event; DRAIN is its normal chronological
 capture/persistence; RESET is genuine original replay at the later cut. Source
 clock rejection antibodies remain mandatory. No loader or live action follows.
+
+Supplemental same W3 fixture migration BEFOREEDIT: the owning replay observer
+now shows all four KORD deterministic vectors refused by exact possession/PIT:
+capturedOct1 08:18 but BPF artifact/HTTP Python first-registration clocksOct7
+16:08:43, while private vector SQL writes remainOct1 08:18. Source registration
+and its reader correctly reject this split clock. Bind the private BPF writer
+clock within the first normal persistence context to vector_capture; restore
+the module clock on exit and never UPDATE old rows or backdate original capture.
+The HK qualified-consumer representative also genuinely fails at its old
+array-only parser input: timezone/hourly only, no returned point/entity receipt.
+ROOT authorizes only _hko_clock_normal_materializer_fixture's deterministic
+portion to use existing fetch_day0_hourly_vectors, normal single-run metadata
+transport/capture callbacks and independently read static-grid returned points.
+Preserve every original model's values, run/target/unit and decision/action
+assertion. Keep generic OM ENS parsing as offline evidence and refuse current
+authority without its distinct original contract; independent native51 GRIB
+roles stay required. SCOPE is these owned synthetic fixtures, not online city
+truth. DRAIN/RESET is genuine normal capture->registration->vector replay at
+the chronological private write/decision cuts. No handcrafted descriptors,
+qualification stubs, requested-as-returned coordinates or production changes.

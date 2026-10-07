@@ -50870,24 +50870,48 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     vector_at = cut-timedelta(minutes=2)
     vector_cycle = cut.replace(hour=0,minute=0)
     provider_models = hourly.day0_hourly_models_for_city(city)
-    for i, model in enumerate(provider_models):
-        api_model = OPENMETEO_MODEL_IDS.get(model,model)
+    from src.data import openmeteo_model_updates as updates, openmeteo_model_surface as model_surface
+    api_models = {OPENMETEO_MODEL_IDS.get(model,model):model for model in provider_models}
+    vector_meta = {"last_run_initialisation_time":vector_cycle.isoformat(),
+        "last_run_availability_time":(vector_cycle+timedelta(hours=1)).isoformat(),
+        "last_run_modification_time":(vector_cycle+timedelta(hours=1)).isoformat(),
+        "update_interval_seconds":21600,"temporal_resolution_seconds":3600}
+    def vector_http(_url,params,**kwargs):
+        model = api_models[params["models"]]
+        if model == "ecmwf_ifs":
+            from src.data.openmeteo_ecmwf_ifs9_bucket_transport import source_cell_geometry_proof
+            cell = source_cell_geometry_proof(latitude=city.lat,longitude=city.lon,target_elevation_m=32.)
+            selected_lat,selected_lon = cell["selected_grid_lat"],(cell["selected_grid_lon"]+180)%360-180
+        else:
+            profile = model_surface._profile(model)
+            selected_lat = profile["lat_min"]+round((city.lat-profile["lat_min"])/profile["dy"])*profile["dy"]
+            selected_lon = profile["lon_min"]+round((city.lon-profile["lon_min"])/profile["dx"])*profile["dx"]
+        i = provider_models.index(model)
         values = [32.0+(i%5)*.05+(1.0 if 14<=h<=18 else -.5) for h in range(24)]
-        payload = {"timezone":city.timezone,"utc_offset_seconds":28800,
+        payload = {"latitude":selected_lat,"longitude":selected_lon,"elevation":32.,
+            "timezone":city.timezone,"utc_offset_seconds":28800,
             "hourly":{"time":times,"temperature_2m":values},"hourly_units":{"temperature_2m":"°C"}}
-        endpoint = "https://single-runs-api.open-meteo.com/v1/forecast"
-        params = {"endpoint":endpoint,"models":api_model,"timezone":city.timezone,"hourly":"temperature_2m"}
-        request_hash = hourly.build_request_hash(endpoint=endpoint,params=params,models=[model],
-                                                captured_at=vector_at.isoformat(),payload=payload)
-        meta = hourly._day0_provider_run_meta(model=model,model_api_id=api_model,run=vector_cycle,
-            available_at=vector_cycle+timedelta(hours=1),modified_at=vector_cycle+timedelta(hours=1),
-            authority="run_pinned_single_runs",endpoint_mode="single_runs",request_params=params,
-            request_hash=request_hash,fetch_started_at=vector_at,fetch_finished_at=vector_at)
-        vectors = hourly.parse_openmeteo_hourly_payload(payload,city=city,models=[model],
-            captured_at=vector_at.isoformat(),source_run_meta_json=json.dumps(meta))
-        assert len(vectors) == 1
+        body = json.dumps(payload).encode()
+        kwargs["capture_entity_body"](body,vector_at.timestamp())
+        kwargs["capture_network_response"](body,vector_at.timestamp(),{"content-type":"application/json"})
+        return json.loads(body)
+    class VectorClockType(type):
+        def __instancecheck__(cls,value): return isinstance(value,datetime)
+    class VectorClock(datetime,metaclass=VectorClockType):
+        @classmethod
+        def now(cls,tz=None): return vector_at.astimezone(tz or utc)
+    sql_clock[0] = vector_at
+    with monkeypatch.context() as vector_capture:
+        vector_capture.setattr(dl,"datetime",VectorClock)
+        vector_capture.setattr(hourly,"_day0_utc_now",lambda:vector_at)
+        vector_capture.setattr(updates,"_fetch_openmeteo",lambda *_a,**_kw:dict(vector_meta))
+        vector_capture.setattr("src.data.openmeteo_client.fetch",vector_http)
+        vectors,request_hash = hourly.fetch_day0_hourly_vectors(city,models=provider_models,now=vector_at)
+        assert [row.model for row in vectors] == provider_models
+        for i,row in enumerate(vectors):
+            assert row.temps_c == tuple(32.0+(i%5)*.05+(1.0 if 14<=h<=18 else -.5) for h in range(24))
         assert hourly.persist_day0_hourly_vectors(vectors,target_date=target.isoformat(),conn=conn,
-            request_hash=request_hash,endpoint=endpoint,now=cut) == 1
+            request_hash=request_hash,now=vector_at) == len(provider_models)
     # The ENS product is one control+50-member entity/capture, not 51 unrelated
     # per-model requests. The ordinary fetch/parser owns its shared identity.
     from src.data import openmeteo_model_updates as updates
@@ -51701,10 +51725,18 @@ def _kord_causal_fast_inputs(fixture,monkeypatch):
         assert len(ens) == 51
         assert {json.loads(row.source_run_meta_json)["request_hash"] for row in ens} == {ens_identity}
         fixture.sql_clock[0] = vector_capture
-        for rows,key,endpoint in ((vectors,identity,json.loads(vectors[0].source_run_meta_json)["endpoint"]),
-                                  (ens,ens_identity,hourly.OPENMETEO_ENSEMBLE_URL)):
-            assert hourly.persist_day0_hourly_vectors(rows,target_date=str(fixture.request.target_date),conn=conn,
-                request_hash=key,endpoint=endpoint,now=vector_capture) == len(rows)
+        class OriginalClockType(type):
+            def __instancecheck__(cls,value): return isinstance(value,datetime)
+        class OriginalClock(datetime,metaclass=OriginalClockType):
+            @classmethod
+            def now(cls,tz=None): return vector_capture.astimezone(tz or timezone.utc)
+        from src.data import bayes_precision_fusion_download as download
+        with monkeypatch.context() as original_writer:
+            original_writer.setattr(download,"datetime",OriginalClock)
+            for rows,key,endpoint in ((vectors,identity,json.loads(vectors[0].source_run_meta_json)["endpoint"]),
+                                      (ens,ens_identity,hourly.OPENMETEO_ENSEMBLE_URL)):
+                assert hourly.persist_day0_hourly_vectors(rows,target_date=str(fixture.request.target_date),conn=conn,
+                    request_hash=key,endpoint=endpoint,now=vector_capture) == len(rows)
     conn.commit()
     qualified = fast.latest_fast_station_conditioning(conn,city=city.name,target_date=str(fixture.request.target_date),
         metric="low",decision_time=cut,settlement_extreme_native=57.2,settlement_unit="F")
