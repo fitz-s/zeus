@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-10-02 (local-proof candidate set)
-# Lifecycle: created=2026-06-06; last_reviewed=2026-09-23; last_reused=2026-09-23
+# Last reused/audited: 2026-10-07 (DST local-day window)
+# Lifecycle: created=2026-06-06; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
 # Authority basis: Replacement forecast coverage must bind to the live baseline source_run, not stale city/date rows.
@@ -4134,3 +4134,64 @@ def test_anchor_local_proof_candidate_set_matches_the_per_row_probe_exactly() ->
     assert {aid for aid in probed if old_probe(aid)} == {aid for aid in probed if aid in candidates}
     assert {1, 101, 102, 104, 109, 111, 112, -113, 114, 115, 1170} <= candidates
     assert not {103, 105, 106, 107, 108, 110, 116} & candidates
+
+
+@pytest.mark.parametrize(
+    "target_date,channel,hours",
+    (
+        ("2026-03-29", "wu_icao_history", 23),
+        ("2026-10-25", "noaa_wrh_efhk", 25),
+    ),
+)
+def test_day0_ledger_fact_window_is_the_local_calendar_day_across_dst(
+    target_date, channel, hours,
+) -> None:
+    """The ledger fact reads [local midnight, next local midnight) in UTC.
+
+    Helsinki's 2026-03-29 is 23 h and 2026-10-25 is 25 h; ``start + 24 h``
+    admits next-day prints on the first and drops the last local hour on the
+    second.
+    """
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo("Europe/Helsinki")
+    day = datetime.fromisoformat(target_date)
+    start = day.replace(tzinfo=tz).astimezone(timezone.utc)
+    end = (day + timedelta(days=1)).replace(tzinfo=tz).astimezone(timezone.utc)
+    assert end - start == timedelta(hours=hours)
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT)"""
+    )
+    decision_time = end + timedelta(hours=3)
+    for at, value in (
+        (start - timedelta(minutes=1), 98.0),
+        (start, 10.0),
+        (end - timedelta(minutes=1), 20.0),
+        (end, 99.0),
+    ):
+        conn.execute(
+            "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?)",
+            ("Helsinki", "EFHK", channel, at.isoformat(), value, "C",
+             (at + timedelta(minutes=1)).isoformat(), None),
+        )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Helsinki",
+        target_date=target_date,
+        temperature_metric="high",
+        decision_time=decision_time,
+        require_settlement_channel=True,
+    )
+
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 20.0
+    assert fact["sample_count"] == 2
+    assert fact["observation_time"] == (end - timedelta(minutes=1)).isoformat()
+    conn.close()

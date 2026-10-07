@@ -1388,7 +1388,9 @@ def _latest_authorized_day0_fact(
             local_day_start_utc = datetime.combine(
                 target_day, datetime.min.time(), tzinfo=tz
             ).astimezone(timezone.utc)
-            local_day_end_utc = local_day_start_utc + timedelta(days=1)
+            local_day_end_utc = datetime.combine(
+                target_day + timedelta(days=1), datetime.min.time(), tzinfo=tz
+            ).astimezone(timezone.utc)
         except (ValueError, ZoneInfoNotFoundError):
             local_day_start_utc = None
             local_day_end_utc = None

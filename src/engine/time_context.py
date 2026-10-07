@@ -65,9 +65,10 @@ def lead_hours_to_settlement_close(
     target_day = _coerce_target_date(target_date)
     reference = _coerce_datetime(reference_time)
     tz = ZoneInfo(city_timezone)
-    target_end_local = datetime.combine(target_day, time.min, tzinfo=tz) + timedelta(days=1)
-    reference_local = reference.astimezone(tz)
-    delta = target_end_local - reference_local
+    target_end_utc = datetime.combine(
+        target_day + timedelta(days=1), time.min, tzinfo=tz
+    ).astimezone(timezone.utc)
+    delta = target_end_utc - reference.astimezone(timezone.utc)
     return delta.total_seconds() / 3600.0
 
 
