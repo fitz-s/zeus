@@ -6,6 +6,8 @@ win any disagreement. Probability law lives in `docs/authority/replacement_final
 
 checked=2026-W41; basis=code at origin/live bc024fedd + read-only WORLD/FORECASTS queries 2026-10-07T07:47Z–08:20Z;
 until=recheck-on-use. The row counts and Gaps below are a snapshot of that date. Re-run §6 before you rely on them.
+§5 G3/G4/G6/G7 resolutions: checked=2026-W41; basis=branch `fix/fast-obs-gaps-g3-g7` + read-only DB/Gamma/AWC queries
+2026-10-07T09:47Z–10:20Z; until=recheck-on-use.
 
 Line numbers cite bc024fedd.
 
@@ -448,6 +450,41 @@ Legend:
     48 h.
 - **Non-gaps.** Intermittent fetch failures do not stop other routes. Over the same log, there are 525 VILK failures
   and about 280–303 per US resolver route. Their 48-h row counts are all non-zero.
+- **Resolution G3a (Amsterdam), `fix/fast-obs-gaps-g3-g7` ee8d369da.**
+  - `resolve_knmi_api_key` reads env `KNMI_API_KEY` first, then the gitignored `config/knmi_secret.json`
+    (`{"knmi_api_key": ...}`). This is the `resolve_cwa_api_key` pattern. The key never enters a log, error or
+    print. Tests pin the order and cover the adapter and ingest failure logs.
+  - The parse path imports `netCDF4` (`station_temperature_adapters.py:458`), and the live `.venv` lacks it.
+    `requirements.txt` now pins `netCDF4==1.7.4` and `cftime==1.6.6`. **Operator action:** install both into
+    `.venv`. Until then the route still fails soft as `SOURCE_UNAVAILABLE`, now with `ModuleNotFoundError` instead
+    of `ValueError`.
+  - Role unchanged, `physical_only`. KNMI's 10-min grid shares no instant with EHAM METARs (:25/:55), so it is
+    dense physical evidence, never a settlement fact. G1 does not apply: G1 needs a route the registry calls
+    `settlement_authorized`.
+- **Resolution G3b (Jinan): neither (a) nor (b). No writer is added and the config is unchanged; the reasons follow.**
+  - (a), enabling a Jinan AWC writer, is refuted.
+    - The AWC poll is one batched request (`fetch_metar_reports`, `ids=…`), so adding the station costs nothing.
+    - But the writer runs only where `fast_obs_source_for_city` returns a source, and that needs an empirical
+      margin (≥ 40 pairs). Forcing Jinan in would serve margin 0.0 on 4 pairs, the fail-open removed on
+      2026-07-26 (Shenzhen class).
+    - ZSJN also publishes no METAR to the global feed (checked 2026-10-07T09:59Z):
+      - AWC returned 0 ZSJN reports over 168 h; ZHCC in the same request returned 36;
+      - the NOAA `ZSJN.TXT` station file was last written 2026-08-24;
+      - the IEM archive has 13 ZSJN reports in August and none after;
+      - the last Jinan AWC print in WORLD is 2026-07-25.
+
+      A writer would write nothing and accumulate no pairs.
+  - (b), removing `aviationweather_metar` from the WU channel sets, is refuted by the code's contracts.
+    - The current-state set (`day0_current_temperature_channels`) is a reader admission list, never a boundary,
+      and it applies no margin (§1).
+    - `test_day0_remaining_day_pricing.py::test_current_temperature_selects_latest_causal_observation` pins AWC
+      admission for a wu_icao city with no margin entry. Gating the set on the writer predicate failed all 8
+      cases (draft branch, not landed).
+    - The target-plan physical set already drops AWC wherever the margin is None
+      (`replacement_forecast_current_target_plan.py:1577-1584`), so Jinan AWC can never form a physical fact.
+  - Net effect: a listed channel with no rows is inert. The cause is an upstream outage at ZSJN, not a Zeus
+    writer gap. If ZSJN reappears on AWC, Jinan still needs an empirical margin refit before its writer runs.
+    That refit is G6's producer, which today carries Jinan's WU-era 4-pair entry.
 
 **G4 — KMA_EVENT runs only for held exposure.**
 
