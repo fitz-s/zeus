@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-07 (KNMI key resolver env->config/knmi_secret.json; fast-obs G3a)
+# Last reused/audited: 2026-10-07 (KNMI key resolver env->config/knmi_secret.json, G3a; WRH batch takes the request slot and 403 stays WrhTokenRefused, G5)
 """Fixed-endpoint station observations with independent receipt and valid clocks.
 
 Provider names select parsers, never arbitrary URLs or executable config. Native
@@ -190,6 +190,8 @@ def _fetch_wrh_batch(route, client):
     This is the existing resolver product, not a promotion of a slower substitute
     for AWC. The physical METAR lane continues independently. Errors are cached
     as errors, never as source-empty evidence, and credentials never enter prints.
+    Every batch takes the module's request slot, so the per-unit batches and the
+    daily product share one in-process spacing; a 403 stays WrhTokenRefused.
     """
     from src.data import noaa_wrh_timeseries as wrh
     from src.data.physical_current_sources import load_physical_current_sources
@@ -197,11 +199,17 @@ def _fetch_wrh_batch(route, client):
                         if r.provider == "noaa_wrh" and r.unit == route.unit} | {route.station_id}))
 
     def fetch():
-        body = _bounded_body(
-            client, "GET", wrh.WRH_TIMESERIES_URL,
-            params=wrh._query_params(",".join(ids), unit=route.unit, start_utc=None, end_utc=None,
-                                     recent_minutes=180, token=wrh.fetch_wrh_token()),
-            headers=wrh._page_headers(ids[0]), timeout=6)
+        wrh._wait_for_request_slot()
+        try:
+            body = _bounded_body(
+                client, "GET", wrh.WRH_TIMESERIES_URL,
+                params=wrh._query_params(",".join(ids), unit=route.unit, start_utc=None, end_utc=None,
+                                         recent_minutes=180, token=wrh.fetch_wrh_token()),
+                headers=wrh._page_headers(ids[0]), timeout=6)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                raise wrh.WrhTokenRefused("WRH batch refused (HTTP 403)") from None
+            raise
         return _WrhBatchPayload(json.loads(body), hashlib.sha256(body).hexdigest())
 
     return _cached_fetch(_WRH_BATCH_CACHE, (route.unit, ids, id(client)), fetch,

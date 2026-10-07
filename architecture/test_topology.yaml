@@ -32,7 +32,7 @@ test_trust_policy:
     tests/test_observation_reaction_chain.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_review_work_delivery.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_settlement_fallback_hierarchy.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
-    tests/test_station_temperature_adapters.py: {created: "2026-09-29", last_used: "2026-10-07", note: "KNMI key order env->config/knmi_secret.json and no key in logs/errors (G3a). Causal current-observation regressions plus WRH native station-reference JSON, original full-batch byte hash/receipt, finite UNKNOWN metadata and unchanged temperature/reader authority identity. Real JMA/IMGW payload parsing rejects boolean temperatures before coercion, retains numeric zero/negative/finite values and keeps HIGH/LOW mixed-row extrema and original clocks/QC unchanged."}
+    tests/test_station_temperature_adapters.py: {created: "2026-09-29", last_used: "2026-10-07", note: "KNMI key order env->config/knmi_secret.json and no key in logs/errors (G3a). Intraday °C page batch: one request/min separate from °F, typed 403 isolation, metric all-rows parsing (G5). Causal current-observation regressions plus WRH native station-reference JSON, original full-batch byte hash/receipt, finite UNKNOWN metadata and unchanged temperature/reader authority identity. Real JMA/IMGW payload parsing rejects boolean temperatures before coercion, retains numeric zero/negative/finite values and keeps HIGH/LOW mixed-row extrema and original clocks/QC unchanged."}
     tests/test_warm_materializer.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_fast_obs_receipt_chain.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Terminal remainder monotonicity; actual live HTTP receipt cut without replay lookahead; civil-day DST bounds; optional physical station routing and shared FMI budget."}
     tests/test_station_forecast_live_ingest_wiring.py: {created: "2026-06-29", last_used: "2026-09-30", note: "Official station original-body writer and HKO same-issued legacy capture recovery; HIGH/LOW exact context, whole old tuple/clock preservation, old-cut rejection and bounded SQLite legacy precision versus exact new capture clocks."}
@@ -1897,9 +1897,9 @@ test_metadata:
     trust: trusted
     authority_docs:
     - docs/authority/zeus_current_architecture.md
-    notes: Controlled providers and non-production canonical checks; WRH source-reference persistence preserves native batch byte identity independently of temperature/current-reader authority. Actual JMA/IMGW parser boolean rejection preserves numeric zero, negatives, finite/sentinel rules and HIGH/LOW mixed-row controls. No ground or routing promotion and no external venue claim.
+    notes: Controlled providers and non-production canonical checks; WRH source-reference persistence preserves native batch byte identity independently of temperature/current-reader authority. Actual JMA/IMGW parser boolean rejection preserves numeric zero, negatives, finite/sentinel rules and HIGH/LOW mixed-row controls. G5: every NOAA city carries one page route in its contract view; the degC batch is one request per minute separate from degF, a 403 stays typed per batch, a recorded metric-view payload reaches the Day0 settlement reduction, and the page route is the resolver comparator rather than a new fast-admission rival. No ground or routing promotion and no external venue claim.
     created: '2026-09-29'
-    last_reused_or_audited: '2026-10-04'
+    last_reused_or_audited: '2026-10-07'
   tests/test_warm_materializer.py:
     cohort: law_antibody
     trust: trusted

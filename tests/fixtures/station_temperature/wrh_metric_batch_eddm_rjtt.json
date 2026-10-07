@@ -1,0 +1,82 @@
+{
+ "SUMMARY": {
+  "RESPONSE_CODE": 1,
+  "RESPONSE_MESSAGE": "OK",
+  "NUMBER_OF_OBJECTS": 2
+ },
+ "UNITS": {
+  "air_temp": "Celsius",
+  "elevation": "ft"
+ },
+ "STATION": [
+  {
+   "STID": "EDDM",
+   "NAME": "Munich Airport",
+   "TIMEZONE": "Europe/Berlin",
+   "ELEVATION": "1487.0",
+   "LATITUDE": "48.35380",
+   "LONGITUDE": "11.78610",
+   "ELEV_DEM": "1489.5",
+   "OBSERVATIONS": {
+    "date_time": [
+     "2026-10-07T10:50:00+0200",
+     "2026-10-07T11:20:00+0200",
+     "2026-10-07T11:50:00+0200",
+     "2026-10-07T12:20:00+0200",
+     "2026-10-07T12:50:00+0200",
+     "2026-10-07T13:20:00+0200"
+    ],
+    "air_temp_set_1": [
+     18.0,
+     19.0,
+     20.0,
+     21.0,
+     22.0,
+     23.0
+    ],
+    "sea_level_pressure_set_1": null,
+    "metar_set_1": [
+     "METAR EDDM 070850Z AUTO VRB02KT CAVOK 18/11 Q1014 NOSIG",
+     "METAR EDDM 070920Z AUTO 26004KT 180V310 CAVOK 19/11 Q1014 NOSIG",
+     "METAR EDDM 070950Z AUTO 26004KT 210V320 CAVOK 20/11 Q1014 NOSIG",
+     "METAR EDDM 071020Z AUTO 23005KT 160V320 CAVOK 21/11 Q1013 NOSIG",
+     "METAR EDDM 071050Z AUTO 24004KT 190V280 CAVOK 22/11 Q1013 NOSIG",
+     "METAR EDDM 071120Z AUTO 25003KT CAVOK 23/10 Q1013 NOSIG"
+    ]
+   }
+  },
+  {
+   "STID": "RJTT",
+   "NAME": "Tokyo Haneda International Airport",
+   "TIMEZONE": "Asia/Tokyo",
+   "ELEVATION": "35.0",
+   "LATITUDE": "35.55230",
+   "LONGITUDE": "139.78000",
+   "ELEV_DEM": "-13.1",
+   "OBSERVATIONS": {
+    "date_time": [
+     "2026-10-07T18:00:00+0900",
+     "2026-10-07T18:30:00+0900",
+     "2026-10-07T19:00:00+0900",
+     "2026-10-07T19:30:00+0900",
+     "2026-10-07T20:00:00+0900"
+    ],
+    "air_temp_set_1": [
+     21.0,
+     21.0,
+     20.0,
+     20.0,
+     20.0
+    ],
+    "sea_level_pressure_set_1": null,
+    "metar_set_1": [
+     "METAR RJTT 070900Z 13009KT 9999 FEW030 21/14 Q1016 NOSIG",
+     "METAR RJTT 070930Z 13009KT 9999 FEW030 SCT080 21/14 Q1017 NOSIG",
+     "METAR RJTT 071000Z 12005KT CAVOK 20/14 Q1018 NOSIG",
+     "METAR RJTT 071030Z 16004KT 130V220 CAVOK 20/13 Q1018 BECMG FM1200  32008KT",
+     "METAR RJTT 071100Z 16003KT 120V220 CAVOK 20/13 Q1018 BECMG FM1200  32006KT"
+    ]
+   }
+  }
+ ]
+}
