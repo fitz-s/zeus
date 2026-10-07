@@ -21158,3 +21158,30 @@ official decimal first-publication/station-equivalence gaps are not relabeled
 as passed required/runtime qualification. ROOT must accept the exact final
 tip before normal FF landing or one registered loader; raw/config/refs/user
 state and the recoverable index-lock package remain preserved.
+
+## 2026-10-07 second runtime restore to e3411078c (v7 re-landed again, every posterior blocked)
+
+The full restart at 2026-10-07 13:46Z (live checkout fast-forwarded to b01dde197
+at 13:45Z; data-ingest, forecast-live, substrate, price-channel, post-trade and
+riskguard reloaded; MAIN untouched) loaded the native-role series again
+(3fc437e57, 3c08030f9, 72bc4f9b1, 727493ff4, ab89f913c). From 13:46Z, 4 posteriors
+committed in 222 materializer runs; the rest BLOCKED
+FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE. The native 2t scheduled runs are
+still PARTIAL (18Z 269/561, 00Z 286/663, 06Z 189/561), which breaks the binding
+re-land rule recorded twice above: while native is PARTIAL the v6 shape must serve.
+
+Proof: four live requests (Hong Kong 10-08 low, Chicago 10-08 high, London 10-09
+high, Tokyo 10-08 high), dry-run with no commit: b01dde197 gives 0/4 READY, all
+CURRENT_SHAPE_ENS_UNAVAILABLE. This restore gives 4/4 READY.
+
+Restore: the ten probability-path files and the eleven v7-coupled test files
+return to their e3411078c bytes. The settlement/harvester commits (79a1ef91e,
+f5b76fe3d, c02a3534a) and settlement_semantics.py are kept; the restored files
+import nothing new from them. tests/test_settlement_semantics.py also returns to
+e3411078c bytes, because its new cases test the reverted materializer and corpus
+call sites. Its one remaining failure (INV-X: tier0_auction_corpus.py:223
+direct construction) is the pre-v7 baseline.
+
+Four forecast-live loads of this series have now broken serving (10-06 07:22Z,
+10-06 21:18Z, 10-07 13:46Z). A reload must not carry it until a live-request
+replay on the target tip shows READY.

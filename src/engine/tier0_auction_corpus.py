@@ -86,55 +86,6 @@ def encode_payload(raw: bytes) -> bytes:
     return zstandard.ZstdCompressor(level=_ZSTD_LEVEL).compress(raw)
 
 
-def _project_held_point_roles(roles: object, *, unit: str, has_y: bool) -> dict:
-    """Finite math inputs only; this diagnostic grants no native source authority."""
-    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
-
-    if (not isinstance(roles, Mapping)
-            or roles.get("schema") != "day0_measurement_domain_shapes_v1"
-            or roles.get("unit") != unit or unit not in ("C", "F")
-            or roles.get("semantics_revision") != DAY0_PROBABILITY_SEMANTICS_REVISION):
-        raise ValueError("HELD_POINT_ROLE_IDENTITY_INVALID")
-    out = {key: roles[key] for key in ("schema", "unit", "semantics_revision")}
-    for name, role in (("X", "remaining_X"), ("Y", "full_Y")):
-        if name == "Y" and not has_y:
-            continue
-        shape = roles.get(name)
-        if not isinstance(shape, Mapping) or shape.get("role") != role or shape.get("unit") != unit:
-            raise ValueError("HELD_POINT_ROLE_MISSING")
-        keys = {"role", "unit", "provider_families", "provider_centers_native",
-                "member_points_native", "member_interval_bounds_native"}
-        if name == "Y":
-            keys |= {"prefix_information_kind", "conditioning_likelihood_scope"}
-        projected = {key: shape[key] for key in keys if key in shape}
-        if set(projected) != keys:
-            raise ValueError("HELD_POINT_ROLE_FIELDS_INVALID")
-        families, centers = projected["provider_families"], projected["provider_centers_native"]
-        points, bounds = projected["member_points_native"], projected["member_interval_bounds_native"]
-        if (not isinstance(families, (list, tuple)) or not 1 <= len(families) <= 256
-                or any(not isinstance(f, str) or not 0 < len(f) <= 256 for f in families)
-                or len(set(families)) != len(families)
-                or not isinstance(centers, (list, tuple)) or len(centers) != len(families)
-                or not isinstance(points, (list, tuple)) or len(points) != 51
-                or not isinstance(bounds, (list, tuple)) or len(bounds) != 51
-                or any(not isinstance(pair, (list, tuple)) or len(pair) != 2 for pair in bounds)):
-            raise ValueError("HELD_POINT_ROLE_SHAPE_INVALID")
-        scalars = [*centers, *points, *(value for pair in bounds for value in pair)]
-        if (any(type(v) not in (int, float) or not math.isfinite(v) for v in scalars)
-                or any(not lo <= point <= hi for point, (lo, hi) in zip(points, bounds))):
-            raise ValueError("HELD_POINT_ROLE_SCALAR_INVALID")
-        if name == "Y" and (projected["prefix_information_kind"] not in {
-                "REPORTED_PRODUCT_PROXY", "INCOMPLETE_SAME_QUANTITY_BOUND",
-                "COMPLETE_SAME_QUANTITY_PREFIX", "NO_PREFIX_CONDITIONING", "UNKNOWN"}
-                or projected["conditioning_likelihood_scope"] not in {
-                    "COARSENED_BOUND_ONLY", "UNCONDITIONED_FULL_Y_PRIOR",
-                    "Y_PREFIX_LIKELIHOOD_UNIDENTIFIED"}):
-            raise ValueError("HELD_POINT_ROLE_PREFIX_INVALID")
-        out[name] = projected
-    # A JSON round-trip freezes arrays without retaining mutable caller metadata.
-    return json.loads(_canonical(out))
-
-
 def decode_payload(blob: bytes) -> object:
     """Inverse of ``encode_payload`` for every ``*_ENCODING`` in the schema."""
 
@@ -216,7 +167,6 @@ def freeze_held_sell_point_trace(trace: Mapping[str, object]) -> bytes:
             "path_error_sigma_c", "instrument_sigma_c", "bin_bounds_c", "remaining_center_bias_native",
             "operator", "settlement", "resolver_terminal", "carrier_to_witness", "n_point",
             "n_samples", "base_yes_q", "support_mask",
-            "domain_role_shapes", "domain_role_shapes_sha256",
         }):
             return _point_trace_unavailable("POINT_KERNEL_FIELDS_INVALID",trace)
         from src.data.day0_hourly_vectors import (
@@ -230,17 +180,6 @@ def freeze_held_sell_point_trace(trace: Mapping[str, object]) -> bytes:
                             DAY0_REMAINING_CARRIER_OPERATOR_V3,
                             DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER}:
             return _point_trace_unavailable("UNSUPPORTED_POINT_KERNEL",trace)
-        roles = kernel.get("domain_role_shapes")
-        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
-        if roles is not None:
-            projection = _project_held_point_roles(roles,
-                unit=kernel["settlement"]["measurement_unit"],
-                has_y=bool(kernel["final_extreme_centers_c"]))
-            if (projection != roles or kernel.get("domain_role_shapes_sha256") !=
-                    hashlib.sha256(_canonical(projection)).hexdigest()):
-                return _point_trace_unavailable("POINT_ROLE_PROJECTION_MISMATCH",trace)
-        elif DAY0_PROBABILITY_SEMANTICS_REVISION in str(trace.get("q_version") or ""):
-            return _point_trace_unavailable("POINT_ROLE_PROJECTION_MISSING",trace)
         raw = _canonical(dict(trace))
         if len(raw) > _POINT_TRACE_CANONICAL_LIMIT:
             return _point_trace_unavailable("TRACE_CANONICAL_SIZE_LIMIT",trace)
@@ -281,21 +220,9 @@ def replay_held_sell_point_trace(raw: bytes) -> tuple[float, ...]:
     }
     if str(parameters["operator"]).endswith("noisy_future_v1"):
         raise ValueError("HELD_POINT_TRACE_UNSUPPORTED_V1")
-    semantics = SettlementSemantics.from_frozen_payload(kernel["settlement"])
-    identity_inputs = {"unit": semantics.measurement_unit}
-    if kernel.get("domain_role_shapes") is not None:
-        roles = _project_held_point_roles(kernel["domain_role_shapes"],
-            unit=semantics.measurement_unit, has_y=bool(kernel["final_extreme_centers_c"]))
-        if (roles != kernel["domain_role_shapes"] or kernel.get("domain_role_shapes_sha256") !=
-                hashlib.sha256(_canonical(roles)).hexdigest()):
-            raise ValueError("HELD_POINT_TRACE_ROLE_PROJECTION_MISMATCH")
-        identity_inputs["domain_role_shapes"] = roles
-    else:
-        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
-        if DAY0_PROBABILITY_SEMANTICS_REVISION in str(trace.get("q_version") or ""):
-            raise ValueError("HELD_POINT_TRACE_ROLE_PROJECTION_MISSING")
+    semantics = SettlementSemantics(**kernel["settlement"])
     parameters.update(
-        n_point=1, n_samples=1, identity_inputs=identity_inputs,
+        n_point=1, n_samples=1, identity_inputs={"unit": semantics.measurement_unit},
         settlement_semantics=semantics,
         resolver_terminal=(Day0ResolverTerminalInput.from_payload(kernel["resolver_terminal"])
                            if kernel.get("resolver_terminal") is not None else None),

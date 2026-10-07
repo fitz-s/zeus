@@ -1,5 +1,5 @@
 # Created: 2026-09-27
-# Last reused/audited: 2026-10-07
+# Last audited: 2026-09-30
 # Authority basis: correction design review REQ-20260925-223704 §2 (every cut,
 #   raw q before any rejection), §3 (complete ordered family simplex, quotes
 #   stored with reasons, never patched), §10 (idempotent immutable identities,
@@ -171,111 +171,6 @@ def test_held_sell_point_kernel_trace_replays_active_mixture_without_samples(met
     np.testing.assert_array_equal(1-np.asarray(corpus.replay_held_sell_point_trace(frozen)), 1-np.asarray(final_q))
     assert len(frozen) <= 16*1024
     assert len(corpus.encode_payload(frozen)) <= 8*1024
-
-
-def _native_role_trace(metric="high", unit="C", y=True, zero=False):
-    """Point-builder arithmetic seam; not a source-qualification fixture."""
-    from src.engine import event_reactor_adapter as adapter
-    from src.contracts.settlement_semantics import SettlementSemantics
-    from src.data.day0_hourly_vectors import build_day0_remaining_probability_carrier
-    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
-
-    center = 30. if unit == "C" else 86.
-    shapes = dict(schema="day0_measurement_domain_shapes_v1", unit=unit,
-                  semantics_revision=DAY0_PROBABILITY_SEMANTICS_REVISION)
-    for name, role, width in (("X", "remaining_X", 0. if zero else 1.),
-                              ("Y", "full_Y", 0. if zero else 3.)):
-        if name == "Y" and not y:
-            continue
-        shapes[name] = dict(role=role, unit=unit,
-            provider_families=["ifs", "icon"], provider_centers_native=[center-1., center+1.],
-            member_points_native=[center+width*(i-25)/25 for i in range(51)],
-            member_interval_bounds_native=[[center+width*(i-25)/25]*2 for i in range(51)],
-            native_scope={"large_source_blob": "not part of math replay"},
-            prefix_information_kind="REPORTED_PRODUCT_PROXY",
-            conditioning_likelihood_scope="COARSENED_BOUND_ONLY")
-    sem = SettlementSemantics("frozen_station", unit, 1., "wmo_half_up", "12:00:00Z")
-    params = dict(future_extremes_c=[center-1., center+1.],
-        final_extreme_centers_c=[center-1., center+1.] if y else [],
-        boundary_scenarios=[(None, 1.)], metric=metric,
-        path_error_sigma_c=7., instrument_sigma_c=0.,
-        bin_bounds_c=[(None, center-1.), (center, center), (center+1., None)],
-        remaining_center_bias_native=0., n_point=8, n_samples=2,
-        identity_inputs={"unit": unit, "domain_role_shapes": shapes}, settlement_semantics=sem)
-    disabled = build_day0_remaining_probability_carrier(**params)
-    with adapter._held_point_trace_capture(True) as capture:
-        enabled = build_day0_remaining_probability_carrier(**params)
-        adapter._capture_held_point_kernel(params, enabled)
-    np.testing.assert_array_equal(enabled["q"], disabled["q"])
-    np.testing.assert_array_equal(enabled["samples"], disabled["samples"])
-    assert enabled["content_identity"] == disabled["content_identity"]
-    kernel = json.loads(capture["kernel"])
-    kernel["base_yes_q"] = enabled["q"]
-    trace = dict(schema="held_sell_point_kernel_trace_v1", status="READY", kernel=kernel,
-        final_yes_q=enabled["q"], q_version="day0-semrev:"+DAY0_PROBABILITY_SEMANTICS_REVISION)
-    return trace, shapes
-
-
-@pytest.mark.parametrize("metric,unit,y,zero", [
-    ("high", "C", True, False), ("low", "C", True, False),
-    ("high", "F", False, False), ("low", "F", False, True)])
-def test_native_role_trace_capture_replays_independent_widths(metric, unit, y, zero):
-    trace, shapes = _native_role_trace(metric, unit, y, zero)
-    frozen = corpus.freeze_held_sell_point_trace(trace)
-    assert json.loads(frozen)["status"] == "READY"
-    assert "native_scope" not in json.loads(frozen)["kernel"]["domain_role_shapes"]["X"]
-    shapes["X"]["member_points_native"][0] = -999.
-    np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(frozen), trace["final_yes_q"])
-
-
-@pytest.mark.parametrize("fault", ["missing", "revision", "unit", "points", "hash", "budget"])
-def test_native_role_trace_bad_projection_is_only_diagnostic_unavailable(fault):
-    trace, _ = _native_role_trace()
-    kernel = trace["kernel"]
-    if fault == "missing": kernel.pop("domain_role_shapes")
-    elif fault == "revision": kernel["domain_role_shapes"]["semantics_revision"] = "old"
-    elif fault == "unit": kernel["domain_role_shapes"]["X"]["unit"] = "F"
-    elif fault == "points": kernel["domain_role_shapes"]["X"]["member_points_native"].pop()
-    elif fault == "hash": kernel["domain_role_shapes"]["X"]["provider_families"][0] = "valid_other_family"
-    else: trace["family"] = "x"*(16*1024)
-    frozen = corpus.freeze_held_sell_point_trace(trace)
-    assert json.loads(frozen)["status"] == "UNAVAILABLE"
-    with pytest.raises(ValueError, match="UNAVAILABLE"):
-        corpus.replay_held_sell_point_trace(frozen)
-
-
-@pytest.mark.parametrize("fault", ["role", "nan", "prefix", "oversize"])
-def test_native_role_capture_failure_does_not_change_the_consumed_carrier(fault):
-    from src.engine import event_reactor_adapter as adapter
-    from src.contracts.settlement_semantics import SettlementSemantics
-    trace, shapes = _native_role_trace()
-    original_q = tuple(trace["final_yes_q"])
-    if fault == "role": shapes["X"]["role"] = "full_Y"
-    elif fault == "nan": shapes["X"]["member_points_native"][0] = float("nan")
-    elif fault == "prefix": shapes["Y"]["conditioning_likelihood_scope"] = "unknown"
-    else: shapes["X"]["provider_families"] = ["a"*257, "icon"]
-    inputs = {key: trace["kernel"][key] for key in (
-        "future_extremes_c", "final_extreme_centers_c", "boundary_scenarios", "metric",
-        "path_error_sigma_c", "instrument_sigma_c", "bin_bounds_c", "remaining_center_bias_native")}
-    inputs.update(identity_inputs={"domain_role_shapes": shapes}, n_point=8, n_samples=2,
-        settlement_semantics=SettlementSemantics.from_frozen_payload(trace["kernel"]["settlement"]))
-    carrier = dict(operator=trace["kernel"]["operator"], q=original_q, content_identity="unchanged")
-    with adapter._held_point_trace_capture(True) as capture:
-        adapter._capture_held_point_kernel(inputs, carrier)
-    assert capture["unavailable"] == b"POINT_KERNEL_CAPTURE_FAILED"
-    assert "kernel" not in capture
-    assert carrier == dict(operator=trace["kernel"]["operator"], q=original_q, content_identity="unchanged")
-
-
-def test_native_role_unconditioned_full_y_replay_keeps_actual_prefix_enum():
-    trace, _ = _native_role_trace()
-    roles = trace["kernel"]["domain_role_shapes"]
-    roles["Y"]["prefix_information_kind"] = "NO_PREFIX_CONDITIONING"
-    roles["Y"]["conditioning_likelihood_scope"] = "UNCONDITIONED_FULL_Y_PRIOR"
-    import hashlib
-    trace["kernel"]["domain_role_shapes_sha256"] = hashlib.sha256(corpus._canonical(roles)).hexdigest()
-    np.testing.assert_array_equal(corpus.replay_held_sell_point_trace(
-        corpus.freeze_held_sell_point_trace(trace)), trace["final_yes_q"])
 
 
 def _curve(token: str, side: str, ask: str) -> ExecutableCostCurve:
