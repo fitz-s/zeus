@@ -1,0 +1,68 @@
+**Data used.**
+
+| data | source | span / count |
+|---|---|---|
+| METAR + SPECI | IEM ASOS `asos.py`, report_type 3 + 4, one request per station, 2 s apart, all HTTP 200, 0 errors | EFHK 10 561, EDDM 10 566, EPWA 10 566, EHAM 10 527, RJTT 10 567, WSSS 10 783 (216 SPECI), CYYZ 9 255 (1 811 SPECI), LEMD 10 662; 2026-03-01 (CYYZ 2025-12-01) .. 2026-10-07 |
+| FMI 100968 10-min | existing `fmi_efhk.csv.gz` plus live WORLD rows appended after 10-06 | 2026-04-02 .. 10-07 |
+| DWD 01262 TT_10 | existing archive plus WORLD | 2025-04-04 .. 10-07 |
+| IMGW 12375 hourly synop | existing archive (October not yet published by IMGW) plus WORLD | 2026-03-01 .. 10-07 |
+| JMA 44166 10-min | **new**: past-weather `10min_a1.php`, 212 pages, 2.5 s apart, 0 errors, 30 521 rows | 2026-03-08 .. 10-06 |
+| NEA S24 1-min | existing archive | 2026-03-12 .. 10-05 |
+| ECCC 51459 hourly | existing archive. The live SWOB was used for latency only: it is a different product (its 19 off-hour rows all coincide with SPECI instants) | |
+| KNMI 06240 | **new**: `ta`, `tx`, `tn` from 769 files at :20 / :30 / :50 / :00. 770 authenticated /url attempts (769 OK, 0 errors, 0 × 429), plus 1 listing call for publication lag: **771 of the 800-call cap** | Amsterdam local days 2026-09-29 .. 10-06 (8 days) |
+| AEMET 3129 | public `horario` XML only, two captures (2026-10-06 13:42Z and 10-07 04:15Z) | |
+| forecast path | Open-Meteo previous-runs `temperature_2m_previous_day1`, model `ecmwf_ifs`, 1 batched request (8 locations) | 2025-11-30 .. 10-08 hourly; null 2026-03-26 .. 04-10 |
+| receipt clocks | WORLD `observation_prints` `fetched_at_utc` (`aviationweather_metar` and the dense live channels); NEA from a 100-min live probe of the data.gov.sg v1 latest endpoint, 192 polls; KNMI from `lastModified` of the newest 60 files | |
+
+**Data-access failures (exact).**
+
+- AEMET OpenData API (`opendata.aemet.es/opendata/api/observacion/convencional/datos/estacion/3129`): no key in the
+  keychain (`security find-generic-password -s zeus-obs/aemet/api-key` → not found). A keyless call returns HTTP 200
+  with an empty body. Madrid therefore has no dense archive; the state-space arm was skipped.
+- IMGW archive `.../synop/2026/2026_10_s.zip`: HTTP 404 (October not yet archived, from the earlier fetch). WORLD rows
+  fill October.
+- data.gov.sg v1 latest endpoint: 2 of 192 polls failed with `URLError: <urlopen error _ssl.c:1063: The handshake
+  operation timed out>`.
+  - The endpoint exposes one 5-min stamp per poll, so the NEA lag (p50 1.7 min) is upper-bounded by the 30 s poll and
+    measures the 5-min product, not the 1-min archive.
+- KNMI: no failures. The cap was respected by counting every authenticated attempt, retries included.
+- `day0_hourly_vectors` (the live ecmwf_ifs source named in the brief) starts 2026-10-04, so it could not supply a
+  2026-03..10 back-test. On-disk ifs9 raw manifests cover only ~12 cycle dates, because most `artifact_path` files are
+  gone (Helsinki: 93 on disk, 1 432 missing).
+  - **Substitute**: the same model through Open-Meteo previous-runs at a fixed 24 h lead. It is causal for every
+    decision, but less sharp than the live day0 vector. A0, A and B all share it; the absolute log-losses are therefore
+    pessimistic for the live system, and the A/B difference is the estimand.
+
+**What is uncertain.**
+
+1. **The forecast lead differs from live.** previous_day1 (24–48 h old) replaces the live day0 vector. With a sharper
+   forecast, A improves and the dense increment B − A could shrink, though dense-at-pending-instant information does
+   not depend on the forecast.
+2. **The latent model is mis-specified in one known way.**
+   - On Helsinki training days the OU model predicts a remaining-max excess (max R(T) − max m) of +0.94 °C from 06:00,
+     against a realised +0.39.
+   - The cause is not marginal variance. Residual paths from *other* days give +0.92; the day's own path shifted by
+     1 h gives +0.71. **The real residual is anti-aligned with the forecast's peaks**, which a stationary OU cannot
+     represent. Observed peak time − forecast peak time = −1.45 h, sd 2.3 h.
+   - The wiggle-shrink mean term (selected for every city by walk-forward) narrows the gap from 0.55 to 0.30 °C on
+     Helsinki training days (4-h window: model 0.95 against realised 0.65 on the shrunk mean). It does not close it.
+   - As a result A0, which carries an empirical remaining-extreme error, beats A on Helsinki and Munich highs. A beats
+     A0 on Tokyo, Singapore, Toronto and Warsaw.
+   - **This affects the level of A and B equally. It does not invalidate the A/B comparison**, which shares the model.
+3. **Small n for the gates.** There are 42–44 NOAA-era test days per city.
+   - High-confidence error counts come from 1–5 days each (clustered), so the Poisson calibration bound treats
+     clustered errors as independent. That is anti-conservative.
+   - The STRICT raw-count rule flips on ±2 errors.
+4. **Live receipt windows are 6–10 days** (WORLD dense channels start 09-27 .. 10-01). Floor leads vs AWC with n < 5
+   are labelled. Singapore and Amsterdam leads are modeled from provider publication lag, not Zeus receipts; there is no
+   live WORLD channel for either.
+5. **Tokyo and Toronto exactness** rests on 10 174 / 7 416 pairs with zero disagreement. A future sensor or software
+   change would break m = 0. A live identity check (R(x) == METAR at every shared instant) is the cheap guard; the
+   theory note's sensor-regime state is the principled one.
+6. **Settlement-source gaps.** Singapore 2026-09-20: 5 METAR rows (32 °C) are absent from the WRH capture and the day
+   settled 31. If WRH drops rows, H ≤ METAR max, and any floor (dense or METAR) can be false.
+   - IEM instants missing from the WORLD WRH capture are common on other days too (e.g. Warsaw 09-20: 7 rows), but on
+     those days the extreme survived.
+   - The WRH capture in WORLD starts 09-13. Earlier NOAA days have no row-level check.
+7. **Two-scale fit for Tokyo** put τ_slow at a numerical infinity (a constant day-level offset, s = 0.26) with
+   τ_fast = 354 min. It is stable in scoring, but means the slow component is a per-day bias, not an OU.

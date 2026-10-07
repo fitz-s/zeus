@@ -1,0 +1,1177 @@
+{
+ "city": "Amsterdam",
+ "station": "EHAM",
+ "source": "KNMI 06240 ta, :20/:30/:50/:00 -> :25/:55 interp",
+ "tz": "Europe/Amsterdam",
+ "dense_identity": {},
+ "metar": {
+  "n": 10527,
+  "n_routine": 10527,
+  "n_speci": 0,
+  "routine_minutes": [
+   25,
+   55
+  ],
+  "first": "2026-03-01 00:25:00+00:00",
+  "last": "2026-10-07 02:55:00+00:00",
+  "m00": 3
+ },
+ "truth": {
+  "high": 177,
+  "low": 47,
+  "eras": {
+   "high": {
+    "wu": 133,
+    "noaa": 44
+   },
+   "low": {
+    "wu": 3,
+    "noaa": 44
+   }
+  }
+ },
+ "dense_range": [
+  "2026-09-28 22:00:00+00:00",
+  "2026-10-06 22:00:00+00:00",
+  768
+ ],
+ "measurement": {
+  "n_pairs": 383,
+  "n_pairs_routine": 383,
+  "n_pairs_speci": 0,
+  "n_days": 8,
+  "first": "2026-09-28 22:25:00+00:00",
+  "last": "2026-10-06 21:55:00+00:00",
+  "gauss": {
+   "b": 0.0521,
+   "sigma": 0.1619,
+   "se_b": 0.0153,
+   "se_sigma": 0.0136,
+   "nll": 111.1638,
+   "aic": 226.3275,
+   "at_sigma_bound": false
+  },
+  "student_t": {
+   "b": 0.0553,
+   "sigma": 0.1207,
+   "nu": 5,
+   "nll": 108.7686,
+   "aic": 223.5373,
+   "nu_profile_nll": {
+    "1": 126.916,
+    "2": 113.257,
+    "3": 110.072,
+    "5": 108.769,
+    "8": 108.806,
+    "15": 109.419,
+    "30": 110.11
+   }
+  },
+  "preferred_by_aic": "student_t",
+  "offset_table_gauss": {
+   "observed": {
+    "-3": 0,
+    "-2": 0,
+    "-1": 16,
+    "0": 339,
+    "1": 28,
+    "2": 0,
+    "3": 0
+   },
+   "expected": {
+    "-3": 0.0,
+    "-2": 0.0,
+    "-1": 19.8,
+    "0": 332.3,
+    "1": 30.9,
+    "2": 0.0,
+    "3": 0.0
+   },
+   "outside": 0,
+   "chi2_cells_ge5": 1.14
+  },
+  "offset_table_t": {
+   "observed": {
+    "-3": 0,
+    "-2": 0,
+    "-1": 16,
+    "0": 339,
+    "1": 28,
+    "2": 0,
+    "3": 0
+   },
+   "expected": {
+    "-3": 0.0,
+    "-2": 0.0,
+    "-1": 16.4,
+    "0": 337.8,
+    "1": 28.7,
+    "2": 0.0,
+    "3": 0.0
+   },
+   "outside": 0,
+   "chi2_cells_ge5": 0.03
+  },
+  "raw_agreement": {
+   "R_x_eq_M": 339,
+   "share": 0.8851,
+   "R_xb_eq_M": 333,
+   "share_b": 0.8695,
+   "sd_M_minus_x": 0.3301
+  },
+  "subsets": {
+   "day_09_18": {
+    "n": 143,
+    "b": 0.0406,
+    "sigma": 0.1655
+   },
+   "night": {
+    "n": 240,
+    "b": 0.0582,
+    "sigma": 0.1596
+   },
+   "routine": {
+    "n": 383,
+    "b": 0.0521,
+    "sigma": 0.1619
+   },
+   "first_half_days": {
+    "n": 191,
+    "b": 0.0524,
+    "sigma": 0.1325
+   },
+   "second_half_days": {
+    "n": 192,
+    "b": 0.0503,
+    "sigma": 0.1831
+   }
+  },
+  "residual_autocorr": {
+   "latent_rho_pairwise": {
+    "rho": 0.3258901878146628,
+    "se": 0.1672645453253054,
+    "n_pairs": 381,
+    "at_bound": false
+   },
+   "generalized_residual_lag1": 0.0953,
+   "n_consecutive": 381,
+   "cadence_min": 30
+  },
+  "lag_alignment": {}
+ },
+ "floor": {
+  "high": {
+   "n_days": 8,
+   "n_instants": 383,
+   "critical_margin": 0.1021,
+   "rule": "zero false iff m > c*",
+   "m_c": 0.15,
+   "false_at_m0": {
+    "days": 1,
+    "instants": 2
+   },
+   "false_at_m_c": {
+    "days": 0,
+    "instants": 0
+   },
+   "binding_instant": {
+    "t": "2026-10-05 12:55:00+00:00",
+    "day": "2026-10-05",
+    "x": 20.55,
+    "M": 20,
+    "settled": 20,
+    "era": "noaa"
+   },
+   "instant_level": {
+    "critical": 0.6021,
+    "m_zero_false_vs_same_instant_metar": 0.65,
+    "false_instants_at_m0": 28
+   },
+   "by_era": {
+    "noaa": {
+     "days": 8,
+     "critical": 0.1021,
+     "m_zero_false": 0.15
+    }
+   },
+   "out_of_sample": {
+    "train_days": 5,
+    "test_days": 3,
+    "m_train": 0.0,
+    "test_false_days": 1,
+    "test_critical": 0.1021
+   },
+   "model_implied_margin": {
+    "per_day_risk": 0.001,
+    "instants_per_day": 48.0,
+    "gauss": 0.6633,
+    "student_t": 1.6156
+   },
+   "fires_m_c": {
+    "margin": 0.15,
+    "days": 8,
+    "days_floor_reaches_settled": 7,
+    "share": 0.875,
+    "lead_vs_same_grid_metar_instant_min": {
+     "p10": 0.0,
+     "p50": 0.0,
+     "p90": 0.0,
+     "n": 7,
+     "earlier": 0,
+     "tie": 7,
+     "later": 0
+    },
+    "threshold_crossings_instant_lead_min": {
+     "p10": -30.0,
+     "p50": 0.0,
+     "p90": 0.0,
+     "n": 51,
+     "earlier": 3,
+     "tie": 42,
+     "later": 6
+    },
+    "lead_vs_awc_receipt_modeled_min": {
+     "p10": -16.36,
+     "p50": -16.2,
+     "p90": -14.82,
+     "n": 7,
+     "earlier": 0,
+     "tie": 0,
+     "later": 7
+    },
+    "lead_vs_awc_receipt_live_min": {
+     "n": 0
+    }
+   },
+   "fires_m_inst": {
+    "margin": 0.65,
+    "days": 8,
+    "days_floor_reaches_settled": 4,
+    "share": 0.5,
+    "lead_vs_same_grid_metar_instant_min": {
+     "p10": -102.0,
+     "p50": -45.0,
+     "p90": -9.0,
+     "n": 4,
+     "earlier": 0,
+     "tie": 1,
+     "later": 3
+    },
+    "threshold_crossings_instant_lead_min": {
+     "p10": -60.0,
+     "p50": -30.0,
+     "p90": 0.0,
+     "n": 48,
+     "earlier": 0,
+     "tie": 15,
+     "later": 33
+    },
+    "lead_vs_awc_receipt_modeled_min": {
+     "p10": -118.31,
+     "p50": -61.29,
+     "p90": -24.8,
+     "n": 4,
+     "earlier": 0,
+     "tie": 0,
+     "later": 4
+    },
+    "lead_vs_awc_receipt_live_min": {
+     "n": 0
+    }
+   }
+  },
+  "low": {
+   "n_days": 8,
+   "n_instants": 383,
+   "critical_margin": -0.0021,
+   "rule": "zero false iff m >= c*",
+   "m_c": 0.0,
+   "false_at_m0": {
+    "days": 0,
+    "instants": 0
+   },
+   "false_at_m_c": {
+    "days": 0,
+    "instants": 0
+   },
+   "binding_instant": {
+    "t": "2026-10-03 05:55:00+00:00",
+    "day": "2026-10-03",
+    "x": 9.45,
+    "M": 10,
+    "settled": 10,
+    "era": "noaa"
+   },
+   "instant_level": {
+    "critical": 0.3479,
+    "m_zero_false_vs_same_instant_metar": 0.35,
+    "false_instants_at_m0": 22
+   },
+   "by_era": {
+    "noaa": {
+     "days": 8,
+     "critical": -0.0021,
+     "m_zero_false": 0.0
+    }
+   },
+   "out_of_sample": {
+    "train_days": 5,
+    "test_days": 3,
+    "m_train": 0.0,
+    "test_false_days": 0,
+    "test_critical": -0.3021
+   },
+   "model_implied_margin": {
+    "per_day_risk": 0.001,
+    "instants_per_day": 48.0,
+    "gauss": 0.6633,
+    "student_t": 1.6156
+   },
+   "fires_m_c": {
+    "margin": 0.0,
+    "days": 8,
+    "days_floor_reaches_settled": 8,
+    "share": 1.0,
+    "lead_vs_same_grid_metar_instant_min": {
+     "p10": -90.0,
+     "p50": 0.0,
+     "p90": 9.0,
+     "n": 8,
+     "earlier": 1,
+     "tie": 5,
+     "later": 2
+    },
+    "threshold_crossings_instant_lead_min": {
+     "p10": -75.0,
+     "p50": 0.0,
+     "p90": 15.0,
+     "n": 16,
+     "earlier": 2,
+     "tie": 9,
+     "later": 5
+    },
+    "lead_vs_awc_receipt_modeled_min": {
+     "p10": -106.33,
+     "p50": -16.32,
+     "p90": -7.12,
+     "n": 8,
+     "earlier": 1,
+     "tie": 0,
+     "later": 7
+    },
+    "lead_vs_awc_receipt_live_min": {
+     "n": 0
+    }
+   },
+   "fires_m_inst": {
+    "margin": 0.35,
+    "days": 8,
+    "days_floor_reaches_settled": 4,
+    "share": 0.5,
+    "lead_vs_same_grid_metar_instant_min": {
+     "p10": -279.0,
+     "p50": -60.0,
+     "p90": -9.0,
+     "n": 4,
+     "earlier": 0,
+     "tie": 1,
+     "later": 3
+    },
+    "threshold_crossings_instant_lead_min": {
+     "p10": -333.0,
+     "p50": -45.0,
+     "p90": 0.0,
+     "n": 12,
+     "earlier": 0,
+     "tie": 3,
+     "later": 9
+    },
+    "lead_vs_awc_receipt_modeled_min": {
+     "p10": -295.26,
+     "p50": -76.34,
+     "p90": -25.1,
+     "n": 4,
+     "earlier": 0,
+     "tie": 0,
+     "later": 4
+    },
+    "lead_vs_awc_receipt_live_min": {
+     "n": 0
+    }
+   }
+  },
+  "bracket_variant": {
+   "high": {
+    "n_days": 9,
+    "n_instants": 385,
+    "critical_margin": -0.0479,
+    "rule": "zero false iff m > c*",
+    "m_c": 0.0,
+    "false_at_m0": {
+     "days": 0,
+     "instants": 0
+    },
+    "false_at_m_c": {
+     "days": 0,
+     "instants": 0
+    },
+    "binding_instant": {
+     "t": "2026-10-05 12:55:00+00:00",
+     "day": "2026-10-05",
+     "x": 20.4,
+     "M": 20,
+     "settled": 20,
+     "era": "noaa"
+    },
+    "instant_level": {
+     "critical": -0.0479,
+     "m_zero_false_vs_same_instant_metar": -0.0,
+     "false_instants_at_m0": 0
+    },
+    "by_era": {
+     "noaa": {
+      "days": 9,
+      "critical": -0.0479,
+      "m_zero_false": 0.0
+     }
+    },
+    "out_of_sample": {
+     "train_days": 6,
+     "test_days": 3,
+     "m_train": 0.0,
+     "test_false_days": 0,
+     "test_critical": -0.0479
+    },
+    "model_implied_margin": {
+     "per_day_risk": 0.001,
+     "instants_per_day": 48.0,
+     "gauss": 0.6633,
+     "student_t": 1.6156
+    },
+    "fires_m_c": {
+     "margin": 0.0,
+     "days": 9,
+     "days_floor_reaches_settled": 6,
+     "share": 0.6667,
+     "lead_vs_same_grid_metar_instant_min": {
+      "p10": -45.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "n": 6,
+      "earlier": 0,
+      "tie": 4,
+      "later": 2
+     },
+     "threshold_crossings_instant_lead_min": {
+      "p10": -30.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "n": 50,
+      "earlier": 0,
+      "tie": 42,
+      "later": 8
+     },
+     "lead_vs_awc_receipt_modeled_min": {
+      "p10": -61.24,
+      "p50": -16.35,
+      "p90": -15.87,
+      "n": 6,
+      "earlier": 0,
+      "tie": 0,
+      "later": 6
+     },
+     "lead_vs_awc_receipt_live_min": {
+      "n": 0
+     }
+    },
+    "fires_m_inst": {
+     "margin": -0.0,
+     "days": 9,
+     "days_floor_reaches_settled": 6,
+     "share": 0.6667,
+     "lead_vs_same_grid_metar_instant_min": {
+      "p10": -45.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "n": 6,
+      "earlier": 0,
+      "tie": 4,
+      "later": 2
+     },
+     "threshold_crossings_instant_lead_min": {
+      "p10": -30.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "n": 50,
+      "earlier": 0,
+      "tie": 42,
+      "later": 8
+     },
+     "lead_vs_awc_receipt_modeled_min": {
+      "p10": -61.24,
+      "p50": -16.35,
+      "p90": -15.87,
+      "n": 6,
+      "earlier": 0,
+      "tie": 0,
+      "later": 6
+     },
+     "lead_vs_awc_receipt_live_min": {
+      "n": 0
+     }
+    }
+   },
+   "low": {
+    "n_days": 9,
+    "n_instants": 385,
+    "critical_margin": -0.1521,
+    "rule": "zero false iff m >= c*",
+    "m_c": 0.0,
+    "false_at_m0": {
+     "days": 0,
+     "instants": 0
+    },
+    "false_at_m_c": {
+     "days": 0,
+     "instants": 0
+    },
+    "binding_instant": {
+     "t": "2026-10-03 05:55:00+00:00",
+     "day": "2026-10-03",
+     "x": 9.6,
+     "M": 10,
+     "settled": 10,
+     "era": "noaa"
+    },
+    "instant_level": {
+     "critical": -0.0521,
+     "m_zero_false_vs_same_instant_metar": -0.05,
+     "false_instants_at_m0": 0
+    },
+    "by_era": {
+     "noaa": {
+      "days": 9,
+      "critical": -0.1521,
+      "m_zero_false": 0.0
+     }
+    },
+    "out_of_sample": {
+     "train_days": 6,
+     "test_days": 3,
+     "m_train": 0.0,
+     "test_false_days": 0,
+     "test_critical": -0.4521
+    },
+    "model_implied_margin": {
+     "per_day_risk": 0.001,
+     "instants_per_day": 48.0,
+     "gauss": 0.6633,
+     "student_t": 1.6156
+    },
+    "fires_m_c": {
+     "margin": 0.0,
+     "days": 9,
+     "days_floor_reaches_settled": 6,
+     "share": 0.6667,
+     "lead_vs_same_grid_metar_instant_min": {
+      "p10": -60.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "n": 6,
+      "earlier": 0,
+      "tie": 4,
+      "later": 2
+     },
+     "threshold_crossings_instant_lead_min": {
+      "p10": -81.0,
+      "p50": -15.0,
+      "p90": 0.0,
+      "n": 14,
+      "earlier": 0,
+      "tie": 7,
+      "later": 7
+     },
+     "lead_vs_awc_receipt_modeled_min": {
+      "p10": -76.37,
+      "p50": -16.29,
+      "p90": -16.07,
+      "n": 6,
+      "earlier": 0,
+      "tie": 0,
+      "later": 6
+     },
+     "lead_vs_awc_receipt_live_min": {
+      "n": 0
+     }
+    },
+    "fires_m_inst": {
+     "margin": 0.0,
+     "days": 9,
+     "days_floor_reaches_settled": 6,
+     "share": 0.6667,
+     "lead_vs_same_grid_metar_instant_min": {
+      "p10": -60.0,
+      "p50": 0.0,
+      "p90": 0.0,
+      "n": 6,
+      "earlier": 0,
+      "tie": 4,
+      "later": 2
+     },
+     "threshold_crossings_instant_lead_min": {
+      "p10": -81.0,
+      "p50": -15.0,
+      "p90": 0.0,
+      "n": 14,
+      "earlier": 0,
+      "tie": 7,
+      "later": 7
+     },
+     "lead_vs_awc_receipt_modeled_min": {
+      "p10": -76.37,
+      "p50": -16.29,
+      "p90": -16.07,
+      "n": 6,
+      "earlier": 0,
+      "tie": 0,
+      "later": 6
+     },
+     "lead_vs_awc_receipt_live_min": {
+      "n": 0
+     }
+    }
+   }
+  }
+ },
+ "nowcast": {
+  "5": {
+   "t0_in_settlement_set": false,
+   "n_train": 240,
+   "n_test": 144,
+   "train_days": 5,
+   "test_days": 3,
+   "test_first_day": "2026-10-04",
+   "fits": {
+    "icm_dense": {
+     "beta": [
+      0.0572
+     ],
+     "sigma": 0.0746,
+     "covariates": [
+      "1"
+     ]
+    },
+    "icm_dense_trend": {
+     "beta": [
+      0.0534,
+      -0.0974
+     ],
+     "sigma": 0.074,
+     "covariates": [
+      "1",
+      "trend"
+     ]
+    },
+    "icm_dense_trend_prevmetar": {
+     "beta": [
+      0.0581,
+      -0.1877,
+      -0.0318
+     ],
+     "sigma": 0.0733,
+     "covariates": [
+      "1",
+      "trend",
+      "gap_prev"
+     ]
+    }
+   },
+   "scores": {
+    "naive_prev_metar": {
+     "brier": 0.7639,
+     "log_loss": 5.2768,
+     "accuracy": 0.6181
+    },
+    "persistence_prob": {
+     "brier": 0.5644,
+     "log_loss": 1.1007,
+     "accuracy": 0.6181
+    },
+    "empirical_dense": {
+     "brier": 0.2152,
+     "log_loss": 0.4508,
+     "accuracy": 0.8681
+    },
+    "icm_dense": {
+     "brier": 0.1869,
+     "log_loss": 0.315,
+     "accuracy": 0.8681
+    },
+    "icm_dense_trend": {
+     "brier": 0.211,
+     "log_loss": 0.3765,
+     "accuracy": 0.8542
+    },
+    "icm_dense_trend_prevmetar": {
+     "brier": 0.2315,
+     "log_loss": 0.4151,
+     "accuracy": 0.8472
+    }
+   },
+   "reliability": {
+    "icm_dense_trend": {
+     "table": [
+      {
+       "bin": "0.0-0.1",
+       "n": 1698,
+       "mean_p": 0.0003,
+       "obs_freq": 0.0029
+      },
+      {
+       "bin": "0.1-0.2",
+       "n": 9,
+       "mean_p": 0.1633,
+       "obs_freq": 0.6667
+      },
+      {
+       "bin": "0.2-0.3",
+       "n": 13,
+       "mean_p": 0.2584,
+       "obs_freq": 0.4615
+      },
+      {
+       "bin": "0.3-0.4",
+       "n": 4,
+       "mean_p": 0.3305,
+       "obs_freq": 0.5
+      },
+      {
+       "bin": "0.4-0.5",
+       "n": 4,
+       "mean_p": 0.4257,
+       "obs_freq": 0.5
+      },
+      {
+       "bin": "0.5-0.6",
+       "n": 4,
+       "mean_p": 0.5743,
+       "obs_freq": 0.5
+      },
+      {
+       "bin": "0.6-0.7",
+       "n": 4,
+       "mean_p": 0.6695,
+       "obs_freq": 0.5
+      },
+      {
+       "bin": "0.7-0.8",
+       "n": 13,
+       "mean_p": 0.7416,
+       "obs_freq": 0.5385
+      },
+      {
+       "bin": "0.8-0.9",
+       "n": 9,
+       "mean_p": 0.8367,
+       "obs_freq": 0.3333
+      },
+      {
+       "bin": "0.9-1.0",
+       "n": 114,
+       "mean_p": 0.9951,
+       "obs_freq": 0.9561
+      }
+     ],
+     "ece": 0.01344
+    },
+    "empirical_dense": {
+     "table": [
+      {
+       "bin": "0.0-0.1",
+       "n": 1702,
+       "mean_p": 0.0104,
+       "obs_freq": 0.0065
+      },
+      {
+       "bin": "0.1-0.2",
+       "n": 26,
+       "mean_p": 0.136,
+       "obs_freq": 0.3077
+      },
+      {
+       "bin": "0.7-0.8",
+       "n": 26,
+       "mean_p": 0.776,
+       "obs_freq": 0.6923
+      },
+      {
+       "bin": "0.8-0.9",
+       "n": 95,
+       "mean_p": 0.8571,
+       "obs_freq": 0.8842
+      },
+      {
+       "bin": "0.9-1.0",
+       "n": 23,
+       "mean_p": 0.9008,
+       "obs_freq": 1.0
+      }
+     ],
+     "ece": 0.00968
+    },
+    "persistence_prob": {
+     "table": [
+      {
+       "bin": "0.0-0.1",
+       "n": 1440,
+       "mean_p": 0.0049,
+       "obs_freq": 0.0049
+      },
+      {
+       "bin": "0.1-0.2",
+       "n": 288,
+       "mean_p": 0.1886,
+       "obs_freq": 0.1667
+      },
+      {
+       "bin": "0.5-0.6",
+       "n": 144,
+       "mean_p": 0.574,
+       "obs_freq": 0.6181
+      }
+     ],
+     "ece": 0.00677
+    }
+   },
+   "brier_ratio_icm_trend_vs_naive": 0.2762,
+   "brier_ratio_icm_trend_vs_persistence": 0.3738,
+   "modeled_minutes_x_t0_before_awc_t1": {
+    "p10": -6.41,
+    "p50": -6.15,
+    "p90": -4.84,
+    "n": 384,
+    "earlier": 8,
+    "tie": 0,
+    "later": 376
+   }
+  },
+  "25": {
+   "t0_in_settlement_set": false,
+   "n_train": 286,
+   "n_test": 97,
+   "train_days": 6,
+   "test_days": 3,
+   "test_first_day": "2026-10-05",
+   "fits": {
+    "icm_dense": {
+     "beta": [
+      0.0567
+     ],
+     "sigma": 0.503,
+     "covariates": [
+      "1"
+     ]
+    },
+    "icm_dense_trend": {
+     "beta": [
+      0.0569,
+      0.0173
+     ],
+     "sigma": 0.503,
+     "covariates": [
+      "1",
+      "trend"
+     ]
+    },
+    "icm_dense_trend_prevmetar": {
+     "beta": [
+      0.0615,
+      -0.0541,
+      -0.0743
+     ],
+     "sigma": 0.5023,
+     "covariates": [
+      "1",
+      "trend",
+      "gap_prev"
+     ]
+    }
+   },
+   "scores": {
+    "naive_prev_metar": {
+     "brier": 0.7216,
+     "log_loss": 4.985,
+     "accuracy": 0.6392
+    },
+    "persistence_prob": {
+     "brier": 0.5421,
+     "log_loss": 1.032,
+     "accuracy": 0.6392
+    },
+    "empirical_dense": {
+     "brier": 0.4705,
+     "log_loss": 0.9217,
+     "accuracy": 0.6701
+    },
+    "icm_dense": {
+     "brier": 0.4797,
+     "log_loss": 0.8408,
+     "accuracy": 0.6701
+    },
+    "icm_dense_trend": {
+     "brier": 0.4794,
+     "log_loss": 0.8391,
+     "accuracy": 0.6701
+    },
+    "icm_dense_trend_prevmetar": {
+     "brier": 0.4839,
+     "log_loss": 0.8459,
+     "accuracy": 0.6804
+    }
+   },
+   "reliability": {
+    "icm_dense_trend": {
+     "table": [
+      {
+       "bin": "0.0-0.1",
+       "n": 1036,
+       "mean_p": 0.0044,
+       "obs_freq": 0.0058
+      },
+      {
+       "bin": "0.1-0.2",
+       "n": 53,
+       "mean_p": 0.1498,
+       "obs_freq": 0.0943
+      },
+      {
+       "bin": "0.2-0.3",
+       "n": 22,
+       "mean_p": 0.2436,
+       "obs_freq": 0.2273
+      },
+      {
+       "bin": "0.3-0.4",
+       "n": 37,
+       "mean_p": 0.3398,
+       "obs_freq": 0.2703
+      },
+      {
+       "bin": "0.4-0.5",
+       "n": 16,
+       "mean_p": 0.4408,
+       "obs_freq": 0.375
+      },
+      {
+       "bin": "0.5-0.6",
+       "n": 35,
+       "mean_p": 0.544,
+       "obs_freq": 0.5143
+      },
+      {
+       "bin": "0.6-0.7",
+       "n": 62,
+       "mean_p": 0.6534,
+       "obs_freq": 0.7581
+      }
+     ],
+     "ece": 0.01263
+    },
+    "empirical_dense": {
+     "table": [
+      {
+       "bin": "0.0-0.1",
+       "n": 1067,
+       "mean_p": 0.0149,
+       "obs_freq": 0.0084
+      },
+      {
+       "bin": "0.1-0.2",
+       "n": 62,
+       "mean_p": 0.1506,
+       "obs_freq": 0.1613
+      },
+      {
+       "bin": "0.3-0.4",
+       "n": 35,
+       "mean_p": 0.3734,
+       "obs_freq": 0.3714
+      },
+      {
+       "bin": "0.4-0.5",
+       "n": 18,
+       "mean_p": 0.4656,
+       "obs_freq": 0.4444
+      },
+      {
+       "bin": "0.5-0.6",
+       "n": 17,
+       "mean_p": 0.5385,
+       "obs_freq": 0.5882
+      },
+      {
+       "bin": "0.6-0.7",
+       "n": 62,
+       "mean_p": 0.6612,
+       "obs_freq": 0.7581
+      }
+     ],
+     "ece": 0.01181
+    },
+    "persistence_prob": {
+     "table": [
+      {
+       "bin": "0.0-0.1",
+       "n": 970,
+       "mean_p": 0.0055,
+       "obs_freq": 0.0031
+      },
+      {
+       "bin": "0.1-0.2",
+       "n": 194,
+       "mean_p": 0.1863,
+       "obs_freq": 0.1649
+      },
+      {
+       "bin": "0.5-0.6",
+       "n": 97,
+       "mean_p": 0.5726,
+       "obs_freq": 0.6392
+      }
+     ],
+     "ece": 0.01023
+    }
+   },
+   "brier_ratio_icm_trend_vs_naive": 0.6644,
+   "brier_ratio_icm_trend_vs_persistence": 0.8843,
+   "modeled_minutes_x_t0_before_awc_t1": {
+    "p10": 13.58,
+    "p50": 13.86,
+    "p90": 15.16,
+    "n": 383,
+    "earlier": 383,
+    "tie": 0,
+    "later": 0
+   }
+  }
+ },
+ "gap_decomposition": {
+  "high": {
+   "days": 8,
+   "days_by_era": {
+    "noaa": 8
+   },
+   "nonzero_days": {
+    "a_cadence": 1,
+    "b_measurement": 1,
+    "c_coverage": 0,
+    "d_era": 0,
+    "d_era_wu": 0,
+    "d_era_noaa": 0,
+    "total": 2
+   },
+   "hist": {
+    "a": {
+     "0": 7,
+     "1": 1
+    },
+    "b": {
+     "0": 7,
+     "1": 1
+    },
+    "c": {
+     "0": 8
+    },
+    "d": {
+     "0": 8
+    },
+    "total": {
+     "0": 6,
+     "1": 2
+    }
+   },
+   "instant_measurement": {
+    "pairs": 383,
+    "R_x_ne_M": 44
+   },
+   "speci_only_sets_extreme_days": 0,
+   "offgrid_only_sets_extreme_days": 0
+  },
+  "low": {
+   "days": 8,
+   "days_by_era": {
+    "noaa": 8
+   },
+   "nonzero_days": {
+    "a_cadence": 0,
+    "b_measurement": 1,
+    "c_coverage": 0,
+    "d_era": 0,
+    "d_era_wu": 0,
+    "d_era_noaa": 0,
+    "total": 1
+   },
+   "hist": {
+    "a": {
+     "0": 8
+    },
+    "b": {
+     "-1": 1,
+     "0": 7
+    },
+    "c": {
+     "0": 8
+    },
+    "d": {
+     "0": 8
+    },
+    "total": {
+     "-1": 1,
+     "0": 7
+    }
+   },
+   "instant_measurement": {
+    "pairs": 383,
+    "R_x_ne_M": 44
+   },
+   "speci_only_sets_extreme_days": 0,
+   "offgrid_only_sets_extreme_days": 0
+  },
+  "definition": "A_full=R(dense day extreme over G), A_S=R(extreme over S\u2229G of x), B=extreme over S\u2229G of METAR, C=extreme over all S (METAR+SPECI), H=settled; a=A_full-A_S, b=A_S-B, c=B-C, d=C-H, a+b+c+d=A_full-H"
+ },
+ "latency": {
+  "awc_lag_min": {
+   "p10": 2.33,
+   "p50": 2.73,
+   "p90": 7.94,
+   "n": 3884,
+   "earlier": 3884,
+   "tie": 0,
+   "later": 0
+  },
+  "dense_lag_model_min": 18.67,
+  "lag_model_source": "KNMI file publication lag p50 13.67 min after the :30/:00 stamp (+5 min to the bracketing stamp): {'probe_at': '2026-10-07T04:08:51.393973+00:00', 'n': 60, 'lag_min_p10': 13.65, 'lag_min_p50': 13.67, 'lag_min_p90': 13.72}",
+  "i_modeled_awc_minus_dense_min": {
+   "p10": -16.34,
+   "p50": -15.94,
+   "p90": -10.73,
+   "n": 3884,
+   "earlier": 310,
+   "tie": 0,
+   "later": 3574
+  }
+ },
+ "dense_lag_used_for_modeled_leads_min": 18.67,
+ "verdict": "NOWCAST_ONLY",
+ "verdict_reason": "d=25: empirical_dense Brier 0.4705 vs naive 0.7216 / persistence 0.5421, x(t0) 13.86 min before AWC t1 | floor: high: m_c=0.15 fires 7/8 d, OOS false=1, floor lead p50=-16.2 (n=7), same-instant receipt lead p50=-15.94; low: m_c=0.0 fires 8/8 d, OOS false=0, floor lead p50=-16.32 (n=8), same-instant receipt lead p50=-15.94",
+ "interpolation_error": {
+  "nea_1min_10min_bracket_midpoint": {
+   "n": 278950,
+   "sd": 0.1641,
+   "mad_sd": 0.0741,
+   "p99_abs": 0.6
+  },
+  "note": "sigma_total^2 = sigma_meas^2 + sigma_interp^2; sigma_interp from NEA 1-min (no sub-10-min KNMI ta at :25)",
+  "sigma_meas_implied": 0.0
+ }
+}

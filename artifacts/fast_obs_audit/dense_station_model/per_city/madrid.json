@@ -1,0 +1,440 @@
+{
+ "city": "Madrid",
+ "station": "LEMD",
+ "source": "AEMET 3129 horario, hourly (2 x 24 h)",
+ "tz": "Europe/Madrid",
+ "dense_identity": {
+  "note": "AEMET public XML 'horario' captures only (no archive; keyed OpenData unavailable)"
+ },
+ "metar": {
+  "n": 10662,
+  "n_routine": 10564,
+  "n_speci": 98,
+  "routine_minutes": [
+   0,
+   30
+  ],
+  "first": "2026-03-01 00:00:00+00:00",
+  "last": "2026-10-07 03:00:00+00:00",
+  "m00": 1
+ },
+ "truth": {
+  "high": 194,
+  "low": 47,
+  "eras": {
+   "high": {
+    "wu": 149,
+    "other:None": 1,
+    "noaa": 44
+   },
+   "low": {
+    "wu": 3,
+    "noaa": 44
+   }
+  }
+ },
+ "dense_range": [
+  "2026-10-05 14:00:00+00:00",
+  "2026-10-07 04:00:00+00:00",
+  39
+ ],
+ "measurement": {
+  "n_pairs": 38,
+  "n_pairs_routine": 38,
+  "n_pairs_speci": 0,
+  "n_days": 3,
+  "first": "2026-10-05 14:00:00+00:00",
+  "last": "2026-10-07 03:00:00+00:00",
+  "gauss": {
+   "b": -0.097,
+   "sigma": 0.4861,
+   "se_b": 0.0927,
+   "se_sigma": 0.0667,
+   "nll": 30.7432,
+   "aic": 65.4865,
+   "at_sigma_bound": false
+  },
+  "student_t": {
+   "b": -0.0396,
+   "sigma": 0.1791,
+   "nu": 2,
+   "nll": 23.8635,
+   "aic": 53.727,
+   "nu_profile_nll": {
+    "1": 24.657,
+    "2": 23.864,
+    "3": 24.238,
+    "5": 25.278,
+    "8": 26.522,
+    "15": 28.115,
+    "30": 29.34
+   }
+  },
+  "preferred_by_aic": "student_t",
+  "offset_table_gauss": {
+   "observed": {
+    "-3": 0,
+    "-2": 1,
+    "-1": 5,
+    "0": 31,
+    "1": 1,
+    "2": 0,
+    "3": 0
+   },
+   "expected": {
+    "-3": 0.0,
+    "-2": 0.3,
+    "-1": 10.2,
+    "0": 23.2,
+    "1": 4.3,
+    "2": 0.0,
+    "3": 0.0
+   },
+   "outside": 0,
+   "chi2_cells_ge5": 5.27
+  },
+  "offset_table_t": {
+   "observed": {
+    "-3": 0,
+    "-2": 1,
+    "-1": 5,
+    "0": 31,
+    "1": 1,
+    "2": 0,
+    "3": 0
+   },
+   "expected": {
+    "-3": 0.1,
+    "-2": 0.2,
+    "-1": 5.8,
+    "0": 29.5,
+    "1": 2.2,
+    "2": 0.2,
+    "3": 0.0
+   },
+   "outside": 0,
+   "chi2_cells_ge5": 0.19
+  },
+  "raw_agreement": {
+   "R_x_eq_M": 31,
+   "share": 0.8158,
+   "R_xb_eq_M": 29,
+   "share_b": 0.7632,
+   "sd_M_minus_x": 0.5322
+  },
+  "subsets": {
+   "routine": {
+    "n": 38,
+    "b": -0.097,
+    "sigma": 0.4861
+   },
+   "second_half_days": {
+    "n": 30,
+    "b": -0.0955,
+    "sigma": 0.5368
+   }
+  },
+  "residual_autocorr": {
+   "latent_rho_pairwise": null,
+   "generalized_residual_lag1": null,
+   "n_consecutive": 0,
+   "cadence_min": 30
+  },
+  "lag_alignment": {}
+ },
+ "floor": {
+  "high": {
+   "n_days": 2,
+   "n_instants": 32,
+   "critical_margin": -0.697,
+   "rule": "zero false iff m > c*",
+   "m_c": 0.0,
+   "false_at_m0": {
+    "days": 0,
+    "instants": 0
+   },
+   "false_at_m_c": {
+    "days": 0,
+    "instants": 0
+   },
+   "binding_instant": {
+    "t": "2026-10-05 16:00:00+00:00",
+    "day": "2026-10-05",
+    "x": 25.9,
+    "M": 26,
+    "settled": 26,
+    "era": "noaa"
+   },
+   "instant_level": {
+    "critical": 1.803,
+    "m_zero_false_vs_same_instant_metar": 1.85,
+    "false_instants_at_m0": 5
+   },
+   "by_era": {
+    "noaa": {
+     "days": 2,
+     "critical": -0.697,
+     "m_zero_false": 0.0
+    }
+   },
+   "out_of_sample": null,
+   "model_implied_margin": {
+    "per_day_risk": 0.001,
+    "instants_per_day": 16.0,
+    "gauss": 1.8645,
+    "student_t": 16.0175
+   },
+   "fires_m_c": {
+    "margin": 0.0,
+    "days": 2,
+    "days_floor_reaches_settled": 1,
+    "share": 0.5,
+    "lead_vs_same_grid_metar_instant_min": {
+     "p10": 60.0,
+     "p50": 60.0,
+     "p90": 60.0,
+     "n": 1,
+     "earlier": 1,
+     "tie": 0,
+     "later": 0
+    },
+    "threshold_crossings_instant_lead_min": {
+     "p10": -42.0,
+     "p50": 0.0,
+     "p90": 42.0,
+     "n": 4,
+     "earlier": 1,
+     "tie": 2,
+     "later": 1
+    },
+    "lead_vs_awc_receipt_modeled_min": {
+     "n": 0
+    },
+    "lead_vs_awc_receipt_live_min": {
+     "n": 0
+    }
+   },
+   "fires_m_inst": {
+    "margin": 1.85,
+    "days": 2,
+    "days_floor_reaches_settled": 0,
+    "share": 0.0,
+    "lead_vs_same_grid_metar_instant_min": {
+     "n": 0
+    },
+    "threshold_crossings_instant_lead_min": {
+     "p10": -120.0,
+     "p50": -120.0,
+     "p90": -120.0,
+     "n": 2,
+     "earlier": 0,
+     "tie": 0,
+     "later": 2
+    },
+    "lead_vs_awc_receipt_modeled_min": {
+     "n": 0
+    },
+    "lead_vs_awc_receipt_live_min": {
+     "n": 0
+    }
+   }
+  },
+  "low": {
+   "n_days": 2,
+   "n_instants": 32,
+   "critical_margin": -1.603,
+   "rule": "zero false iff m >= c*",
+   "m_c": 0.0,
+   "false_at_m0": {
+    "days": 0,
+    "instants": 0
+   },
+   "false_at_m_c": {
+    "days": 0,
+    "instants": 0
+   },
+   "binding_instant": {
+    "t": "2026-10-06 20:00:00+00:00",
+    "day": "2026-10-06",
+    "x": 14.2,
+    "M": 14,
+    "settled": 13,
+    "era": "noaa"
+   },
+   "instant_level": {
+    "critical": 0.497,
+    "m_zero_false_vs_same_instant_metar": 0.5,
+    "false_instants_at_m0": 4
+   },
+   "by_era": {
+    "noaa": {
+     "days": 2,
+     "critical": -1.603,
+     "m_zero_false": 0.0
+    }
+   },
+   "out_of_sample": null,
+   "model_implied_margin": {
+    "per_day_risk": 0.001,
+    "instants_per_day": 16.0,
+    "gauss": 1.8645,
+    "student_t": 16.0175
+   },
+   "fires_m_c": {
+    "margin": 0.0,
+    "days": 2,
+    "days_floor_reaches_settled": 0,
+    "share": 0.0,
+    "lead_vs_same_grid_metar_instant_min": {
+     "n": 0
+    },
+    "threshold_crossings_instant_lead_min": {
+     "p10": -66.0,
+     "p50": 0.0,
+     "p90": 0.0,
+     "n": 10,
+     "earlier": 0,
+     "tie": 8,
+     "later": 2
+    },
+    "lead_vs_awc_receipt_modeled_min": {
+     "n": 0
+    },
+    "lead_vs_awc_receipt_live_min": {
+     "n": 0
+    }
+   },
+   "fires_m_inst": {
+    "margin": 0.5,
+    "days": 2,
+    "days_floor_reaches_settled": 0,
+    "share": 0.0,
+    "lead_vs_same_grid_metar_instant_min": {
+     "n": 0
+    },
+    "threshold_crossings_instant_lead_min": {
+     "p10": -132.0,
+     "p50": -60.0,
+     "p90": 0.0,
+     "n": 8,
+     "earlier": 0,
+     "tie": 3,
+     "later": 5
+    },
+    "lead_vs_awc_receipt_modeled_min": {
+     "n": 0
+    },
+    "lead_vs_awc_receipt_live_min": {
+     "n": 0
+    }
+   }
+  }
+ },
+ "nowcast": {
+  "10": {
+   "n": 0,
+   "note": "insufficient pairs (grid does not contain t1 - delta)"
+  },
+  "20": {
+   "n": 0,
+   "note": "insufficient pairs (grid does not contain t1 - delta)"
+  },
+  "30": {
+   "n": 0,
+   "note": "insufficient pairs (grid does not contain t1 - delta)"
+  }
+ },
+ "gap_decomposition": {
+  "high": {
+   "days": 1,
+   "days_by_era": {
+    "noaa": 1
+   },
+   "nonzero_days": {
+    "a_cadence": 0,
+    "b_measurement": 0,
+    "c_coverage": 0,
+    "d_era": 0,
+    "d_era_wu": 0,
+    "d_era_noaa": 0,
+    "total": 0
+   },
+   "hist": {
+    "a": {
+     "0": 1
+    },
+    "b": {
+     "0": 1
+    },
+    "c": {
+     "0": 1
+    },
+    "d": {
+     "0": 1
+    },
+    "total": {
+     "0": 1
+    }
+   },
+   "instant_measurement": {
+    "pairs": 24,
+    "R_x_ne_M": 6
+   },
+   "speci_only_sets_extreme_days": 0,
+   "offgrid_only_sets_extreme_days": 0
+  },
+  "low": {
+   "days": 1,
+   "days_by_era": {
+    "noaa": 1
+   },
+   "nonzero_days": {
+    "a_cadence": 0,
+    "b_measurement": 1,
+    "c_coverage": 0,
+    "d_era": 0,
+    "d_era_wu": 0,
+    "d_era_noaa": 0,
+    "total": 1
+   },
+   "hist": {
+    "a": {
+     "0": 1
+    },
+    "b": {
+     "1": 1
+    },
+    "c": {
+     "0": 1
+    },
+    "d": {
+     "0": 1
+    },
+    "total": {
+     "1": 1
+    }
+   },
+   "instant_measurement": {
+    "pairs": 24,
+    "R_x_ne_M": 6
+   },
+   "speci_only_sets_extreme_days": 0,
+   "offgrid_only_sets_extreme_days": 0
+  },
+  "definition": "A_full=R(dense day extreme over G), A_S=R(extreme over S\u2229G of x), B=extreme over S\u2229G of METAR, C=extreme over all S (METAR+SPECI), H=settled; a=A_full-A_S, b=A_S-B, c=B-C, d=C-H, a+b+c+d=A_full-H"
+ },
+ "latency": {
+  "awc_lag_min": {
+   "p10": 4.34,
+   "p50": 4.5,
+   "p90": 9.01,
+   "n": 3915,
+   "earlier": 3915,
+   "tie": 0,
+   "later": 0
+  }
+ },
+ "dense_lag_used_for_modeled_leads_min": null,
+ "verdict": "NOT_USEFUL",
+ "verdict_reason": "floor: high: m_c=0.0 fires 1/2 d, OOS false=None, floor lead p50=None (n=0), same-instant receipt lead p50=None; low: m_c=0.0 fires 0/2 d, OOS false=None, floor lead p50=None (n=0), same-instant receipt lead p50=None | nowcast: no held-out Brier gain available before the AWC METAR"
+}

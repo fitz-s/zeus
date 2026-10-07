@@ -1,0 +1,117 @@
+### 7.1 Answer to "how does a dense station relate to the settled value"
+
+There is one relation, with three city-specific parameters:
+
+1. **identity**: σ and b at settlement instants (§1);
+2. **availability**: dense receipt time against AWC receipt of the same METAR;
+3. **cadence gain**: dense instants between METARs (§4a).
+
+The hard floor (§2) and the nowcast (§3) are special cases of the state-space posterior (§5):
+
+- the floor is the σ → 0 limit at an instant whose METAR is pending;
+- the nowcast is its one-step marginal.
+
+The state-space B arm is the version that puts dense information into the bin probability, and the one to ship if
+anything is shipped.
+
+### 7.2 Per-city verdicts
+
+The first verdict column is the items 1–4 verdict (FLOOR_USABLE / NOWCAST_ONLY / NOT_USEFUL). The second is the
+state-space gate on NOAA-era test days.
+
+| city | items 1–4 | state-space B vs A (high / low; STRICT) | reason |
+|---|---|---|---|
+| Toronto | **FLOOR_USABLE** | NOT SIGNIFICANT / NOT SIGNIFICANT (FAIL / PASS) | See note T. |
+| Tokyo | NOWCAST_ONLY | **B_USABLE / B_USABLE** (PASS / FAIL) | See note K. |
+| Helsinki | NOWCAST_ONLY | **B_USABLE / B_USABLE** (PASS / FAIL) | See note H. |
+| Singapore | NOWCAST_ONLY | **B_USABLE / B_USABLE** (FAIL / PASS) | See note S. |
+| Warsaw | NOT_USEFUL | B_USABLE (negligible) / NOT SIGNIFICANT (PASS / FAIL) | See note W. |
+| Munich | NOT_USEFUL | NOT SIGNIFICANT / NOT SIGNIFICANT (PASS / PASS) | See note M. |
+| Amsterdam | NOWCAST_ONLY (8 days) | not run | See note A. |
+| Madrid | NOT_USEFUL | not run | See note D. |
+
+**T, Toronto.**
+
+- ECCC 51459 equals the METAR body group at every instant: 7 416 / 7 416 pairs, σ → 0.
+- The SWOB receipt beats AWC for the same instant by a median 5.5 min (147 / 148 live instants).
+- The floor at m = 0 is exact for every NOAA-era day and out of sample.
+  - The all-history m_high = 0.5 is forced by one WU-era day (05-18: METAR 31, WU settled 30).
+  - The floor fires on 143 / 289 days, with a modeled lead of +5 min.
+- In the state space, B − A logloss is −0.006 (high) and −0.004 (low), but the 95 % bands include 0.
+  - The 5-min lead touches only the last pending instant. Hourly METAR plus hourly SWOB gives little *between*
+    instants.
+  - The value is in timing, not probability. A FLOOR_USABLE rule (dense R(x) at a settlement instant is the METAR
+    integer, received ~5 min earlier) captures it more simply than the filter.
+  - Caveat: 9 / 288 days had a SPECI set the high, and future SPECIs are invisible to both.
+
+**K, Tokyo.**
+
+- JMA 44166 is identical to the METAR (10 198 / 10 198), but arrives at the same time (median −0.5 min; dense first
+  on 46 % of instants). So the floor brings no time lead: NOWCAST_ONLY.
+- The 10-min readings *between* METARs carry the largest gain of any city: high −0.037 [−0.052, −0.024],
+  low −0.018 [−0.030, −0.008]. Both A and B beat A0 on both metrics.
+- Lead to P ≥ 0.9: median +10 min (high).
+- STRICT fails on low (21 vs 15 errors at q ≥ 0.95), but within the Poisson bound of 17.7 expected. The errors come
+  from 2 days, mainly 08-27, a convective drop at 18 local; B led A by 60 min once it showed.
+
+**H, Helsinki.**
+
+- FMI is not identical to the METAR: a two-population error, σ_core 0.08 / σ_outlier 0.41, outlier weight 0.28, with
+  agreement non-stationary by month.
+- Same-instant receipt is a tie (median −0.8 min). The floor needs m = 0.35 and is never earlier than AWC.
+- But the 10-min path between METARs informs the extreme. B − A is −0.020 [−0.025, −0.014] (high) and
+  −0.015 [−0.023, −0.008] (low). The gain is concentrated at 13–16 local (high, up to −0.057) and 21–23 / 06 local
+  (low).
+- Lead to P ≥ 0.9: median +20 min (high).
+- STRICT fails on low: 2 errors vs 0, both on one day (09-12 06:00, a radiative minimum the forecast missed). This is
+  within the Poisson bound.
+
+**S, Singapore.**
+
+- NEA S24 is a different sensor (σ 0.44 Gauss / 0.22 core plus 0.86 outliers; drift ρ 0.65, τ_e 97 min). Its
+  readings still sharpen the path.
+- B − A is −0.015 [−0.022, −0.009] (high) and −0.011 [−0.021, −0.002] (low). Lead median +20 min (high).
+- The measurement margin is large (m_high 0.9) and out-of-sample false floors occur, so a floor is not usable.
+- STRICT fails on high by one error (1 vs 0).
+- **The settlement-page dropout (09-20, §5.4) is the dominant risk**: it gives A and B 46–47 decisions at 100 %
+  confidence on the wrong bin. That is not a dense-data problem.
+- Live receipt is modeled from a 100-minute probe only; Zeus has no NEA channel.
+
+**W, Warsaw.**
+
+- Hourly IMGW synop is 15.7 min later than AWC and only roughly equals the METAR (σ 0.73).
+- B − A is −0.002 on high: statistically significant but economically nil. Low is not significant.
+
+**M, Munich.**
+
+- DWD 01262 arrives 27 min after AWC (median 40.8-min publication lag), so by the time a dense reading exists, the
+  METAR for that instant is already in hand.
+- B − A is 0.000 on both metrics. The extra cadence never arrives in time to matter.
+- The sensor also reads ~0.4 °C below the METAR by day.
+
+**A, Amsterdam.**
+
+- KNMI ta at :20/:30 interpolated to :25 matches the METAR to within the interpolation error. KNMI publishes 13.7 min
+  after its stamp, so the :30 file arrives ~16 min after AWC's :25 METAR.
+- The 800-call cap allowed 8 days, too few for a train/test state-space run.
+- If KNMI is pursued, fetch every 10-min file. tx/tn bracket the instant exactly and gave m = 0 on all 9 days, but the
+  publication lag makes it slower than AWC.
+
+**D, Madrid.**
+
+- No dense archive: the AEMET public XML keeps 24 h, and OpenData has no key. Nothing to evaluate.
+
+### 7.3 Bottom line
+
+- A dense series improves the settled-bin probability out of sample **when, and only when**, it is identical or
+  near-identical to the METAR sensor **and** arrives no later than AWC: Tokyo, Helsinki, Singapore.
+  - The improvement is −0.015 to −0.037 nats per decision. It concentrates in the hours the extreme is set, and moves
+    P(correct) ≥ 0.9 a median 10–20 min earlier on highs.
+- Where the dense value arrives after the METAR (Munich, Warsaw, Amsterdam), it adds nothing, whatever its cadence.
+- No city shows semantic violations.
+- High-confidence errors stay within B's own expected count everywhere. The literal raw-count rule (B ≤ A) fails on
+  4 of the 8 usable metrics, by 1–6 errors concentrated in 1–2 days each. With 42–44 test days that rule cannot be
+  certified either way.
+- Given the operator's "B usable only if false-certainty is no worse" rule, **no city passes STRICT on both metrics**:
+  - Tokyo high, Helsinki high and Singapore low pass STRICT and the log-loss gate;
+  - Toronto passes on the floor rule only.

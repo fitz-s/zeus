@@ -1,0 +1,298 @@
+# Dense airport station → settled daily extreme: one method, applied per city
+
+Read-only analysis. No DB writes, no `src/` or `config/` changes. Every DB was opened with `file:…?mode=ro`. Artifacts live in
+`artifacts/fast_obs_audit/dense_station_model/`.
+
+| file | role |
+|---|---|
+| `dense_model.py` | Items 1–4 mathematics: rounding R, the interval-censored MLE, floor margins, scoring |
+| `run_dense_model.py` | Items 1–4 runner → `per_city/<city>.json`, `summary_table.md` |
+| `state_space.py`, `ss_engine.py` | State-space settled-extreme model: filter, particle engine, grid oracle, estimation |
+| `run_state_space.py` | A0 / A / B experiment → `per_city_ss/<city>.json`, `per_city_ss/<city>_decisions.csv.gz` |
+| `build_ss_summary.py` | A0 / A / B table and gate → `ss_summary_table.md`, `ss_verdicts.json` |
+| `test_dense_model.py` | 34 tests (synthetic data only) |
+| `fetch_*.py`, `probe_*.py` | Data acquisition; raw responses kept in `raw/` |
+
+## 0. Settlement law and notation
+
+The WRH timeseries page renders every METAR and SPECI row of the station as an integer in the contract unit (°C for
+every city here). For a local day d with settlement instants S_d:
+
+- H_d = max_{t∈S_d} M_t
+- L_d = min_{t∈S_d} M_t
+- M_t = R(T_t)
+
+R is `SettlementSemantics(rounding_rule="wmo_half_up").round_single`, i.e. R(v) = ⌊v + 0.5⌋. Examples: 2.5 → 3, −0.5 → 0,
+−1.5 → −1, −2.51 → −3. The code calls the repo function itself, and the tests pin negatives against `round_single`.
+
+Local days are [local midnight, next local midnight). Each boundary is constructed in the city timezone before conversion
+to UTC, so DST days are 23 h or 25 h long.
+
+Truth is `settlement_outcomes`, authority = VERIFIED. Eras are split by `provenance_json.data_version`:
+
+- `noaa_wrh_timeseries_v1` is the NOAA era, from 2026-08-24 (Toronto from 08-23).
+- `wu_icao_history*` is the WU era.
+
+**The METAR integer used in fitting is the TT/dd body group** (M = minus) from IEM ASOS, report_type 3 + 4. IEM files
+the second half-hourly routine report under type 4, so its labels are not used. A report is classed as routine if and
+only if its minute is one of the station's dominant cadence minutes; anything else is a SPECI. All 8 stations parsed
+with 0 rows lacking a TT group and 0 duplicate instants.
+
+## 1. Measurement model at settlement instants
+
+**Model.** For t ∈ S ∩ G: M_t = R(x_t + b + ε_t). The dense reading x_t is reported to 0.1 °C. ε is Gaussian
+(baseline) or Student-t with ν chosen by profile likelihood.
+
+**Interval-censored ML.** M = k means x + b + ε ∈ [k − ½, k + ½), so each pair contributes
+log P(lo ≤ Z < hi) with lo, hi = (k ∓ ½ − x − b)/σ. Tails are computed stably via `log_ndtr`. Standard errors come
+from the numerical Hessian.
+
+The state-space estimation (§5) also integrates the dense reading's own 0.1 quantum: x is an interval, not a point.
+
+**Residual autocorrelation.** Two estimates between consecutive routine instants:
+
+- a pairwise bivariate-normal likelihood for the latent ρ of (ε_t, ε_{t+cad});
+- the lag-1 correlation of the generalised residuals E[ε | M].
+
+**Alignment check.** The same fit is repeated with the dense series shifted by ±10 min and ±20 min (±1..5 min for
+1-min data). For every 10-min source, lag 0 is the unique minimum of nll per pair (§table). Timestamps are aligned.
+
+**Findings (refinement the data forced).**
+
+- **Tokyo (JMA 44166) and Toronto (ECCC 51459)** reproduce the METAR exactly: R(x) = M in 10 198 / 10 198 and
+  7 416 / 7 416 pairs, including 198 Toronto cases at x = −k.5, all rounding half-up.
+  - The likelihood is flat on b ∈ [0.0, 0.1) with σ → 0. Read the "b = +0.05, σ = 0.007" in the table as "identical
+    reading" (the midpoint of the identified set), not as an estimate with that precision.
+  - The METAR body group is literally R(national reading). With σ = 0 the floor margin is 0.
+- **Helsinki, Singapore, Warsaw**: the Gaussian is rejected and Student-t wins on AIC.
+  - χ² of the observed-vs-expected table of j = M − R(x): Helsinki 207 → 9, Singapore 199 → 9, Warsaw 352 → 33.
+  - Helsinki is a two-population mixture: σ_core 0.084 and σ_outlier 0.41, outlier weight 0.28.
+  - The operator's "229 of 240" is the last 240 pairs; over the full archive R(x) = M holds in 7 832 / 9 025 (86.8 %).
+  - By month, R(x) = M runs from 83 % (May) to 95 % (October): Helsinki's agreement is non-stationary.
+- **Munich**: b = +0.20 overall but 0.38 by day versus 0.09 by night. The DWD TT_10 sensor reads below the METAR in
+  daytime.
+  - The latent residual is strongly autocorrelated (ρ = 0.58). This is a slowly drifting sensor offset, not white noise.
+- **Singapore**: NEA S24 versus WSSS gives σ = 0.46 (t: 0.34, ν = 5) and ρ = 0.54. NEA S24 is a different sensor and
+  site from the METAR thermometer; its identity changed name mid-series (see the prior SUMMARY).
+- **Warsaw**: hourly synop only. σ = 0.72 overall, 0.39 by day and 0.85 at night; the synop value is not the METAR
+  instant reading at night.
+- **Amsterdam**: KNMI ta at :20/:30 → :25 by midpoint interpolation, n = 383 (8 days, the 800-call cap).
+  - The fit gives σ_total 0.162. The NEA 1-min series gives a midpoint-interpolation error sd of 0.164.
+  - So the interpolation error alone accounts for all of σ_total: the KNMI sensor itself is indistinguishable from
+    the METAR at the instants it hits.
+- **Madrid**: two AEMET 24-h windows, n = 38. Descriptive only.
+
+## 2. Hard-floor rule
+
+**Floor.** At a settlement instant t: floor_t = R(x_t + b − m). If ε_t ≥ −m then M_t ≥ floor_t, hence H_d ≥ floor_t.
+**Ceiling.** ceil_t = R(x_t + b + m); L_d ≤ ceil_t.
+
+A false high floor occurs iff x + b − m ≥ H + ½. The set with zero false floors is therefore m > c*, where
+c* = max(x + b − H − ½). For lows, a false ceiling occurs iff x + b + m < L − ½, so the zero-false set is m ≥ c*.
+The asymmetry is R's half-up edge, and it is unit-tested.
+
+m_c is the smallest margin on a 0.05 grid with zero false days over all history, found by applying R directly.
+It is reported overall, per truth era, and out of sample: m from the first 70 % of days, false floors counted on the
+last 30 %.
+
+**Two margins are reported, and the difference matters.**
+
+- m_c bounds the floor against the **settled day extreme**, which is what a trade needs.
+- m_inst bounds it against **the same-instant METAR**. That bound is much wider: Helsinki 1.15, Munich 1.05,
+  Singapore 4.5, Warsaw 3.65. The day extreme absorbs single-instant errors, and the same-instant margin is the one a
+  per-instant "this METAR will be ≥ k" claim would need.
+
+The model-implied margin at a 10⁻³ per-day risk is σ·z(10⁻³/n_inst). It is 0.98 (Helsinki), 1.13 (Munich) and
+1.87 (Singapore) under the Gaussian, and 5.0, 1.45, 4.6 under the fitted t. **The empirical m_c is far smaller than the
+model margin**: history (≤ 300 days) cannot certify a 10⁻³ tail. m_c is a sample statement, not a guarantee.
+
+**Lead.** The lead is reported only where it is real.
+
+- Lead vs the same-grid METAR instant: the floor reaches the settled value at a dense instant before any METAR shows it.
+  For Tokyo and Toronto this is 0 by construction (same instants).
+- Lead vs the actual AWC receipt, which is the decision-relevant one. Live where WORLD has the dense channel (n is
+  small: live data only starts 09-27..10-01); otherwise modeled with the channel's p50 publication lag.
+
+## 3. Nowcast of the next settlement integer
+
+Target: P(M_{t1} = k | x(t0)), with t1 a routine settlement instant and Δ = t1 − t0 ∈ {10, 20, 30} min (KNMI: 5, 25).
+Δ = 30 puts t0 on the previous settlement instant for half-hourly stations, so it is marked * in the table.
+Days are split 70 / 30 by date.
+
+Models compared:
+
+- naive: the previous METAR carried forward, as a point mass;
+- persistence-probabilistic: the empirical distribution of M_{t1} − M_prev;
+- empirical-dense: the table of j = M_{t1} − R(x0 + b), conditioned on the position of x0 + b inside its rounding cell;
+- ICM-dense: interval-censored N(x0 + β·1 + γ·trend [+ δ·(M_prev − x0)], σ).
+
+All are scored on the held-out 30 % with multi-category Brier, log loss and reliability ECE.
+
+Result: wherever the dense value arrives before the METAR, the dense nowcasts beat both baselines at Δ = 10 and 20.
+The empirical table is usually best: it captures the non-Gaussian residual for free. Trend adds nothing material.
+Availability uses live WORLD receipts where present (x(t0) arrives a median 9.2 min before AWC's t1 METAR at Δ = 10
+for Helsinki, 9.3 min for Tokyo), otherwise the modeled lag.
+
+## 4. Gap decomposition of dense-max vs settled H (and dense-min vs L)
+
+Per day, on days with ≥ 80 % coverage of both grids:
+
+- A_full = R(extreme over G of x)
+- A_S = R(extreme over S ∩ G of x)
+- B = extreme over S ∩ G of M
+- C = extreme over all S of M (METAR + SPECI)
+- H = settled value
+
+The terms are a = A_full − A_S (cadence), b = A_S − B (measurement), c = B − C (coverage: SPECIs and off-grid
+instants), and d = C − H (era / source). They telescope: a + b + c + d = A_full − H.
+
+The table counts days with each term ≠ 0, and per-city histograms are in the JSON. Main readings:
+
+- Helsinki and Tokyo highs are driven by cadence: Tokyo has 25 / 203 cadence days and 0 measurement days.
+- Munich and Warsaw are driven by measurement.
+- Toronto by coverage: 9 days on which a SPECI set the high.
+- Singapore by both cadence and measurement.
+- Era (d ≠ 0) is rare: Tokyo 1 WU day, Singapore 1 NOAA day, Toronto 1.
+
+## 5. State-space model of the settled extreme (the main deliverable)
+
+### 5.1 Model
+
+On a 5-min grid from local 00:00 − 180 min to the end of the local day:
+
+- T_t = m_t + a_t + c_t, with mean m_t = f_t + μ(h_t) + β(f_t − S₄ₕf_t).
+  - f is the ECMWF IFS hourly forecast, linearly interpolated.
+  - μ(h) is the forecast bias by local hour.
+  - β shrinks the forecast's sub-4-h wiggle, where S₄ₕ is a centred 4-h running mean. β is chosen by walk-forward
+    (§5.3).
+- a and c are independent OU processes: slow (τ_s, s_s²) and fast (τ_f, s_f²).
+  - One-scale model: s_f = 0. Both scales are kept in the state, because their sum is not Markov.
+- Dense: the reading x_t is a quantised value of x*_t = T_t − b(h_t) + d_t + w_t.
+  - d is an OU error drift (τ_e, a·σ²).
+  - w is a white mixture (1 − π)N(0, s₁²) + πN(0, s₂²).
+  - The quantum is 0.1: T + d + w ∈ [x + b − 0.05, x + b + 0.05).
+- METAR / SPECI: T_t ∈ [M − ½, M + ½) exactly.
+- H = max(B, max over pending scheduled routine instants of R(T_t)), and L is the min.
+  - B is the extreme of the METAR / SPECI integers already **received**: obs time + AWC p50 lag ≤ τ0.
+  - Pending means the routine clock schedule, never the realised future rows, so a future report's existence never
+    leaks.
+  - Future SPECIs are not modelled.
+
+### 5.2 Inference (exact likelihoods; Monte Carlo only in the posterior representation)
+
+`ss_engine.run_day` is a fully adapted particle filter with N = 20 000.
+
+- **Observation steps.** At a step with observations, each particle's predictive for the observed linear functional
+  (a + c for a METAR, a + c + d + w for a dense reading) is Gaussian. The functional is drawn from its
+  **truncated** predictive, and the particle weight is the exact interval probability. Mixture components are drawn
+  with their exact posterior odds. The state is then conditioned on the drawn value.
+- **Exactness.** The interval likelihoods are exact (theory point 3), and the dense quantum enters as an interval
+  (point 4). Multiple reports in one 5-min slot are merged into the hull of their cells.
+- **Decision procedure.** Received information is processed in time order:
+  - the main pass covers both channels up to min(receipt cut-offs);
+  - the faster channel then continues alone, recording R(T) on the path at pending settlement instants. This is how
+    **a dense reading at a still-pending METAR instant** makes that instant nearly known;
+  - OU paths are then simulated to the day end.
+- **Arms share everything.** A and B use the same parameters, the same random streams and the same decision rule. B
+  adds only the dense likelihood factors (theory point 1). With no dense data, B is bit-identical to A (tested).
+
+**Approximation arms**, reported as such:
+
+- `A_tn` / `B_tn`: a Gaussian assumed-density main pass with an exact truncated-normal moment match for METAR;
+- `A_g12` / `B_g12`: METAR treated as N(M, 1/12).
+
+On NOAA test days they differ from the exact arm by ≤ 0.001 log-loss in A and ≤ 0.003 in the B−A difference (third
+table). The moment-matching approximation is adequate here.
+
+**Validation against an exact oracle.** `grid_oracle` is a finite-state forward recursion on a 401-cell residual
+grid, with exact cell censoring and indicator columns for P(H ≤ k) and P(L ≥ k).
+
+- On synthetic days the particle filter matches it within total variation < 0.03 at every decision for both arms
+  (test). The typical difference is ≈ 0.003.
+- The test suite also checks:
+  - truncated-normal moments against quadrature;
+  - MC pmfs against the exact independent-instant formula;
+  - zero mass below a received high or above a received low;
+  - recovery of OU (τ, s) from synthetic dense series (one and two scales);
+  - recovery of b and σ under quantisation;
+  - B beating A on held-out synthetic days, with a day-bootstrap 97.5 % bound < 0.
+
+### 5.3 Estimation (training days only)
+
+The split is by date: the first 70 % of usable days train, the last 30 % test. A day is usable when it has the forecast,
+≥ 80 % METAR coverage and ≥ 80 % dense coverage.
+
+- **b by 3-h local block, s₁, s₂, π**: ML on same-instant pairs with the quantised likelihood
+  P(M | x) = Σ_j w_j ∫ uniform-quantum × Gaussian. The mixture is used if it wins AIC by > 2.
+- **Error drift a, τ_e**: the latent correlation of the dense-vs-METAR error at 1–4 settlement cadences (pairwise
+  likelihood), fitted to a·exp(−L/τ_e). Variance is conserved: drift a·s₁², core white (1 − a)·s₁².
+- **μ(h), β**: least squares of M − f at METAR instants.
+- **OU parameters**: weighted LS fit of the empirical autocovariance of the dense residual x + b − m.
+  - One scale uses lags 10–180 min, as specified.
+  - Two scales use lags 10–720 min, because the slow component is not identified inside 3 h.
+  - Lag 0 is never used: it carries the dense white noise.
+- **Model choice**: {one, two scales} × {plain, wiggle-shrunk mean}, by walk-forward held-out log-loss *inside the
+  training days* (inner 70 / 30 split, hourly decisions). The pick minimises the mean of A and B, so it favours
+  neither arm.
+- **A0**: max(B, R(N(max remaining forecast + mean_h, sd_h))), with (mean_h, sd_h) the empirical remaining-extreme error
+  by local decision hour on training days. There is no state conditioning.
+
+### 5.4 Scoring
+
+Decisions are taken every 10 min from local 06:00 to the day end on test days. Each decision is scored on the settled
+value with:
+
+- log loss, floored at 10⁻⁴;
+- multi-category Brier;
+- randomized categorical PIT;
+- calibration of the top-bin probability (`reliability_top` in the JSON);
+- **lead**: the first decision time with P(correct bin) ≥ 0.9, B − A in minutes, so positive = B earlier;
+- **semantic violations**: mass on bins the received METAR extreme already excludes, reported separately (must be 0);
+- **high-confidence calibration**: errors among decisions with top ≥ 0.95, alongside Σ(1 − q) and coverage;
+- **false-certainty rate**: the share of all decisions with top ≥ 0.95 on a wrong bin.
+
+The uncertainty of B − A is a **day-blocked** bootstrap, because decisions within a day are not independent.
+
+**Source-incompatible days.** These are days where the settled value contradicts the received METAR record:
+P_A(truth) < 10⁻³ at the day's last decision. They are listed and excluded from the gate.
+
+The one instance is Singapore 2026-09-20 high. The METARs show 32 at 03:30–05:14 UTC, but those 5 rows are absent
+from the WRH capture in WORLD, and the day settled 31. No observation model can score that; it is a settlement-source
+issue (§7).
+
+**Gate** (NOAA era, excluding incompatible days): B is usable iff all three hold.
+
+1. The B − A log-loss day-block 95 % upper bound is < 0.
+2. There are zero semantic violations.
+3. B's errors at q ≥ 0.95 do not exceed the 95 % Poisson bound of B's own Σ(1 − q).
+
+The operator's literal raw-count rule (false-certainty rate B ≤ A) is shown as STRICT next to it.
+
+## 6. Results
+
+### 6.1 Items 1–4 summary (verbatim from `summary_table.md`)
+
+SUMMARY_TABLE_PLACEHOLDER
+
+Verdict definitions:
+
+- **FLOOR_USABLE**: all of the following hold:
+  - zero false floors at m_c over all history and on the held-out 30 %;
+  - the floor reaches the settled value on ≥ 20 % of days;
+  - median floor lead over the AWC receipt > 0;
+  - the dense receipt of a settlement instant beats AWC's receipt of the same METAR.
+- **NOWCAST_ONLY**: a dense nowcast from a non-settlement instant beats both baselines held-out, and is available
+  before the AWC METAR.
+- **NOT_USEFUL**: neither.
+
+### 6.2 State-space A0 / A / B (verbatim from `ss_summary_table.md`)
+
+SS_TABLE_PLACEHOLDER
+
+## 7. Per-city verdicts and reasons
+
+VERDICTS_PLACEHOLDER
+
+## 8. Data access, failures, and what is uncertain
+
+DATA_PLACEHOLDER
