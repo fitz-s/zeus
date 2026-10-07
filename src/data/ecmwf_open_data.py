@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-10-06
+# Last reused or audited: 2026-10-04
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -115,464 +115,6 @@ class OpenDataPaths:
     extract_script: Path
     manifest_path: Path
     origin: str
-
-_NATIVE_2T_QUANTITY = "native_2m_temperature_instantaneous_knots"
-_NATIVE_2T_VERSION = "ecmwf_ifs50r1_2t_native_source_v1"
-
-
-@dataclass(frozen=True)
-class NativeTemperatureSource:
-    status: str
-    source_run_id: str | None
-    observed_count: int
-    missing_member_steps: tuple[tuple[int, int], ...]
-    reason: str | None = None
-
-
-@dataclass(frozen=True)
-class NativeTemperatureScope:
-    status: str
-    native_knots: tuple[dict, ...] = ()
-    available_at: str | None = None
-    temperature_first_possession_at: str | None = None
-    reason: str | None = None
-    quantity_role: str = _NATIVE_2T_QUANTITY
-    temporal_representation: str = "acquired_native_knots"
-    qualification_status: str = "OFFLINE_ONLY"
-    projection_status: str = "NOT_PERFORMED"
-    extrema_status: str = "NOT_COMPUTED"
-    static_validity_status: str = "UNKNOWN"
-    temperature_scope_first_possession_at: str | None = None
-    physical_dependency_available_at: str | None = None
-    pit_status: str = "UNKNOWN"
-    physical_witness: dict | None = None
-    scope_role: str = "remaining_X"
-    temperature_metric: str | None = None
-
-
-def _native_temperature_steps(run: datetime, steps: list[int]) -> list[int]:
-    if (run.tzinfo is None or run.utcoffset() != timedelta(0) or run.hour not in (0, 6, 12, 18)
-            or run.minute or run.second or run.microsecond or run > datetime.now(timezone.utc)):
-        raise ValueError("NATIVE_2T_RUN_INVALID")
-    horizon = 240 if run.hour in (0, 12) else 90
-    if (not steps or len(set(steps)) != len(steps)
-            or any(type(s) is not int or s < 0 or s > horizon
-                   or s % (3 if s <= 144 else 6) for s in steps)):
-        raise ValueError("NATIVE_2T_NATIVE_STEPS_INVALID")
-    return sorted(steps)
-
-
-def _native_index_receipt_path(index: Path, receipt_sha: str) -> Path:
-    """Resolve the proof's immutable receipt, never another acquisition clock.
-
-    SCOPE: this exact index/receipt digest. DRAIN: restore its original bytes on
-    a normal poll. RESET: strict digest readback; legacy is permitted only when
-    no digest generation exists and its bytes match the exact original digest.
-    """
-    if type(receipt_sha) is not str or not re.fullmatch(r"[0-9a-f]{64}", receipt_sha):
-        raise ValueError("NATIVE_2T_ORIGINAL_INDEX_RECEIPT_INVALID")
-    generation = index.with_name(f"{index.stem}.http-{receipt_sha}.json")
-    receipt = generation if _path_present(generation) else index.with_suffix(".http.json")
-    if (receipt.is_symlink() or not receipt.is_file()
-            or hashlib.sha256(receipt.read_bytes()).hexdigest() != receipt_sha):
-        raise ValueError("NATIVE_2T_ORIGINAL_INDEX_RECEIPT_INVALID")
-    return receipt
-
-
-def _read_native_temperature_record(path: Path, run: datetime, *,
-        flat_indices: tuple[int, ...] = ()) -> tuple[dict, bytes]:
-    """Revalidate retained originals; metadata echoes never replace GRIB sections."""
-    import base64
-    from urllib.parse import urlsplit
-    from scripts import extract_open_ens_localday as decoder
-
-    raw = path.read_bytes()
-    proof_path = path.with_suffix(".grib2.proof.json")
-    proof_bytes = proof_path.read_bytes()
-    proof = json.loads(proof_bytes)
-    member, step = proof["member"], proof["step_hours"]
-    if type(member) is not int or not 0 <= member <= 50:
-        raise ValueError("NATIVE_2T_MEMBER_INVALID")
-    _native_temperature_steps(run, [step])
-    if (raw[:4] != b"GRIB" or raw[-4:] != b"7777" or len(raw) < 20 or raw[7] != 2
-            or int.from_bytes(raw[8:16], "big") != len(raw)):
-        raise ValueError("NATIVE_2T_MESSAGE_FRAMING_INVALID")
-    envelope = urlsplit(proof["source_url"])
-    if (envelope.hostname not in ("data.ecmwf.int", "ecmwf-forecasts.s3.eu-central-1.amazonaws.com")
-            and not (envelope.hostname == "storage.googleapis.com"
-                     and envelope.path.startswith("/ecmwf-open-data/"))):
-        raise ValueError("NATIVE_2T_SOURCE_HOST_INVALID")
-    if envelope.username or envelope.password or envelope.query or envelope.fragment:
-        raise ValueError("NATIVE_2T_SOURCE_HOST_INVALID")
-    if proof["range_http"].get("status") != 206:
-        raise ValueError("NATIVE_2T_RANGE_NOT_206")
-    original_headers = proof["range_http"]["headers"]
-    if type(original_headers) is not dict:
-        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
-    # HTTP names are case-insensitive; original proof bytes remain untouched.
-    # Reject repeated singleton names before any case-folding can hide them.
-    headers = {}
-    for name, value in original_headers.items():
-        if type(name) is not str or type(value) is not str:
-            raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
-        key = name.lower()
-        if key in {"content-range", "content-length"}:
-            if key in headers:
-                raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
-            headers[key] = value
-    if headers.keys() != {"content-range", "content-length"}:
-        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
-    span = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", headers["content-range"])
-    if not span:
-        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
-    start, end, total = map(int, span.groups())
-    if (not 0 <= start <= proof["source_index_offset"]
-            or end < proof["source_index_offset"] + len(raw) - 1 or end >= total
-            or int(headers["content-length"]) != end - start + 1):
-        raise ValueError("NATIVE_2T_RANGE_RECEIPT_INVALID")
-    index_path = path.parent / proof["index_path"]
-    if not index_path.resolve().is_relative_to(path.parent.resolve()):
-        raise ValueError("NATIVE_2T_INDEX_OUTSIDE_CACHE")
-    index = index_path.read_bytes()
-    if proof.get("ingest_mode") == "SCHEDULED_LIVE":
-        receipt_bytes = _native_index_receipt_path(index_path, proof["index_receipt_sha256"]).read_bytes()
-        receipt = json.loads(receipt_bytes)
-        started = datetime.fromisoformat(receipt["fetch_started_at"])
-        received = datetime.fromisoformat(receipt["source_fetched_at"])
-        fetched = datetime.fromisoformat(proof["source_fetched_at"])
-        if (hashlib.sha256(receipt_bytes).hexdigest() != proof["index_receipt_sha256"]
-                or receipt["source_url"] != proof["source_url"]
-                or receipt["source_index_url"] != proof["source_index_url"]
-                or receipt["http"]["status"] != 200
-                or any(clock.tzinfo is None for clock in (started, received, fetched))
-                or not run <= started <= received <= fetched <= datetime.now(timezone.utc)
-                or proof.get("qualification_status") != "UNKNOWN"
-                or proof.get("source_issued_at") is not None):
-            raise ValueError("NATIVE_2T_ORIGINAL_INDEX_RECEIPT_INVALID")
-    capture, _ = decoder._decode_native_original(raw, flat_indices=flat_indices, instantaneous=True)
-    if capture["capture_status"] != "OBSERVED":
-        raise ValueError("NATIVE_2T_CAPTURE_UNKNOWN")
-    h = capture["observed_headers"]
-    sections = {s["section_number"]: base64.b64decode(s["bytes_base64"], validate=True)
-                for s in capture["metadata_sections"]}
-    s1, s3, s4 = sections[1], sections[3], sections[4]
-    valid = run + timedelta(hours=step)
-    if (h["paramId"] != 167 or h["shortName"] != "2t" or h["units"] != "K"
-            or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
-            or h["stepType"] != "instant" or h["stepUnits"] != 1
-            or h["startStep"] != step or h["endStep"] != step or str(h["stepRange"]) != str(step)
-            or h["centre"] != "ecmf" or h["generatingProcessIdentifier"] != 161
-            or h["dataType"] != ("fc" if member == 0 else "pf")
-            or h.get("number", 0) != member
-            or (h["dataDate"], h["dataTime"]) != (int(run.strftime("%Y%m%d")), run.hour * 100)
-            or (h["validityDate"], h["validityTime"]) != (int(valid.strftime("%Y%m%d")), valid.hour * 100)
-            or raw[6] != 0 or s4[9:11] != b"\x00\x00"
-            or int.from_bytes(s1[5:7], "big") != 98
-            or int.from_bytes(s1[12:14], "big") != run.year
-            or tuple(s1[14:19]) != (run.month, run.day, run.hour, 0, 0)
-            or s1[20] != (1 if member == 0 else 4)
-            or int.from_bytes(s4[7:9], "big") != (0 if member == 0 else 1)
-            or h["productDefinitionTemplateNumber"] != (0 if member == 0 else 1)
-            or s4[13] != 161 or s4[11] != h["typeOfGeneratingProcess"]
-            or h["typeOfGeneratingProcess"] != (2 if member == 0 else 4)
-            or s4[17] != 1 or int.from_bytes(s4[18:22], "big") != step
-            or s4[22] != 103 or s4[23] != 0 or int.from_bytes(s4[24:28], "big") != 2
-            or (member and s4[35] != member)
-            or decoder._open_ens_original_grid(s3) != {k: h[k] for k in decoder._GRID_KEYS}):
-        raise ValueError("NATIVE_2T_ORIGINAL_IDENTITY_MISMATCH")
-    binding = decoder._open_ens_source_binding(raw, {**proof, "original_index_bytes": index,
-        "original_range_bytes": raw}, h, param="2t", member=member, step=step, run=run)
-    return {**binding, "member": member, "step_hours": step, "valid_time_utc": valid.isoformat(),
-        "path": str(path.resolve()), "proof_sha256": hashlib.sha256(proof_bytes).hexdigest(),
-        "grid_sha256": hashlib.sha256(s3).hexdigest(),
-        "observed_headers": h,
-        "original_section_sha256": {str(n): hashlib.sha256(body).hexdigest() for n, body in sections.items()},
-        "process_type": h["typeOfGeneratingProcess"]}, raw
-
-
-def persist_native_temperature_source_run(conn: sqlite3.Connection, *, cache_dir: Path,
-        manifest_path: Path, expected_run_utc: datetime, product_steps: list[int],
-        ingest_mode: str = "ARCHIVE_BACKFILL") -> NativeTemperatureSource:
-    """Source inventory only; caller owns the FORECAST_CLASS transaction.
-
-    No HTTP, schedule, source activation, snapshots, hourly vectors or q writes.
-    SCOPE: stable product/run/original-grid. DRAIN: normal cadence may retain the
-    missing original ranges; this function only inventories them. RESET: exact
-    proofs are rechecked on every call, without renewing retained possession clocks.
-    A product's expected steps may grow, never shrink with a city/cut scope view.
-    """
-    steps = _native_temperature_steps(expected_run_utc, product_steps)
-    if ingest_mode not in {"ARCHIVE_BACKFILL", "SCHEDULED_LIVE"}:
-        raise ValueError("NATIVE_2T_INGEST_ROLE_INVALID")
-    if conn.in_transaction:
-        raise ValueError("NATIVE_2T_REQUIRES_OWN_TRANSACTION")
-    previous_bytes = manifest_path.read_bytes() if manifest_path.exists() else None
-    previous = json.loads(previous_bytes) if previous_bytes else None
-    if previous and previous.get("ingest_mode", "ARCHIVE_BACKFILL") != ingest_mode:
-        raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
-    if previous:
-        previous_row = get_source_run(conn, previous["source_run_id"])
-        if not previous_row or previous_row["manifest_hash"] != hashlib.sha256(previous_bytes).hexdigest():
-            raise ValueError("NATIVE_2T_PREVIOUS_MANIFEST_UNBOUND")
-    old = {(m["member"], m["step_hours"]): m for m in
-           (previous or {}).get("retained_identities", (previous or {}).get("messages", []))}
-    if previous and (previous["run_time_utc"] != expected_run_utc.isoformat()
-                     or not set(previous["product_steps"]).issubset(steps)):
-        raise ValueError("NATIVE_2T_CACHE_RUN_OR_PLAN_CHANGED")
-    records, errors, seen = [], [], set()
-    for path in sorted(cache_dir.glob("step*-member*.grib2")):
-        try:
-            record, _ = _read_native_temperature_record(path, expected_run_utc)
-            if ingest_mode == "SCHEDULED_LIVE":
-                proof = json.loads(path.with_suffix(".grib2.proof.json").read_bytes())
-                if proof.get("ingest_mode") != ingest_mode:
-                    raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
-            key = record["member"], record["step_hours"]
-            if key in seen:
-                raise ValueError("NATIVE_2T_DUPLICATE_MEMBER_STEP")
-            seen.add(key)
-            if key in old and old[key] != record:
-                raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
-            records.append(record)
-        except Exception as exc:
-            errors.append(f"{path.name}:{exc}")
-    if previous:
-        compatible = [m for m in records if m["grid_sha256"] == previous["grid_sha256"]]
-        if len(compatible) != len(records):
-            errors.append("NATIVE_2T_RETAINED_GRID_CHANGED")
-            records = compatible
-    grids = {m["grid_sha256"] for m in records}
-    process_types = {(m["member"] == 0, m["process_type"]) for m in records}
-    if ((len(grids) != 1 and not (previous and not grids))
-            or any(sum(role == other for other, _ in process_types) > 1
-                               for role, _ in process_types)):
-        return NativeTemperatureSource("UNKNOWN", None, len(records), (), "NATIVE_2T_GRID_OR_PROCESS_UNKNOWN")
-    grid = next(iter(grids)) if grids else previous["grid_sha256"]
-    run_id = f"ecmwf_open_data:2t_instant_native_knots:{expected_run_utc:%Y%m%dT%H%MZ}:grid:{grid}:ifs50r1"
-    if ingest_mode == "SCHEDULED_LIVE":
-        run_id += ":origin:scheduled_live"
-    existing = get_source_run(conn, run_id)
-    if existing and (existing["ingest_mode"], existing["origin_mode"]) != (ingest_mode, ingest_mode):
-        raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
-    if existing and previous is None:
-        # Canonical identity outlives a missing file. Restoration must supply
-        # the original bound manifest/proofs, not replace its first clocks.
-        raise ValueError("NATIVE_2T_CANONICAL_MANIFEST_MISSING")
-    if previous and (previous["source_run_id"] != run_id or previous["grid_sha256"] != grid):
-        raise ValueError("NATIVE_2T_CACHE_IDENTITY_CHANGED")
-    wanted = {(m, s) for s in steps for m in range(51)}
-    actual = {(m["member"], m["step_hours"]) for m in records}
-    missing = tuple(sorted(wanted - actual))
-    complete = not missing and not errors and wanted == actual
-    clocks = [m["source_fetched_at"] for m in records]
-    observed_steps = [s for s in steps if {(m, s) for m in range(51)} <= actual]
-    payload = {"version": _NATIVE_2T_VERSION, "quantity_role": _NATIVE_2T_QUANTITY,
-        "source_run_id": run_id, "run_time_utc": expected_run_utc.isoformat(), "grid_sha256": grid,
-        "product_steps": steps, "messages": records, "errors": errors,
-        # Keep original identity anchors even when a later scan finds a missing
-        # or tampered body: repair cannot reset its first-possession clock.
-        "retained_identities": list({**old, **{(m["member"], m["step_hours"]): m for m in records}}.values()),
-        "source_issued_at": None, "source_publication_at": None,
-        "qualification_status": "UNKNOWN" if ingest_mode == "SCHEDULED_LIVE" else "OFFLINE_ONLY"}
-    if ingest_mode == "SCHEDULED_LIVE":
-        payload.update(ingest_mode=ingest_mode,
-            temperature_first_possession_at=max(clocks, key=datetime.fromisoformat) if clocks else None)
-    content = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    digest = hashlib.sha256(content).hexdigest()
-    with conn:
-        write_source_run(conn, source_run_id=run_id, source_id="ecmwf_open_data",
-            track="2t_instant_native_knots", release_calendar_key="ecmwf_open_data",
-            ingest_mode=ingest_mode, origin_mode=ingest_mode,
-            source_cycle_time=expected_run_utc, source_issue_time=None, source_release_time=None,
-            source_available_at=(max(clocks, key=datetime.fromisoformat)
-                if complete and ingest_mode == "ARCHIVE_BACKFILL" else None),
-            status="SUCCESS" if complete else "PARTIAL", completeness_status="COMPLETE" if complete else "PARTIAL",
-            temperature_metric=None, physical_quantity=_NATIVE_2T_QUANTITY, observation_field="2t",
-            valid_time_start=expected_run_utc + timedelta(hours=steps[0]),
-            valid_time_end=expected_run_utc + timedelta(hours=steps[-1]),
-            data_version=_NATIVE_2T_VERSION, expected_members=51,
-            observed_members=len({m["member"] for m in records}), expected_steps_json=steps,
-            observed_steps_json=observed_steps, expected_count=len(wanted), observed_count=len(actual),
-            partial_run=not complete, manifest_hash=digest,
-            raw_payload_hash=hashlib.sha256(json.dumps(sorted(m["raw_message_sha256"] for m in records)).encode()).hexdigest(),
-            reason_code=None if complete else "NATIVE_2T_INCOMPLETE_OR_INVALID_ORIGINAL")
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    # DB commits first. Failed publication leaves readback UNKNOWN, not a false ready row.
-    with tempfile.NamedTemporaryFile(dir=manifest_path.parent, delete=False) as handle:
-        temporary = Path(handle.name)
-        try:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-            os.replace(temporary, manifest_path)
-        finally:
-            temporary.unlink(missing_ok=True)
-    return NativeTemperatureSource("AVAILABLE" if complete else "INCOMPLETE", run_id,
-        len(actual), missing, errors[0] if errors else None)
-
-
-def read_native_temperature_scope(conn: sqlite3.Connection, *, source_run_id: str,
-        manifest_path: Path, required_steps: list[int], qualified_prefix_cut_utc: datetime | None,
-        local_day_end_utc: datetime, explicit_manifest: list[dict], mask_grib_path: Path | None = None,
-        mask_proof_path: Path | None = None, surface_geopotential_grib_path: Path | None = None,
-        surface_geopotential_proof_path: Path | None = None, decision_at_utc: datetime | None = None,
-        metric: str | None = None, role: str = "remaining_X", local_day_start_utc: datetime | None = None,
-        _paths: OpenDataPaths | None = None) -> NativeTemperatureScope:
-    """Qualified scope view of immutable originals, never hourly or live q authority.
-
-    SCOPE: supplied qualified prefix cut through local end, with native brackets.
-    DRAIN: supply missing bytes/prefix/static proof through existing source cadence.
-    RESET: revalidate this scope independently; a different city/cut never changes cache identity.
-    ``pit_status`` proves possession of this exact model quantity/scope, not
-    hourly extrema, station equivalence, q authority or provider publication.
-    """
-    import base64
-    import eccodes as ec
-    from scripts import extract_open_ens_localday as decoder
-
-    mode, temperature_clock = None, None
-    try:
-        content = manifest_path.read_bytes()
-        payload = json.loads(content)
-        row = get_source_run(conn, source_run_id)
-        mode = payload.get("ingest_mode", "ARCHIVE_BACKFILL")
-        if (not row or row["manifest_hash"] != hashlib.sha256(content).hexdigest()
-                or payload["source_run_id"] != source_run_id or payload["version"] != _NATIVE_2T_VERSION
-                or row["physical_quantity"] != _NATIVE_2T_QUANTITY or row["temperature_metric"] is not None
-                or row["source_id"] != "ecmwf_open_data" or row["track"] != "2t_instant_native_knots"
-                or row["dataset_id"] != _NATIVE_2T_VERSION or row["source_issue_time"] is not None
-                or row["source_release_time"] is not None
-                or row["expected_count"] != 51 * len(payload["product_steps"])
-                or row["observed_count"] != len(payload["messages"])
-                or row["source_cycle_time"] != payload["run_time_utc"] or payload["errors"]
-                or mode not in {"ARCHIVE_BACKFILL", "SCHEDULED_LIVE"}
-                or (row["ingest_mode"], row["origin_mode"]) != (mode, mode)
-                or payload["qualification_status"] != ("UNKNOWN" if mode == "SCHEDULED_LIVE" else "OFFLINE_ONLY")
-                or (mode == "SCHEDULED_LIVE" and row["source_available_at"] is not None)):
-            raise ValueError("NATIVE_2T_MANIFEST_OR_ROW_INVALID")
-        run = datetime.fromisoformat(payload["run_time_utc"])
-        steps = _native_temperature_steps(run, required_steps)
-        if steps != [s for s in range(steps[0], steps[-1] + 1) if s % (3 if s <= 144 else 6) == 0]:
-            raise ValueError("NATIVE_2T_SCOPE_NATIVE_GRID_GAP")
-        wanted = {(m, s) for s in steps for m in range(51)}
-        selected = [m for m in payload["messages"] if m["step_hours"] in steps]
-        if len(selected) != len(wanted) or {(m["member"], m["step_hours"]) for m in selected} != wanted:
-            return NativeTemperatureScope("INCOMPLETE", reason="NATIVE_2T_MEMBER_STEP_SET_INCOMPLETE",
-                qualification_status=payload["qualification_status"])
-        scope_start = local_day_start_utc if role == "full_Y" else qualified_prefix_cut_utc
-        if (role not in {"remaining_X", "full_Y"} or metric not in {None, "high", "low"}
-                or scope_start is None or scope_start.tzinfo is None
-                or local_day_end_utc.tzinfo is None or not run <= scope_start < local_day_end_utc
-                or run + timedelta(hours=steps[0]) > scope_start
-                or run + timedelta(hours=steps[-1]) < local_day_end_utc):
-            raise ValueError("NATIVE_2T_QUALIFIED_PREFIX_OR_BRACKET_UNKNOWN")
-        if decision_at_utc is not None and (decision_at_utc.tzinfo is None
-                or decision_at_utc.utcoffset() != timedelta(0)
-                or decision_at_utc > datetime.now(timezone.utc) or metric is None):
-            raise ValueError("NATIVE_2T_DECISION_SCOPE_INVALID")
-        # Resolve the actual normal collector caches, not an offline/audit HTTP
-        # helper. Both mandatory tracks share this product/run/grid inventory.
-        if mask_grib_path is None:
-            paths = _paths or _resolve_opendata_paths()
-            directory = _download_output_path(run_date=run.date(), run_hour=run.hour,
-                param="2t", raw_root=paths.raw_root).parent
-            candidates = [directory / f".{track}_{run:%Y%m%d}_{run:%H}z_lsm.grib2" for track in TRACKS]
-            mask_grib_path = next((p for p in candidates if p.exists() and p.with_suffix(".z.grib2").exists()), candidates[0])
-        mask_proof_path = mask_proof_path or mask_grib_path.with_suffix(".proof.json")
-        surface_geopotential_grib_path = surface_geopotential_grib_path or mask_grib_path.with_suffix(".z.grib2")
-        surface_geopotential_proof_path = surface_geopotential_proof_path or surface_geopotential_grib_path.with_suffix(".proof.json")
-        mask = decoder._read_land_mask(mask_grib_path, mask_proof_path)
-        mask_capture = decoder._open_ens_original_surface_capture(mask_grib_path)
-        mask_gid = ec.codes_new_from_message(mask_grib_path.read_bytes())
-        try:
-            if (ec.codes_get(mask_gid, "paramId") != 172 or ec.codes_get(mask_gid, "shortName") != "lsm"
-                    or ec.codes_get(mask_gid, "units") != "(0 - 1)"
-                    or ec.codes_get(mask_gid, "typeOfLevel") != "surface"):
-                raise ValueError("NATIVE_2T_LSM_ORIGINAL_QUANTITY_INVALID")
-        finally:
-            ec.codes_release(mask_gid)
-        s3 = next(base64.b64decode(s["bytes_base64"], validate=True)
-                  for s in mask_capture["metadata_sections"] if s["section_number"] == 3)
-        if (hashlib.sha256(s3).hexdigest() != payload["grid_sha256"]
-                or decoder._open_ens_original_grid(s3) != mask["fields"]):
-            raise ValueError("NATIVE_2T_LSM_ORIGINAL_GRID_MISMATCH")
-        if not explicit_manifest or len({c["city"] for c in explicit_manifest}) != len(explicit_manifest):
-            raise ValueError("NATIVE_2T_CITY_SCOPE_INVALID")
-        points = decoder._select_land_grid_points(mask["fields"], explicit_manifest, mask["values"].__getitem__)
-        indices = tuple(points[city["city"]]["selected_flat_index"] for city in explicit_manifest)
-        originals = []
-        for saved in selected:
-            record, raw = _read_native_temperature_record(Path(saved["path"]), run, flat_indices=indices)
-            if mode == "SCHEDULED_LIVE" and json.loads(Path(saved["path"]).with_suffix(
-                    ".grib2.proof.json").read_bytes()).get("ingest_mode") != mode:
-                raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
-            if record != saved:
-                raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
-            originals.append((saved, raw))
-        temperature_clock = max((s["source_fetched_at"] for s, _ in originals), key=datetime.fromisoformat)
-        knots = []
-        for saved, raw in originals:
-            _, decoded = decoder._decode_native_original(raw, flat_indices=indices, instantaneous=True)
-            size, missing, _, values = decoded
-            if size != mask["fields"]["Ni"] * mask["fields"]["Nj"]:
-                raise ValueError("NATIVE_2T_VALUES_GRID_INVALID")
-            for city, value in zip(explicit_manifest, values):
-                point = points[city["city"]]
-                if not math.isfinite(value) or value == missing:
-                    raise ValueError("NATIVE_2T_SELECTED_VALUE_INVALID")
-                knots.append({"city": city["city"], "member": saved["member"],
-                    "step_hours": saved["step_hours"], "valid_time_utc": saved["valid_time_utc"],
-                    "value_k": value, "raw_message_sha256": saved["raw_message_sha256"],
-                    "selected_point": point, "lsm_raw_sha256": mask_capture["raw_message_sha256"],
-                    "surface_class": "PURE_LAND" if point["selected_land_fraction"] == 1 else "MIXED_LAND_WATER"})
-        static_status, dependency_clock, pit, witness, static_reason = "UNKNOWN", None, "UNKNOWN", None, None
-        try:
-            phi = decoder.read_native_static_dependency(path=surface_geopotential_grib_path,
-                proof_path=surface_geopotential_proof_path, param="z", run=run, grid_sha256=payload["grid_sha256"])
-            own_index = mask_grib_path.with_suffix(".index.body")
-            land = decoder.read_native_static_dependency(path=mask_grib_path, proof_path=mask_proof_path,
-                param="lsm", run=run, grid_sha256=payload["grid_sha256"],
-                index_path=own_index if own_index.exists() else surface_geopotential_grib_path.with_suffix(".index.body"),
-                index_proof_path=mask_proof_path if own_index.exists() else surface_geopotential_proof_path)
-            for point in points.values():
-                for cell in point["four_neighbors"]:
-                    value = float(phi["values"][cell["flat_index"]])
-                    if not math.isfinite(value) or value == phi["missing_value"]:
-                        raise ValueError("NATIVE_2T_STATIC_PHI_NONFINITE")
-                    cell["raw_phi_m2_s2"] = value
-                point["selected_raw_phi_m2_s2"] = float(phi["values"][point["selected_flat_index"]])
-                point["surface_class"] = "PURE_LAND" if point["selected_land_fraction"] == 1 else "MIXED_LAND_WATER"
-            dependency_clock = max((temperature_clock, land["available_at"], phi["available_at"]), key=datetime.fromisoformat)
-            static_status = "SAME_RUN_OBSERVED"
-            pit = ("AVAILABLE" if decision_at_utc is not None and datetime.fromisoformat(dependency_clock) < decision_at_utc
-                   else "AFTER_DECISION" if decision_at_utc is not None else "UNKNOWN")
-            witness = {"quantity": {"param_id": 167, "units": "K", "height_agl_m": 2, "step_type": "instant"},
-                "run_time_utc": run.isoformat(), "scope_role": role, "temperature_metric": metric,
-                "origin_mode": mode, "source_run_id": source_run_id,
-                "scope_start_utc": scope_start.isoformat(), "scope_end_utc": local_day_end_utc.isoformat(),
-                "grid_sha256": payload["grid_sha256"], "selected_cities": points,
-                "temperature_messages": [s for s, _ in originals],
-                "static_dependencies": [{k: v for k, v in dep.items() if k not in {"values", "fields"}}
-                                        for dep in (land, phi)],
-                "sensor_agl_status": "UNKNOWN", "station_ground_datum_status": "UNKNOWN",
-                "precision_status": "UNKNOWN", "representativeness_status": "UNKNOWN",
-                "station_equivalence_status": "UNKNOWN", "source_issued_at": None}
-        except (ValueError, KeyError, OSError, TypeError) as exc:
-            static_reason = str(exc)
-        return NativeTemperatureScope("AVAILABLE", tuple(knots),
-            temperature_first_possession_at=temperature_clock, reason=static_reason,
-            qualification_status=payload["qualification_status"], static_validity_status=static_status,
-            temperature_scope_first_possession_at=temperature_clock,
-            physical_dependency_available_at=dependency_clock, pit_status=pit, physical_witness=witness,
-            scope_role=role, temperature_metric=metric)
-    except Exception as exc:
-        return NativeTemperatureScope("UNKNOWN", reason=str(exc),
-            temperature_first_possession_at=temperature_clock, temperature_scope_first_possession_at=temperature_clock,
-            qualification_status="UNKNOWN" if mode == "SCHEDULED_LIVE" else "OFFLINE_ONLY",
-            scope_role=role, temperature_metric=metric)
-
-
-
 
 
 def _write_runtime_coordinate_manifest(raw_root: Path, *, manifest_json: str | None = None) -> Path:
@@ -699,9 +241,8 @@ MODEL_VERSION = "ecmwf_open_data"
 # cycle+track has durable COMPLETE source-run evidence AND an equal count of
 # VERIFIED canonical snapshots (the proof gate in
 # _plan_decoded_open_data_raw_retention is unchanged and remains the only thing
-# that authorizes aggregate deletion). Still-consumable role receipts keep
-# byte-identical original messages separately; a re-fetch is not proof of the
-# original acquisition clock.
+# that authorizes a delete). Any GRIB still needed is re-fetchable from ECMWF,
+# so retaining a calendar window buys nothing a re-fetch does not.
 #
 # 2026-09-17 (operator directive, twice restated): was 2, which retained ~46 GB
 # across two day-dirs on a host at 96% full — for the only one of 13 sources that
@@ -731,404 +272,6 @@ class _RawRetentionPlan:
     retained_group_count: int
     unrecognized_file_count: int
     planned_bytes: int
-    role_originals: tuple[tuple[tuple[Path, ...], tuple[dict, ...]], ...] = ()
-    live_role_hashes: frozenset[str] = frozenset()
-    role_reference_errors: tuple[str, ...] = ()
-    role_reference_complete: bool = False
-    role_gc_files: tuple[tuple[Path, int, int, int, int], ...] = ()
-    reference_db: Path | None = None
-    reference_time: datetime | None = None
-
-
-def _role_message_path(raw_root: Path, digest: str) -> Path:
-    """Address an original by its canonical receipt, never a new capture clock."""
-    if not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise ValueError("ROLE_ORIGINAL_DIGEST_INVALID")
-    raw_root = raw_root.absolute()
-    path = raw_root / "raw" / "ecmwf_open_ens" / "role_messages" / f"{digest}.grib2"
-    if raw_root.is_symlink():
-        raise ValueError("ROLE_ORIGINAL_ROOT_SYMLINK")
-    parent = path.parent
-    while parent != raw_root:
-        if parent.is_symlink():
-            raise ValueError("ROLE_ORIGINAL_DIRECTORY_SYMLINK")
-        parent = parent.parent
-    return path
-
-
-def _read_role_message_bytes(raw_root: Path, capture: Mapping[str, object]) -> bytes:
-    path = _role_message_path(raw_root, str(capture["raw_message_sha256"]))
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("ROLE_ORIGINAL_BODY_UNAVAILABLE")
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, "rb") as stream:
-        if os.fstat(stream.fileno()).st_size != int(capture["raw_message_length"]):
-            raise ValueError("ROLE_ORIGINAL_LENGTH_MISMATCH")
-        raw = stream.read()
-    if hashlib.sha256(raw).hexdigest() != capture["raw_message_sha256"]:
-        raise ValueError("ROLE_ORIGINAL_HASH_MISMATCH")
-    return raw
-
-
-def _publish_role_message(raw_root: Path, capture: Mapping[str, object], raw: bytes) -> None:
-    """An exclusive atomic replica of observed bytes; no receipt or clock minting."""
-    import tempfile
-    if (len(raw) != int(capture["raw_message_length"])
-            or hashlib.sha256(raw).hexdigest() != capture["raw_message_sha256"]):
-        raise ValueError("ROLE_ORIGINAL_PUBLICATION_MISMATCH")
-    path = _role_message_path(raw_root, str(capture["raw_message_sha256"]))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _role_message_path(raw_root, str(capture["raw_message_sha256"]))
-    if path.exists() or path.is_symlink():
-        if _read_role_message_bytes(raw_root, capture) != raw:
-            raise ValueError("ROLE_ORIGINAL_PUBLICATION_CONFLICT")
-        return
-    with tempfile.TemporaryDirectory(prefix=".publish-", dir=path.parent) as directory:
-        staged = Path(directory) / "original.grib2"
-        with staged.open("wb") as stream:
-            stream.write(raw)
-            stream.flush()
-            os.fsync(stream.fileno())
-        try:
-            os.link(staged, path)
-        except FileExistsError:
-            if _read_role_message_bytes(raw_root, capture) != raw:
-                raise ValueError("ROLE_ORIGINAL_PUBLICATION_CONFLICT")
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-
-
-def _preserve_role_originals(raw_root: Path, sources: tuple[Path, ...], captures: tuple[dict, ...]) -> None:
-    """Complete the original-body replica before any proven aggregate deletion.
-
-    SCOPE: this exact run/quantity group. DRAIN: ordinary collection retries
-    publication from its retained original bytes. RESET: every canonical
-    capture has a byte-identical replica. No network or acquisition clock.
-    """
-    import eccodes as ec
-    from scripts.extract_open_ens_localday import _native_message_capture
-
-    remaining = {str(capture["raw_message_sha256"]): capture for capture in captures}
-    for digest, capture in tuple(remaining.items()):
-        path = _role_message_path(raw_root, digest)
-        if path.exists() or path.is_symlink():
-            _read_role_message_bytes(raw_root, capture)
-            del remaining[digest]
-    for source in sources:
-        if not remaining:
-            break
-        if source.is_symlink() or not source.is_file():
-            raise ValueError("ROLE_ORIGINAL_SOURCE_UNAVAILABLE")
-        with source.open("rb") as stream:
-            while (gid := ec.codes_grib_new_from_file(stream)) is not None:
-                try:
-                    raw = ec.codes_get_message(gid)
-                    digest = hashlib.sha256(raw).hexdigest()
-                    if digest not in remaining:
-                        continue
-                    capture = remaining[digest]
-                    if _native_message_capture(gid) != capture:
-                        raise ValueError("ROLE_ORIGINAL_CAPTURE_MISMATCH")
-                    _publish_role_message(raw_root, capture, raw)
-                    _read_role_message_bytes(raw_root, capture)
-                    del remaining[digest]
-                finally:
-                    ec.codes_release(gid)
-    if remaining:
-        raise ValueError("ROLE_ORIGINAL_CAPTURE_INCOMPLETE")
-
-
-def _role_original_snapshot_references(conn, now_utc: datetime, *, raw_root: Path | None = None) -> tuple[set[int], set[tuple[str, str, str]], list[str]]:
-    """Read existing consumers only; never turn missing evidence into no reference.
-
-    SCOPE: original-message hashes of exact normal source snapshots. DRAIN:
-    each normal cleanup recomputes market frontiers, current-revision posterior
-    age plus the existing Prepared two-stage bound, unfinished claims and
-    nonterminal command parents. RESET: expiry/removal/terminal state without
-    another exact consumer releases that original; unresolved mappings retain
-    their scope, never require an always-newest manifest or a guard clear.
-    """
-    from src.config import STATE_DIR
-    from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
-    from src.data.replacement_forecast_cycle_policy import (
-        CURRENT_EVIDENCE_SEMANTICS_REVISION, replacement_source_cycle_max_age_hours,
-    )
-    from src.state.db import _connect_read_only, ZEUS_WORLD_DB_PATH
-    from src.execution.command_bus import TERMINAL_STATES
-    from src.data.replacement_forecast_production import _replacement_forecast_live_materialization_queue_config
-    from src.data import replacement_forecast_live_materialization_queue as queue
-
-    selected: set[int] = set()
-    uncertain: set[tuple[str, str, str]] = set()
-    errors: list[str] = []
-    visited_posteriors = set()
-
-    def scope_of(payload):
-        scope = (str(payload.get("city", "")), str(payload.get("target_date", "")),
-                 str(payload.get("temperature_metric", payload.get("metric", ""))))
-        return scope if scope[0] and scope[1] and scope[2] in {"high", "low"} else None
-
-    def preserve_scope(scope):
-        if scope is None:
-            errors.append("ROLE_RETENTION_REFERENCE_SCOPE_UNKNOWN")
-            return
-        uncertain.add(scope)
-        selected.update(int(row[0]) for row in conn.execute(
-            "SELECT snapshot_id FROM ensemble_snapshots WHERE city=? AND target_date=? AND temperature_metric=?",
-            scope))
-
-    def consume(payload, scope=None):
-        found = False
-        if isinstance(payload, Mapping):
-            for key, value in payload.items():
-                if key == "native_snapshot_id":
-                    selected.add(int(value)); found = True
-                elif key == "paired_snapshot_ids":
-                    selected.update(int(v) for v in value); found = True
-                elif key in {"posterior_id", "posterior_identity_hash"} and value not in (None, ""):
-                    column = "posterior_id" if key == "posterior_id" else "posterior_identity_hash"
-                    if (column, str(value)) not in visited_posteriors:
-                        visited_posteriors.add((column, str(value)))
-                        row = conn.execute(f"SELECT provenance_json FROM forecast_posteriors WHERE {column}=?", (value,)).fetchone()
-                        if row is not None:
-                            found = consume(json.loads(row[0]), scope) or found
-                elif isinstance(value, (Mapping, list, tuple)):
-                    found = consume(value, scope) or found
-        elif isinstance(payload, (list, tuple)):
-            for value in payload:
-                found = consume(value, scope) or found
-        return found
-
-    # Storage candidates are not qualified actions. Keep the transport frontier
-    # and the public role selector's finite native-run envelope without decoding
-    # every global field once per city/metric. A market needs both quantities
-    # of its same-city/day native cohort before its counterpart snapshot exists:
-    # either normal collector can finish and run GC first. This storage-only
-    # frontier uses the same finite role/run and target-expiry bounds below.
-    # Only the action reader qualifies bytes, grid, 51 members and causal
-    # possession; retaining the opposite quantity grants no X/Y authority.
-    frontiers = conn.execute("""SELECT coverage.city, coverage.target_local_date,
-            coverage.temperature_metric, coverage.target_window_start_utc,
-            coverage.target_window_end_utc, source.source_cycle_time, coverage.source_run_id
-        FROM source_run_coverage coverage JOIN source_run source
-          ON source.source_run_id=coverage.source_run_id
-        WHERE coverage.source_id=? AND source.status='SUCCESS'
-          AND source.completeness_status='COMPLETE' AND source.partial_run=0
-          AND source.ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP')
-          AND source.source_cycle_time<=? AND coverage.target_window_end_utc>?
-          AND EXISTS (SELECT 1 FROM market_events market
-            WHERE market.city=coverage.city AND market.target_date=coverage.target_local_date
-              AND market.temperature_metric IN ('high','low')
-              AND market.token_id IS NOT NULL AND market.range_label IS NOT NULL)
-        ORDER BY source.source_cycle_time DESC""", (SOURCE_ID, now_utc.isoformat(), now_utc.isoformat()))
-    chosen = set()
-    for row in frontiers:
-        scope = tuple(str(v) for v in row[:3])
-        start, end, cycle = (datetime.fromisoformat(str(v)) for v in row[3:6])
-        roles = ("Y",) if cycle <= start else ()
-        if start <= now_utc < end:
-            roles += ("X",)
-        for role in roles:
-            if (*scope, role) not in chosen:
-                chosen.add((*scope, role))
-                transport_ids = tuple(int(r[0]) for r in conn.execute(
-                    "SELECT snapshot_id FROM ensemble_snapshots WHERE city=? AND target_date=? AND temperature_metric=? AND source_run_id=? ORDER BY snapshot_id DESC",
-                    (*scope, row[6])))
-                selected.update(transport_ids)
-                try:
-                    # Match read_native_measurement_role's existing query, not
-                    # a new Y age cutoff: an independent prior-start Y can be
-                    # older than the current X. Partial/unknown bodies remain
-                    # possible storage dependencies, never action permission.
-                    runs = conn.execute("""SELECT source_cycle_time FROM source_run
-                        WHERE source_id='ecmwf_open_data' AND track='2t_instant_native_knots'
-                          AND ingest_mode='SCHEDULED_LIVE' AND origin_mode='SCHEDULED_LIVE'
-                          AND julianday(source_cycle_time)<=julianday(?)
-                        ORDER BY source_cycle_time DESC, source_run_id LIMIT 16""",
-                        ((start if role == "Y" else now_utc).isoformat(),)).fetchall()
-                    if not runs:
-                        raise ValueError("ROLE_RETENTION_NATIVE_CANDIDATES_UNKNOWN")
-                    candidates = conn.execute("""SELECT snapshot_id,provenance_json,
-                            COALESCE(source_available_at,available_at),recorded_at
-                        FROM ensemble_snapshots WHERE snapshot_id IN (
-                            SELECT MAX(snapshot_id) FROM ensemble_snapshots
-                            WHERE city=? AND target_date=? AND temperature_metric=?
-                              AND source_cycle_time IN (""" + ",".join("?" for _ in runs) +
-                        ") GROUP BY source_cycle_time)", (*scope, *(r[0] for r in runs))).fetchall()
-                    if not candidates:
-                        raise ValueError("ROLE_RETENTION_NATIVE_CANDIDATES_UNKNOWN")
-                    selected.update(int(candidate[0]) for candidate in candidates)
-                    for candidate in candidates:
-                        capture = json.loads(candidate[1])["native_capture_receipt"]
-                        point = capture["selected_point"]
-                        if (capture["capture_status"] != "OBSERVED" or not capture["messages"]
-                                or int(point["flat_index"]) < 0
-                                or not all(math.isfinite(float(point[k])) for k in ("lat", "lon"))
-                                or any(datetime.fromisoformat(str(clock)).tzinfo is None
-                                       for clock in candidate[2:])):
-                            raise ValueError("ROLE_RETENTION_NATIVE_CANDIDATES_UNKNOWN")
-                except (OSError, ValueError, TypeError, KeyError, IndexError):
-                    # SCOPE: this exact market family. DRAIN: normal capture or
-                    # original metadata restoration. RESET: known finite
-                    # candidates, or target expiry without another consumer.
-                    preserve_scope(scope)
-                    errors.append("ROLE_RETENTION_NATIVE_FRONTIER_UNKNOWN")
-
-    # A Prepared may be selected at T+C and execute until its book's S+C.
-    # This is the existing contract's two-stage upper bound, not a new TTL.
-    bound = replacement_source_cycle_max_age_hours()
-    if not math.isfinite(bound):
-        errors.append("ROLE_RETENTION_AGE_POLICY_UNBOUNDED")
-        return selected, uncertain, errors
-    earliest = now_utc - timedelta(hours=bound) - 2 * FRESHNESS_WINDOW_DEFAULT
-    for row in conn.execute("""SELECT city,target_date,temperature_metric,provenance_json
-            FROM forecast_posteriors WHERE runtime_layer='live'
-              AND source_cycle_time>=? AND source_cycle_time<=?""",
-            (earliest.isoformat(), now_utc.isoformat())):
-        scope = tuple(str(v) for v in row[:3])
-        try:
-            payload = json.loads(row[3])
-            shape = payload.get("bayes_precision_fusion", {}).get("current_evidence_shape", {})
-            if shape.get("semantics_revision") == CURRENT_EVIDENCE_SEMANTICS_REVISION:
-                if not consume(payload, scope):
-                    preserve_scope(scope)
-        except (ValueError, TypeError, KeyError):
-            preserve_scope(scope)
-            errors.append("ROLE_RETENTION_POSTERIOR_REFERENCE_UNKNOWN")
-
-    cfg = _replacement_forecast_live_materialization_queue_config()
-    capture_root = Path(cfg["request_dir"]).parent / queue._REQUEST_ALIAS_DIR
-    def queue_inventory():
-        # An IO mutation fence only. It confers no temporal qualification.
-        directories = {Path(cfg[k]) for k in ("seed_dir", "request_dir", "inflight_dir")}
-        directories.add(capture_root)
-        for base in (Path(cfg["inflight_dir"]), capture_root):
-            if base.is_symlink():
-                continue
-            if base.exists():
-                for entry in base.iterdir():
-                    if base == capture_root and not entry.name.startswith(queue._CAPTURE_PREFIX):
-                        continue
-                    if (base != capture_root and entry.name.startswith(".")
-                            and not entry.name.startswith(queue._STAGING_PREFIX)):
-                        continue
-                    if entry.is_dir() and not entry.is_symlink():
-                        directories.add(entry)
-                        if base == capture_root:
-                            directories.add(entry / queue._CAPTURE_PAYLOAD_DIR)
-        objects = set(directories)
-        for directory in directories:
-            if directory.is_dir() and not directory.is_symlink():
-                objects.update(directory.iterdir())
-        result = []
-        for path in sorted(objects):
-            try:
-                stat = path.lstat()
-                identity = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-            except FileNotFoundError:
-                identity = None
-            result.append((str(path), identity))
-        return tuple(result)
-    before_inventory = queue_inventory()
-    paths = []
-    for key in ("seed_dir", "request_dir"):
-        directory = Path(cfg[key])
-        if directory.is_symlink():
-            errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
-        elif directory.exists():
-            paths.extend(directory.glob("*.json"))
-    inflight = Path(cfg["inflight_dir"])
-    if inflight.is_symlink():
-        errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
-    elif inflight.exists():
-        batches = []
-        for entry in inflight.iterdir():
-            if ((entry.name.startswith(".") and not entry.name.startswith(queue._STAGING_PREFIX))
-                    or entry.name == queue._lease.LEASE_DIR_NAME):
-                continue
-            if entry.is_symlink() or not entry.is_dir():
-                errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
-            else:
-                batches.append(entry)
-        for batch in sorted(batches, key=lambda p: not p.name.startswith(queue._STAGING_PREFIX)):
-            # A replaced captured entry can still have a live worker holding
-            # its parsed immutable body. Regular-only enumeration would turn
-            # missing proof into a false no-consumer declaration.
-            paths.extend(queue._captured_entries(batch))
-        # Recovery can move a published claim back to its source directory.
-        # Observe that reverse destination again. A captured path moved while
-        # reading is UNKNOWN, never proof that its frozen request disappeared.
-        for key in ("seed_dir", "request_dir"):
-            directory = Path(cfg[key])
-            if directory.is_symlink():
-                errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
-            elif directory.exists():
-                paths.extend(directory.glob("*.json"))
-    if capture_root.is_symlink():
-        errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
-    else:
-        for capture in queue._capture_dirs(Path(cfg["request_dir"])):
-            payload = capture / queue._CAPTURE_PAYLOAD_DIR
-            if capture.is_symlink() or not capture.is_dir() or payload.is_symlink():
-                errors.append("ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN")
-                continue
-            # Only the owning terminal classification may remove this from
-            # the consumer union. Unfinished regular payloads are requests.
-            if not queue._capture_settled(capture):
-                paths.extend(queue._capture_entries(capture))
-    for path in paths:
-        try:
-            body, _ = queue.read_regular_request(path)
-            payload = json.loads(body)
-            scope = scope_of(payload)
-            if not consume(payload, scope):
-                # Unfinished construction has no point certificate yet. Its
-                # committed baseline and counterpart are still dependencies.
-                preserve_scope(scope)
-        except (OSError, ValueError, TypeError, KeyError):
-            errors.append("ROLE_RETENTION_UNFINISHED_REFERENCE_UNKNOWN")
-
-    if before_inventory != queue_inventory():
-        errors.append("ROLE_RETENTION_REFERENCE_MUTATED")
-
-    terminal = {state.value for state in TERMINAL_STATES}
-    trade = world = None
-    try:
-        trade = _connect_read_only(STATE_DIR / "zeus_trades.db")
-        world = _connect_read_only(ZEUS_WORLD_DB_PATH)
-        trade.execute("PRAGMA query_only=ON"); world.execute("PRAGMA query_only=ON")
-        for command in trade.execute("SELECT command_id,token_id,q_version,state FROM venue_commands WHERE state NOT IN (" + ",".join("?" for _ in terminal) + ")", tuple(terminal)):
-            scope_row = conn.execute("SELECT city,target_date,temperature_metric FROM market_events WHERE token_id=? LIMIT 1", (command[1],)).fetchone()
-            scope = None if scope_row is None else tuple(str(v) for v in scope_row)
-            row = conn.execute("SELECT provenance_json FROM forecast_posteriors WHERE posterior_identity_hash=?", (command[2],)).fetchone()
-            found = row is not None and consume(json.loads(row[0]), scope)
-            bridge = trade.execute("SELECT decision_certificate_hash FROM position_decision_attribution WHERE command_id=? AND resolution='ATTRIBUTED'", (command[0],)).fetchone()
-            pending, visited = ([] if bridge is None else [str(bridge[0])]), set()
-            while pending:
-                digest = pending.pop()
-                if digest in visited:
-                    continue
-                visited.add(digest)
-                cert = world.execute("SELECT payload_json FROM decision_certificates WHERE certificate_hash=?", (digest,)).fetchone()
-                if cert is None:
-                    preserve_scope(scope)
-                    errors.append("ROLE_RETENTION_COMMAND_CERTIFICATE_UNKNOWN")
-                    continue
-                found = consume(json.loads(cert[0]), scope) or found
-                pending.extend(str(r[0]) for r in world.execute("SELECT parent_certificate_hash FROM decision_certificate_edges WHERE child_certificate_id=(SELECT certificate_id FROM decision_certificates WHERE certificate_hash=?)", (digest,)))
-            if not found or bridge is None:
-                preserve_scope(scope)
-                errors.append("ROLE_RETENTION_COMMAND_REFERENCE_UNKNOWN")
-    except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
-        errors.append("ROLE_RETENTION_COMMAND_AUTHORITY_UNKNOWN")
-    finally:
-        for connection in (trade, world):
-            if connection is not None:
-                connection.close()
-    return selected, uncertain, errors
 
 
 def _raw_file_identity(path: Path) -> tuple[str, int, str] | None:
@@ -1236,7 +379,6 @@ def _plan_decoded_open_data_raw_retention(
     raw_root: Path,
     reference_date: date,
     retention_days: int = _RAW_RETENTION_CALENDAR_DAYS,
-    reference_time: datetime | None = None,
 ) -> _RawRetentionPlan:
     """Plan deletion only for raw groups reproduced by canonical DB truth.
 
@@ -1248,15 +390,14 @@ def _plan_decoded_open_data_raw_retention(
     if retention_days < 0:
         raise ValueError("OpenData raw retention days must not be negative")
     root = raw_root / "raw" / "ecmwf_open_ens" / "ecmwf"
-    if root.is_symlink() or (root.exists() and not root.is_dir()):
-        return _RawRetentionPlan(root, (), 0, 0, 0, 0,
-            role_reference_errors=("ROLE_RETENTION_RAW_DIRECTORY_UNKNOWN",))
+    if not root.exists() or root.is_symlink() or not root.is_dir():
+        return _RawRetentionPlan(root, (), 0, 0, 0, 0)
 
     cutoff = reference_date - timedelta(days=retention_days - 1)
     groups: dict[tuple[str, int, str], list[Path]] = {}
     blocked_groups: set[tuple[str, int, str]] = set()
     unrecognized = 0
-    for day_dir in (sorted(root.iterdir()) if root.exists() else ()):
+    for day_dir in sorted(root.iterdir()):
         if day_dir.is_symlink() or not day_dir.is_dir():
             continue
         try:
@@ -1277,7 +418,6 @@ def _plan_decoded_open_data_raw_retention(
             groups.setdefault(identity, []).append(candidate)
 
     planned: list[Path] = []
-    role_originals: list[tuple[tuple[Path, ...], tuple[dict, ...]]] = []
     eligible_groups = 0
     retained_groups = 0
     for (day_text, hour, param), paths in sorted(groups.items()):
@@ -1366,79 +506,9 @@ def _plan_decoded_open_data_raw_retention(
             continue
         eligible_groups += 1
         planned.extend(paths)
-        # Canonical observed captures are the evidence already published by
-        # normal ingest, not a newly inferred source role or first clock.
-        captures: dict[str, dict] = {}
-        for snapshot in conn.execute(
-            """SELECT snapshot.provenance_json FROM ensemble_snapshots snapshot
-               JOIN source_run source ON source.source_run_id=snapshot.source_run_id
-               WHERE snapshot.source_id=? AND snapshot.temperature_metric=?
-                 AND (snapshot.source_run_id=? OR snapshot.source_run_id LIKE ? ESCAPE '\\')
-                 AND source.ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP')""",
-            (SOURCE_ID, metric, source_run_prefix, _sql_like_escape(source_run_prefix) + ":%"),
-        ):
-            provenance = json.loads(snapshot[0] or "{}")
-            capture = provenance.get("native_capture_receipt", {})
-            if capture.get("capture_status") == "OBSERVED":
-                for message in capture.get("messages", ()):
-                    digest = str(message["raw_message_sha256"])
-                    if digest in captures and captures[digest] != message:
-                        raise ValueError("ROLE_ORIGINAL_CANONICAL_CAPTURE_CONFLICT")
-                    captures[digest] = message
-        if captures:
-            role_originals.append((tuple(paths), tuple(captures.values())))
 
-    if root.exists():
-        planned.extend(_orphaned_transport_sidecars(root, planned_canonical=set(planned)))
+    planned.extend(_orphaned_transport_sidecars(root, planned_canonical=set(planned)))
 
-    live_hashes: set[str] = set()
-    reference_errors: list[str] = []
-    reference_complete = True
-    store = raw_root / "raw/ecmwf_open_ens/role_messages"
-    if role_originals or store.exists() or store.is_symlink():
-        try:
-            selected, _, reference_errors = _role_original_snapshot_references(conn,
-                reference_time or datetime.combine(reference_date, datetime.min.time(), tzinfo=timezone.utc),
-                raw_root=raw_root)
-            # A straddling native interval requires the same-run opposite
-            # extrema quantity even when that metric has no separate market.
-            for snapshot_id in tuple(selected):
-                scope = conn.execute("SELECT city,target_date,temperature_metric,source_cycle_time FROM ensemble_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
-                if scope is not None:
-                    selected.update(int(r[0]) for r in conn.execute(
-                        "SELECT snapshot_id FROM ensemble_snapshots WHERE city=? AND target_date=? AND temperature_metric=? AND source_cycle_time=?",
-                        (scope[0], scope[1], "low" if scope[2] == "high" else "high", scope[3])))
-            for snapshot_id in selected:
-                row = conn.execute("SELECT provenance_json FROM ensemble_snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
-                if row is None:
-                    reference_errors.append("ROLE_RETENTION_SNAPSHOT_REFERENCE_UNKNOWN")
-                    continue
-                capture = json.loads(row[0])["native_capture_receipt"]
-                if capture.get("capture_status") != "OBSERVED" or not capture.get("messages"):
-                    reference_errors.append("ROLE_RETENTION_CAPTURE_REFERENCE_UNKNOWN")
-                    continue
-                live_hashes.update(str(m["raw_message_sha256"]) for m in capture["messages"])
-        except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
-            reference_errors.append("ROLE_RETENTION_CANONICAL_REFERENCE_UNKNOWN")
-        global_unknown = {
-            "ROLE_RETENTION_REFERENCE_SCOPE_UNKNOWN", "ROLE_RETENTION_AGE_POLICY_UNBOUNDED",
-            "ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN", "ROLE_RETENTION_UNFINISHED_REFERENCE_UNKNOWN",
-            "ROLE_RETENTION_COMMAND_AUTHORITY_UNKNOWN", "ROLE_RETENTION_CANONICAL_REFERENCE_UNKNOWN",
-            "ROLE_RETENTION_SNAPSHOT_REFERENCE_UNKNOWN", "ROLE_RETENTION_CAPTURE_REFERENCE_UNKNOWN",
-            "ROLE_RETENTION_REFERENCE_MUTATED",
-        }
-        reference_complete = not global_unknown.intersection(reference_errors)
-        if reference_complete:
-            role_originals = [(sources, tuple(m for m in captures if str(m["raw_message_sha256"]) in live_hashes))
-                              for sources, captures in role_originals]
-
-    gc_files = []
-    if reference_complete and store.exists() and not store.is_symlink():
-        for path in store.glob("*.grib2"):
-            if re.fullmatch(r"[0-9a-f]{64}\.grib2", path.name) and not path.is_symlink() and path.is_file():
-                stat = path.stat()
-                gc_files.append((path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
-    database = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
     return _RawRetentionPlan(
         root=root,
         files=tuple(sorted(planned)),
@@ -1446,13 +516,6 @@ def _plan_decoded_open_data_raw_retention(
         retained_group_count=retained_groups,
         unrecognized_file_count=unrecognized,
         planned_bytes=sum(path.stat().st_size for path in planned),
-        role_originals=tuple(role_originals),
-        live_role_hashes=frozenset(live_hashes),
-        role_reference_errors=tuple(reference_errors),
-        role_reference_complete=reference_complete,
-        role_gc_files=tuple(gc_files),
-        reference_db=Path(database) if database else None,
-        reference_time=reference_time or datetime.combine(reference_date, datetime.min.time(), tzinfo=timezone.utc),
     )
 
 
@@ -1462,28 +525,10 @@ def _apply_decoded_open_data_raw_retention(plan: _RawRetentionPlan) -> dict[str,
     deleted_bytes = 0
     errors: list[str] = []
     parents: set[Path] = set()
-    protected: set[Path] = set()
-    raw_root = plan.root.parents[2]
-    try:
-        store = _role_message_path(raw_root, "0" * 64).parent
-        unsafe_root = plan.root.is_symlink()
-    except ValueError:
-        store = None
-        unsafe_root = True
-    if unsafe_root:
+    if plan.root.is_symlink():
         errors.append("raw_root_became_symlink")
     else:
-        for sources, captures in plan.role_originals:
-            try:
-                _preserve_role_originals(plan.root.parents[2], sources, captures)
-            except (OSError, ValueError, KeyError, TypeError) as exc:
-                # A storage/receipt gap does not undo already-committed
-                # mandatory truth; it only prevents this group's raw cleanup.
-                protected.update(sources)
-                errors.append(f"ROLE_ORIGINAL_RETENTION_DEFERRED:{type(exc).__name__}")
         for path in plan.files:
-            if path in protected:
-                continue
             parents.add(path.parent)
             if path.parent.parent != plan.root:
                 errors.append(f"path_outside_raw_root:{path}")
@@ -1506,56 +551,8 @@ def _apply_decoded_open_data_raw_retention(plan: _RawRetentionPlan) -> dict[str,
             except OSError:
                 pass
     status = "ERROR" if errors else ("APPLIED" if plan.files else "NO_ELIGIBLE_RAW")
-    role_deleted = 0
-    if (not unsafe_root and store is not None and store.exists()
-            and plan.role_reference_complete and not protected and plan.role_gc_files):
-        if store.is_symlink():
-            errors.append("ROLE_ORIGINAL_GC_DIRECTORY_SYMLINK")
-        else:
-            # The other H/L collector can publish after this plan leaves the
-            # writer lock. Never extend the deletion set to its new objects.
-            # Refresh exact consumers before unlinking an existing object;
-            # timestamps below are mutation fences, not possession or TTL.
-            live_hashes = set(plan.live_role_hashes)
-            try:
-                if plan.reference_db is None or plan.reference_time is None:
-                    raise ValueError("ROLE_RETENTION_REFERENCE_REVALIDATION_UNKNOWN")
-                from src.state.db import _connect_read_only
-                fresh_conn = _connect_read_only(plan.reference_db)
-                try:
-                    fresh_conn.execute("PRAGMA query_only=ON")
-                    fresh = _plan_decoded_open_data_raw_retention(fresh_conn,
-                        raw_root=raw_root, reference_date=plan.reference_time.date(),
-                        reference_time=plan.reference_time)
-                    if not fresh.role_reference_complete:
-                        raise ValueError("ROLE_RETENTION_REFERENCE_REVALIDATION_UNKNOWN")
-                    live_hashes.update(fresh.live_role_hashes)
-                finally:
-                    fresh_conn.close()
-            except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
-                errors.append("ROLE_RETENTION_REFERENCE_REVALIDATION_UNKNOWN")
-                live_hashes.update(path.stem for path, *_ in plan.role_gc_files)
-            for path, dev, ino, size, modified in plan.role_gc_files:
-                if path.stem in live_hashes:
-                    continue
-                if path.is_symlink() or not path.is_file():
-                    errors.append("ROLE_ORIGINAL_GC_FILE_UNKNOWN")
-                    continue
-                # Original bodies are released only after the complete live
-                # reference union is known. Missing bodies are not proof of
-                # unreferenced state; unknown authority prevents this sweep.
-                try:
-                    stat = path.stat()
-                    if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != (dev, ino, size, modified):
-                        continue
-                    path.unlink()
-                    role_deleted += 1
-                except FileNotFoundError:
-                    continue
-                except OSError as exc:
-                    errors.append(f"ROLE_ORIGINAL_GC_DEFERRED:{type(exc).__name__}")
     return {
-        "status": "ERROR" if errors else status,
+        "status": status,
         "eligible_group_count": plan.eligible_group_count,
         "retained_group_count": plan.retained_group_count,
         "unrecognized_file_count": plan.unrecognized_file_count,
@@ -1564,8 +561,6 @@ def _apply_decoded_open_data_raw_retention(plan: _RawRetentionPlan) -> dict[str,
         "deleted_file_count": deleted_files,
         "deleted_bytes": deleted_bytes,
         "errors": errors[:10],
-        "role_reference_errors": list(plan.role_reference_errors),
-        "role_message_deleted_count": role_deleted,
     }
 
 # ECMWF Open Data is replicated across multiple mirrors. AWS is fastest but
@@ -1740,132 +735,6 @@ class _RateLimitedSession(requests.Session):
         if limited:
             _fetch_bucket.observe(response.status_code)
         return response
-
-
-class _NativeDeadlineSession(requests.Session):
-    """Optional public-original transport with a cancellable total HTTP cut.
-
-    curl owns DNS/connect/headers/body under --max-time; the parent owns the
-    same absolute subprocess timeout and reaps it. This is not an idle socket
-    timeout or a daemon worker. No unsupported-tool requests fallback exists.
-    Only unverified in-flight scratch is disposable; committed native parts
-    remain in their original cache across timeout/503/partial normal polls.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self._curl_checked = False
-
-    def get(self, url, **kwargs):
-        from urllib.parse import urlsplit
-        from requests.utils import select_proxy
-        from requests.structures import CaseInsensitiveDict
-
-        deadline = getattr(self, "_zeus_deadline", None)
-        if deadline is None:
-            raise ValueError("NATIVE_2T_HTTP_DEADLINE_REQUIRED")
-        _fetch_bucket.acquire(deadline=deadline)
-        if not self._curl_checked:
-            try:
-                checked = subprocess.run(["/usr/bin/curl", "-q", "--version"], capture_output=True,
-                    timeout=_remaining_step_timeout(deadline), check=False)
-            except subprocess.TimeoutExpired as exc:
-                raise requests.Timeout("STEP_DEADLINE_EXCEEDED") from exc
-            except OSError as exc:
-                raise ValueError("NATIVE_2T_BOUNDED_HTTP_UNAVAILABLE") from exc
-            version = re.match(rb"curl (\d+)\.(\d+)\.(\d+)", checked.stdout)
-            if (checked.returncode or version is None
-                    or tuple(int(n) for n in version.groups()) < (8, 4, 0)):
-                raise ValueError("NATIVE_2T_BOUNDED_HTTP_UNSUPPORTED")
-            self._curl_checked = True
-        parts = urlsplit(str(url))
-        if (parts.scheme not in {"http", "https"} or parts.username or parts.password
-                or parts.query or parts.fragment):
-            raise ValueError("NATIVE_2T_HTTP_ORIGIN_INVALID")
-        headers = CaseInsensitiveDict(kwargs.get("headers", {}))
-        maximum = _RANGE_RESUME_CHUNK_BYTES
-        if "Range" in headers:
-            match = re.fullmatch(r"bytes=(\d+)-(\d+)", headers["Range"])
-            if match is None or int(match[2]) < int(match[1]):
-                raise ValueError("NATIVE_2T_HTTP_RANGE_INVALID")
-            maximum = int(match[2]) - int(match[1]) + 1
-            if not 100 <= maximum <= 32 * 1024 * 1024:
-                raise ValueError("NATIVE_2T_HTTP_RANGE_INVALID")
-        if {name.lower() for name in headers} - {"range"}:
-            raise ValueError("NATIVE_2T_HTTP_HEADERS_UNSUPPORTED")
-        # Match requests' trust_env/explicit session proxy and verify routing;
-        # credentials stay in the child environment, never argv or error logs.
-        settings = self.merge_environment_settings(str(url), {}, True, kwargs.get("verify", True), None)
-        verify = settings["verify"]
-        if verify is False:
-            raise ValueError("NATIVE_2T_TLS_VERIFICATION_REQUIRED")
-        if settings["cert"] is not None or self.auth is not None or self.cookies:
-            raise ValueError("NATIVE_2T_HTTP_AUTH_UNSUPPORTED")
-        proxy = select_proxy(str(url), settings["proxies"])
-        child_env = {key: value for key, value in os.environ.items()
-            if key.lower() not in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}}
-        if proxy:
-            child_env[parts.scheme + "_proxy"] = proxy
-        ca = verify if isinstance(verify, str) else requests.certs.where()
-        safe_headers = {"content-length", "content-range", "content-type", "content-encoding", "date",
-            "last-modified", "etag", "server", "cache-control", "age", "transfer-encoding"}
-        with tempfile.TemporaryDirectory(prefix="zeus-native-http-") as directory:
-            body_path, header_path = Path(directory) / "body", Path(directory) / "headers"
-            # No redirect, retry, decompression, curlrc, insecure TLS or second
-            # budget. libcurl >=8.4 also caps unknown-length/chunked bodies.
-            remaining = _remaining_step_timeout(deadline)
-            command = ["/usr/bin/curl", "-q", "--silent", "--proto", "=" + parts.scheme,
-                "--max-time", str(remaining), "--max-filesize", str(maximum),
-                "--header", "Accept-Encoding: identity", "--dump-header", str(header_path),
-                "--output", str(body_path), "--write-out", "%{http_code}",
-                "--capath" if Path(ca).is_dir() else "--cacert", str(ca)]
-            if "Range" in headers:
-                command.extend(["--header", "Range: " + headers["Range"]])
-            command.extend(["--url", str(url)])
-            try:
-                completed = subprocess.run(command, env=child_env, capture_output=True,
-                    timeout=_remaining_step_timeout(deadline), check=False)
-            except subprocess.TimeoutExpired as exc:
-                raise requests.Timeout("STEP_DEADLINE_EXCEEDED") from exc
-            except OSError as exc:
-                raise ValueError("NATIVE_2T_BOUNDED_HTTP_UNAVAILABLE") from exc
-            if completed.returncode == 28:
-                raise requests.Timeout("STEP_DEADLINE_EXCEEDED")
-            if completed.returncode:
-                # curl stderr can contain a proxy credential or private route.
-                raise requests.RequestException("NATIVE_2T_HTTP_TRANSFER_FAILED:" + str(completed.returncode))
-            _remaining_step_timeout(deadline)
-            if (not re.fullmatch(rb"\d{3}", completed.stdout) or not body_path.is_file()
-                    or body_path.stat().st_size > maximum or not header_path.is_file()
-                    or header_path.stat().st_size > 65536):
-                raise ValueError("NATIVE_2T_HTTP_ENVELOPE_INVALID")
-            blocks = [block for block in header_path.read_bytes().split(b"\r\n\r\n") if block]
-            # Proxy CONNECT headers and informational responses are not the
-            # origin entity. Bind the final status/header block only.
-            lines = blocks[-1].decode("latin1").split("\r\n") if blocks else []
-            status = re.fullmatch(r"HTTP/\S+ (\d{3})(?: .*)?", lines[0]) if lines else None
-            if status is None or int(status[1]) != int(completed.stdout):
-                raise ValueError("NATIVE_2T_HTTP_ENVELOPE_INVALID")
-            captured = CaseInsensitiveDict()
-            for line in lines[1:]:
-                name, sep, value = line.partition(":")
-                if not sep or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
-                    raise ValueError("NATIVE_2T_HTTP_HEADERS_INVALID")
-                if name.lower() in safe_headers:
-                    if name in captured:
-                        raise ValueError("NATIVE_2T_HTTP_HEADER_DUPLICATE")
-                    captured[name] = value.strip()
-            if captured.get("Content-Encoding", "identity").lower() != "identity":
-                raise ValueError("NATIVE_2T_HTTP_ENCODING_UNSUPPORTED")
-            content = body_path.read_bytes()
-            if "Content-Length" in captured and captured["Content-Length"] != str(len(content)):
-                raise ValueError("NATIVE_2T_HTTP_LENGTH_INVALID")
-            response = requests.Response()
-            response.status_code, response.headers, response.url = int(status[1]), captured, str(url)
-            response._content, response._content_consumed = content, True
-            response._native_body_complete = True
-            _fetch_bucket.observe(response.status_code)
-            return response
 
 
 def _part_offset_length(part: Any) -> tuple[int, int]:
@@ -2258,8 +1127,6 @@ def _resolve_index_parts(
     result: Any,
     *,
     deadline: float | None = None,
-    original_indexes: list[dict] | None = None,
-    native_complete_body: bool = False,
 ) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
     """Resolve ECMWF ``.index`` parts without multiurl's 120-second retry loop."""
 
@@ -2272,7 +1139,6 @@ def _resolve_index_parts(
     for url in result.urls:
         base, _ = os.path.splitext(str(url))
         index_url = f"{base}.index"
-        started = datetime.now(timezone.utc).isoformat() if original_indexes is not None else None
         response = client.session.get(
             index_url,
             stream=True,
@@ -2283,31 +1149,7 @@ def _resolve_index_parts(
             if response.status_code != 200:
                 response.raise_for_status()
             parts: list[tuple[int, int]] = []
-            if original_indexes is not None:
-                if native_complete_body:
-                    _remaining_step_timeout(deadline)
-                    if getattr(response, "_native_body_complete", False) is not True:
-                        raise ValueError("NATIVE_2T_HTTP_BODY_NOT_BOUNDED")
-                    body = response.content
-                    if len(body) > _RANGE_RESUME_CHUNK_BYTES:
-                        raise ValueError("NATIVE_2T_INDEX_BODY_OVERSIZED")
-                else:
-                    chunks, size = [], 0
-                    for chunk in response.iter_content(chunk_size=65536):
-                        _remaining_step_timeout(deadline)
-                        size += len(chunk)
-                        if size > _RANGE_RESUME_CHUNK_BYTES:
-                            raise ValueError("NATIVE_2T_INDEX_BODY_OVERSIZED")
-                        chunks.append(chunk)
-                    body = b"".join(chunks)
-                original_indexes.append({"source_url": str(url), "source_index_url": index_url,
-                    "body": body, "fetch_started_at": started,
-                    "source_fetched_at": datetime.now(timezone.utc).isoformat(),
-                    "http": {"status": response.status_code, "headers": dict(response.headers)}})
-                lines = body.splitlines()
-            else:
-                lines = response.iter_lines()
-            for raw_line in lines:
+            for raw_line in response.iter_lines():
                 _remaining_step_timeout(deadline)
                 if not raw_line:
                     continue
@@ -2326,8 +1168,7 @@ def _resolve_index_parts(
     return resolved
 
 
-def _read_static_mask_range(session: Any, url: str, offset: int, length: int, *, deadline: float | None = None,
-                            receipt: dict | None = None) -> bytes:
+def _read_static_mask_range(session: Any, url: str, offset: int, length: int, *, deadline: float | None = None) -> bytes:
     """Read exactly one indexed static LSM GRIB message; never the full GRIB."""
     if not 0 <= offset or not 100 <= length <= 1024 * 1024:
         raise ValueError("ENS_LAND_MASK_INDEX_BOUNDS_INVALID")
@@ -2349,9 +1190,6 @@ def _read_static_mask_range(session: Any, url: str, offset: int, length: int, *,
         message = b"".join(chunks)
         if len(message) != length or not message.startswith(b"GRIB") or not message.endswith(b"7777"):
             raise ValueError("ENS_LAND_MASK_MESSAGE_INVALID")
-        if receipt is not None:
-            receipt.update(status=response.status_code, headers=dict(response.headers),
-                           source_fetched_at=datetime.now(timezone.utc).isoformat())
         return message
     finally:
         response.close()
@@ -2363,41 +1201,6 @@ def _fetch_cycle_land_mask(
 ) -> dict[str, object]:
     """Acquire bounded same-cycle IFS control static geometry for ENS extraction."""
     from ecmwf.opendata import Client
-    from scripts.extract_open_ens_localday import _read_land_mask
-
-    proof_path = output_path.with_suffix(".proof.json")
-    cycle = datetime.combine(cycle_date, datetime.min.time(), timezone.utc).replace(hour=cycle_hour)
-    # SCOPE: this exact static run/body. DRAIN: restore its original committed
-    # evidence; RESET: a valid original or an independent new run. Old caches
-    # without indexes remain diagnostic; re-fetching cannot renew their clock.
-    if proof_path.exists():
-        if output_path.is_symlink() or proof_path.is_symlink():
-            raise ValueError("ENS_LAND_MASK_CACHE_SYMLINK")
-        before = output_path.read_bytes(), proof_path.read_bytes()
-        observed = _read_land_mask(output_path, proof_path)
-        proof = observed["proof"]
-        fetched = datetime.fromisoformat(str(proof["source_fetched_at"]))
-        if (proof["source_cycle_time"] != cycle.isoformat() or fetched.tzinfo is None
-                or not cycle <= fetched <= datetime.now(timezone.utc)
-                or proof["source_index_length"] != len(before[0])
-                or (output_path.read_bytes(), proof_path.read_bytes()) != before):
-            raise ValueError("ENS_LAND_MASK_CACHE_ORIGINAL_INVALID")
-        return {**proof, "mask_grid_identity_hash": observed["grid_identity_hash"]}
-    # A body without the final proof marker has no committed possession clock.
-    # Preserve that interrupted publication, then normal bounded acquisition can
-    # drain it. This is not permission to replace a committed invalid original.
-    for orphan in (output_path, output_path.with_suffix(".index.body")):
-        if orphan.exists():
-            if orphan.is_symlink():
-                raise ValueError("ENS_LAND_MASK_CACHE_SYMLINK")
-            digest = hashlib.sha256(orphan.read_bytes()).hexdigest()
-            preserved = orphan.with_name(f"{orphan.name}.uncommitted-{digest}")
-            if preserved.exists():
-                if preserved.read_bytes() != orphan.read_bytes():
-                    raise ValueError("ENS_LAND_MASK_ORPHAN_HASH_CONFLICT")
-                orphan.unlink()
-            else:
-                orphan.rename(preserved)
 
     last_error: Exception | None = None
     for mirror in _DOWNLOAD_SOURCES:
@@ -2410,16 +1213,15 @@ def _fetch_cycle_land_mask(
                 date=int(cycle_date.strftime("%Y%m%d")), time=cycle_hour,
                 stream="oper", type=["fc"], step=[0], param=["lsm"],
             )
-            originals: list[dict] = []
-            parts = _resolve_index_parts(client, result, deadline=deadline, original_indexes=originals)
+            parts = _resolve_index_parts(client, result, deadline=deadline)
             if len(parts) != 1 or len(parts[0][1]) != 1:
                 raise ValueError("ENS_LAND_MASK_INDEX_NOT_SINGLE_MESSAGE")
             url, ((offset, length),) = parts[0]
-            range_receipt: dict = {}
             message = _read_static_mask_range(
-                client.session, url, offset, length, deadline=deadline, receipt=range_receipt,
+                client.session, url, offset, length, deadline=deadline,
             )
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(message)
             proof: dict[str, object] = {
                 "source": "ecmwf_open_data_ifs_oper_fc_step0_lsm",
                 "source_url": url,
@@ -2429,47 +1231,30 @@ def _fetch_cycle_land_mask(
                 ).replace(hour=cycle_hour).isoformat(),
                 "source_index_offset": offset,
                 "source_index_length": length,
-                "source_fetched_at": range_receipt.pop("source_fetched_at"),
+                "source_fetched_at": datetime.now(timezone.utc).isoformat(),
                 "mask_sha256": hashlib.sha256(message).hexdigest(),
-                "source_index_sha256": hashlib.sha256(originals[0]["body"]).hexdigest(),
-                "index_http": originals[0]["http"], "range_http": range_receipt,
-                "index_first_possession_at": originals[0]["source_fetched_at"],
-                "source_issued_at": None,
             }
-            with tempfile.TemporaryDirectory(prefix=".lsm_capture_", dir=output_path.parent) as temp:
-                staging = Path(temp)
-                body_path, index_path, marker = staging / "lsm.grib2", staging / "index.body", staging / "proof.json"
-                for path, data in ((body_path, message), (index_path, originals[0]["body"]),
-                                   (marker, json.dumps(proof, sort_keys=True).encode())):
-                    with path.open("wb") as handle:
-                        handle.write(data)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                decoded = _read_land_mask(body_path, marker)
-                _remaining_step_timeout(deadline)
-                os.replace(body_path, output_path)
-                os.replace(index_path, output_path.with_suffix(".index.body"))
-                os.replace(marker, proof_path)  # Last publication is the commit marker.
+            output_path.with_suffix(".proof.json").write_text(
+                json.dumps(proof, sort_keys=True), encoding="utf-8",
+            )
+            from scripts.extract_open_ens_localday import _read_land_mask
+            decoded = _read_land_mask(output_path, output_path.with_suffix(".proof.json"))
             proof["mask_grid_identity_hash"] = decoded["grid_identity_hash"]
             return proof
         except (OSError, ValueError, requests.RequestException) as exc:
             last_error = exc
-            # A publication failure is drained on the next poll, not retried
-            # through another mirror after bytes have been locally published.
-            if output_path.exists():
-                break
     raise ValueError(f"ENS_LAND_MASK_UNAVAILABLE:{type(last_error).__name__ if last_error else 'NO_MIRROR'}")
 
 
-def _native_temperature_index_parts(body: bytes, run: datetime, step: int, *, control: bool, param: str = "2t") -> list[dict]:
+def _native_temperature_index_parts(body: bytes, run: datetime, step: int, *, control: bool) -> list[dict]:
     """Exact original-index 2t fields; control follows the 50r1 oper/fc envelope."""
-    wanted = {"param": param, "levtype": "sfc", "class": "od", "date": run.strftime("%Y%m%d"),
+    wanted = {"param": "2t", "levtype": "sfc", "class": "od", "date": run.strftime("%Y%m%d"),
               "time": run.strftime("%H%M"), "step": str(step),
               "stream": "oper" if control else "enfo", "type": "fc" if control else "pf"}
     parts = []
     for line in body.splitlines():
         row = json.loads(line)
-        if row.get("param") != param:
+        if row.get("param") != "2t":
             continue
         if any(str(row.get(k)) != v for k, v in wanted.items()):
             raise ValueError("NATIVE_2T_INDEX_IDENTITY_MISMATCH")
@@ -2491,539 +1276,6 @@ def _native_temperature_index_parts(body: bytes, run: datetime, step: int, *, co
            for a, b in zip(ordered, ordered[1:])):
         raise ValueError("NATIVE_2T_INDEX_RANGES_OVERLAP")
     return ordered
-
-
-_native_temperature_source_lock = threading.Lock()
-
-
-def restore_paired_role_originals(conn, *, plan: dict, decision_at: datetime,
-        deadline_monotonic: float, _paths: OpenDataPaths | None = None, _on_acquired: Any = None) -> dict:
-    """Restore only byte-identical canonical captures, never re-ingest a run.
-
-    SCOPE: selected source/city/date/metric and original SHA. DRAIN: the existing
-    bounded normal turn resumes exclusive CAS publication with configured
-    replicas. RESET: strict original readback, or an independently captured new
-    run. Missing/changed evidence cannot renew any canonical possession clock.
-    """
-    import eccodes as ec
-    from ecmwf.opendata import Client
-    from scripts import extract_open_ens_localday as decoder
-    paths = _paths or _resolve_opendata_paths()
-    if not _native_temperature_source_lock.acquire(blocking=False):
-        return {"status": "DEFERRED", "reason": "NATIVE_2T_SINGLEFLIGHT_BUSY"}
-    session = None
-    missing = {}
-    checked = {}
-    try:
-        if _on_acquired is not None:
-            _remaining_step_timeout(deadline_monotonic)
-            _on_acquired()
-        run = plan["run"]
-        if (decision_at.tzinfo is None or decision_at.utcoffset() != timedelta(0)
-                or decision_at > datetime.now(timezone.utc) or run.tzinfo is None
-                or run.utcoffset() != timedelta(0) or run > decision_at):
-            raise ValueError("ROLE_ORIGINAL_CANONICAL_CLOCK_UNKNOWN")
-        for city, target, metric, role in plan["targets"]:
-            track = {"high": "mx2t6_high", "low": "mn2t6_low"}[metric]
-            row = conn.execute("""SELECT provenance_json,source_available_at,recorded_at
-                FROM ensemble_snapshots WHERE source_run_id=? AND city=? AND target_date=?
-                  AND temperature_metric=? AND source_cycle_time=?
-                ORDER BY snapshot_id DESC LIMIT 1""",
-                (plan["sources"][track], city, target, metric, run.isoformat())).fetchone()
-            if row is None:
-                raise ValueError("ROLE_ORIGINAL_CANONICAL_CAPTURE_UNKNOWN")
-            clocks = [datetime.fromisoformat(str(row[1])),
-                      datetime.fromisoformat(str(row[2]))]
-            # SQLite's owning recorded_at DEFAULT is UTC, unlike provider clocks.
-            clocks[1] = clocks[1].replace(tzinfo=timezone.utc) if clocks[1].tzinfo is None else clocks[1]
-            if any(clock.tzinfo is None or not run <= clock <= decision_at for clock in clocks):
-                raise ValueError("ROLE_ORIGINAL_CANONICAL_CLOCK_UNKNOWN")
-            capture = json.loads(row[0])["native_capture_receipt"]
-            if capture["capture_status"] != "OBSERVED" or not capture["messages"]:
-                raise ValueError("ROLE_ORIGINAL_CANONICAL_CAPTURE_UNKNOWN")
-            for saved in capture["messages"]:
-                h = saved["observed_headers"]
-                digest = saved["raw_message_sha256"]
-                if digest in checked:
-                    if saved != checked[digest]:
-                        raise ValueError("ROLE_ORIGINAL_CANONICAL_CAPTURE_CONFLICT")
-                    continue
-                definition = decoder.TRACKS[track]
-                if (not re.fullmatch(r"[0-9a-f]{64}", digest)
-                        or saved["capture_status"] != "OBSERVED"
-                        or h["paramId"] != definition.paramId or h["stepType"] != definition.step_type
-                        or h["units"] != "K" or h["typeOfLevel"] != "heightAboveGround" or h["level"] != 2
-                        or h["dataDate"] != int(run.strftime("%Y%m%d")) or h["dataTime"] != run.hour * 100):
-                    raise ValueError("ROLE_ORIGINAL_CANONICAL_IDENTITY_UNKNOWN")
-                member = int(h.get("perturbationNumber", h.get("number", 0)))
-                if not 0 <= member <= 50 or h["dataType"] != ("fc" if member == 0 else "pf"):
-                    raise ValueError("ROLE_ORIGINAL_CANONICAL_IDENTITY_UNKNOWN")
-                path = _role_message_path(paths.raw_root, digest)
-                if _path_present(path):
-                    _read_role_message_bytes(paths.raw_root, saved)
-                else:
-                    missing[digest] = (track, saved, member, int(h["endStep"]))
-                checked[digest] = saved
-        if not missing:
-            return {"status": "AVAILABLE", "restored_count": 0}
-        mirrors = tuple(dict.fromkeys(_DOWNLOAD_SOURCES))
-        if not mirrors or any(m not in {"aws", "google"} for m in mirrors):
-            raise ValueError("NATIVE_2T_MIRROR_POOL_UNSUPPORTED")
-        cache = paths.raw_root / "raw/ecmwf_open_ens/native_2t_scheduled" / f"{run:%Y%m%dT%HZ}" / ".paired-originals"
-        cursor = _native_mirror_attempt(cache, paths.raw_root, run, mirrors)
-        cache.mkdir(parents=True, exist_ok=True)
-        order = mirrors
-        if cursor.get("configured_mirrors") == list(mirrors):
-            offset = mirrors.index(cursor["last_attempted_mirror"])
-            if cursor["status"] != "COMPLETE": offset = (offset + 1) % len(mirrors)
-            order = mirrors[offset:] + mirrors[:offset]
-        session = _NativeDeadlineSession()
-        session._zeus_deadline = deadline_monotonic
-        restored = 0
-        for mirror in order:
-            _remaining_step_timeout(deadline_monotonic)
-            if plan["priority"]() is not True:
-                raise ValueError("NATIVE_2T_MANDATORY_PRIORITY")
-            attempt = {"last_attempted_mirror": mirror, "status": "RUNNING",
-                "attempt_started_at": datetime.now(timezone.utc).isoformat(), "attempt_finished_at": None, "reason": None}
-            _native_mirror_attempt(cache, paths.raw_root, run, mirrors, attempt)
-            try:
-                indexes = {}
-                for digest, (track, saved, member, step) in tuple(missing.items()):
-                    _remaining_step_timeout(deadline_monotonic)
-                    if plan["priority"]() is not True: raise ValueError("NATIVE_2T_MANDATORY_PRIORITY")
-                    param = decoder.TRACKS[track].open_data_param
-                    key = param, step, member == 0
-                    if key not in indexes:
-                        client = Client(source=mirror); client.session = session
-                        result = client._get_urls(target=str(cache / "unused"), use_index=False,
-                            date=int(run.strftime("%Y%m%d")), time=run.hour, stream="oper" if member == 0 else "enfo",
-                            type=["fc" if member == 0 else "pf"], step=[step], param=[param])
-                        entities = []
-                        _resolve_index_parts(client, result, deadline=deadline_monotonic,
-                            original_indexes=entities, native_complete_body=True)
-                        if len(entities) != 1: raise ValueError("ROLE_ORIGINAL_INDEX_UNKNOWN")
-                        entity = entities[0]
-                        origin = ("https://storage.googleapis.com/ecmwf-open-data/" if mirror == "google"
-                            else "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/")
-                        stream = "oper" if member == 0 else "enfo"
-                        kind = "fc" if member == 0 else "ef"
-                        expected_url = (f"{origin}{run:%Y%m%d}/{run:%H}z/ifs/0p25/{stream}/"
-                            f"{run:%Y%m%d%H}0000-{step}h-{stream}-{kind}.grib2")
-                        if entity["source_url"] != expected_url:
-                            raise ValueError("ROLE_ORIGINAL_REPLICA_ORIGIN_UNKNOWN")
-                        indexes[key] = entity, _native_temperature_index_parts(entity["body"], run, step,
-                            control=member == 0, param=param)
-                    entity, parts = indexes[key]
-                    part = next(p for p in parts if p["member"] == member)
-                    offset, length = part["source_index_offset"], part["source_index_length"]
-                    response = session.get(entity["source_url"], stream=True,
-                        headers={"Range": f"bytes={offset}-{offset+length-1}"},
-                        timeout=_remaining_step_timeout(deadline_monotonic), verify=getattr(client, "verify", True))
-                    try:
-                        _validate_range_response(response, offset=offset, length=length)
-                        raw = response.content
-                        if (getattr(response, "_native_body_complete", False) is not True
-                                or len(raw) != saved["raw_message_length"] or hashlib.sha256(raw).hexdigest() != digest):
-                            raise ValueError("ROLE_ORIGINAL_REPLICA_MISMATCH")
-                        gid = ec.codes_new_from_message(raw)
-                        try:
-                            if (decoder._native_message_capture(gid) != saved
-                                    or ec.codes_get(gid, "generatingProcessIdentifier") != 161):
-                                raise ValueError("ROLE_ORIGINAL_CAPTURE_MISMATCH")
-                        finally: ec.codes_release(gid)
-                        _publish_role_message(paths.raw_root, saved, raw)
-                        _read_role_message_bytes(paths.raw_root, saved)
-                        del missing[digest]; restored += 1
-                    finally: response.close()
-                _native_mirror_attempt(cache, paths.raw_root, run, mirrors,
-                    {**attempt, "status": "COMPLETE", "attempt_finished_at": datetime.now(timezone.utc).isoformat()})
-                return {"status": "AVAILABLE", "restored_count": restored}
-            except (OSError, ValueError, requests.RequestException) as exc:
-                _native_mirror_attempt(cache, paths.raw_root, run, mirrors,
-                    {**attempt, "status": "FAILED", "reason": str(exc), "attempt_finished_at": datetime.now(timezone.utc).isoformat()})
-                if not isinstance(exc, requests.RequestException): raise
-        return {"status": "INCOMPLETE", "restored_count": restored, "missing_count": len(missing)}
-    except (OSError, ValueError, KeyError, TypeError, requests.RequestException) as exc:
-        return {"status": "UNKNOWN", "reason": str(exc), "missing_count": len(missing)}
-    finally:
-        try:
-            if session is not None: session.close()
-        finally:
-            _native_temperature_source_lock.release()
-
-
-def _native_mirror_attempt(cache: Path, root: Path, run: datetime, mirrors: tuple[str, ...],
-                           update: dict | None = None) -> dict:
-    """Runtime scheduling only; no original reader or identity consumes this file.
-
-    SCOPE: this normal run's diagnostic slot. DRAIN: restore a regular, valid
-    slot on a normal poll. RESET: valid receipt or an independent run; an
-    already verified complete subset does not depend on this cursor.
-    """
-    import stat
-    for parent in (cache, *cache.parents):
-        if parent.is_symlink():
-            raise ValueError("NATIVE_2T_MIRROR_DIAGNOSTIC_ALIAS")
-        if parent == root:
-            break
-    path = cache / "mirror-attempt.json"
-    previous = {}
-    if _path_present(path):
-        if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode) or path.stat().st_size > 65536:
-            raise ValueError("NATIVE_2T_MIRROR_DIAGNOSTIC_ALIAS")
-        try:
-            previous = json.loads(path.read_bytes())
-            started = datetime.fromisoformat(previous["attempt_started_at"])
-            finished = datetime.fromisoformat(previous["attempt_finished_at"]) if previous.get("attempt_finished_at") else None
-            if (previous["version"] != 1 or previous["run_time_utc"] != run.isoformat()
-                    or previous["ingest_mode"] != "SCHEDULED_LIVE"
-                    or previous["status"] not in {"RUNNING", "FAILED", "PARTIAL", "COMPLETE"}
-                    or previous["last_attempted_mirror"] not in previous["configured_mirrors"]
-                    or any(mirror not in {"aws", "google"} for mirror in previous["configured_mirrors"])
-                    or started.tzinfo is None or not run <= started <= datetime.now(timezone.utc)
-                    or (finished and (finished.tzinfo is None or not started <= finished <= datetime.now(timezone.utc)))):
-                raise ValueError("invalid mirror attempt")
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("NATIVE_2T_MIRROR_DIAGNOSTIC_INVALID") from exc
-    if update is not None:
-        content = json.dumps({"version": 1, "run_time_utc": run.isoformat(), "ingest_mode": "SCHEDULED_LIVE",
-            "configured_mirrors": list(mirrors), **update}, sort_keys=True).encode()
-        with tempfile.NamedTemporaryFile(dir=cache, delete=False) as handle:
-            temporary = Path(handle.name)
-            try:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-                os.replace(temporary, path)
-            finally:
-                temporary.unlink(missing_ok=True)
-    return previous
-
-
-def _promote_native_mirror_part(path: Path, cache: Path, run: datetime) -> dict:
-    """Publish a verified missing part without changing any original receipt."""
-    record, raw = _read_native_temperature_record(path, run)
-    proof = json.loads(path.with_suffix(".grib2.proof.json").read_bytes())
-    if proof.get("ingest_mode") != "SCHEDULED_LIVE":
-        raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
-    # Recovery publishes only from the configured replica's own stage. A
-    # misplaced original is evidence to restore, not permission to relabel it.
-    origins = {"aws": "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/",
-        "google": "https://storage.googleapis.com/ecmwf-open-data/"}
-    mirror = next((mirror for mirror in _DOWNLOAD_SOURCES if mirror in origins
-        and path.parent == cache / f".mirror-{_resume_source_namespace(mirror)}.partial"), None)
-    if mirror is None or not record["source_url"].startswith(origins[mirror]):
-        raise ValueError("NATIVE_2T_MIRROR_STAGE_ORIGIN_INVALID")
-    index = path.parent / proof["index_path"]
-    receipt = _native_index_receipt_path(index, proof["index_receipt_sha256"])
-    receipt_destination = cache / f"{index.stem}.http-{proof['index_receipt_sha256']}.json"
-    # Links also retain the staged proof across interrupted publication. An
-    # identical body-only publication can restore this exact proof, not recapture.
-    for origin, destination in ((index, cache / index.name),
-            (receipt, receipt_destination),
-            (path, cache / path.name),
-            (path.with_suffix(".grib2.proof.json"), cache / path.with_suffix(".grib2.proof.json").name)):
-        if origin.is_symlink() or not origin.is_file():
-            raise ValueError("NATIVE_2T_MIRROR_STAGE_ALIAS")
-        if _path_present(destination):
-            if destination.is_symlink() or not destination.is_file() or destination.read_bytes() != origin.read_bytes():
-                raise ValueError("NATIVE_2T_MIRROR_PUBLICATION_CONFLICT")
-        else:
-            try:
-                os.link(origin, destination)
-            except FileExistsError:
-                if destination.is_symlink() or not destination.is_file() or destination.read_bytes() != origin.read_bytes():
-                    raise ValueError("NATIVE_2T_MIRROR_PUBLICATION_CONFLICT")
-    # Preserve the first legacy receipt byte-for-byte for old readers/proofs.
-    # Later acquisitions coexist by their proof's digest, not by overwriting
-    # the original HTTP Date or possession clock for this index entity.
-    legacy = cache / index.with_suffix(".http.json").name
-    if not _path_present(legacy):
-        try:
-            os.link(receipt, legacy)
-        except FileExistsError:
-            # A concurrent acquisition may have established the first legacy
-            # receipt. Its contents are never our new proof's authority.
-            if legacy.is_symlink() or not legacy.is_file():
-                raise ValueError("NATIVE_2T_MIRROR_STAGE_ALIAS")
-    return _read_native_temperature_record(cache / path.name, run)[0]
-
-
-def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: datetime,
-        required_steps: list[int], cycle_deadline_monotonic: float,
-        _priority: Any, _paths: OpenDataPaths | None = None, _on_acquired: Any = None) -> dict:
-    """Drain current target knots on the ordinary scheduler's remaining budget.
-
-    SCOPE: optional native product/run/member-step, never mandatory H/L or q.
-    DRAIN: next normal poll resumes individually proven parts after priority,
-    deadline or HTTP deferral. RESET: singleflight releases in finally; missing
-    parts retry next poll without renewing retained bytes or possession clocks.
-    step0 is a forecast knot, not a prior observation; 3h/6h stays native.
-    """
-    report = {"status": "DEFERRED", "qualification_status": "UNKNOWN",
-        "source_issued_at": None, "available_at": None, "observed_count": 0}
-    if not callable(_priority):
-        return {**report, "reason": "NATIVE_2T_PRIORITY_UNKNOWN"}
-    def admitted():
-        _remaining_step_timeout(cycle_deadline_monotonic)
-        if _priority() is not True:
-            raise ValueError("NATIVE_2T_MANDATORY_PRIORITY")
-        _remaining_step_timeout(cycle_deadline_monotonic)
-    try:
-        steps = _native_temperature_steps(run_utc, required_steps)
-    except (ValueError, requests.Timeout) as exc:
-        return {**report, "reason": str(exc)}
-    if not _native_temperature_source_lock.acquire(blocking=False):
-        return {**report, "reason": "NATIVE_2T_SINGLEFLIGHT_BUSY"}
-    session = None
-    try:
-        if _on_acquired is not None:
-            _remaining_step_timeout(cycle_deadline_monotonic)
-            _on_acquired()
-        paths = _paths or _resolve_opendata_paths()
-        cache = paths.raw_root / "raw" / "ecmwf_open_ens" / "native_2t_scheduled" / f"{run_utc:%Y%m%dT%HZ}"
-        manifest = cache / "source-manifest.json"
-        manifest_bytes = manifest.read_bytes() if manifest.exists() else None
-        previous = json.loads(manifest_bytes) if manifest_bytes is not None else {}
-        anchors = conn.execute("""
-            SELECT source_run_id, manifest_hash, ingest_mode, origin_mode FROM source_run
-             WHERE source_id='ecmwf_open_data' AND track='2t_instant_native_knots'
-               AND source_cycle_time=? AND source_run_id GLOB ?
-        """, (run_utc.isoformat(),
-            f"ecmwf_open_data:2t_instant_native_knots:{run_utc:%Y%m%dT%H%MZ}:*:origin:scheduled_live")).fetchall()
-        # SCOPE: exact run/normal origin. DRAIN: restore the canonical-bound
-        # original manifest and proofs; each poll rechecks them. RESET: a true
-        # hash/clock restoration (or an independent new run) admits work again.
-        # Valid step appends still update the hash after validating the old one.
-        if anchors:
-            if (len(anchors) != 1 or manifest_bytes is None
-                    or hashlib.sha256(manifest_bytes).hexdigest() != anchors[0]["manifest_hash"]
-                    or previous.get("source_run_id") != anchors[0]["source_run_id"]
-                    or previous.get("ingest_mode") != "SCHEDULED_LIVE"
-                    or (anchors[0]["ingest_mode"], anchors[0]["origin_mode"]) != ("SCHEDULED_LIVE", "SCHEDULED_LIVE")):
-                raise ValueError("NATIVE_2T_CANONICAL_MANIFEST_UNBOUND")
-        elif previous:
-            raise ValueError("NATIVE_2T_CANONICAL_MANIFEST_UNBOUND")
-        plan = sorted(set(steps) | set(previous.get("product_steps", [])))
-        old = {(m["member"], m["step_hours"]): m for m in previous.get("retained_identities", [])}
-        # Validate before requesting: unproved old bytes cannot become a first
-        # normal capture, and a tampered identity must not be overwritten.
-        retained = {}
-        for path in sorted(cache.glob("step*-member*.grib2")):
-            if not _path_present(path.with_suffix(".grib2.proof.json")):
-                # Only a complete staged original can repair interrupted
-                # promotion. Bound old parts additionally require the exact
-                # original proof digest; a new replica cannot renew its clock.
-                for mirror in _DOWNLOAD_SOURCES:
-                    staged_path = cache / f".mirror-{_resume_source_namespace(mirror)}.partial" / path.name
-                    if not _path_present(staged_path) or staged_path.parent.is_symlink():
-                        continue
-                    candidate, raw = _read_native_temperature_record(staged_path, run_utc)
-                    key = candidate["member"], candidate["step_hours"]
-                    if (raw == path.read_bytes()
-                            and (key not in old or candidate["proof_sha256"] == old[key]["proof_sha256"])):
-                        if key not in old:
-                            candidate_origin = candidate["source_url"].split(f"/{run_utc:%Y%m%d}/", 1)[0]
-                            for old_key, saved in old.items():
-                                if saved["source_url"].startswith(candidate_origin + "/"):
-                                    continue
-                                prefix_path = staged_path.parent / f"step{old_key[1]:03d}-member{old_key[0]:02d}.grib2"
-                                comparable, _ = _read_native_temperature_record(prefix_path, run_utc)
-                                if comparable["raw_message_sha256"] != saved["raw_message_sha256"]:
-                                    raise ValueError("NATIVE_2T_MIRROR_COHORT_DIVERGED")
-                        _promote_native_mirror_part(staged_path, cache, run_utc)
-                        break
-            record, _ = _read_native_temperature_record(path, run_utc)
-            proof = json.loads(path.with_suffix(".grib2.proof.json").read_bytes())
-            if proof.get("ingest_mode") != "SCHEDULED_LIVE":
-                raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
-            retained[(record["member"], record["step_hours"])] = record
-        if any(key in retained and retained[key] != saved for key, saved in old.items()):
-            raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_CHANGED")
-        if any(key not in retained for key in old):
-            # A removed original is repair debt, not permission to mint it again.
-            raise ValueError("NATIVE_2T_RETAINED_ORIGINAL_MISSING")
-        if all((member, step) in retained for step in steps for member in range(51)):
-            source = persist_native_temperature_source_run(conn, cache_dir=cache, manifest_path=manifest,
-                expected_run_utc=run_utc, product_steps=plan, ingest_mode="SCHEDULED_LIVE")
-            # The target subset may be complete while another city's appended
-            # product steps are still PARTIAL. Never upgrade the global row.
-            return {**report, "status": "AVAILABLE" if source.source_run_id else source.status,
-                "source_run_id": source.source_run_id,
-                "observed_count": 51 * len(steps), "missing_count": 0,
-                "inventory_status": source.status, "inventory_observed_count": source.observed_count,
-                "manifest_path": str(manifest), "required_steps": steps, "reason": source.reason}
-        # Queue expiry limits new transport, not readback of already possessed
-        # original evidence. A nonempty or old unproved cache never earns this.
-        try:
-            admitted()
-        except (ValueError, requests.Timeout) as exc:
-            return {**report, "observed_count": len(retained), "reason": str(exc)}
-        from ecmwf.opendata import Client
-        cache.mkdir(parents=True, exist_ok=True)
-        mirrors = tuple(dict.fromkeys(_DOWNLOAD_SOURCES))
-        if not mirrors or any(mirror not in {"aws", "google"} for mirror in mirrors):
-            raise ValueError("NATIVE_2T_MIRROR_POOL_UNSUPPORTED")
-        cursor = _native_mirror_attempt(cache, paths.raw_root, run_utc, mirrors)
-        if cursor.get("configured_mirrors") == list(mirrors):
-            offset = mirrors.index(cursor["last_attempted_mirror"])
-            if cursor["status"] != "COMPLETE":
-                offset = (offset + 1) % len(mirrors)
-            mirrors = mirrors[offset:] + mirrors[:offset]
-        configured = tuple(dict.fromkeys(_DOWNLOAD_SOURCES))
-        session = _NativeDeadlineSession()
-        session._zeus_deadline = cycle_deadline_monotonic
-        failure = None
-        for mirror in mirrors:
-            admitted()
-            attempt = {"last_attempted_mirror": mirror, "status": "RUNNING",
-                "attempt_started_at": datetime.now(timezone.utc).isoformat(), "attempt_finished_at": None, "reason": None}
-            _native_mirror_attempt(cache, paths.raw_root, run_utc, configured, attempt)
-            try:
-                # Even an interrupted stage is a durable failed turn, not a
-                # permanent first-mirror gate. Preserve it; the next normal
-                # poll can try another configured replica under a fresh cut.
-                stage = cache / f".mirror-{_resume_source_namespace(mirror)}.partial"
-                if stage.is_symlink():
-                    raise ValueError("NATIVE_2T_MIRROR_STAGE_ALIAS")
-                stage.mkdir(exist_ok=True)
-                prefix = dict(retained)
-                staged = {}
-                for path in sorted(stage.glob("step*-member*.grib2")):
-                    if path.is_symlink() or path.with_suffix(".grib2.proof.json").is_symlink():
-                        raise ValueError("NATIVE_2T_MIRROR_STAGE_ALIAS")
-                    record, _ = _read_native_temperature_record(path, run_utc)
-                    if json.loads(path.with_suffix(".grib2.proof.json").read_bytes()).get("ingest_mode") != "SCHEDULED_LIVE":
-                        raise ValueError("NATIVE_2T_ORIGIN_ROLE_CHANGED")
-                    expected_origin = ("https://storage.googleapis.com/ecmwf-open-data/" if mirror == "google"
-                        else "https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/")
-                    if not record["source_url"].startswith(expected_origin):
-                        raise ValueError("NATIVE_2T_MIRROR_STAGE_ORIGIN_INVALID")
-                    staged[(record["member"], record["step_hours"])] = record
-                # Same-endpoint originals require no re-download. A different
-                # replica must reproduce every possessed field, not merely its grid.
-                for key, record in prefix.items():
-                    own_source = ("google" if record["source_url"].startswith("https://storage.googleapis.com/ecmwf-open-data/") else
-                        "aws" if record["source_url"].startswith("https://ecmwf-forecasts.s3.eu-central-1.amazonaws.com/") else None)
-                    if own_source == mirror:
-                        staged[key] = record
-
-                def promote_verified():
-                    for key in prefix.keys() & staged.keys():
-                        if staged[key]["raw_message_sha256"] != prefix[key]["raw_message_sha256"]:
-                            raise ValueError("NATIVE_2T_MIRROR_COHORT_DIVERGED")
-                    if not prefix.keys() <= staged.keys():
-                        return
-                    for key, record in sorted(staged.items()):
-                        if key not in retained and key[1] in steps:
-                            if retained and record["grid_sha256"] != next(iter(retained.values()))["grid_sha256"]:
-                                raise ValueError("NATIVE_2T_RETAINED_GRID_CHANGED")
-                            retained[key] = _promote_native_mirror_part(Path(record["path"]), cache, run_utc)
-
-                promote_verified()
-                capture_steps = sorted(set(steps) | {key[1] for key in prefix})
-                for step in capture_steps:
-                    for control in (True, False):
-                        members = [0] if control else list(range(1, 51))
-                        if all((member, step) in staged for member in members):
-                            continue
-                        admitted()
-                        client = Client(source=mirror)
-                        client.session = session
-                        result = client._get_urls(target=str(stage / "unused"), use_index=False,
-                            date=int(run_utc.strftime("%Y%m%d")), time=run_utc.hour,
-                            stream="oper" if control else "enfo", type=["fc" if control else "pf"],
-                            step=[step], param=["2t"])
-                        indexes = []
-                        _resolve_index_parts(client, result, deadline=cycle_deadline_monotonic,
-                            original_indexes=indexes, native_complete_body=True)
-                        if len(indexes) != 1:
-                            raise ValueError("NATIVE_2T_INDEX_ENTITY_AMBIGUOUS")
-                        index = indexes[0]
-                        body = index["body"]
-                        parts = _native_temperature_index_parts(body, run_utc, step, control=control)
-                        digest = hashlib.sha256(body).hexdigest()
-                        entity = hashlib.sha256(index["source_url"].encode() + body).hexdigest()
-                        index_path = stage / f"index-{entity}.body"
-                        if index_path.exists():
-                            if index_path.is_symlink() or index_path.read_bytes() != body:
-                                raise ValueError("NATIVE_2T_INDEX_ENTITY_CHANGED")
-                        else:
-                            with index_path.open("xb") as handle:
-                                handle.write(body)
-                            with index_path.with_suffix(".http.json").open("x") as handle:
-                                json.dump({k: v for k, v in index.items() if k != "body"}, handle, sort_keys=True)
-                        receipt_sha = hashlib.sha256(index_path.with_suffix(".http.json").read_bytes()).hexdigest()
-                        for part in parts:
-                            key = part["member"], step
-                            if key in staged:
-                                continue
-                            admitted()
-                            offset, length = part["source_index_offset"], part["source_index_length"]
-                            response = session.get(index["source_url"], stream=True,
-                                headers={"Range": f"bytes={offset}-{offset + length - 1}"},
-                                timeout=_remaining_step_timeout(cycle_deadline_monotonic),
-                                verify=getattr(client, "verify", True))
-                            try:
-                                _validate_range_response(response, offset=offset, length=length)
-                                _remaining_step_timeout(cycle_deadline_monotonic)
-                                if getattr(response, "_native_body_complete", False) is not True:
-                                    raise ValueError("NATIVE_2T_HTTP_BODY_NOT_BOUNDED")
-                                raw = response.content
-                                if len(raw) != length:
-                                    raise ValueError("NATIVE_2T_RANGE_TRUNCATED")
-                                proof = {**part, "step_hours": step, "source_url": index["source_url"],
-                                    "source_index_url": index["source_index_url"], "index_path": index_path.name,
-                                    "source_index_sha256": digest, "raw_message_sha256": hashlib.sha256(raw).hexdigest(),
-                                    "index_receipt_sha256": receipt_sha,
-                                    "source_fetched_at": datetime.now(timezone.utc).isoformat(), "ingest_mode": "SCHEDULED_LIVE",
-                                    "source_issued_at": None, "qualification_status": "UNKNOWN",
-                                    "range_http": {"status": response.status_code, "headers": dict(response.headers)}}
-                                path = stage / f"step{step:03d}-member{part['member']:02d}.grib2"
-                                if _path_present(path) or _path_present(path.with_suffix(".grib2.proof.json")):
-                                    raise ValueError("NATIVE_2T_UNBOUND_EXISTING_BYTES")
-                                with path.open("xb") as handle:
-                                    handle.write(raw)
-                                with path.with_suffix(".grib2.proof.json").open("x") as handle:
-                                    json.dump(proof, handle, sort_keys=True)
-                                record, _ = _read_native_temperature_record(path, run_utc)
-                                staged[key] = record
-                                promote_verified()
-                            finally:
-                                response.close()
-                failure = None
-                _native_mirror_attempt(cache, paths.raw_root, run_utc, configured,
-                    {**attempt, "status": "COMPLETE", "attempt_finished_at": datetime.now(timezone.utc).isoformat()})
-                break
-            except requests.RequestException as exc:
-                failure = str(exc) or type(exc).__name__
-                _native_mirror_attempt(cache, paths.raw_root, run_utc, configured,
-                    {**attempt, "status": "FAILED", "reason": failure,
-                     "attempt_finished_at": datetime.now(timezone.utc).isoformat()})
-                if time.monotonic() >= cycle_deadline_monotonic:
-                    break
-            except (OSError, ValueError) as exc:
-                _native_mirror_attempt(cache, paths.raw_root, run_utc, configured,
-                    {**attempt, "status": "FAILED", "reason": str(exc),
-                     "attempt_finished_at": datetime.now(timezone.utc).isoformat()})
-                raise
-        source = persist_native_temperature_source_run(conn, cache_dir=cache, manifest_path=manifest,
-            expected_run_utc=run_utc, product_steps=plan, ingest_mode="SCHEDULED_LIVE")
-        missing = {(member, step) for step in steps for member in range(51)} - retained.keys()
-        return {**report, "status": ("INCOMPLETE" if missing else "AVAILABLE") if source.source_run_id else "DEFERRED",
-            "source_run_id": source.source_run_id, "observed_count": 51 * len(steps) - len(missing),
-            "missing_count": len(missing), "manifest_path": str(manifest),
-            "inventory_status": source.status, "inventory_observed_count": source.observed_count,
-            "required_steps": steps, "reason": failure or source.reason}
-    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
-        return {**report, "status": "UNKNOWN", "reason": str(exc) or type(exc).__name__}
-    finally:
-        try:
-            if session is not None:
-                session.close()
-        finally:
-            _native_temperature_source_lock.release()
 
 
 def _capture_native_temperature_bytes(run: datetime, steps: list[int], output_dir: Path,
@@ -6806,7 +5058,6 @@ def collect_open_ens_cycle(
                     conn,
                     raw_root=paths.raw_root,
                     reference_date=now.date(),
-                    reference_time=now,
                 )
             except Exception as exc:  # noqa: BLE001 - retention must fail closed
                 retention_summary = {

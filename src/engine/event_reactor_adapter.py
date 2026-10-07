@@ -221,14 +221,6 @@ def _capture_held_point_kernel(inputs, carrier, *, projection=None) -> None:
             carrier_to_witness=list(projection) if projection is not None else list(range(len(carrier["q"]))),
             n_point=inputs["n_point"], n_samples=inputs["n_samples"],
         )
-        domain = (inputs.get("identity_inputs") or {}).get("domain_role_shapes")
-        if domain is not None:
-            from src.engine import tier0_auction_corpus as corpus
-            projection = corpus._point_role_projection(domain)
-            kernel.update(domain_role_shapes=projection,
-                domain_role_content_sha256=hashlib.sha256(json.dumps(domain,
-                    sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest(),
-                domain_role_projection_sha256=hashlib.sha256(corpus._canonical(projection)).hexdigest())
         raw = json.dumps(kernel, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
         if len(raw) > 16*1024:
             capture["unavailable"] = b"POINT_KERNEL_SIZE_LIMIT"
@@ -37682,8 +37674,6 @@ def _day0_replacement_conditioning(
                 "day0_remaining_carrier_future_extremes_c",
                 "day0_remaining_carrier_final_extremes_c",
                 "day0_remaining_carrier_path_error_sigma_c",
-                "day0_measurement_domain_shapes",
-                "day0_measurement_domain_identification_bounds",
                 "day0_remaining_center_bias_c",
                 "day0_remaining_center_policy",
                 "day0_probability_mixture_policy",
@@ -38319,7 +38309,7 @@ def _replacement_predictive_sigma_c(replacement_bundle: object) -> float | None:
     if not isinstance(fusion, Mapping):
         return None
     value = fusion.get("predictive_sigma_c")
-    if value is None or isinstance(value, bool):
+    if value is None:
         return None
     try:
         return float(value)
@@ -38970,8 +38960,6 @@ def _global_day0_execution_payload(
             "day0_remaining_carrier_future_extremes_c": "_edli_day0_remaining_carrier_future_extremes_c",
             "day0_remaining_carrier_final_extremes_c": "_edli_day0_remaining_carrier_final_extremes_c",
             "day0_remaining_carrier_path_error_sigma_c": "_edli_day0_remaining_carrier_path_error_sigma_c",
-            "day0_measurement_domain_shapes": "_edli_day0_measurement_domain_shapes",
-            "day0_measurement_domain_identification_bounds": "_edli_day0_measurement_domain_identification_bounds",
             "day0_remaining_center_bias_c": "_edli_day0_remaining_center_bias_c",
             "day0_remaining_center_policy": "_edli_day0_remaining_center_policy",
             "day0_probability_mixture_policy": "_edli_day0_probability_mixture_policy",
@@ -39167,8 +39155,6 @@ def _global_day0_probability_authority_payload(
                 "remaining_carrier_path_error_sigma_c",
                 "_edli_day0_remaining_carrier_path_error_sigma_c",
             ),
-            ("measurement_domain_shapes", "_edli_day0_measurement_domain_shapes"),
-            ("measurement_domain_identification_bounds", "_edli_day0_measurement_domain_identification_bounds"),
             ("remaining_center_bias_c", "_edli_day0_remaining_center_bias_c"),
             ("remaining_center_policy", "_edli_day0_remaining_center_policy"),
             ("probability_mixture_policy", "_edli_day0_probability_mixture_policy"),
@@ -40069,30 +40055,6 @@ def _build_day0_deterministic_witness(
     return witness, deterministic_payload
 
 
-def _day0_uses_native_role_contract_metadata(payload: Mapping[str, object]) -> bool:
-    """Route current role metadata, not an additional probability authority.
-
-    The public bundle reader has qualified the original role proof. The
-    remaining-member builder still replays that proof and current provider
-    state; a legacy daily-extrema boundary flag is not this role's metadata.
-    """
-    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
-
-    domains = payload.get("_edli_day0_measurement_domain_shapes")
-    if (not isinstance(domains, Mapping)
-            or domains.get("schema") != "day0_measurement_domain_shapes_v1"
-            or domains.get("semantics_revision") != DAY0_PROBABILITY_SEMANTICS_REVISION):
-        return False
-    shape = domains.get("X")
-    return bool(isinstance(shape, Mapping)
-        and shape.get("role") == "remaining_X"
-        and isinstance(shape.get("native_scope"), Mapping)
-        and isinstance(shape.get("member_points_native"), (list, tuple))
-        and len(shape["member_points_native"]) == 51
-        and isinstance(shape.get("member_interval_bounds_native"), (list, tuple))
-        and len(shape["member_interval_bounds_native"]) == 51)
-
-
 def _day0_remaining_global_probability_components(
     event: OpportunityEvent,
     *,
@@ -40121,8 +40083,7 @@ def _day0_remaining_global_probability_components(
         and payload.get("_edli_day0_direct_current_redecision_authority")
         is True
     )
-    current_role_metadata = _day0_uses_native_role_contract_metadata(payload)
-    if snapshot is None and not direct_held_remaining and not current_role_metadata:
+    if snapshot is None and not direct_held_remaining:
         snapshot = _forecast_snapshot_row_for_event(
             forecast_conn,
             event=event,
@@ -40130,11 +40091,11 @@ def _day0_remaining_global_probability_components(
             allow_latest=True,
             decision_time=decision_time,
         )
-    if snapshot is None and not direct_held_remaining and not current_role_metadata:
+    if snapshot is None and not direct_held_remaining:
         raise ValueError("Day0 base forecast snapshot missing for global inference")
     seed_members = (
         None
-        if direct_held_remaining or current_role_metadata
+        if direct_held_remaining
         else _day0_seed_members_multimodel(
             forecast_conn,
             family=family,
@@ -40247,33 +40208,6 @@ def _day0_global_candidate_payoff_q_lcb_caps(
     if not family_key:
         raise ValueError("GLOBAL_DAY0_CANDIDATE_CAP_FAMILY_MISSING")
     caps: list[tuple[str, str, str, str, float]] = []
-    enclosure = payload.get("_edli_day0_measurement_domain_effective_identification_bounds",
-                            payload.get("_edli_day0_measurement_domain_identification_bounds"))
-    domain_caps: dict[str, tuple[float, float]] = {}
-    if payload.get("_edli_day0_measurement_domain_shapes") is not None:
-        # SCOPE: this exact carrier's bin bounds. DRAIN: normal materialization
-        # re-emits the shape and enclosure together; RESET: a complete matching
-        # carrier. Confidence quantiles may widen, never narrow this enclosure.
-        if not isinstance(enclosure, Mapping) or enclosure.get("schema") != "role_interval_gaussian_preimage_enclosure_v1":
-            raise ValueError("DAY0_MEASUREMENT_DOMAIN_BOUNDS_MISSING")
-        topology = payload.get("_edli_day0_carrier_bin_topology")
-        if isinstance(topology, (list, tuple)):
-            candidates = tuple(family.candidates)
-            unit = str(candidates[0].bin.unit).upper()
-            source_to_event = _day0_carrier_topology_to_event_indices(topology,
-                tuple(candidate.bin for candidate in candidates),
-                native_scale=1.0 if unit == "C" else 1.8,
-                native_offset=0.0 if unit == "C" else 32.0)
-            ids = [str(binding_by_condition[str(candidates[index].condition_id)].bin_id)
-                   for index in source_to_event]
-        else:
-            ids = [str(getattr(binding, "bin_id", "")) for binding in bindings]
-        lower, upper = np.asarray(enclosure.get("lower"), dtype=float), np.asarray(enclosure.get("upper"), dtype=float)
-        if (lower.shape != (len(ids),) or upper.shape != lower.shape or len(set(ids)) != len(ids)
-                or not np.isfinite(lower).all() or not np.isfinite(upper).all()
-                or np.any(lower < 0) or np.any(upper > 1) or np.any(lower > upper)):
-            raise ValueError("DAY0_MEASUREMENT_DOMAIN_BOUNDS_INVALID")
-        domain_caps = {bin_id: (float(lo), 1.0 - float(hi)) for bin_id, lo, hi in zip(ids, lower, upper, strict=True)}
     for condition_id, binding in binding_by_condition.items():
         bin_id = str(getattr(binding, "bin_id", "") or "").strip()
         for side, direction in (
@@ -40283,73 +40217,9 @@ def _day0_global_candidate_payoff_q_lcb_caps(
             cap = _qlcb_float(
                 transformed.get((condition_id, direction), 0.0)
             )
-            if domain_caps:
-                if bin_id not in domain_caps:
-                    raise ValueError("DAY0_MEASUREMENT_DOMAIN_BOUNDS_TOPOLOGY_MISMATCH")
-                cap = min(cap, domain_caps[bin_id][0 if side == "YES" else 1])
             if not math.isfinite(cap) or not 0.0 <= cap <= 1.0:
                 raise ValueError("GLOBAL_DAY0_CANDIDATE_CAP_INVALID")
             caps.append((family_key, condition_id, bin_id, side, cap))
-    return tuple(sorted(caps))
-
-
-def _replacement_global_candidate_payoff_q_lcb_caps(
-    *, replacement_bundle: object, family: object, bindings: tuple[object, ...],
-    samples: np.ndarray, point_q: np.ndarray, band_alpha: float,
-) -> tuple[tuple[str, str, str, str, float], ...]:
-    """Bind a full-Y confidence enclosure to the same certified point witness.
-
-    The predictive matrix and mean stay unchanged. The submit-license caps only
-    intersect their lower-CVaR with this certificate's per-bin enclosure.
-    """
-    from src.solve.solver import _lower_cvar
-
-    provenance = getattr(replacement_bundle, "provenance_json", None) or {}
-    fusion = provenance.get("bayes_precision_fusion", {})
-    shape = fusion.get("current_evidence_shape", {})
-    if not isinstance(shape, Mapping) or shape.get("predictive_sigma_interval_c") is None:
-        return ()
-    if not isinstance(shape.get("native_point_model"), Mapping):
-        raise ValueError("GLOBAL_Y_IDENTIFICATION_POINT_MODEL_MISSING")
-    candidates = tuple(getattr(family, "candidates", ()) or ())
-    matrix, point = np.asarray(samples, dtype=float), np.asarray(point_q, dtype=float)
-    if (matrix.ndim != 2 or matrix.shape[0] < 2 or matrix.shape[1] != len(bindings)
-            or point.shape != (len(bindings),) or len(candidates) != len(bindings)
-            or not np.isfinite(matrix).all() or not np.isfinite(point).all()
-            or np.any(matrix < 0.0) or np.any(matrix > 1.0)
-            or not np.allclose(matrix.sum(axis=1), 1.0, rtol=0.0, atol=1e-9)):
-        raise ValueError("GLOBAL_Y_IDENTIFICATION_BOUNDS_SHAPE_INVALID")
-    family_id = str(getattr(family, "family_id", "") or "")
-    if not family_id:
-        raise ValueError("GLOBAL_Y_IDENTIFICATION_FAMILY_MISSING")
-    q = getattr(replacement_bundle, "q", {}) or {}
-    lower = getattr(replacement_bundle, "q_lcb", {}) or {}
-    upper = getattr(replacement_bundle, "q_ucb", {}) or {}
-    weights = np.ones(matrix.shape[0])
-    caps = []
-    seen = set()
-    for index, (candidate, binding) in enumerate(zip(candidates, bindings, strict=True)):
-        condition = str(getattr(binding, "condition_id", "") or "")
-        bin_id = str(getattr(binding, "bin_id", "") or "")
-        if (not condition or not bin_id or condition in seen
-                or condition != str(getattr(candidate, "condition_id", "") or "")):
-            raise ValueError("GLOBAL_Y_IDENTIFICATION_BINDING_INVALID")
-        seen.add(condition)
-        source_bin_id = _candidate_replacement_bin_id(candidate, replacement_bundle)
-        if source_bin_id is None:
-            raise ValueError("GLOBAL_Y_IDENTIFICATION_BOUNDS_TOPOLOGY_MISMATCH")
-        try:
-            lo, hi, mean = float(lower[source_bin_id]), float(upper[source_bin_id]), float(q[source_bin_id])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("GLOBAL_Y_IDENTIFICATION_BOUNDS_INVALID") from exc
-        if (not all(math.isfinite(v) for v in (lo, hi, mean))
-                or not 0.0 <= lo <= mean <= hi <= 1.0
-                or not math.isclose(mean, float(point[index]), abs_tol=1e-12, rel_tol=0.0)):
-            raise ValueError("GLOBAL_Y_IDENTIFICATION_BOUNDS_INVALID")
-        for side, values, bound in (("YES", matrix[:, index], lo),
-                                    ("NO", 1.0 - matrix[:, index], 1.0 - hi)):
-            caps.append((family_id, condition, bin_id, side,
-                         min(float(_lower_cvar(values, weights, band_alpha)), bound)))
     return tuple(sorted(caps))
 
 
@@ -41981,11 +41851,8 @@ def _prepare_current_global_probability_family(
                 )
                 if not (
                     settlement_unit in {"C", "F"}
+                    and predictive_sigma_native > 0.0
                     and math.isfinite(predictive_sigma_native)
-                    and (predictive_sigma_native > 0.0 or (
-                        predictive_sigma_native == 0.0
-                        and _day0_uses_native_role_contract_metadata(current_day0_payload)
-                    ))
                 ):
                     raise ValueError(
                         "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID"
@@ -42712,11 +42579,6 @@ def _prepare_current_global_probability_family(
     candidate_payoff_q_lcb_caps: tuple[
         tuple[str, str, str, str, float], ...
     ] = ()
-    if current_day0_payload is None and bundle is not None:
-        candidate_payoff_q_lcb_caps = _replacement_global_candidate_payoff_q_lcb_caps(
-            replacement_bundle=bundle, family=family, bindings=bindings,
-            samples=samples, point_q=point_q,
-            band_alpha=_GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA)
     if (
         current_day0_payload is not None
         and final_daily_observation is None
@@ -42889,8 +42751,6 @@ def _prepare_current_global_probability_family(
             "_edli_day0_remaining_carrier_future_extremes_c",
             "_edli_day0_remaining_carrier_final_extremes_c",
             "_edli_day0_remaining_carrier_path_error_sigma_c",
-            "_edli_day0_measurement_domain_shapes",
-            "_edli_day0_measurement_domain_identification_bounds",
             "_edli_day0_remaining_center_bias_c",
             "_edli_day0_remaining_center_policy",
             "_edli_day0_probability_mixture_policy",
@@ -45545,9 +45405,9 @@ def _day0_resolver_terminal_carrier(payload: Mapping[str, object]) -> bool:
 class _Day0CarrierRowSampler:
     """Bootstrap from the carrier's own composed rows.
 
-    Resolver composition already carries ``s``/``G-`` uncertainty; qualified
-    current native roles carry their own point-model draws. Re-sampling members
-    or adding legacy process noise would change either certified distribution.
+    The resolver-graded composition is terminal: its rows already carry
+    ``s``/``G-`` uncertainty.  Re-sampling members and applying a boundary here
+    would apply the boundary a second time.
     """
 
     rows: np.ndarray
@@ -45801,10 +45661,7 @@ def _market_analysis_from_event_snapshot(
         and payload.get("_edli_day0_direct_current_redecision_authority")
         is True
     )
-    current_role_metadata = bool(
-        is_day0 and _day0_uses_native_role_contract_metadata(payload)
-    )
-    if snapshot is None and not direct_held_remaining and not current_role_metadata:
+    if snapshot is None and not direct_held_remaining:
         raise ValueError("DAY0_REMAINING_DIRECT_CONTRACT_AUTHORITY_REQUIRED")
     # The Day0 random variable is the final extreme conditioned on current
     # remaining-hour vectors.  An ordinary path uses its full-day snapshot only
@@ -45847,7 +45704,7 @@ def _market_analysis_from_event_snapshot(
     # unit-swap (Kelvin leak / source swap / new city) cannot silently invert q
     # into the wrong bins (wrong-SIDE on a KNOWN market — Paris-class).
     direct_semantics = None
-    if direct_held_remaining or current_role_metadata:
+    if direct_held_remaining:
         city, direct_semantics, unit = _day0_remaining_direct_contract_metadata(
             family=family,
             payload=payload,
@@ -46047,7 +45904,7 @@ def _market_analysis_from_event_snapshot(
         if _day0_rd_members is None:
             payload["_edli_q_source"] = "platt"
         day0_extra_member_sigma = 0.0
-        if _day0_rd_members is not None and not current_role_metadata:
+        if _day0_rd_members is not None:
             day0_extra_member_sigma = _day0_extra_member_sigma_native(
                 payload=payload,
                 family=family,
@@ -46057,7 +45914,7 @@ def _market_analysis_from_event_snapshot(
             )
             if day0_extra_member_sigma > 0.0:
                 payload["_edli_day0_extra_member_sigma_native"] = float(day0_extra_member_sigma)
-        if direct_held_remaining or current_role_metadata:
+        if direct_held_remaining:
             p_raw = _normalize_event_bound_p_raw_vector(
                 _day0_remaining_p_raw_vector(
                     members,
@@ -46132,7 +45989,6 @@ def _market_analysis_from_event_snapshot(
             )
             if _day0_resolver_terminal_carrier(payload)
             or "_edli_day0_composed_probability_samples" in payload
-            or current_role_metadata
             else _make_day0_bootstrap_sampler(
                 members_native=members,
                 payload=payload,
@@ -46333,7 +46189,7 @@ def _market_analysis_from_event_snapshot(
         unit=unit,  # #101: agreed snapshot-or-direct contract unit == city == bins
         precision=(
             float(direct_semantics.precision)
-            if direct_held_remaining or current_role_metadata
+            if direct_held_remaining
             else float(snapshot.get("members_precision") or 1.0)
         ),
         round_fn=None,
@@ -46341,7 +46197,7 @@ def _market_analysis_from_event_snapshot(
         season="",
         forecast_source=(
             _day0_probability_conditioning_source(payload)
-            if direct_held_remaining or current_role_metadata
+            if direct_held_remaining
             else str(snapshot.get("source_id") or payload.get("source_id") or "")
         ),
         market_complete=True,
@@ -47288,10 +47144,6 @@ def _day0_remaining_p_raw_vector(
         # Verify what was written: the carrier's own current state and shape,
         # never a later recompute at this replay's clock.
         written = _day0_carrier_written_inputs(payload)
-        domain_shapes = written.get("domain_role_shapes")
-        if domain_shapes is not None:
-            identity_inputs["domain_role_shapes"] = deepcopy(domain_shapes)
-            instrument_sigma_native = 0.0
         if written["current_path_state"] is not None:
             identity_inputs["current_path_state"] = dict(written["current_path_state"])
         conditional_identity = written["conditional_high_shape_identity"]
@@ -47354,8 +47206,6 @@ def _day0_remaining_p_raw_vector(
             resolver_terminal=resolver_terminal,
         )
         carrier = build_day0_remaining_probability_carrier(**carrier_inputs)
-        if domain_shapes is not None and payload.get("_edli_day0_measurement_domain_identification_bounds") != carrier.get("identification_bounds"):
-            raise ValueError("DAY0_MEASUREMENT_DOMAIN_BOUNDS_REPLAY_MISMATCH")
         _capture_held_point_kernel(
             carrier_inputs, carrier, projection=np.argsort(carrier_to_event).tolist(),
         )
@@ -47426,13 +47276,10 @@ def _day0_remaining_p_raw_vector(
                         observed_extreme_c=float(wu_conditioning["observed_extreme_c"]),
                         half_step=next(iter(steps)) / 2.0,
                         rounding_rule=next(iter(rules)), likelihood=residual,
-                        identification_bounds=carrier.get("identification_bounds"),
                     )
                 )
                 if receipt["scenario_weights"] != likelihood["scenario_weights"]:
                     raise ValueError
-                if domain_shapes is not None:
-                    payload["_edli_day0_measurement_domain_effective_identification_bounds"] = receipt["identification_bounds"]
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 raise ValueError("DAY0_WU_CURRENT_CARRIER_REPLAY_INVALID") from exc
             payload["_edli_day0_composed_probability_samples"] = [
@@ -48771,7 +48618,6 @@ def _remaining_day_extremes_c_with_current_state_evidence(
     observation_time: datetime,
     current_temp_c: float,
     metric: str,
-    unresolved_window_start: datetime | None = None,
 ) -> tuple[list[float], dict[str, float]]:
     """Compatibility wrapper around the shared Day0 path transform."""
 
@@ -48792,7 +48638,6 @@ def _remaining_day_extremes_c_with_current_state_evidence(
         ),
         settlement_unit="C",
         fallback_window_start=observation_time,
-        unresolved_window_start=unresolved_window_start,
     )
 
 
@@ -48826,7 +48671,6 @@ def _day0_carrier_written_inputs(payload: Mapping[str, object]) -> dict[str, obj
             "_edli_day0_conditional_high_shape_witness"
         ),
         "remaining_variance_basis": payload.get("_edli_day0_remaining_variance_basis"),
-        "domain_role_shapes": deepcopy(payload.get("_edli_day0_measurement_domain_shapes")),
     }
 
 
@@ -48854,8 +48698,6 @@ def _snapshot_day0_source_clock_carrier_provenance(
         "_edli_day0_remaining_carrier_future_extremes_c",
         "_edli_day0_remaining_carrier_final_extremes_c",
         "_edli_day0_remaining_carrier_path_error_sigma_c",
-        "_edli_day0_measurement_domain_shapes",
-        "_edli_day0_measurement_domain_identification_bounds",
         "_edli_day0_remaining_center_bias_c",
         "_edli_day0_remaining_center_policy",
         "_edli_day0_probability_mixture_policy",
@@ -48894,8 +48736,6 @@ def _rebuild_decision_time_day0_carrier(
     authority_kind: str,
     entry_authority: bool,
     held_shared_current_remaining_path: bool = False,
-    forecast_conn: sqlite3.Connection | None = None,
-    world_conn: sqlite3.Connection | None = None,
 ) -> None:
     """Rebuild the effective Day0 carrier from current causal hourly vectors.
 
@@ -48997,28 +48837,7 @@ def _rebuild_decision_time_day0_carrier(
     final_values_native = tuple(
         value * native_scale + native_offset for value in final_values_c
     )
-    domain_shapes = payload.get("_edli_day0_measurement_domain_shapes")
-    if domain_shapes is not None:
-        if forecast_conn is None:
-            raise ValueError("DAY0_CURRENT_ROLE_REBUILD_CONNECTION_UNAVAILABLE")
-        from src.data.replacement_forecast_materializer import _day0_measurement_domain_shapes
-        boundary_native = _day0_probability_boundary_native(
-            payload, str(family.metric).strip().lower(), city=city, unit=carrier_unit)
-        role_request = SimpleNamespace(city=str(family.city), city_timezone=city.timezone,
-            target_date=str(family.target_date), computed_at=decision_time,
-            day0_observed_extreme_source=_day0_probability_conditioning_source(payload),
-            day0_observed_extreme_observation_time=payload.get("observation_time"),
-            day0_observed_extreme_c=(None if boundary_native is None
-                else (boundary_native - native_offset) / native_scale),
-            day0_observed_extreme_unit="C")
-        # Replay original run/body/PIT; derive the role window and provider
-        # mismatch from this decision, never relabel a prior derived shape.
-        domain_shapes = _day0_measurement_domain_shapes(forecast_conn, role_request,
-            metric=str(family.metric).strip().lower(), future=values_c,
-            station_evidence=payload.get("_edli_day0_station_extreme_providers") or (),
-            source_conn=world_conn, native_scope_identities=domain_shapes)
-        payload["_edli_day0_measurement_domain_shapes"] = domain_shapes
-    extra_sigma_native = 0.0 if domain_shapes is not None else _day0_extra_member_sigma_native(
+    extra_sigma_native = _day0_extra_member_sigma_native(
         payload=payload,
         family=family,
         unit=carrier_unit,
@@ -49104,8 +48923,6 @@ def _rebuild_decision_time_day0_carrier(
     from src.events.day0_authority import DAY0_PROBABILITY_MIXTURE_POLICY
 
     identity_inputs["day0_probability_mixture_policy"] = DAY0_PROBABILITY_MIXTURE_POLICY
-    if domain_shapes is not None:
-        identity_inputs["domain_role_shapes"] = deepcopy(domain_shapes)
     semantics = SettlementSemantics.for_city(city)
     from src.calibration.day0_resolver_terminal_residual import (
         resolve_day0_resolver_terminal_input,
@@ -49113,7 +48930,7 @@ def _rebuild_decision_time_day0_carrier(
     from src.config import day0_resolver_terminal_residual_enabled
 
     resolver_terminal = None
-    if domain_shapes is None and day0_resolver_terminal_residual_enabled():
+    if day0_resolver_terminal_residual_enabled():
         # The resolver-graded composition conditions on the single possessed
         # boundary; the survival/fast-residual scenario mixture is not applied.
         boundary = _day0_probability_boundary_native(
@@ -49141,7 +48958,7 @@ def _rebuild_decision_time_day0_carrier(
         # native-unit values/bounds. Keep the persisted witness canonical in C,
         # then apply the same native scale used by the consumer.
         path_error_sigma_c=path_error_sigma_c * native_scale,
-        instrument_sigma_c=(0.0 if domain_shapes is not None else float(sigma_instrument_for_city(city).to(carrier_unit).value)),
+        instrument_sigma_c=float(sigma_instrument_for_city(city).to(carrier_unit).value),
         bin_bounds_c=tuple(tuple(pair) for pair in bounds),
         n_point=ensemble_n_mc(),
         n_samples=500,
@@ -49151,16 +48968,13 @@ def _rebuild_decision_time_day0_carrier(
             None
             if resolver_terminal is not None
             else DAY0_REMAINING_CARRIER_OPERATOR_V3
-            if final_values_native or domain_shapes is not None
+            if final_values_native
             else DAY0_REMAINING_CARRIER_OPERATOR_V2
         ),
         remaining_center_bias_native=0.0,
         resolver_terminal=resolver_terminal,
     )
     carrier = build_day0_remaining_probability_carrier(**carrier_inputs)
-    if domain_shapes is not None:
-        payload["_edli_day0_measurement_domain_identification_bounds"] = deepcopy(carrier["identification_bounds"])
-        payload.pop("_edli_day0_measurement_domain_effective_identification_bounds", None)
     _capture_held_point_kernel(carrier_inputs, carrier)
     if resolver_terminal is not None:
         payload["_edli_day0_resolver_terminal_input"] = carrier[
@@ -49189,7 +49003,6 @@ def _rebuild_decision_time_day0_carrier(
             "_edli_day0_remaining_bias_artifact": None,
             "_edli_day0_remaining_carrier_probability_cutoff_utc": cutoff,
             "_edli_day0_carrier_written_inputs": {
-                "domain_role_shapes": deepcopy(identity_inputs.get("domain_role_shapes")),
                 "current_path_state": deepcopy(identity_inputs.get("current_path_state")),
                 "conditional_high_shape_identity": (
                     None if conditional_high is None else conditional_high.identity
@@ -49222,8 +49035,6 @@ def _rebuild_held_day0_shared_carrier(
     decision_time: datetime,
     future_extremes_c: object,
     final_extreme_centers_c: object = (),
-    forecast_conn: sqlite3.Connection | None = None,
-    world_conn: sqlite3.Connection | None = None,
 ) -> None:
     """Compatibility wrapper retaining the narrowed held A' authority gate."""
     if payload.get("_edli_day0_redecision_authority_scope") != (
@@ -49239,8 +49050,6 @@ def _rebuild_held_day0_shared_carrier(
         final_extreme_centers_c=final_extreme_centers_c,
         authority_kind="held_a_prime",
         entry_authority=False,
-        forecast_conn=forecast_conn,
-        world_conn=world_conn,
     )
 
 
@@ -50339,23 +50148,6 @@ def _day0_remaining_day_members(
                 return None
         if current_state is not None:
             window_start = current_state[1]
-        if payload.get("_edli_day0_measurement_domain_shapes") is not None:
-            # Current role certificates preserve the native-prefix -> spot gap.
-            # A spot cannot resolve unobserved earlier extrema. The owning
-            # materializer replays the selected cumulative original read-only.
-            from src.data.replacement_forecast_materializer import _day0_measurement_domain_start
-            boundary_native = _day0_probability_boundary_native(
-                payload, metric, city=city_obj, unit=unit)
-            role_request = SimpleNamespace(city=str(family.city), city_timezone=city_obj.timezone,
-                target_date=str(family.target_date), computed_at=decision_time,
-                day0_observed_extreme_source=_day0_probability_conditioning_source(payload),
-                day0_observed_extreme_observation_time=payload.get("observation_time"),
-                day0_observed_extreme_c=(boundary_native if str(unit).upper() == "C"
-                                       else None if boundary_native is None else (boundary_native - 32.) / 1.8),
-                day0_observed_extreme_unit="C")
-            window_start = _day0_measurement_domain_start(
-                world_conn or forecast_conn, role_request, metric=metric)
-            payload["_edli_day0_measurement_domain_start_utc"] = window_start.isoformat()
         payload["_edli_day0_remaining_window_start_utc"] = (
             window_start.astimezone(timezone.utc).isoformat()
         )
@@ -50538,7 +50330,6 @@ def _day0_remaining_day_members(
                     observation_time=current_observed_at,
                     current_temp_c=current_c,
                     metric=metric,
-                    unresolved_window_start=(window_start if payload.get("_edli_day0_measurement_domain_shapes") is not None else None),
                 )
             )
             payload["_edli_day0_current_temperature_native"] = current_native
@@ -50586,7 +50377,6 @@ def _day0_remaining_day_members(
         elif (
             metric == "high" and current_state is not None
             and decision_time.astimezone(UTC) <= target_end
-            and payload.get("_edli_day0_measurement_domain_shapes") is None
         ):
             from src.data.day0_hourly_vectors import (
                 Day0CurrentTemperatureState,
@@ -50749,8 +50539,6 @@ def _day0_remaining_day_members(
                 final_extreme_centers_c=final_extremes_c,
                 authority_kind="entry_current_remaining_path",
                 entry_authority=True,
-                forecast_conn=forecast_conn,
-                world_conn=world_conn,
             )
         elif (
             payload.get("_edli_day0_redecision_authority_scope")
@@ -50767,8 +50555,6 @@ def _day0_remaining_day_members(
                 final_extreme_centers_c=final_extremes_c,
                 authority_kind="held_current_remaining_path",
                 entry_authority=False,
-                forecast_conn=forecast_conn,
-                world_conn=world_conn,
             )
         elif (
             not entry_authority
@@ -50787,8 +50573,6 @@ def _day0_remaining_day_members(
                 authority_kind="held_shared_current_remaining_path",
                 entry_authority=False,
                 held_shared_current_remaining_path=True,
-                forecast_conn=forecast_conn,
-                world_conn=world_conn,
             )
         elif (
             payload.get("_edli_day0_redecision_authority_scope")
@@ -50803,8 +50587,6 @@ def _day0_remaining_day_members(
                 decision_time=decision_time,
                 future_extremes_c=extremes_c[:hourly_member_count],
                 final_extreme_centers_c=final_extremes_c,
-                forecast_conn=forecast_conn,
-                world_conn=world_conn,
             )
         maturity_values = np.asarray(values, dtype=float).copy()
         probability_clock = (

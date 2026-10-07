@@ -20084,3 +20084,40 @@ delta classifier and narrow changed-surface gates. Keep classifier integration
 requirements explicit; code/service-credit proof does not establish native
 role completion or new public v7/v35 consumption. No push/registered load until
 ROOT accepts the exact final checked tip; raw/config/ref evidence is preserved.
+
+## 2026-10-07 runtime restore to 620a0b5f5 (native-role v7 re-land blocked every posterior again)
+
+The forecast-live restart at 2026-10-06 21:18:25Z loaded 3c6c9a477, which carried
+66d90a6c7 ("restore qualified native roles", whose own message says "this
+candidate is not load-ready") and its follow-ons. The last forecast_posteriors
+row is posterior_id 758687, computed 21:17:56Z. After that, every materialization
+BLOCKED FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE (~750 per hour), so D+0..D+2
+probabilities aged to 4.5-5.8 h for all 94 families.
+
+Mechanism (replayed on live state): `_read_full_Y_evidence_shape` now requires
+`read_native_measurement_role(role="full_Y")`. That reader needs a complete
+`2t_instant_native_knots` scheduled run covering the whole target local day. Every
+live native run is PARTIAL (12Z 509/663, 18Z 46/561, 00Z 172/1377), so it raises
+NATIVE_2T_MEMBER_STEP_SET_INCOMPLETE. The shape reader returns None, and the
+v6 ENS shape that was serving is no longer consulted. This repeats the first
+re-land requirement below ("a native role that is absent leaves the existing
+shape path serving"), which the series did not meet.
+
+Proof: three live requests (Hong Kong 10-07 low/12Z carrier, Chicago 10-07
+high/18Z, London 10-08 high/18Z) dry-run on HEAD a04f19478 give BLOCKED
+CURRENT_SHAPE_ENS_UNAVAILABLE (2) or ERROR SNAPSHOT_RETRY_EXHAUSTED (1). On this
+restore all three give READY.
+
+Restore: the ten runtime files the native series owns
+(day0_hourly_vectors, ecmwf_open_data, replacement_forecast_bundle_reader,
+replacement_forecast_cycle_policy, replacement_forecast_materializer,
+event_reactor_adapter, tier0_auction_corpus, day0_authority,
+forecast_live_daemon, extract_open_ens_localday) return to their 620a0b5f5
+bytes, as do the nine series-coupled test files. All other commits since
+620a0b5f5 are kept: preflight/deploy gates, recovery, observation custody and
+CI. Their imports resolve against the restored bytes.
+
+Re-land requirements (unchanged, now binding): the full-Y native role is
+optional evidence. While the native run for the target day is PARTIAL or absent,
+the v6 ENS shape keeps serving. A live-request replay must show READY on the
+current queue before any forecast-live load.
