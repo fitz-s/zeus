@@ -20121,3 +20121,306 @@ Re-land requirements (unchanged, now binding): the full-Y native role is
 optional evidence. While the native run for the target day is PARTIAL or absent,
 the v6 ENS shape keeps serving. A live-request replay must show READY on the
 current queue before any forecast-live load.
+
+## 2026-10-07 continuation: current role contract, staged repair plan
+
+Status: PLAN ONLY; checked=2026-W41; basis=06:00:24Z fresh origin/live,
+canonical read-only certificate/monitor receipts and ROOT's current continuation
+decision; until=recheck-on-use. The sole task parent was normally fast-forwarded
+from a04f19478 to origin/live88e0e25e98a0dac6a828f1bc90ddd7673338d5f6.
+The delta has no raw-audit path intersection; the123 originals remain untracked,
+unstaged and in their original custody, with0df9/54164ac recovery refs retained.
+No live checkout edit, source request, seed/wake, DB write or loader accompanies
+this plan. The preceding restore paragraph records that restore's intent, not a
+new authority amendment or a verified direct human cancellation of this task.
+
+Current distinction: HK LOW posterior759972 and its actual held monitor receipt
+retain the current within/ENS-center-disagreement/between sigma arithmetic; no
+historical floor or fitted mixture was observed on that certificate. This does
+not prove native role qualification. The restore removed the normal native/fair
+producer and mandatory typed role path, and current held certificates retain v6
+identities. ROOT directs repair of the demonstrated role-contract difference,
+not a blind inverse of6f9/88e, a revision-label upgrade, or a fallback model.
+
+### A — normal producer and typed physical roles (scope proposal pending)
+
+Native owns the bounded source/test closure proposal in a parallel child only
+if parallel editing requires it; parent owns PLAN and integration. Compare the
+current88e implementation with the accepted a04f source/test evidence, select
+only necessary hunks and declare exact paths before ROOT accepts edits. Keep
+unrelated peer changes and current lawful global sigma/mean action laws. The
+closure must connect immutable source originals and current input clocks to
+normal seed/materialization, typed full-Y/current-X roles and public ENTRY,
+held redecision and JIT readers without a second q or a missing-role legacy fill.
+The exact source/test list and any overlap with B remain pending; this paragraph
+does not authorize a whole ten-file snapshot restore.
+
+SCOPE: the exact city/local-date/HIGH-or-LOW/current-input family whose required
+physical role is missing or invalid. DRAIN: existing bounded normal producer,
+retained partial acquisition and normal seed/worker queues; preserve source
+issued/fetched/written clocks, actual-slot fairness and atomic service receipts.
+RESET: real valid role originals and current input preparation followed by a
+new current-role decision/certificate that public consumers accept. Missing
+roles remain family DATA_DEGRADED, not blanket RED, forced SELL or frozen global
+execution. Current processes continue until a verified bounded release.
+
+Required evidence: a current-source failure reproduction; normal real-byte H/L
+producer->role->first decision->public ENTRY/held/JIT positives; missing/corrupt
+original, wrong quantity/metric/unit/grid, PIT/new-HWM and incompatible revision
+negatives; source service BUSY/no-credit, atomic/restart/default-call controls
+for restored scheduling seams; unchanged lawful three-term global sigma and
+Day0 X/Y conditional semantics without a common noise/floor substitution.
+Use immutable input cassettes only, isolated canonical DBs and denied external
+transport; do not cache q/READY or forge clocks/qualification. Exact affected
+checks and required gates follow the accepted diff, not all old suites.
+Rollback: preserve88e and prior accepted commits as recovery points; any failed
+candidate remains on the task branch. No live file overwrite or automatic
+restore. Loading requires approved exact diff, independent named-risk closure,
+final-tip required checks, normal FF landing/live FF and one registered loader
+with its PRESTOP/current-held/public qualification gates intact.
+
+### B — HKO publication grade versus actual venue outcome (plan pending)
+
+Physical owns a separate bounded proposal; no B source edit is approved here.
+Verified defect candidate: a later source value whose floor happens to match
+the resolved winner cannot alone establish first publication or a legitimate
+source revision. Preserve actual venue resolution/settlement authority while
+separating it from source-grade evidence and retained historical provenance.
+Do not alter floor/precision/bin math, rewrite historical rows or reverse venue
+facts. Physical must name exact owning paths, existing evidence fields and
+consumer boundaries; A/B shared contracts need explicit single-writer transfer
+before either edits. No schema/truth-class expansion is implied.
+
+SCOPE: the exact source/station/local-date/H-L/publication entity being graded,
+not the already proven venue outcome or every city's probability. DRAIN:
+ordinary possession and validation of actual official publication/clarification
+originals under the existing source law. RESET: qualified first-publication or
+legitimate-revision evidence, never a scalar match or an invented FIRSTPUB flag.
+The currently missing positive adapter is a stated evidence/interface gap, not
+something asserted to self-heal on the next poll. Require source-grade rejection
+and venue-outcome continuity twins, immutable original/publication identity and
+NOOP/revision controls, then changed-risk gates and independent review. Rollback
+is the untouched88e baseline; B waits for its exact scope and ROOT acceptance.
+
+No new runtime/source sampling, external requests or registered loading is
+authorized by the plan. Next: accept A's exact closure and B's disjoint minimal
+contract proposal, implement in the task lane and integrate only frozen proofs.
+
+### B accepted bounded slice — BEFORE EDIT
+
+ROOT accepts physical as sole writer of these five existing source paths:
+src/data/settlement_observation_selection.py,
+src/contracts/settlement_semantics.py,
+src/ingest/harvester_truth_writer.py, src/execution/harvester.py and
+src/state/db.py, plus their declared existing focused tests. A does not own
+these paths; any newly required shared file needs explicit ownership transfer.
+Physical runs the complete scoped read/reproduce/edit/test cycle in a managed
+parallel child created from current origin/live88e, not the live checkout or
+the raw-bearing parent. Parent owns only PLAN and normal integration.
+
+Carry the exact selected publication entity/provenance through the selection
+boundary, apply a pure publication qualification in SettlementSemantics, gate
+both normal and legacy harvester source grading before any legacy/canonical
+write, and protect direct/era callers at db.log_settlement's final boundary.
+No schema, enum, rounding/precision change or new venue-write path. Existing
+VENUE_RESOLVED and actual venue PNL remain independent facts. Without proven
+first publication or an actual legitimate clarification, the exact HKO city/
+day/metric source grade stays UNKNOWN or existing DISPUTED. Historical VERIFIED
+rows are not overwritten; this invocation does not re-certify them by matching
+the winner's floor. A template flag is not positive publication evidence.
+
+SCOPE: that source-publication identity only. DRAIN: validation of possessed
+official original/clarification evidence; the latest endpoint cannot reconstruct
+historical first publication, so no invented timed re-fetch debt. RESET: actual
+lawful publication evidence admitted by the same guard. Require a real RED
+scalar-match/no-proof example, source-grade and venue-outcome continuity twins,
+NOOP publication identity, direct final-guard/legacy bypass and immutable
+historical-row antibodies in private DBs with external transport denied.
+Keep all source roles, clocks and canonical transaction laws. Freeze the exact
+diff/tests for independent review before normal integration, final changed-risk
+gates or any proposed registered loading. No live action is authorized here.
+
+B's exact five existing tests are tests/test_settlement_semantics.py,
+tests/test_harvester_truth_writer_m1_settled_at.py,
+tests/test_harvester_truth_writer_source_disagreement.py,
+tests/test_harvester_split_independence.py and tests/test_db.py.
+The physical adviser reports a hard read-only role constraint after receiving
+the child; no implementation has begun. ROOT must assign the accepted B scope
+to a writable executor, preserving physical's independent read-only assessment.
+This routing gap does not change source-grade acceptance or authorize another
+writer implicitly. The managed child remains clean at88e until that transfer.
+
+### A1/A2 exact writer closure — BEFORE EDIT
+
+Native's parallel child is based on current origin/live88e. A1 restores only
+accepted necessary producer hunks in src/data/ecmwf_open_data.py,
+scripts/extract_open_ens_localday.py and src/ingest/forecast_live_daemon.py:
+normal acquisition, retained resume, genuine acquired-slot service/fairness and
+atomic journal protection, with source clocks, immutable proofs and original
+budget/lock laws intact. Preserve the lawful current global sigma path and B's
+source-grade files. Require actual normal-source/real-Lock/default-call and
+atomic/restart controls before freezing A1; no qualification or venue authority
+is inferred from acquired service or partial transport.
+
+A2's proposed additional exact source closure is
+src/data/day0_hourly_vectors.py,
+src/data/replacement_forecast_materializer.py,
+src/data/replacement_forecast_cycle_policy.py,
+src/data/replacement_forecast_bundle_reader.py,
+src/engine/event_reactor_adapter.py and src/events/day0_authority.py.
+Only these three existing tests are owned in this slice:
+tests/test_ecmwf_open_data_collect_cycle.py,
+tests/test_forecast_live_daemon.py and
+tests/test_replacement_forecast_materializer.py. No tier0_auction_corpus restore,
+whole branch replay, B-file edit or additional file is implied. A2 may reproduce
+contained/straddling dependency failures, but must not reduce instant-message
+qualification gates until the independent mathematical boundary is accepted.
+All required51 members, metric/unit/grid, original SHA/proof/PIT and fresh-cut
+identity remain mandatory. The candidate interval dependency distinction is
+not a new declaration that partial evidence is a complete full-day role.
+SCOPE/DRAIN/RESET, rollback and loading conditions are those of phase A above.
+Exact A2 math/hunks and first-decision/public-consumer evidence remain acceptance
+obligations before integration or any registered loading; no source GET or
+live seed/wake/DB mutation accompanies the implementation.
+
+ROOT now accepts XY's bounded interval-dependency equivalence and authorizes A2
+within the exact closure above. Fully contained primary native extrema supply
+their actual point value without an unrelated continuous full-day2t demand;
+all51 primary members, matching static/grid/original SHA and causal PIT proof
+remain required. A straddling interval requires every actual PL clip knot and
+paired support anchor consumed by the owning projection. Local-day D is right
+closure support, not an inside-day observed extreme; preserve the half-open
+projection. Up to204 fields is the examined3h/four-anchor instance, not a new
+hard cap or permission to drop another geometry's dependencies. Bind actual
+quantity/product/role frontier and the maximum first-possession dependency cut;
+never relabel extrema as2t, a partial run as COMPLETE, or an old clock as new.
+This removes only mathematically redundant dependencies. Full-Y remains a
+required physical role where its law requires it; missing required anchors
+remain exact-family DATA_DEGRADED, not an optional-role legacy substitution.
+Require deleted-nonrequired-input equality and deleted-required-input refusal
+twins through the real normal producer and public role consumers before freeze.
+
+ROOT transferred B's writable implementation to hko_publication_grade_impl;
+physical remains the read-only design/final-boundary reviewer. The executor is
+READY in the existing B child and owns its ignored example-derived test config,
+private STATE/TMP and denied external transport. Parent does not modify that
+config or B source. The accepted five source/five test scope is unchanged.
+
+### B f1f Important blocked; accepted dual-claim method — BEFORE EDIT
+
+Physical identifies an Important/INV-47 defect in f1f287447fe979aa294ae5a1949206e946315e2b:
+the universal HKO UNKNOWN gate lacks an implemented concrete RESET. Keep that
+commit and all original RED/full193P1F/selected/27-control receipts on its child
+branch; do not pick, land, load or call it a closed source-truth repair. The
+factory-guard failure is an independently reproduced88e baseline gap, not a
+skipped PASS. A continues independently.
+
+ROOT accepts one bounded method change in the same five B source paths and
+existing tests. Keep decimal first-publication source grade UNKNOWN. Separately,
+strict native Gamma evidence may establish one resolved venue integer truth:
+exactly one resolved YES point label supplies its integer, not a floor of the
+decimal observation. Only that claim is canonical authority VERIFIED with source
+polymarket_gamma; it never verifies the official publication or permits a source
+name to bypass the final guard. Bind the actual raw entity/hash, immutable
+capture clock, original contract, city/local-date/H-L/unit and condition through
+normal and legacy writers and independently at the central boundary.
+
+SCOPE: the exact contract/condition and source-publication tuple, with venue
+integer and official decimal claims kept distinct. DRAIN/RESET: actual possessed
+native venue proof transitions from unresolved to strictly resolved unique point,
+not a promised future source parser or timed latest-endpoint poll. Candidate
+positive input is the existing Sep27 original body SHA119cf8...e023/condition
+e565..., which the executor must fully verify from its existing custody before
+using it. NO-only points, ranges/open shoulders,0.99/proposed outcomes, multiple
+winning points, malformed hash/time or wrong identity refuse scalar truth while
+the already lawful payout path stays unchanged. Slot0/1 outcome facts are not
+in-band trade-price authority. Historical VERIFIED facts are not overwritten;
+new accepted tuples carry actual qualification time without backdating immutable
+capture or walk-forward eligibility. Official decimal first publication remains
+an explicit external-input gap, not an integer-source certification.
+
+Executor owns this complete bounded edit/test cycle in the existing B child;
+physical independently reviews the concrete RESET and the two truth axes.
+Require actual native-body positive and unresolved->resolved RESET, every named
+bad twin and direct/normal/legacy final-guard tests, historical preservation and
+venue-payout continuity. No new venue writer, schema, enum, rounding law, template
+positive flag, source GET, live DB write or wider file set. Freeze and important
+review precede normal integration and final changed-risk gates. Parent owns only
+PLAN/integration; neither old f1f nor this plan authorizes CLI/pick/loading.
+
+### A integration and preflight skip restoration — BEFORE EDIT
+
+ROOT authorizes only the ordered A span2483e25f2d88d85fe58ca2846a1af00e2b33b3e6
+->20767ded1bc5caa535bba2f400e19f410b587d20
+->42c381acf32a3d3298a7abe3b0b7085b6af4dd64 into the parent88e task tree.
+The span owns nine source and three existing test paths listed above, with no
+B/corpus/PLAN delta. Preserve peer bytes, raw originals and current lawful global
+sigma components. Independent A review remains required before final landing.
+
+Additional owned path: tests/test_check_live_restart_preflight.py, only removal
+of the two88e skip decorators on the normal-producer public-receipt and full-Y
+local-day rollover H/L tests. SCOPE is these four parameterized cases; DRAIN is
+actual isolated normal capture/materialization/public-reader execution; RESET is
+real qualification and missing-current-state/old-revision refusal, never a READY
+mock or renewed clock. Source deployment gates stay unchanged. Run the four
+cases with private STATE/TMP, example-derived ignored config and denied external
+transport, preserving original failure evidence if a fixture prerequisite fails.
+Rollback is the single test edit or ordered A commits on the task branch, not
+live mutation. B remains independent and oldf1f blocked; no final CLI/push/load
+before source review and a unified frozen input set.
+
+### B native child revision clock Important — BEFORE EDIT
+
+Physical reproduced a future winning market updatedAt2099 with consistent body
+hash/capture identity still admitted by f59's unique-point helper. This is an
+Important source-clock gap; the merged12P interaction XML does not cover it and
+does not close it. Pause final CLI/secrets/push/loading. A's independent approval
+and existing52-case evidence are unchanged.
+
+ROOT authorizes the B executor's bounded followup only in its already owned
+src/contracts/settlement_semantics.py and an existing B test. Every winning and
+losing child participating in uniqueness must carry an aware native update
+clock no later than immutable capture; preserve the existing event-clock guard.
+Do not invent child<=event-update ordering, source-issued clocks, renewed capture
+or new proof flags. SCOPE is the exact original entity/claim; DRAIN/RESET is a
+properly bound original whose participating child revision clocks pass the same
+capture frontier, not a manual refresh or qualification bypass. Keep future,
+naive/malformed/missing child-clock refusal twins and real native-body positives.
+The executor edits/tests/freezes in its existing B child; parent changes only
+PLAN/integration. After freeze, only normal-pick the followup, verify exact
+hashes and run the narrow new-clock/interaction checks. Physical must close the
+Important before one unified final PLAN/input freeze and legal gates. Preserve
+old f59/mixed receipts, raw originals, refs/config and all historical fact clocks.
+
+### A/B reviewed integration freeze and changed-risk gate basis
+
+A42c received independent APPROVE0C/I; B's f1f->f59->0c96 combined dual-claim
+method and child-clock Important received physical APPROVE0C/I. Parent normally
+integrated only the authorized spans, preserving current88e peers and raw123.
+A's52 unique author cases and B's focused/clock receipts retain their separate
+epochs and deselected/baseline dispositions; none is a same-tip whole-suite PASS.
+The unrelated88e tier0 factoryguard remains an actual baseline failure, with
+unchanged owning bytes, not a new skip or a completed mandatory check.
+
+Actual parent checks: re-enabled preflight4P0F/E/S74.04s (four-prepared.xml,
+SHAfb018a4e7828e77affbefd7c8e95a0041610d54e8b5321d541f8dc93b356bf27);
+source/venue/prefix interaction12P3.40s (interaction.xml,
+SHA9eea831cf6b9a319d92ef3b9c6352763c92515e8042203a8f7169f169b0f7578);
+child-clock H/L direct/era, concrete RESET and real HKO X-only public-consumer
+9P44.81s (clock-role.xml,
+SHAaf9a83012cb0843796e6f100b361e7ba1b51be78820a2882afa3b09553c72b6b).
+All receipts are under /tmp/zeus-A-upgrade-w9tnUy; private STATE/TMP and
+external-network-denied sandbox were used. The first4-case setup failure from
+an absent private STATE directory is retained separately, not relabeled PASS.
+Pure boundaries also reject0/1 payout as submit prices and venue Gamma as
+reported temperature-prefix/physical-finality evidence. Decimal first-publication
+eligibility remains UNKNOWN; no claim of live role completeness or MAIN loading.
+
+Freeze this PLAN before one actual final single-live CLI, exact-HEAD ancestry
+secret scan, schema/test-quality, semantic classification with P0/integration
+truth and mapped invariant coverage, and changed-surface registry checks.
+Keep all failed output; any new mandatory failure returns its precise scope to
+ROOT rather than bypassing it. No further input/HEAD changes during those gates.
+Only ROOT's acceptance of the exact frozen tip can authorize normal FF landing
+and one registered PRESTOP-qualified restart. No manual source GET, seed/wake,
+SDK/live DB action, raw staging or unrelated baseline repair is authorized.
