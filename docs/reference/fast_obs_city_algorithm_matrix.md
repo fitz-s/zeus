@@ -497,6 +497,18 @@ Legend:
   Seoul 10-07 and Busan 10-06/10-07 carry only legacy AWC transport.
 - **Status.** Unclear class: the "priority path" is a held-position path, not a per-city path. Entry decisions in
   Seoul/Busan use AWC and Ogimet.
+- **Resolution, `fix/fast-obs-gaps-g3-g7` 9c8a58613.**
+  - `_reports_with_status` now polls KMA for every eligible fast-lane station in `KMA_PRIORITY_STATIONS`
+    (RKSI, RKPK), held or not.
+  - Quota:
+    - The AMO endpoint is a public keyless form. No quota or terms are recorded in code, `architecture/` or docs.
+    - `KmaMetarCursor` already limits each station to one request per 60 s, with two workers. The ceiling is
+      2 POSTs/min, the rate a held Seoul+Busan pair already drew.
+  - Emitted events still pass family admission: a listed market or held exposure.
+  - Tests fail on 24d65cb46 and pass on the fix: entry-only and held rounds both poll both stations; a non-KMA
+    station never reaches the cursor; an unheld Seoul prefetch reaches KMA.
+  - Existing transport noise is unchanged by this fix: 68 `KMA_METAR_FETCH_FAILED` in the retained log
+    (ConnectError/TLS hostname mismatch 40, ConnectTimeout 15, ReadTimeout 13).
 
 **G5 — For the 37 non-US NOAA cities, B is absent during the Day0 window.**
 
@@ -521,6 +533,42 @@ Legend:
   when IMD is missing. The fast tail compares raw AWC, without margin, against the IMD value. They are equal, so it
   never fires: 0 Lucknow fast-tail posteriors in 48 h.
 - **Status.** Unclear: the margin measurement needs re-running on the current window.
+- **Resolution: re-measured. The margin stays 7.0, which is correct. The regenerated artifact is not committed.**
+  - Canonical producer: `scripts/measure_settlement_page_metar_divergence.py`. It wrote the current artifact at
+    755dad929 and is listed in `db_writer_lock.py:832`. It was re-run on 2026-10-07T10:17Z with `--since 2026-08-23`,
+    reading the forecasts DB `mode=ro` and writing to scratch.
+  - Lucknow: 88 pairs, p99 |Δ| 6, threshold 7.0, `settlement_faithful` false. All three are unchanged.
+  - The single driver is 2026-09-06 HIGH: the page shows 31 (VERIFIED settlement 31) and the Ogimet daily shows 37.
+    - The 37 is a real report, `VILK 060730Z … 37/27`, published by AWC at 07:36Z.
+    - AWC republished the same 060730Z report as 27/27 at 07:56Z. Ogimet first wrote 27, then 37 on 09-09.
+  - At n ≤ 100, p99 is the sample maximum, so one corrupt print sets the margin. The margin is doing its job: a raw
+    37 would have been an absorbing false HIGH.
+  - Why the agreement audit disagrees: it collapses each instant to its last version
+    (`awc_metar_baseline.py`, "Duplicates by instant collapse (last wins)"). It therefore saw 31 for 09-06. Live
+    readers do not collapse that way, so the audit does not refute the margin.
+  - Not committed: the script rewrites `carried_from_method` on the five carried wu_icao cities (Auckland, Jakarta,
+    Jinan, Lagos, Taipei). It replaces the WU-era method string with its own page-vs-Ogimet `method`. A second run
+    carries forward the previous run's `method`, so those entries would claim a measurement that never covered
+    them. Their numbers are unchanged.
+  - Served-margin changes the re-run would make (NOAA cities, 45-day window):
+
+    | City | before | after | p99 driver (page vs Ogimet, rounded Δ) |
+    |---|---|---|---|
+    | Denver | 2.0 | 5.0 | 2026-09-23 LOW 58.1 °F vs 54.32 °F (Δ 4) |
+    | Beijing | 0.0 | 3.0 | 2026-09-20 HIGH 28 vs 30 |
+    | Madrid | 0.0 | 3.0 | 2026-09-20 LOW 16 vs 14 |
+    | Ankara | 0.0 | 2.0 | 2026-09-20 LOW 14 vs 13 |
+    | Guangzhou | 0.0 | 2.0 | 2026-09-20 HIGH 36 vs 37 |
+    | Qingdao | 0.0 | 2.0 | 2026-09-20 HIGH 29 vs 30 |
+    | Singapore | 0.0 | 2.0 | 2026-09-20 and 09-23 HIGH, Δ −1 |
+    | Tel Aviv | 0.0 | 2.0 | 2026-09-20 LOW 23 vs 22 |
+
+    Every other city keeps its served margin. Pair counts rise from 48–52 to 88–90.
+  - Seven of the eight flips sit on one target date, 2026-09-20, in seven unrelated countries. That pattern
+    suggests a one-day Ogimet or page ingest artifact rather than station divergence. It is UNVERIFIED and was not
+    traced here.
+  - Because p99 equals the maximum at n < 101, each changed threshold rests on one or two days. Committing a refit
+    needs two things first: the carry-provenance fix in the script, and a check of the 2026-09-20 rows.
 
 **G7 — No live market, so the matrix row cannot be verified by posteriors.**
 
