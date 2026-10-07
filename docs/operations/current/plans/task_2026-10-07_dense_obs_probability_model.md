@@ -120,10 +120,10 @@ Otherwise the legacy code runs with identical arguments and gives byte-identical
 ### Steps (each a commit)
 1. [x] design (this section) 4f2446661; corrected (B_A page-only, per-row retention marks)
 2. [x] operator module + unit tests b8a1e31a3
-3. [x] fit module + refit script f6852da68 (params artifact: fit in progress)
+3. [x] fit module + refit script f6852da68; artifact 4e1327d6e (content 20ceb2f9)
 4. [x] evidence/dispatch + builder integration + revision v36/v35 + allow-lists + integration tests 310567d72
 5. [x] G1/G2/G8 (in 310567d72) + regression tests
-6. [ ] replay proof (live, read-only) + performance + registries (source_rationale, script_manifest, test_topology)
+6. [x] replay proof + perf (scripts/replay_day0_dense_state_space.py) + registries 35571b4dd
 
 Rollback: revert the branch commits. No schema or DB change. Legacy paths are unchanged when the artifact is absent.
 
@@ -132,3 +132,32 @@ Rollback: revert the branch commits. No schema or DB change. Legacy paths are un
 - Page retention measured from WORLD (AWC instant vs noaa_wrh row, page-covered days 09-13..10-05): Helsinki 0.962 (1085/1127), Tokyo 0.990, Singapore 0.992, Toronto 0.987, Lucknow 0.981 (11 integer differences), Moscow 0.898, Ankara 0.991, Istanbul 0.930. The misses cluster on 2026-09-20 (multi-station page dropout); independence is optimistic there.
 - Baseline (origin/live bc024fedd), 84 modules touching changed surfaces: 8441 tests, 681 failing in 49 modules (pre-existing).
 - Next: replay proof script (shipped carrier, live DBs mode=ro), perf, registries.
+
+### Results (2026-10-07)
+- Artifact (train to 2026-10-05, retention to 2026-10-05; inner walk-forward selection):
+  - Helsinki one|shrunk, tau 227 min, s 1.31, beta -0.75; FMI core 0.076, outlier 0.39 at w 0.27; no SPECI.
+  - Tokyo one|shrunk, tau 513 min, s 1.30, beta -1.30; JMA identity (s1 0.02). The two-scale order lost inside training (0.679 vs 0.661).
+  - Singapore one|plain, tau 277 min; NEA core 0.21, drift 0.30 at tau_e 100 min; SPECI 0.00068/min.
+  - Toronto one|shrunk, fitted and unqualified.
+  - Qualified: Helsinki, Tokyo and Singapore, high and low. Singapore is inert live because Zeus has no NEA writer.
+- Live replay (read-only, 10-06 and 10-07, out of sample): 30 dense families. The shipped core matches the backtest grid oracle with max |dq| 0.0016 (median 0.0009). Per-family compute p50 0.41 s, p99 0.63 s, including the read-only DB reads, with no lock held.
+- Legacy byte-identity: 8 live V2 posteriors (Madrid, Moscow x2, London, Ankara x2, Buenos Aires, Toronto) rebuild with identical sha256 on the branch and on origin/live, and equal their persisted identity and q.
+- G2 live replay of the Tokyo 10-04 LOW settlement fact at 14:55Z: origin/live 18.4 (non-METAR, R = 18, wrong); branch 18.5 (R = 19 = settled).
+- G1 Tokyo 760918: q(<= 24) falls from 0.64 (served) to < 0.05 (dense law, frozen fixture), with every bin semantically allowed; a page row at 25 makes those bins semantic zeros.
+
+### Provenance verdicts (files modified)
+All CURRENT_REUSABLE, audited 2026-10-07 against bc024fedd law (AGENTS.md section 0/2, invariants INV-37, settlement semantics):
+- src/data/day0_hourly_vectors.py: carrier builder (6f9bca665); dispatch inserted after validation; legacy path unchanged.
+- src/events/day0_authority.py (6f9bca665): revision v36/v35; FA routes provisional; dense shape and operator in the policy sets.
+- src/data/day0_fast_obs.py (3c66f43ad): G8 settlement-integer supersession; the raw comparison is kept when no city is given.
+- src/data/physical_current_sources.py (2026-10-06 audit): metar_instant_minutes on fast admissions.
+- src/data/replacement_forecast_current_target_plan.py (02849df39): G2 METAR-instant settlement facts; metar_content_only physical facts; dense skips the fast tail.
+- src/data/replacement_forecast_seed_discovery.py (4fc499647), src/data/replacement_forecast_live_materialization_queue.py (127c15b88), src/data/replacement_forecast_materializer.py, src/data/replacement_forecast_bundle_reader.py, src/data/replacement_forecast_cycle_policy.py (6f9bca665): allow-lists and routing only.
+- src/state/db_writer_lock.py: two read-only script allowlist rows.
+- config/physical_current_sources.json: metar_instant_minutes on the six fast-admission rows.
+
+### Residuals (not exact)
+- Adapter FA-sourced decisions run through the carrier region via finality and carrier-source routing. No end-to-end adapter decision test exists for an FA city.
+- Retention independence is optimistic on clustered page dropouts (2026-09-20 hit every station).
+- The forecast proxy for fitting is the previous_day1 ecmwf_ifs path; live serves the freshest causal capture.
+- The tier0 held-SELL point trace reports UNSUPPORTED_POINT_KERNEL for the dense operator. This is diagnostic only.
