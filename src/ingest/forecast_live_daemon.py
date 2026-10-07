@@ -1430,8 +1430,18 @@ def _run_opendata_track_if_due(
         current_identity=identity,
         now_utc=retry_now,
     )
-    if retry is None or time.monotonic() >= poll_deadline_monotonic:
+    if time.monotonic() >= poll_deadline_monotonic:
         return newest_result
+    if retry is None:
+        # Only this call's actual availability result, after mandatory retry
+        # opportunities, permits prior-role debt. A stored SKIP is not a probe.
+        try:
+            turn = _native_temperature_fair_turn(_job_conn, track=track, now_utc=retry_now,
+                deadline_monotonic=poll_deadline_monotonic, _current_check=(identity, newest_result))
+        except Exception as exc:  # Optional planning cannot replace mandatory truth.
+            logger.warning("forecast-live unreleased native turn deferred track=%s: %s", track, exc)
+            turn = None
+        return turn if turn is not None else newest_result
     retry_identity, retry_debt = retry
     retry_result = run_opendata_track(
         track,
@@ -1759,6 +1769,417 @@ def _run_journaled_opendata_track(track: str) -> dict:
         conn.close()
 
 
+def _native_temperature_transport_plans(conn, *, now_utc: datetime, full_y_only: bool = False) -> list[dict]:
+    """Current roles first, then actual verified future full-Y market needs."""
+    from src.data.ecmwf_open_data import _native_temperature_steps, TRACKS
+    from src.config import runtime_coordinate_manifest_json
+    from src.data.forecast_fetch_plan import data_version_for_track
+    from src.data.forecast_target_contract import compute_target_local_day_window_utc, required_period_end_steps
+    from src.state.source_run_repo import get_source_run
+
+    if _is_source_paused("ecmwf_open_data"):
+        return []
+    # SCOPE: optional transport on this exact current coordinate frame. DRAIN:
+    # ordinary H/L collection writes the owning bound identity; each next poll
+    # recomputes it. RESET: matching raw/job evidence, not a bare/old version.
+    manifest_json = runtime_coordinate_manifest_json()
+    expected_versions = {track: data_version_for_track(track, manifest_json) for track in TRACKS}
+    # Coverage supplies required transport steps, not readiness or shape
+    # authority. Only actual active local-day markets enter this bounded plan.
+    rows = conn.execute("""
+        SELECT coverage.*, source.source_cycle_time AS native_run_utc,
+               source.observed_steps_json AS native_source_observed_steps_json
+          FROM source_run_coverage coverage JOIN source_run source
+            ON source.source_run_id=coverage.source_run_id
+         WHERE coverage.source_id='ecmwf_open_data'
+           AND source.source_id='ecmwf_open_data'
+           AND source.status IN ('SUCCESS','PARTIAL')
+           AND source.ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP')
+           AND ((source.track IN ('mx2t6_high_full_horizon','mx2t6_high_short_horizon') AND source.dataset_id=?)
+             OR (source.track IN ('mn2t6_low_full_horizon','mn2t6_low_short_horizon') AND source.dataset_id=?))
+           AND source.source_cycle_time<=?
+           AND coverage.target_window_end_utc>? AND coverage.expires_at>?
+           AND (coverage.target_window_start_utc<=? OR
+                (coverage.completeness_status='COMPLETE' AND coverage.readiness_status='LIVE_ELIGIBLE'))
+           AND EXISTS (SELECT 1 FROM market_events market
+             WHERE market.city=coverage.city AND market.target_date=coverage.target_local_date
+               AND market.temperature_metric=coverage.temperature_metric
+               AND market.token_id IS NOT NULL AND market.range_label IS NOT NULL)
+         ORDER BY source.source_cycle_time DESC, coverage.city, coverage.temperature_metric
+    """, (expected_versions["mx2t6_high"], expected_versions["mn2t6_low"],
+          now_utc.isoformat(), now_utc.isoformat(), now_utc.isoformat(), now_utc.isoformat())).fetchall()
+    by_run = {}
+    for row in rows:
+        by_run.setdefault(row["native_run_utc"], []).append(row)
+
+    def mandatory_complete(run, sources, *, require_pair=True):
+        if _is_source_paused("ecmwf_open_data"):
+            return False
+        for track, source_id in sources.items():
+            row = get_source_run(conn, source_id)
+            job = conn.execute("""SELECT * FROM job_run WHERE source_run_id=? AND scheduled_for=?
+                ORDER BY finished_at DESC LIMIT 1""", (source_id, run.isoformat())).fetchone()
+            if (not row or not job or row["status"] not in {"SUCCESS", "PARTIAL"}
+                    or job["status"] not in {"SUCCESS", "PARTIAL"} or job["finished_at"] is None
+                    or job["release_calendar_key"] != row["release_calendar_key"]
+                    or row["source_cycle_time"] != run.isoformat()
+                    or row["source_id"] != "ecmwf_open_data"
+                    or row["track"] not in {track + "_full_horizon", track + "_short_horizon"}
+                    or row["ingest_mode"] not in {"SCHEDULED_LIVE", "BOOT_CATCHUP"}
+                    or row["dataset_id"] != expected_versions[track]):
+                return False
+            try:
+                expected, observed = json.loads(row["expected_steps_json"]), json.loads(row["observed_steps_json"])
+                if not expected or not set(expected).issubset(observed):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        return len(sources) == 2 if require_pair else bool(sources)
+
+    # Split turns, not identities: every city/metric in the same run and phase
+    # shares originals; a future append cannot block an already complete scope.
+    ordered = [(run_text, [row for row in run_rows
+        if (_parse_utc_timestamp(row["target_window_start_utc"]) > now_utc) == future], future)
+        for future in (False, True) for run_text, run_rows in by_run.items()]
+    claimed, plans = set(), []
+    for run_text, coverage_rows, future in ordered:
+        run = _parse_utc_timestamp(run_text)
+        if run is None:
+            continue
+        sources = {}
+        for row in coverage_rows:
+            metric = row["temperature_metric"]
+            track = {"high": "mx2t6_high", "low": "mn2t6_low"}.get(metric)
+            if track is not None and row["track"] in {track + "_full_horizon", track + "_short_horizon"}:
+                sources.setdefault(track, row["source_run_id"])
+        # A city may list only HIGH (or LOW). The sibling raw job still owns
+        # mandatory priority, but its market/readiness is not native permission.
+        for track in TRACKS:
+            if track in sources:
+                continue
+            candidates = conn.execute("SELECT source_run_id FROM source_run WHERE source_id='ecmwf_open_data' "
+                "AND source_cycle_time=? AND track IN (?,?) AND dataset_id=? "
+                "AND ingest_mode IN ('SCHEDULED_LIVE','BOOT_CATCHUP') AND status IN ('SUCCESS','PARTIAL')",
+                (run.isoformat(), track + "_full_horizon", track + "_short_horizon", expected_versions[track])).fetchall()
+            for candidate in candidates:
+                if mandatory_complete(run, {track: candidate["source_run_id"]}, require_pair=False):
+                    sources[track] = candidate["source_run_id"]
+                    break
+        if not mandatory_complete(run, sources):
+            continue
+        wanted, targets = set(), set()
+        for row in coverage_rows:
+            try:
+                window = compute_target_local_day_window_utc(city_timezone=row["city_timezone"],
+                    target_local_date=datetime.fromisoformat(row["target_local_date"]).date())
+                if (not now_utc < window.end_utc
+                        or row["target_window_start_utc"] != window.start_utc.isoformat()
+                        or row["target_window_end_utc"] != window.end_utc.isoformat()):
+                    continue
+                role = "full_Y" if run <= window.start_utc else "remaining_X"
+                if full_y_only and role != "full_Y":
+                    continue
+                target = (row["city"], row["target_local_date"], row["temperature_metric"], role)
+                if target in claimed:
+                    continue
+                ends = json.loads(row["expected_steps_json"])
+                if ends != list(required_period_end_steps(source_cycle_time=run,
+                        target_window_start_utc=window.start_utc, target_window_end_utc=window.end_utc,
+                        period_hours=3)) or not set(ends).issubset(json.loads(row["native_source_observed_steps_json"])):
+                    continue
+                start_hours = (max(window.start_utc, run) - run).total_seconds() / 3600
+                first = int(start_hours // (3 if start_hours <= 144 else 6)) * (3 if start_hours <= 144 else 6)
+                last = ends[-1] if ends[-1] <= 144 else ((ends[-1] + 5) // 6) * 6
+                # H/L period-end plans do not turn post-144h native six-hour
+                # instants into three-hour observations. Only necessary native
+                # brackets are selected; the advertised 06/18 control horizon
+                # is validated by the source, never extended past step90.
+                knots = _native_temperature_steps(run, [step for step in range(first, last + 1)
+                    if step % (3 if step <= 144 else 6) == 0])
+                # A late run may inventory its future only; no prefix observation
+                # or full-Y qualification is manufactured by truncating daystart.
+                if (run + timedelta(hours=knots[0]) > max(window.start_utc, run)
+                        or run + timedelta(hours=knots[-1]) < window.end_utc):
+                    continue
+                wanted.update(knots)
+                targets.add(target)
+            except (KeyError, TypeError, ValueError):
+                continue
+        if not wanted:
+            continue
+        claimed.update(targets)
+        plans.append({"run": run, "steps": sorted(wanted), "targets": sorted(targets), "future": future,
+            "sources": dict(sources),
+            "priority": lambda run=run, sources=dict(sources): mandatory_complete(run, sources)})
+    return plans
+
+
+def _drain_native_temperature_source(conn, *, now_utc: datetime, deadline_monotonic: float) -> dict:
+    """Read or drain exact active originals without refreshing this poll's cut."""
+    from src.data.ecmwf_open_data import collect_native_temperature_source, restore_paired_role_originals
+
+    results, future_results = [], []
+    for plan in _native_temperature_transport_plans(conn, now_utc=now_utc):
+        paired = restore_paired_role_originals(conn, plan=plan, decision_at=now_utc,
+            deadline_monotonic=deadline_monotonic)
+        result = collect_native_temperature_source(conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
+            cycle_deadline_monotonic=deadline_monotonic,
+            _priority=plan["priority"])
+        (future_results if plan["future"] else results).append({**result, "paired_originals": paired,
+            "transport_run_utc": plan["run"].isoformat()})
+    if len(results) == 1:
+        return {**results[0], "future_runs": future_results}
+    if results:
+        return {"status": "DRAINED", "qualification_status": "UNKNOWN", "runs": results, "future_runs": future_results}
+    if future_results:
+        return {"status": "DRAINED", "qualification_status": "UNKNOWN", "future_runs": future_results}
+    return {"status": "DEFERRED", "qualification_status": "UNKNOWN",
+        "reason": "NATIVE_2T_TARGET_OR_MANDATORY_PLAN_UNKNOWN"}
+
+
+def _native_temperature_service_receipt(receipt) -> dict:
+    """Scheduling credit only; an attempt clock is not source possession."""
+    if receipt is None:
+        return {}
+    try:
+        meta = json.loads(receipt["meta_json"])
+        if not isinstance(meta, dict):
+            return {}
+        if "service_started_at" in meta:
+            started = _parse_utc_timestamp(meta["service_started_at"])
+            if started is None or meta.get("service_transport_kind") not in {"native", "paired"}:
+                return {}
+            return {key: meta.get(key) for key in (
+                "service_started_at", "service_transport_kind", "service_mandatory_attempt")}
+        # Old RUNNING was written before lock acquisition. BUSY never acquired
+        # it. Only an original positive collector result proves legacy service.
+        if receipt["status"] == "RUNNING" or receipt["reason_code"] == "NATIVE_2T_SINGLEFLIGHT_BUSY":
+            return {}
+        kind = meta.get("transport_kind")
+        positive = (meta.get("paired_status") if kind == "paired" else meta.get("collector_status"))
+        if positive not in {"INCOMPLETE", "AVAILABLE"} or _parse_utc_timestamp(receipt["started_at"]) is None:
+            return {}
+        return {"service_started_at": receipt["started_at"], "service_transport_kind": kind or "native",
+            "service_mandatory_attempt": meta.get("mandatory_attempt")}
+    except (TypeError, ValueError, KeyError):
+        return {}
+
+
+def _write_native_temperature_attempt(conn, *, meta_json: dict, _service: dict | None = None, **journal) -> dict:
+    """Merge exact-scope scheduling credit in one short DB-only transaction.
+
+    SCOPE: this native job key, never source qualification. DRAIN: normal slot
+    acquisition; BUSY diagnostics cannot erase a concurrent owner's service.
+    RESET: committed service/diagnostic metadata; no transaction spans I/O.
+    """
+    from src.state.job_run_repo import write_job_run
+    if conn.in_transaction:
+        raise ValueError("NATIVE_SERVICE_JOURNAL_TRANSACTION_ALREADY_OPEN")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        latest = conn.execute("""SELECT started_at,status,reason_code,meta_json FROM job_run
+            WHERE job_run_id=? AND job_name=? AND source_id=? AND track=? AND scheduled_for=?
+              AND release_calendar_key=? AND expected_scope_json=?""",
+            (journal["job_run_id"], journal["job_name"], journal["source_id"], journal["track"],
+             journal["scheduled_for"].isoformat(), journal["release_calendar_key"],
+             json.dumps(journal["expected_scope_json"], sort_keys=True, separators=(",", ":")))).fetchone()
+        # Inherited metadata was read before BEGIN and is not a new acquired
+        # event. Always take that complete group from the protected current row.
+        meta = {key: value for key, value in meta_json.items() if not key.startswith("service_")}
+        service = _native_temperature_service_receipt(latest)
+        previous_started = _parse_utc_timestamp(service.get("service_started_at"))
+        acquired_started = _parse_utc_timestamp((_service or {}).get("service_started_at"))
+        if acquired_started is not None and (previous_started is None or acquired_started >= previous_started):
+            service = _service
+        meta.update(service)
+        if latest is not None:
+            try:
+                busy = json.loads(latest["meta_json"]).get("last_busy_attempt")
+                old_finished = _parse_utc_timestamp(busy.get("finished_at")) if isinstance(busy, dict) else None
+                incoming = meta.get("last_busy_attempt")
+                new_finished = _parse_utc_timestamp(incoming.get("finished_at")) if isinstance(incoming, dict) else None
+                if old_finished is not None and (new_finished is None or old_finished >= new_finished):
+                    meta["last_busy_attempt"] = busy
+            except (TypeError, ValueError, AttributeError):
+                pass
+        write_job_run(conn, **journal, meta_json=meta)
+        conn.commit()
+        return meta
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+def _native_temperature_fair_turn(conn, *, track: str, now_utc: datetime, deadline_monotonic: float,
+        _current_check: tuple[dict, dict] | None = None) -> dict | None:
+    """Drain source debt fairly without borrowing another poll's budget.
+
+    SCOPE: exact normal run/current coordinate city/date/metric transport debt.
+    DRAIN: existing scheduler alternates its mandatory terminal journal and an
+    independently named native attempt journal, including HTTP503/defer/partial.
+    Within each active/future priority layer, never-attempted scopes precede
+    least-recent attempts, so an exhausted failed scope cannot monopolize turns.
+    RESET: a validated required subset, an expired target or a new legal run;
+    no manifest-newest equality, in-memory turn latch or mandatory-status rewrite.
+    A crash after native RUNNING still gives the next tick back to mandatory.
+    For an already SUCCESSful mandatory run, native and paired transport debt
+    alternate by the exact scope's durable phase receipt, including RUNNING.
+    One phase consumes this poll's original cut; incomplete inventory is not
+    role qualification, and a paired turn cannot mint a native SUCCESS.
+    A same-frame unreleased check, after current probe and mandatory retries,
+    permits the same phase drain for legal prior Y; the next tick probes again.
+    BUSY is a real attempt diagnostic, not a served phase. Only the original
+    collector's successful lock acquisition credits LRU/phase/mandatory attempt;
+    releasing that lock lets the next normal tick retry the unserved debt.
+    """
+    from src.data.ecmwf_open_data import collect_native_temperature_source, restore_paired_role_originals
+    from src.data.release_calendar import FetchDecision
+
+    identity = _forecast_work_identity(track, now_utc=now_utc)
+    if identity["decision"] is not FetchDecision.FETCH_ALLOWED or _is_source_paused(str(identity["source_id"])):
+        return None
+    checked_unreleased = False
+    if _current_check is not None:
+        checked_identity, outcome = _current_check
+        checked_unreleased = (checked_identity.get("decision") is FetchDecision.FETCH_ALLOWED
+            and all(checked_identity.get(key) == identity.get(key) for key in (
+                "track", "source_id", "scheduled_for", "job_name", "release_calendar_key", "data_version", "coordinate_manifest_json"))
+            and checked_identity.get("track") == track
+            and outcome.get("status") == "skipped_not_released"
+            and outcome.get("source") == identity["source_id"] and outcome.get("track") == track
+            and ("availability_probe" not in outcome or outcome["availability_probe"].get("status") == "not_released"))
+        if not checked_unreleased:
+            return None
+    mandatory = conn.execute("SELECT * FROM job_run WHERE job_run_id=?", (_job_run_id(identity),)).fetchone()
+    if checked_unreleased:
+        if mandatory is not None and mandatory["status"] != "SKIPPED_NOT_RELEASED":
+            return None
+    elif mandatory is None or mandatory["status"] not in {"FAILED", "PARTIAL", "SUCCESS"}:
+        return None
+    completed_mandatory = mandatory is not None and mandatory["status"] == "SUCCESS"
+    if mandatory is not None:
+        acquired, finished = (_parse_utc_timestamp(mandatory[field]) for field in ("lock_acquired_at", "finished_at"))
+        if (acquired is None or finished is None or finished < acquired
+            or mandatory["scheduled_for"] != identity["scheduled_for"].isoformat()
+            or mandatory["release_calendar_key"] != identity["release_calendar_key"]):
+            return None
+    # One durable turn per real terminal attempt, across candidate changes and
+    # across process restarts. A 503 with no native inventory is still a turn.
+    attempt = ([mandatory[field] for field in ("job_run_id", "started_at", "lock_acquired_at", "finished_at")]
+        if mandatory is not None else None)
+    phase_turn = completed_mandatory or checked_unreleased
+    job_name = "forecast_live_native_2t_" + track
+    previous = conn.execute("SELECT started_at,status,reason_code,meta_json FROM job_run WHERE job_name=? AND source_id=? "
+        "AND track='2t_instant_native_knots' ORDER BY started_at DESC,rowid DESC LIMIT 1",
+        (job_name, "ecmwf_open_data")).fetchone()
+    if previous is not None and not phase_turn:
+        served = conn.execute("""SELECT started_at,status,reason_code,meta_json FROM job_run
+            WHERE job_name=? AND source_id='ecmwf_open_data' AND track='2t_instant_native_knots'
+              AND CASE WHEN json_valid(meta_json)
+                THEN json_extract(meta_json,'$.service_mandatory_attempt') END = json(?) LIMIT 1""",
+            (job_name, json.dumps(attempt, separators=(",", ":")))).fetchone()
+        if (_native_temperature_service_receipt(served).get("service_mandatory_attempt") == attempt
+                or _native_temperature_service_receipt(previous).get("service_mandatory_attempt") == attempt):
+            return None
+    candidates = []
+    for order, plan in enumerate(_native_temperature_transport_plans(conn, now_utc=now_utc,
+            full_y_only=not completed_mandatory)):
+        if (plan["run"] > identity["scheduled_for"] or (not completed_mandatory
+                and (plan["run"] == identity["scheduled_for"] or not any(target[3] == "full_Y" for target in plan["targets"])))):
+            continue
+        scope = {"run": plan["run"].isoformat(), "targets": plan["targets"], "required_steps": plan["steps"]}
+        scope_json = json.dumps(scope, sort_keys=True, separators=(",", ":"))
+        scope_hash = hashlib.sha256(scope_json.encode()).hexdigest()
+        receipt = conn.execute("SELECT rowid,started_at,status,reason_code,meta_json FROM job_run WHERE job_run_id=? AND job_name=? "
+            "AND source_id='ecmwf_open_data' AND track='2t_instant_native_knots' AND scheduled_for=? "
+            "AND release_calendar_key=? AND expected_scope_json=?",
+            (job_name + ":" + scope_hash, job_name, plan["run"].isoformat(),
+             "ecmwf_open_data:native_2t:" + scope_hash, scope_json)).fetchone()
+        service = _native_temperature_service_receipt(receipt)
+        started = _parse_utc_timestamp(service.get("service_started_at"))
+        rank = (plan["future"], started is not None, started or datetime.min.replace(tzinfo=timezone.utc),
+            receipt["rowid"] if receipt and started is not None else 0, order)
+        candidates.append((rank, plan, scope, scope_hash, receipt))
+    for _, plan, scope, scope_hash, receipt in sorted(candidates, key=lambda candidate: candidate[0]):
+        # Expired admission permits only a complete, verified original cache
+        # read. It cannot issue HTTP or turn nonempty bytes into qualification.
+        cached = collect_native_temperature_source(conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
+            cycle_deadline_monotonic=time.monotonic(), _priority=plan["priority"])
+        paired_cache = restore_paired_role_originals(conn, plan=plan, decision_at=now_utc,
+            deadline_monotonic=time.monotonic())
+        if cached["status"] == "AVAILABLE" and paired_cache["status"] == "AVAILABLE":
+            continue
+        transport_kind = None
+        if phase_turn:
+            previous_kind = _native_temperature_service_receipt(receipt).get("service_transport_kind")
+            transport_kind = "paired" if previous_kind == "native" else "native"
+            if cached["status"] == "AVAILABLE":
+                transport_kind = "paired"
+            elif paired_cache["status"] == "AVAILABLE":
+                transport_kind = "native"
+        journal = dict(job_run_id=job_name + ":" + scope_hash, job_name=job_name, plane="forecast",
+            scheduled_for=plan["run"], source_id="ecmwf_open_data", track="2t_instant_native_knots",
+            release_calendar_key="ecmwf_open_data:native_2t:" + scope_hash,
+            started_at=_utcnow(), expected_scope_json=scope)
+        meta = {"mandatory_attempt": attempt, "qualification_status": "UNKNOWN",
+            **_native_temperature_service_receipt(receipt)}
+        if receipt is not None:
+            try:
+                prior_busy = json.loads(receipt["meta_json"]).get("last_busy_attempt")
+                if isinstance(prior_busy, dict):
+                    meta["last_busy_attempt"] = prior_busy
+            except (TypeError, ValueError, AttributeError):
+                pass
+        if checked_unreleased:
+            meta["current_availability_check"] = {"job_run_id": _job_run_id(identity), "status": "not_released"}
+        if transport_kind is not None:
+            meta["transport_kind"] = transport_kind
+        meta = _write_native_temperature_attempt(conn, **journal, status="RUNNING", meta_json=meta)
+        def acquired(kind):
+            # Called inside the unchanged source lock's finally protection,
+            # after its absolute deadline check and before any transport I/O.
+            service = dict(service_started_at=_utcnow().isoformat(), service_transport_kind=kind,
+                service_mandatory_attempt=attempt)
+            meta.update(_write_native_temperature_attempt(conn, **journal, status="RUNNING",
+                meta_json=meta, _service=service))
+        try:
+            paired = paired_cache if transport_kind == "native" else restore_paired_role_originals(
+                conn, plan=plan, decision_at=now_utc, deadline_monotonic=deadline_monotonic,
+                _on_acquired=lambda: acquired("paired"))
+            result = cached if transport_kind == "paired" else collect_native_temperature_source(
+                conn=conn, run_utc=plan["run"], required_steps=plan["steps"],
+                cycle_deadline_monotonic=deadline_monotonic, _priority=plan["priority"],
+                _on_acquired=lambda: acquired("native"))
+            result = {**result, "paired_originals": paired}
+            if transport_kind is not None:
+                result["transport_kind"] = transport_kind
+        except Exception as exc:  # Optional failure is not mandatory failure.
+            result = {"status": "DEFERRED", "qualification_status": "UNKNOWN", "reason": str(exc)}
+        collector_status = result["status"]
+        if collector_status == "UNKNOWN" and result.get("reason") == "STEP_DEADLINE_EXCEEDED":
+            # Scheduling debt only: preserve the raw inventory verdict, reason
+            # and all canonical evidence; no other UNKNOWN is transport expiry.
+            result = {**result, "status": "DEFERRED", "collector_status": collector_status}
+        status = {"AVAILABLE": "SUCCESS", "INCOMPLETE": "PARTIAL"}.get(result["status"], "FAILED")
+        if phase_turn and status == "SUCCESS" and result.get("paired_originals", {}).get("status") != "AVAILABLE":
+            status = "PARTIAL"
+        if (result.get("reason") == "NATIVE_2T_SINGLEFLIGHT_BUSY"
+                or result.get("paired_originals", {}).get("reason") == "NATIVE_2T_SINGLEFLIGHT_BUSY"):
+            meta["last_busy_attempt"] = {"started_at": journal["started_at"].isoformat(),
+                "finished_at": _utcnow().isoformat(), "transport_kind": transport_kind,
+                "reason": "NATIVE_2T_SINGLEFLIGHT_BUSY"}
+        _write_native_temperature_attempt(conn, **journal, status=status, finished_at=_utcnow(),
+            source_run_id=result.get("source_run_id"), reason_code=result.get("reason"),
+            affected_scope_json={"observed_count": result.get("observed_count", 0)},
+            meta_json={**meta, "collector_status": collector_status,
+                "paired_status": result.get("paired_originals", {}).get("status")})
+        return {"status": "current_cycle_already_journaled" if completed_mandatory else "native_temperature_optional_turn",
+            "source": "ecmwf_open_data", "track": track,
+            "mandatory_job_run_id": _job_run_id(identity), "mandatory_status": mandatory["status"] if mandatory is not None else None,
+            "native_temperature_source": {**result, "transport_run_utc": plan["run"].isoformat()}}
+    return None
+
+
 def _run_journaled_opendata_track_if_due(
     track: str,
     *,
@@ -1775,6 +2196,14 @@ def _run_journaled_opendata_track_if_due(
             0, FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS - FORECAST_LIVE_SAFE_CYCLE_HANDOFF_SECONDS
         )
         try:
+            turn = _native_temperature_fair_turn(conn, track=track, now_utc=_utcnow(), deadline_monotonic=poll_deadline)
+        except Exception as exc:  # Optional planning/cache debt cannot stop mandatory.
+            logger.warning("forecast-live native turn deferred track=%s: %s", track, exc)
+            conn.commit()
+            turn = None
+        if turn is not None:
+            return turn
+        try:
             replay = _committed_held_opendata_wake(
                 conn, track=track, now_utc=_utcnow(), deadline_monotonic=poll_deadline,
             )
@@ -1788,7 +2217,13 @@ def _run_journaled_opendata_track_if_due(
             _use_availability_probe=_use_availability_probe,
         )
         committed = _commit_opendata_result_and_wake(conn, result)
-        return {**committed, "committed_held_wake": replay} if replay is not None else committed
+        if result.get("status") == "native_temperature_optional_turn":
+            return {**committed, "committed_held_wake": replay}
+        try:
+            native = _drain_native_temperature_source(conn, now_utc=_utcnow(), deadline_monotonic=poll_deadline)
+        except Exception as exc:  # Optional source debt cannot fail mandatory ingest.
+            native = {"status": "DEFERRED", "qualification_status": "UNKNOWN", "reason": str(exc)}
+        return {**committed, "committed_held_wake": replay, "native_temperature_source": native}
     except Exception:
         conn.commit()
         raise
