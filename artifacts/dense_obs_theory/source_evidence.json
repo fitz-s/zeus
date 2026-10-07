@@ -1,0 +1,522 @@
+{
+  "files": [
+    {
+      "bytes": 82537,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/per_candidate/fmi_efhk.json",
+      "sha256": "c51b4a0ba574075a32765e8aec46002d9515f15549c8741221dc89cc2939f359"
+    },
+    {
+      "bytes": 81676,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/per_candidate/fmi_efhk_at_resolver_instants.json",
+      "sha256": "be0354fd0e15801cffdae0cec6ad3a5c811a601326acca1035e9ab3074c02040"
+    },
+    {
+      "bytes": 1170,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/per_candidate/_instant_offset_vs_metar.json",
+      "sha256": "d2d031b7b20f46a734a44302f2e70c57774779dc63d12b9c794d0260f0e45e1c"
+    },
+    {
+      "bytes": 4576,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/per_candidate/_truth_eras.json",
+      "sha256": "f832c44bb3a13d9dfdf6079e77bd4038a2cb681eaf16214f00a808c595ed790c"
+    },
+    {
+      "bytes": 8891,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/per_candidate/world_fmi_airport_temperature_EFHK.json",
+      "sha256": "6ab69ab71d0a964b8ed5e7434ad421568d8a4d01d6f3a61dbeddabe3f6d8b38e"
+    },
+    {
+      "bytes": 42375,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/per_candidate/awc_metar_EFHK.json",
+      "sha256": "5ada526060c8f58d8427f3837d03564eb1d15a9edb9b237d4435a6fd4de6e77e"
+    },
+    {
+      "bytes": 98488,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/raw/fmi_efhk.csv.gz",
+      "sha256": "a251c2f5a631d4effa0098eea2a979c54ad7d88db2a6d643069ff7f4e7f0f380"
+    },
+    {
+      "bytes": 8641,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/dae_common.py",
+      "sha256": "b9d3c06c4b4657842870483dee9949a10730edcde2b5d2111d5a045321a2a9b1"
+    },
+    {
+      "bytes": 2482,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/fetch_fmi.py",
+      "sha256": "d896e02c9897147f7f617fe4687a8fe8bf604ffa8475fc57168d90dcacf88458"
+    },
+    {
+      "bytes": 2525,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/subsample_at_resolver_instants.py",
+      "sha256": "ebfde850493d7241a90e449d02c8d0d726ee54bb9cb7c2ff33ce62a1b0738514"
+    },
+    {
+      "bytes": 3346,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/instant_offset_diagnostic.py",
+      "sha256": "e2e0fa5a07839a5e384fe82fb14b9ff3aff8dfa856b132fb4b75e612eb1a9f92"
+    },
+    {
+      "bytes": 1778,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/truth_eras.py",
+      "sha256": "6b74e48c341537f9da896eae524b59b26fe326345980d945822f8c42f66f508d"
+    },
+    {
+      "bytes": 19585,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/SUMMARY.md",
+      "sha256": "4558eb3f53a3170f0a433b8dd9831d7f4f4d2105e1e7177dc19a088b53679205"
+    },
+    {
+      "bytes": 7540,
+      "matches_pinned_blob": true,
+      "path": "src/data/fmi_airport_temperature.py",
+      "sha256": "b270565e90bbf56c9d132de702b6f61d7eb2a02988f7af52e6c18e018352f018"
+    },
+    {
+      "bytes": 330595,
+      "matches_pinned_blob": true,
+      "path": "artifacts/fast_obs_audit/source_identity_pairs.json",
+      "sha256": "ca9da1ced745d6f46e9cee1bf16176f9e83fe91fce47ee948c95fbb83f0f4ef4"
+    }
+  ],
+  "fmi_loader_contract": {
+    "identity_lines": "15-23,46,75-99,111-113",
+    "path": "src/data/fmi_airport_temperature.py",
+    "query_lines": "167-174",
+    "receipt_lines": "120-132,157-178",
+    "unit_check_lines": "57-64",
+    "unverified": "The code and inspected metadata checks do not establish a one-minute averaging kernel, the historical averaging convention, shared sensor routing, or the140m distance claim. AIP can establish sensor locations separately, not identity of the selected stream.",
+    "verified": "Loader requests parameter temperature (not a code-level t2m token), degC, fmisid100968, and a ten-minute query grid; metadata parser checks parameter identity and unit. Receipt is local acquisition after response; provider_published_at_ms is null."
+  },
+  "limits": "These observations refute using dense extrema as settlement hard bounds. They do not establish calibrated dense-channel model parameters, future expected-log-score improvement, absence of lookahead in a new backtest, or a production ship gate.",
+  "percentages": {
+    "all_high_above_settled": 21.468926553672315,
+    "noaa_era_high_above_settled": 13.953488372093023,
+    "note": "38/177 is about one day in 4.66; the one-in-seven description fits 6/43 only."
+  },
+  "pinned_commit": "88e0e25e98a0dac6a828f1bc90ddd7673338d5f6",
+  "raw_data_and_clocks": {
+    "historical_fmi": {
+      "columns": [
+        "ts_utc",
+        "value"
+      ],
+      "first_timestamp_utc": "2026-04-02T00:00:00+00:00",
+      "last_timestamp_utc": "2026-10-06T00:00:00+00:00",
+      "limitations": [
+        "CSV retains observation timestamps and values only; no source publication, acquisition, receipt, revision, or polling-opportunity clocks.",
+        "fetch_fmi.py:38 uses fetch-time now for historical retrieval, and dae_common.py:84-102 drops that fetched_at clock from saved raw rows. Historical receipt-time causality and latency distributions cannot be reconstructed from this file.",
+        "The177 HIGH comparisons reflect the settlement dates present in the checked-in summary, not every calendar date between the endpoints. All used FMI days show complete nominal grid coverage."
+      ],
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/raw/fmi_efhk.csv.gz",
+      "rows": 26929
+    },
+    "unverified": [
+      "User240 pairs/229 agreements/11 flips/8 near-boundary flips and0.283 SD were not located in the inspected evidence.",
+      "UserAWC median89s/bimodal modes and FMI median150s have not been independently reproduced from receipt records in this audit.",
+      "The full historical observation/report versions and first-receipt records required for causal forecasts were not supplied in these aggregate artifacts."
+    ],
+    "world_live_fmi": {
+      "high_aggregate": {
+        "dangerous": 0,
+        "dangerous_name": "over",
+        "diff_hist": {
+          "0": 8
+        },
+        "dropped_coverage": 1,
+        "eq": 8,
+        "first_live_day": "2026-09-27",
+        "metric": "high",
+        "n_days": 8,
+        "opposite": 0,
+        "opposite_name": "under",
+        "reveal_lead_min_all": {
+          "earlier": 6,
+          "later": 2,
+          "n": 8,
+          "p10": -521.3,
+          "p50": 9.3,
+          "p90": 37.0,
+          "tie": 0
+        },
+        "reveal_lead_min_nobackfill": {
+          "earlier": 6,
+          "later": 2,
+          "n": 8,
+          "p10": -521.3,
+          "p50": 9.3,
+          "p90": 37.0,
+          "tie": 0
+        }
+      },
+      "limitations": "Small live-window diagnostic with8 accepted HIGH days and1 day dropped by coverage; reveal lead against AWC is not a provider latency distribution or a calibrated forecast skill estimate.",
+      "meta": {
+        "backfill_cut_min_awc": 297.9,
+        "backfill_cut_min_candidate": 26.8,
+        "cadence_s": 600,
+        "channel": "fmi_airport_temperature",
+        "city": "Helsinki",
+        "coverage_min": 0.8,
+        "first_live_day": "2026-09-27",
+        "last_day": "2026-10-05",
+        "n_prints": 1251,
+        "rounding": "floor(v+0.5)",
+        "source": "WORLD.observation_prints (mode=ro)",
+        "station": "EFHK",
+        "tz": "Europe/Helsinki"
+      },
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/per_candidate/world_fmi_airport_temperature_EFHK.json"
+    }
+  },
+  "repository": "https://github.com/fitz-s/zeus",
+  "same_instant_evidence": {
+    "awc_diagnostic": {
+      "cohort_method": "instant_offset_diagnostic.py:18,49-70 matches raw FMI observation timestamps to AWC integers drawn from WORLD since2026-07-16; one METAR value retained per resolved observation instant.",
+      "limitations": [
+        "This3229-pair cohort is different from the user-supplied240-pair cohort.",
+        "No raw paired-record export, standard deviation, fractional-boundary counts, or per-pair receipt clocks are retained in this diagnostic summary.",
+        "WORLD query at53-54 has no ORDER BY and the dict at57 overwrites duplicate observation instants; correction/version selection is not explicit.",
+        "Observation-time reconstruction uses fetched month and a preceding-month approximation at35-41; it is not an authoritative full observation date from the data provider.",
+        "Original WORLD database not available; summary arithmetic was checked, not reconstructed against source rows."
+      ],
+      "lines": "2-14",
+      "path": "artifacts/fast_obs_audit/daily_extreme_agreement/per_candidate/_instant_offset_vs_metar.json",
+      "stored_summary": {
+        "cand_minus_metar_contract": {
+          "minus1": 156,
+          "other": 0,
+          "plus1": 184,
+          "zero": 2889
+        },
+        "exact_contract_equal": 0.8947,
+        "mean_raw_offset": -0.036,
+        "median_raw_offset": 0.0,
+        "n_pairs": 3229
+      }
+    },
+    "resolver_pairs": {
+      "candidate_minus_resolver_contract_histogram": {
+        "-1": 6,
+        "0": 37,
+        "1": 6
+      },
+      "channel": "fmi",
+      "city": "Helsinki",
+      "equal": 37,
+      "first_time_utc": "2026-09-29T15:50:00+00:00",
+      "last_time_utc": "2026-09-30T15:50:00+00:00",
+      "limitations": "Different49-pair cohort. Rows contain values, contract rounding and versions, but no per-row receipt clocks. The source-pair construction script was not independently audited here.",
+      "n_pairs": 49,
+      "path": "artifacts/fast_obs_audit/source_identity_pairs.json"
+    }
+  },
+  "scheduled_grid_control": {
+    "filter": "FMI timestamps with minute in {20,50} and second=0, followed by local-day extreme; no join to actual accepted resolver reports.",
+    "limitations": [
+      "This is a scheduled-minute control, not proof of an identical settlement row set or sensor.",
+      "It does not independently establish report completeness, correction handling, historical WU-product row membership, or arbitrary SPECI inclusion.",
+      "The script prose at lines6-7 claiming all residual disagreement must be instrument/rounding/identity is stronger than the implemented control establishes."
+    ],
+    "lines": "13-16,23-38",
+    "path": "artifacts/fast_obs_audit/daily_extreme_agreement/subsample_at_resolver_instants.py"
+  },
+  "schema_version": 1,
+  "scope": "Read-only local empirical audit of checked-in artifacts; not a reproduction against original operational databases or an out-of-sample forecasting experiment.",
+  "september_10_example": {
+    "conclusion": "Both full-grid and scheduled-grid FMI maxima round to18; this day demonstrates that FMI cannot provide a settlement hard floor but does not isolate cadence as the sole source of the mismatch. The cited13:10 peak is UTC,16:10 Europe/Helsinki.",
+    "date": "2026-09-10",
+    "raw_max_c": 18.0,
+    "raw_max_instants": [
+      {
+        "local": "2026-09-10T16:10:00+03:00",
+        "utc": "2026-09-10T13:10:00+00:00"
+      }
+    ],
+    "scheduled_grid_max_c": 17.6,
+    "scheduled_grid_max_instants": [
+      {
+        "local": "2026-09-10T13:50:00+03:00",
+        "utc": "2026-09-10T10:50:00+00:00"
+      }
+    ],
+    "settled_high_in_checked_in_summary": 17
+  },
+  "settlement_era_evidence": {
+    "caveat": "truth_eras.py:24-28 counts settlement outcome rows without filtering metric. Its NOAA count of 86 is not 86 distinct days; the metric-specific summaries have 43 HIGH and 43 LOW days. The original settlement_outcomes table/provenance documents were not available to independently verify final truth or era attribution.",
+    "helsinki": {
+      "by_source": {
+        "noaa_wrh_timeseries_v1": [
+          "2026-08-24",
+          "2026-10-05",
+          86
+        ],
+        "none": [
+          "2026-07-02",
+          "2026-07-02",
+          1
+        ],
+        "wu_icao_history": [
+          "2026-05-03",
+          "2026-08-23",
+          106
+        ],
+        "wu_icao_history_v1": [
+          "2026-04-03",
+          "2026-05-02",
+          30
+        ]
+      },
+      "wrh_start": "2026-08-24"
+    },
+    "source_path": "artifacts/fast_obs_audit/daily_extreme_agreement/per_candidate/_truth_eras.json"
+  },
+  "verified_arithmetic": {
+    "fmi_efhk": {
+      "high": {
+        "all": {
+          "above_settled": 38,
+          "below_settled": 2,
+          "candidate_minus_settlement_histogram": {
+            "-1": 2,
+            "0": 137,
+            "1": 37,
+            "2": 1
+          },
+          "dropped_days": 0,
+          "equal": 137,
+          "first_date": "2026-04-03",
+          "last_date": "2026-10-05",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 177,
+          "used_days": 177
+        },
+        "before_wrh_start": {
+          "above_settled": 32,
+          "below_settled": 1,
+          "candidate_minus_settlement_histogram": {
+            "-1": 1,
+            "0": 101,
+            "1": 31,
+            "2": 1
+          },
+          "dropped_days": 0,
+          "equal": 101,
+          "first_date": "2026-04-03",
+          "last_date": "2026-08-23",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 134,
+          "used_days": 134
+        },
+        "from_wrh_start": {
+          "above_settled": 6,
+          "below_settled": 1,
+          "candidate_minus_settlement_histogram": {
+            "-1": 1,
+            "0": 36,
+            "1": 6
+          },
+          "dropped_days": 0,
+          "equal": 36,
+          "first_date": "2026-08-24",
+          "last_date": "2026-10-05",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 43,
+          "used_days": 43
+        }
+      },
+      "high_above_settled_from_wrh_start": [
+        {
+          "candidate_contract": 21,
+          "candidate_raw_c": 20.6,
+          "date": "2026-08-28",
+          "difference": 1,
+          "settled": 20
+        },
+        {
+          "candidate_contract": 20,
+          "candidate_raw_c": 19.8,
+          "date": "2026-08-29",
+          "difference": 1,
+          "settled": 19
+        },
+        {
+          "candidate_contract": 19,
+          "candidate_raw_c": 18.5,
+          "date": "2026-09-04",
+          "difference": 1,
+          "settled": 18
+        },
+        {
+          "candidate_contract": 16,
+          "candidate_raw_c": 15.7,
+          "date": "2026-09-06",
+          "difference": 1,
+          "settled": 15
+        },
+        {
+          "candidate_contract": 18,
+          "candidate_raw_c": 18.0,
+          "date": "2026-09-10",
+          "difference": 1,
+          "settled": 17
+        },
+        {
+          "candidate_contract": 18,
+          "candidate_raw_c": 17.8,
+          "date": "2026-09-11",
+          "difference": 1,
+          "settled": 17
+        }
+      ],
+      "low": {
+        "all": {
+          "above_settled": 0,
+          "below_settled": 5,
+          "candidate_minus_settlement_histogram": {
+            "-1": 5,
+            "0": 41
+          },
+          "dropped_days": 0,
+          "equal": 41,
+          "first_date": "2026-08-21",
+          "last_date": "2026-10-05",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 46,
+          "used_days": 46
+        },
+        "from_wrh_start": {
+          "above_settled": 0,
+          "below_settled": 5,
+          "candidate_minus_settlement_histogram": {
+            "-1": 5,
+            "0": 38
+          },
+          "dropped_days": 0,
+          "equal": 38,
+          "first_date": "2026-08-24",
+          "last_date": "2026-10-05",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 43,
+          "used_days": 43
+        }
+      }
+    },
+    "fmi_efhk_at_resolver_instants": {
+      "high": {
+        "all": {
+          "above_settled": 16,
+          "below_settled": 13,
+          "candidate_minus_settlement_histogram": {
+            "-1": 13,
+            "0": 148,
+            "1": 16
+          },
+          "dropped_days": 0,
+          "equal": 148,
+          "first_date": "2026-04-03",
+          "last_date": "2026-10-05",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 177,
+          "used_days": 177
+        },
+        "before_wrh_start": {
+          "above_settled": 13,
+          "below_settled": 12,
+          "candidate_minus_settlement_histogram": {
+            "-1": 12,
+            "0": 109,
+            "1": 13
+          },
+          "dropped_days": 0,
+          "equal": 109,
+          "first_date": "2026-04-03",
+          "last_date": "2026-08-23",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 134,
+          "used_days": 134
+        },
+        "from_wrh_start": {
+          "above_settled": 3,
+          "below_settled": 1,
+          "candidate_minus_settlement_histogram": {
+            "-1": 1,
+            "0": 39,
+            "1": 3
+          },
+          "dropped_days": 0,
+          "equal": 39,
+          "first_date": "2026-08-24",
+          "last_date": "2026-10-05",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 43,
+          "used_days": 43
+        }
+      },
+      "high_above_settled_from_wrh_start": [
+        {
+          "candidate_contract": 20,
+          "candidate_raw_c": 19.5,
+          "date": "2026-08-29",
+          "difference": 1,
+          "settled": 19
+        },
+        {
+          "candidate_contract": 16,
+          "candidate_raw_c": 15.7,
+          "date": "2026-09-06",
+          "difference": 1,
+          "settled": 15
+        },
+        {
+          "candidate_contract": 18,
+          "candidate_raw_c": 17.6,
+          "date": "2026-09-10",
+          "difference": 1,
+          "settled": 17
+        }
+      ],
+      "low": {
+        "all": {
+          "above_settled": 0,
+          "below_settled": 0,
+          "candidate_minus_settlement_histogram": {
+            "0": 46
+          },
+          "dropped_days": 0,
+          "equal": 46,
+          "first_date": "2026-08-21",
+          "last_date": "2026-10-05",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 46,
+          "used_days": 46
+        },
+        "from_wrh_start": {
+          "above_settled": 0,
+          "below_settled": 0,
+          "candidate_minus_settlement_histogram": {
+            "0": 43
+          },
+          "dropped_days": 0,
+          "equal": 43,
+          "first_date": "2026-08-24",
+          "last_date": "2026-10-05",
+          "minimum_observation_grid_coverage": 1.0,
+          "rows": 43,
+          "used_days": 43
+        }
+      }
+    }
+  }
+}

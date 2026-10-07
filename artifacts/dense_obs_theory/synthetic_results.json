@@ -1,0 +1,79 @@
+{
+  "elapsed_seconds": 2.911345898000036,
+  "environment": {
+    "numpy": "2.3.5",
+    "python": "3.12.14",
+    "scipy": "1.17.0"
+  },
+  "errors": 0,
+  "failures": 0,
+  "passed": true,
+  "results": {
+    "deliberate_bias_misspecification": {
+      "known_correct_bias_log_loss": 2.2336314359536948e-10,
+      "meaning": "Counterexample: adding data is not guaranteed to help a misspecified likelihood.",
+      "metar_only_log_loss": 0.6931471805599453,
+      "wrong_dense_model_log_loss": 11.111111111222796
+    },
+    "exact_information_enumeration": {
+      "conditional_mutual_information_nats": 0.36806420716849697,
+      "dense_expected_log_loss": 0.3250829733914483,
+      "meaning": "Exact finite enumeration under the correct declared toy model.",
+      "metar_only_expected_log_loss": 0.6931471805599453
+    },
+    "finite_hmm_persistence_recovery": {
+      "fitted_tau": 11.365910836804591,
+      "meaning": "Censored/missing-observation marginal MLE for a finite reset HMM with anchored sensor parameters; not OU parameter recovery.",
+      "optimizer_converged": true,
+      "seed": 172119,
+      "training_instants": 2200,
+      "true_tau": 12.0
+    },
+    "heldout_finite_markov_paths": {
+      "days": 800,
+      "dense_mean_log_loss": 0.1465083037797226,
+      "improvement_approx_95pct_interval": [
+        1.0717616486788004,
+        1.1851242698402298
+      ],
+      "meaning": "Oracle parameters are fixed independently of heldout days; not an A/B test on Zeus or real stations.",
+      "metar_only_mean_log_loss": 1.2749512630392377,
+      "paired_mean_improvement_nats": 1.128442959259515,
+      "paired_standard_error": 0.028919036010568753,
+      "q_ge_0_99_wrong_and_total": {
+        "dense": [
+          0,
+          138
+        ],
+        "metar_only": [
+          0,
+          0
+        ]
+      },
+      "randomized_pit_means": {
+        "dense": 0.4934875092917311,
+        "metar_only": 0.5176375864042668
+      },
+      "seed": 701926
+    },
+    "interval_pair_parameter_recovery": {
+      "fitted": {
+        "bias_c": 0.18046329036980438,
+        "dense_sigma_c": 0.16368425307847756,
+        "latent_sigma_c": 0.9028570519984103
+      },
+      "meaning": "Joint iid paired-data MLE; does not validate temporal parameters or real sensor identity.",
+      "optimizer_converged": true,
+      "seed": 824105,
+      "training_pairs": 6000,
+      "truth": {
+        "bias_c": 0.18,
+        "dense_sigma_c": 0.16,
+        "latent_sigma_c": 0.9
+      }
+    }
+  },
+  "schema": "dense_obs_theory.synthetic.v1",
+  "scope": "Exact finite-state reference and synthetic experiments only. No live calibration or continuous-process certification.",
+  "tests_run": 28
+}
