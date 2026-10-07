@@ -1,7 +1,7 @@
 # Created: 2026-09-29
 # Last reused/audited: 2026-10-07
 # Lifecycle: created=2026-09-29; last_reviewed=2026-10-07; last_reused=2026-10-07
-# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md native sample boolean boundary; operator re-admission of Moscow UUWW 2026-10-06 (artifacts/fast_obs_audit/ROUND4.md); docs/reference/fast_obs_city_algorithm_matrix.md §5 G3a (KNMI key resolver)
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md native sample boolean boundary; operator re-admission of Moscow UUWW 2026-10-06 (artifacts/fast_obs_audit/ROUND4.md); docs/reference/fast_obs_city_algorithm_matrix.md §5 G3a (KNMI key resolver); G5 page routes for every NOAA city (same doc §5, artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json)
 # Purpose: Pin station adapter parsing and registry source roles, including fast-admission proof law.
 # Reuse: Run when physical_current_sources, station_temperature_adapters, or the registry JSON changes.
 # Authority: REQ-20260929-223929-bf51a2; recorded provider responses, 2026-09-30 UTC.
@@ -498,12 +498,20 @@ def test_every_configured_promotion_matches_committed_pair_evidence():
     for row in json.loads(REGISTRY_PATH.read_text())['sources']:
         proof=row['value_identity_proof']
         if row['provider'] == 'noaa_wrh':
-            import gzip
-            native_rows=json.loads(gzip.decompress((ROOT/'us_resolver_precision.json.gz').read_bytes()))
-            n=sum(r['station']==row['station_id'] for r in native_rows)
-            assert proof['n_pairs']==proof['n_exact']==n
-            assert row['role']=='canonical_resolver' and row['unit']=='F'
+            assert row['role']=='canonical_resolver'
             assert row['source_channel']=='noaa_wrh_'+row['station_id'].lower()
+            if row['unit']=='F':
+                import gzip
+                native_rows=json.loads(gzip.decompress((ROOT/'us_resolver_precision.json.gz').read_bytes()))
+                n=sum(r['station']==row['station_id'] for r in native_rows)
+                assert proof['n_pairs']==proof['n_exact']==n
+            else:
+                # degC: the daily page product against VERIFIED settlements (G5 artifact).
+                daily=json.loads((REGISTRY_PATH.parents[1]/proof['report_path']).read_text())
+                actual,=[c for c in daily['cities'] if c['station']==row['station_id']]
+                assert (proof['n_pairs'],proof['n_exact'])==(actual['verified']['n_pairs'],actual['verified']['n_exact'])
+                assert proof['chain_bin']['n_pairs']==actual['chain_bin']['n_pairs']
+                assert proof['chain_bin']['n_exact']==actual['chain_bin']['n_exact']
             continue  # Existing native resolver, not an alternate-channel promotion.
         evidence_path=proof.get('report_path')
         evidence=json.loads((REGISTRY_PATH.parents[1]/evidence_path).read_text()) if evidence_path else report
@@ -683,7 +691,7 @@ def test_wrh_batch_shares_acquisition_across_registered_us_stations(monkeypatch)
     import httpx
     from src.data import station_temperature_adapters as adapters
     from src.data import noaa_wrh_timeseries as wrh
-    routes = [r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh"]
+    routes = [r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh" and r.unit == "F"]
     calls = []
     def handler(request):
         calls.append({"params": dict(request.url.params)})
@@ -715,6 +723,265 @@ def test_wrh_rate_limit_is_deferred_without_secret_in_error(monkeypatch):
         assert "private-test-value" not in str(exc.value)
     assert len(calls)==1
     adapters._WRH_BATCH_CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
+# G5: the NOAA settlement page polled intraday for every NOAA city
+# ---------------------------------------------------------------------------
+
+_WRH_METRIC_FIXTURE = ROOT / "wrh_metric_batch_eddm_rjtt.json"
+_WRH_METRIC_RECEIPT = datetime(2026, 10, 7, 11, 38, 50, tzinfo=timezone.utc)
+
+
+def _noaa_cities(unit):
+    from src.config import cities_by_name
+    return {c.wu_station: c for c in cities_by_name.values()
+            if c.settlement_source_type == "noaa" and c.settlement_unit == unit}
+
+
+def test_every_noaa_city_has_one_page_route_in_its_contract_view():
+    from src.data.physical_current_sources import physical_current_sources_for_city
+    routes = [r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh"]
+    for unit in ("C", "F"):
+        cities = _noaa_cities(unit)
+        mine = {r.station_id: r for r in routes if r.unit == unit}
+        assert set(mine) == set(cities) and len(mine) == len([r for r in routes if r.unit == unit])
+        for station, city in cities.items():
+            route = mine[station]
+            assert route.settlement_authorized and route.current_path == "resolver"
+            assert route.identity["resolver_view"] == city.settlement_page_view
+            assert route.minimum_poll_seconds == 60
+            assert route in physical_current_sources_for_city(city)
+    assert len(_noaa_cities("C")) == 37 and len(_noaa_cities("F")) == 11
+
+
+def test_resolver_route_does_not_de_admit_a_measured_fast_route():
+    """The page route is the 'resolver' comparator, not an unmeasured new rival."""
+    from src.data.physical_current_sources import SourceRole
+    routes = {(r.provider, r.station_id): r for r in load_physical_current_sources()[0]}
+    for provider, station in [("jma_amedas", "RJTT"), ("eccc_swob", "CYYZ"), ("metaviatelecom_metar", "UUWW"),
+                              ("imd_olbs_metar", "VILK"), ("mgm_metar", "LTAC"), ("mgm_metar", "LTFM")]:
+        assert routes[(provider, station)].role is SourceRole.FAST_ADMISSION
+        assert ("noaa_wrh", station) in routes
+
+
+def test_resolver_route_still_holds_a_fast_route_to_its_measured_resolver_lag(tmp_path, caplog):
+    """Mapping the page route to 'resolver' keeps the speed law: a slower lead is omitted."""
+    data = json.loads(REGISTRY_PATH.read_text())
+    row = next(r for r in data["sources"] if r["provider"] == "jma_amedas")
+    lead = row["latency_evidence"]["first_proven_lead"]
+    resolver = next(c for c in lead["comparators"] if c["channel"] == "resolver")
+    resolver["interval"]["lag_lower_ms"] = lead["candidate"]["lag_upper_ms"] - 1
+    path = tmp_path / "slower.json"
+    path.write_text(json.dumps(data))
+    with caplog.at_level("ERROR"):
+        routes = load_physical_current_sources(path)[0]
+    assert ("jma_amedas", "RJTT") not in {(r.provider, r.station_id) for r in routes}
+    assert ("noaa_wrh", "RJTT") in {(r.provider, r.station_id) for r in routes}
+    assert "LEAD_NOT_FASTER:resolver" in caplog.text
+
+
+@pytest.mark.parametrize("change,reason", [
+    ({"resolver_view": "hourly_only"}, "view"), ({"unit": "K"}, "unit"),
+    ({"provider_station": "RJAA"}, "native id"), ({"source_channel": "noaa_wrh_temperature"}, "channel"),
+])
+def test_metric_page_route_rejects_a_malformed_shape(tmp_path, change, reason):
+    data = json.loads(REGISTRY_PATH.read_text())
+    row = next(r for r in data["sources"] if r["provider"] == "noaa_wrh" and r["station_id"] == "RJTT")
+    for key, value in change.items():
+        (row["identity"] if key in {"resolver_view", "provider_station"} else row)[key] = value
+    path = tmp_path / f"bad_{reason.replace(' ', '_')}.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="PHYSICAL_CURRENT_ADAPTER_INVALID"):
+        load_physical_current_sources(path)
+
+
+def test_page_route_without_counted_proof_cannot_claim_the_resolver_role(tmp_path):
+    data = json.loads(REGISTRY_PATH.read_text())
+    row = next(r for r in data["sources"] if r["provider"] == "noaa_wrh" and r["station_id"] == "EDDM")
+    row["value_identity_proof"]["n_exact"] -= 1
+    path = tmp_path / "unproven.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="CANONICAL_ROLE_INVALID"):
+        load_physical_current_sources(path)
+
+
+def _batch_client(calls, *, status=None):
+    import httpx
+
+    def handler(request):
+        params = dict(request.url.params)
+        calls.append(params)
+        if status is not None:
+            return httpx.Response(status, json={"SUMMARY": {"RESPONSE_MESSAGE": "Invalid request per token rules"}})
+        unit = "F" if params.get("units", "").startswith("temp|F") else "C"
+        return httpx.Response(200, json={"UNITS": {"air_temp": {"C": "Celsius", "F": "Fahrenheit"}[unit]},
+                                         "STATION": []})
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_metric_batch_is_one_request_per_minute_separate_from_fahrenheit(monkeypatch):
+    from src.data import station_temperature_adapters as adapters
+    from src.data import noaa_wrh_timeseries as wrh
+    slots = []
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "test-token-not-persisted")
+    monkeypatch.setattr(wrh, "_wait_for_request_slot", lambda: slots.append(1))
+    routes = [r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh"]
+    calls = []
+    adapters._WRH_BATCH_CACHE.clear()
+    try:
+        client = _batch_client(calls)
+        for route in routes:
+            adapters._fetch_wrh_batch(route, client)
+        for route in routes:  # The next round inside the minute is served from the cache.
+            adapters._fetch_wrh_batch(route, client)
+        assert len(calls) == 2 and len(slots) == 2
+        metric, = [c for c in calls if "units" not in c]
+        imperial, = [c for c in calls if "units" in c]
+        assert set(metric["STID"].split(",")) == set(_noaa_cities("C"))
+        assert set(imperial["STID"].split(",")) == set(_noaa_cities("F"))
+        assert imperial["units"] == "temp|F,speed|kts,english"
+        assert metric["recent"] == imperial["recent"] == "180"
+        assert {key for key, (_, _, _, _) in adapters._WRH_BATCH_CACHE.items()} == {
+            ("C", tuple(sorted(_noaa_cities("C"))), id(client)),
+            ("F", tuple(sorted(_noaa_cities("F"))), id(client))}
+    finally:
+        adapters._WRH_BATCH_CACHE.clear()
+
+
+def test_refused_metric_batch_is_typed_and_leaves_the_fahrenheit_batch_serving(monkeypatch):
+    from src.data import station_temperature_adapters as adapters
+    from src.data import noaa_wrh_timeseries as wrh
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "private-test-value")
+    monkeypatch.setattr(wrh, "_wait_for_request_slot", lambda: None)
+    routes = load_physical_current_sources()[0]
+    metric = next(r for r in routes if r.provider == "noaa_wrh" and r.unit == "C")
+    imperial = next(r for r in routes if r.provider == "noaa_wrh" and r.unit == "F")
+    refused, served = [], []
+    adapters._WRH_BATCH_CACHE.clear()
+    try:
+        refusing, serving = _batch_client(refused, status=403), _batch_client(served)
+        for _ in range(2):
+            with pytest.raises(ValueError, match="WRH_CURRENT_TRANSPORT_DEFERRED:WrhTokenRefused") as exc:
+                adapters._fetch_wrh_batch(metric, refusing)
+            assert "private-test-value" not in str(exc.value)
+        assert len(refused) == 1  # Cached as an error for the retry floor, never re-requested.
+        data, _ = adapters._fetch_wrh_batch(imperial, serving)
+        assert data["UNITS"]["air_temp"] == "Fahrenheit" and len(served) == 1
+        # And the reverse: a refused F batch leaves the C batch serving.
+        adapters._WRH_BATCH_CACHE.clear(); refused.clear(); served.clear()
+        with pytest.raises(ValueError, match="WrhTokenRefused"):
+            adapters._fetch_wrh_batch(imperial, refusing)
+        data, _ = adapters._fetch_wrh_batch(metric, serving)
+        assert data["UNITS"]["air_temp"] == "Celsius" and len(served) == 1
+    finally:
+        adapters._WRH_BATCH_CACHE.clear()
+
+
+def test_metric_view_parses_every_row_without_a_units_param():
+    """The degC page shows every row: non-routine rows count, no hourly filter."""
+    from src.data.noaa_wrh_timeseries import rows_from_payload
+    payload = json.loads(_WRH_METRIC_FIXTURE.read_text())
+    routes = {r.station_id: r for r in load_physical_current_sources()[0]
+              if r.provider == "noaa_wrh" and r.unit == "C"}
+    for station in ("EDDM", "RJTT"):
+        stations = [s for s in payload["STATION"] if s["STID"] == station]
+        body = json.dumps({"UNITS": payload["UNITS"], "STATION": stations}).encode()
+        rows = rows_from_payload({"STATION": stations}, station)
+        assert rows and not any(row.is_official_report for row in rows)  # all-view rows only
+        samples = parse_station_payload(routes[station], body, received_at=_WRH_METRIC_RECEIPT)
+        assert [(s.observed_at, s.value_native) for s in samples] == [(r.utc, r.air_temp) for r in rows]
+        assert all(s.unit == "C" for s in samples)
+    hourly = replace(routes["EDDM"], identity={**routes["EDDM"].identity, "resolver_view": "hourly"})
+    eddm = [s for s in payload["STATION"] if s["STID"] == "EDDM"]
+    body = json.dumps({"UNITS": payload["UNITS"], "STATION": eddm}).encode()
+    assert parse_station_payload(hourly, body, received_at=_WRH_METRIC_RECEIPT) == ()
+    with pytest.raises(ValueError, match="STATION_UNIT_OR_QC_INVALID"):
+        parse_station_payload(routes["EDDM"], body.replace(b'"Celsius"', b'"Fahrenheit"'),
+                              received_at=_WRH_METRIC_RECEIPT)
+
+
+def test_recorded_metric_batch_reaches_the_day0_settlement_reduction(monkeypatch):
+    """Fixture payload for two non-US stations -> adapter -> prints ledger -> Day0 readers."""
+    import httpx
+    from zoneinfo import ZoneInfo
+    from src.config import cities_by_name
+    from src.data import station_temperature_adapters as adapters
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+
+    body = _WRH_METRIC_FIXTURE.read_bytes()
+    calls = []
+
+    def handler(request):
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, content=body)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "test-token-not-persisted")
+    monkeypatch.setattr(wrh, "_wait_for_request_slot", lambda: None)
+    adapters._WRH_BATCH_CACHE.clear()
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    conn = sqlite3.connect(":memory:"); conn.row_factory = sqlite3.Row; ensure_table(conn)
+    routes = {r.station_id: r for r in load_physical_current_sources()[0]
+              if r.provider == "noaa_wrh" and r.unit == "C"}
+    expected = {"Munich": ("EDDM", 23.0, 18.0), "Tokyo": ("RJTT", 21.0, 20.0)}
+    try:
+        for city_name, (station, _, _) in expected.items():
+            route = routes[station]
+            prints = adapters.fetch_station_temperature(
+                route, start=_WRH_METRIC_RECEIPT - timedelta(hours=3), end=_WRH_METRIC_RECEIPT, client=client)
+            assert prints
+            for sample in prints:
+                assert append_print(conn, city=city_name, station_id=station, source_channel=route.source_channel,
+                                    publish_ts_utc=sample.observed_at.isoformat(), value_native=sample.value_native,
+                                    unit="C", fetched_at_utc=sample.fetched_at.isoformat(),
+                                    raw_report=sample.raw_report)
+    finally:
+        adapters._WRH_BATCH_CACHE.clear()
+    assert len(calls) == 1 and "units" not in calls[0]
+    decision = datetime.now(timezone.utc)
+    for city_name, (station, high, low) in expected.items():
+        city = cities_by_name[city_name]
+        day = _WRH_METRIC_RECEIPT.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+        state = read_day0_current_temperature_state(conn=conn, city=city, target_date=day, decision_time=decision)
+        assert state is not None and state.source == f"noaa_wrh_{station.lower()}"
+        for metric, value in (("high", high), ("low", low)):
+            fact = _latest_authorized_day0_fact(conn, city=city_name, target_date=day, temperature_metric=metric,
+                                               decision_time=decision, require_settlement_channel=True)
+            assert fact is not None and fact["observation_source"] == f"noaa_wrh_{station.lower()}"
+            assert fact["observed_extreme_native"] == value
+    conn.close()
+
+
+def test_daily_product_row_and_intraday_prints_share_one_channel_without_double_counting():
+    """daily_tick's prints for a clock already polled intraday are a repeat, not a second sample."""
+    from src.data.daily_obs_append import _append_noaa_wrh_prints
+    from src.data.noaa_wrh_timeseries import rows_from_payload
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    payload = json.loads(_WRH_METRIC_FIXTURE.read_text())
+    stations = [s for s in payload["STATION"] if s["STID"] == "EDDM"]
+    rows = rows_from_payload({"STATION": stations}, "EDDM")
+    route = next(r for r in load_physical_current_sources()[0]
+                 if r.provider == "noaa_wrh" and r.station_id == "EDDM")
+    conn = sqlite3.connect(":memory:"); conn.row_factory = sqlite3.Row; ensure_table(conn)
+    body = json.dumps({"UNITS": payload["UNITS"], "STATION": stations}).encode()
+    for sample in parse_station_payload(route, body, received_at=_WRH_METRIC_RECEIPT):
+        append_print(conn, city="Munich", station_id="EDDM", source_channel=route.source_channel,
+                     publish_ts_utc=sample.observed_at.isoformat(), value_native=sample.value_native,
+                     unit="C", fetched_at_utc=sample.fetched_at.isoformat(), raw_report=sample.raw_report)
+    intraday = conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0]
+    later = _WRH_METRIC_RECEIPT + timedelta(hours=14)
+    written = _append_noaa_wrh_prints(conn, city_name="Munich", station="EDDM", unit="C", rows=rows,
+                                      target_date_local=rows[0].utc.astimezone(
+                                          __import__("zoneinfo").ZoneInfo("Europe/Berlin")).date(),
+                                      view="all", fetch_utc=later)
+    assert intraday == len(rows) and written == 0  # Same clock and value: suppressed.
+    fact = _latest_authorized_day0_fact(conn, city="Munich", target_date="2026-10-07", temperature_metric="high",
+                                       decision_time=later, require_settlement_channel=True)
+    assert fact["sample_count"] == len(rows) and fact["observed_extreme_native"] == 23.0
+    conn.close()
 
 
 @pytest.mark.parametrize("city_name,provider,value,unit", [
@@ -902,7 +1169,9 @@ def test_every_configured_role_satisfies_its_law():
     data = json.loads(REGISTRY_PATH.read_text())
     by_station = {}
     for row in data["sources"]:
-        by_station.setdefault(row["station_id"], set()).add(row["provider"])
+        # A canonical-resolver route is the "resolver" comparator itself.
+        path = "resolver" if row["role"] == "canonical_resolver" else row["provider"]
+        by_station.setdefault(row["station_id"], set()).add(path)
     loaded = {(r.provider, r.station_id): r.role for r in load_physical_current_sources()[0]}
     for row in data["sources"]:
         assert loaded[(row["provider"], row["station_id"])] is SourceRole(row["role"])
