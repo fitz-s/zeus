@@ -411,6 +411,63 @@ def persist_native_temperature_source_run(conn: sqlite3.Connection, *, cache_dir
         len(actual), missing, errors[0] if errors else None)
 
 
+def _read_native_extrema_static_scope(*, paths: OpenDataPaths, run: datetime,
+        grid_sha256: str, cities: list[dict], metric: str, role: str,
+        scope_start: datetime, scope_end: datetime, source_run_id: str,
+        first_possession: datetime, decision_time: datetime, origin_mode: str) -> NativeTemperatureScope:
+    """Static support for an original statistic, without inventing instant 2t.
+
+    SCOPE is the original extrema run/grid/role. DRAIN uses normal mandatory
+    static capture; RESET re-reads immutable LSM/phi/index originals. No source
+    run or receipt is created, and no station-ground equivalence is asserted.
+    """
+    from scripts import extract_open_ens_localday as decoder
+    directory = _download_output_path(run_date=run.date(), run_hour=run.hour,
+        param=decoder.TRACKS["mx2t6_high" if metric == "high" else "mn2t6_low"].open_data_param,
+        raw_root=paths.raw_root).parent
+    candidates = [directory / f".{track}_{run:%Y%m%d}_{run:%H}z_lsm.grib2" for track in TRACKS]
+    mask = next((p for p in candidates if p.exists() and p.with_suffix(".z.grib2").exists()), candidates[0])
+    phi_path = mask.with_suffix(".z.grib2")
+    own_index = mask.with_suffix(".index.body")
+    land = decoder.read_native_static_dependency(path=mask, proof_path=mask.with_suffix(".proof.json"),
+        param="lsm", run=run, grid_sha256=grid_sha256,
+        index_path=own_index if own_index.exists() else phi_path.with_suffix(".index.body"),
+        index_proof_path=mask.with_suffix(".proof.json") if own_index.exists() else phi_path.with_suffix(".proof.json"))
+    phi = decoder.read_native_static_dependency(path=phi_path, proof_path=phi_path.with_suffix(".proof.json"),
+        param="z", run=run, grid_sha256=grid_sha256)
+    points = decoder._select_land_grid_points(land["fields"], cities, land["values"].__getitem__)
+    for point in points.values():
+        for cell in point["four_neighbors"]:
+            value = float(phi["values"][cell["flat_index"]])
+            if not math.isfinite(value) or value == phi["missing_value"]:
+                raise ValueError("MEASUREMENT_NATIVE_STATIC_PHI_NONFINITE")
+            cell["raw_phi_m2_s2"] = value
+        point["selected_raw_phi_m2_s2"] = float(phi["values"][point["selected_flat_index"]])
+        point["surface_class"] = "PURE_LAND" if point["selected_land_fraction"] == 1 else "MIXED_LAND_WATER"
+    dependency = max(first_possession, *(datetime.fromisoformat(dep["available_at"]) for dep in (land, phi)))
+    track = decoder.TRACKS["mx2t6_high" if metric == "high" else "mn2t6_low"]
+    witness = {"quantity": {"param_id": track.paramId, "units": "K", "height_agl_m": 2,
+                    "step_type": track.step_type},
+        "dependency_kind": "NATIVE_STATISTIC_INTERVALS_WITH_STATIC_SUPPORT",
+        "run_time_utc": run.isoformat(), "scope_role": role, "temperature_metric": metric,
+        "origin_mode": origin_mode, "source_run_id": source_run_id,
+        "scope_start_utc": scope_start.isoformat(), "scope_end_utc": scope_end.isoformat(),
+        "grid_sha256": grid_sha256, "selected_cities": points,
+        "temperature_messages": [], "boundary_supports": [],
+        "static_dependencies": [{k: v for k, v in dep.items() if k not in {"values", "fields"}}
+                                for dep in (land, phi)],
+        "sensor_agl_status": "UNKNOWN", "station_ground_datum_status": "UNKNOWN",
+        "precision_status": "UNKNOWN", "representativeness_status": "UNKNOWN",
+        "station_equivalence_status": "UNKNOWN", "source_issued_at": None}
+    return NativeTemperatureScope("AVAILABLE", quantity_role=track.physical_quantity,
+        temporal_representation="native_statistic_intervals", qualification_status="UNKNOWN",
+        static_validity_status="SAME_RUN_OBSERVED", physical_witness=witness,
+        temperature_scope_first_possession_at=first_possession.isoformat(),
+        physical_dependency_available_at=dependency.isoformat(),
+        pit_status="AVAILABLE" if dependency < decision_time else "AFTER_DECISION",
+        scope_role=role, temperature_metric=metric)
+
+
 def read_native_temperature_scope(conn: sqlite3.Connection, *, source_run_id: str,
         manifest_path: Path, required_steps: list[int], qualified_prefix_cut_utc: datetime | None,
         local_day_end_utc: datetime, explicit_manifest: list[dict], mask_grib_path: Path | None = None,
