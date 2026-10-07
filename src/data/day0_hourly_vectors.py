@@ -562,6 +562,7 @@ _DAY0_CAPTURE_EQUIVALENCE_ONLY_META = frozenset(
         "source_run_authority",
         "provider_source_available_at_utc",
         "provider_source_modified_at_utc",
+        "provider_metadata_bracket_evidence",
     }
 )
 
@@ -618,6 +619,17 @@ def _day0_normalize_vector_request_semantics(
     proves a DIFFERENT run remains a mismatch here.
     """
 
+    if key == "__physical_response_capture_v1" and isinstance(value, Mapping):
+        index = value.get("location_index")
+        locations = value.get("locations", [])
+        geometry = locations[index] if type(index) is int and 0 <= index < len(locations) else {}
+        # Each original is independently replayed before this semantic projection.
+        # Endpoint/HTTP clocks and a larger donor window are transport, not a new point.
+        value = {"model": value.get("model"), "native_variable": value.get("native_variable"),
+                 "temperature_unit": value.get("temperature_unit"), "geometry": geometry}
+    if key == "__physical_response_reference_v1":
+        value = {"revision": "day0_original_entity_reference_v1",
+                 "model_surface_geometry": value.get("model_surface_witness", {}).get("geometry")}
     if key == "request_params_json" and isinstance(value, str):
         try:
             value = json.loads(value)
@@ -698,6 +710,10 @@ def _day0_canonical_vector_row_snapshot(
         raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SOURCE_META_INVALID") from exc
     if not isinstance(meta, Mapping):
         raise ValueError("DAY0_CAUSAL_CAPTURE_EQUIVALENCE_SOURCE_META_INVALID")
+    _day0_replay_vector_original(conn, Day0HourlyVector(model=model, city=city,
+        target_date=target_date, timezone_name=timezone_name, captured_at=str(row[5]),
+        times=times, temps_c=temps, source_run_meta_json=str(row[11])),
+        decision_bound_utc=decision_bound_utc, provider=str(row[6]), endpoint=str(row[7]), request_hash=str(row[8]))
 
     capture = _day0_parse_aware_clock(row[5], field_name="captured_at")
     fetch_started = _day0_parse_aware_clock(
@@ -3170,6 +3186,8 @@ def _day0_provider_run_meta(
     request_hash: str,
     fetch_started_at: datetime,
     fetch_finished_at: datetime,
+    physical_response: Mapping[str, object] | None = None,
+    metadata_bracket_evidence: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build explicit provider-run provenance for one hourly vector."""
 
@@ -3195,6 +3213,8 @@ def _day0_provider_run_meta(
         "request_hash": request_hash,
         "fetch_started_at": fetch_started_at.isoformat(),
         "fetch_finished_at": fetch_finished_at.isoformat(),
+        **({"__physical_response_capture_v1": dict(physical_response)} if physical_response is not None else {}),
+        **({"provider_metadata_bracket_evidence": dict(metadata_bracket_evidence)} if metadata_bracket_evidence is not None else {}),
     }
 
 
@@ -3398,6 +3418,7 @@ def _day0_exact_run_payloads(
         model_api_id = OPENMETEO_MODEL_IDS.get(model, model)
         request_identity["models"].append(model_api_id)
         fetch_started = _day0_utc_now()
+        metadata_bracket_evidence = None
         if selection.endpoint_mode == "single_runs":
             authority = "run_pinned_single_runs"
             endpoint_mode = "single_runs"
@@ -3426,6 +3447,7 @@ def _day0_exact_run_payloads(
                     modified_at = transport.modification_time.astimezone(UTC)
                     authority = "provider_meta_declared"
                     endpoint_mode = "standard_meta_stamped"
+                    metadata_bracket_evidence = transport.metadata_bracket_evidence
                 except Exception as standard_exc:
                     raise ValueError(
                         f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
@@ -3455,6 +3477,7 @@ def _day0_exact_run_payloads(
                 run = transport.run.astimezone(UTC)
                 available_at = transport.source_available_at.astimezone(UTC)
                 modified_at = transport.modification_time.astimezone(UTC)
+                metadata_bracket_evidence = transport.metadata_bracket_evidence
             except Exception as standard_exc:
                 raise ValueError(
                     f"DAY0_PROVIDER_RUN_TRANSPORT_UNAVAILABLE:{model}:"
@@ -3474,6 +3497,7 @@ def _day0_exact_run_payloads(
             "endpoint_mode": endpoint_mode,
             "fetch_started": fetch_started,
             "fetch_finished": fetch_finished,
+            "metadata_bracket_evidence": metadata_bracket_evidence,
         }))
     request_identity_payload = {
         **request_identity,
@@ -3501,6 +3525,8 @@ def _day0_exact_run_payloads(
                         "run": meta["run"].isoformat()},
         request_hash=bundle_hash, fetch_started_at=meta["fetch_started"],
         fetch_finished_at=meta["fetch_finished"],
+        physical_response=payload.get("__physical_response_capture_v1"),
+        metadata_bracket_evidence=meta.get("metadata_bracket_evidence"),
     )) for model, payload, meta in fetched], request_identity_payload)
 
 
@@ -3813,6 +3839,260 @@ def fetch_day0_source_clock_ensemble_vectors(
         return [], ""
 
 
+def _day0_original_entity(vector: Day0HourlyVector, meta: Mapping[str, object]) -> dict:
+    """Replay one deterministic provider entity, not request-coordinate echoes.
+
+    SCOPE: this vector's model/location/run and consumed projection. DRAIN: a
+    normal capture retains its genuine original descriptor. RESET: the same
+    immutable evidence replays independently; no newest-row equality is required.
+    Native ENS members retain their separate original-message/member contract.
+    """
+    from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
+    from src.data.openmeteo_ecmwf_ifs9_anchor import SINGLE_RUNS_FORECAST_URL, STANDARD_FORECAST_URL
+    capture = meta.get("__physical_response_capture_v1")
+    if not isinstance(capture, Mapping):
+        raise ValueError("DAY0_ORIGINAL_ENTITY_MISSING")
+    params = capture["request_params"]
+    if (capture["revision"] != "openmeteo_single_model_entity_body_v1"
+            or capture["model"] != vector.model or meta.get("model") != vector.model
+            or meta.get("provider") != "openmeteo"
+            or params["models"] != OPENMETEO_MODEL_IDS.get(vector.model, vector.model)
+            or meta.get("model_api_id") != params["models"]
+            or meta.get("provider_run_id") != f"openmeteo:{params['models']}:{capture['source_cycle_time']}"
+            or params.get("temperature_unit") != "celsius" or params.get("hourly") != "temperature_2m"
+            or params.get("cell_selection", "land") != "land" or params.get("elevation") is not None
+            or capture["temperature_unit"] != "celsius" or capture["native_variable"] != "temperature_2m"
+            or capture["source_cycle_time"] != meta["provider_source_cycle_time_utc"]):
+        raise ValueError("DAY0_ORIGINAL_MODEL_RUN_UNIT_MISMATCH")
+    endpoint = {"single_runs": SINGLE_RUNS_FORECAST_URL, "standard_meta_stamped": STANDARD_FORECAST_URL}.get(meta.get("endpoint_mode"))
+    if (endpoint is None or capture["request_url"] != endpoint or meta.get("endpoint") != endpoint
+            or meta.get("source_run_authority") != {"single_runs": "run_pinned_single_runs",
+                "standard_meta_stamped": "provider_meta_declared"}.get(meta.get("endpoint_mode"))):
+        raise ValueError("DAY0_ORIGINAL_ENDPOINT_MISMATCH")
+    run = _day0_parse_aware_clock(capture["source_cycle_time"], field_name="original_run")
+    if endpoint == SINGLE_RUNS_FORECAST_URL:
+        pinned = datetime.fromisoformat(str(params["run"]))
+        if pinned.tzinfo is None:
+            pinned = pinned.replace(tzinfo=UTC)  # this protocol's explicit run parameter
+        if pinned != run:
+            raise ValueError("DAY0_ORIGINAL_PINNED_RUN_MISMATCH")
+    body = Path(str(capture["artifact_path"])).read_bytes()
+    if len(body) != capture["byte_size"] or hashlib.sha256(body).hexdigest() != capture["sha256"]:
+        raise ValueError("DAY0_ORIGINAL_BODY_HASH_MISMATCH")
+    decoded = json.loads(body)
+    payloads = [decoded] if isinstance(decoded, dict) else decoded
+    index = capture["location_index"]
+    locations = capture["locations"]
+    if (type(index) is not int or not isinstance(payloads, list) or not 0 <= index < len(payloads)
+            or len(locations) != len(payloads)):
+        raise ValueError("DAY0_ORIGINAL_LOCATION_INDEX_INVALID")
+    payload, point = payloads[index], locations[index]
+    requests = list(zip(str(params["latitude"]).split(","), str(params["longitude"]).split(","),
+                        str(params["timezone"]).split(","), strict=True))
+    scope = json.loads(str(meta["request_params_json"]))
+    if len(requests) != len(payloads):
+        raise ValueError("DAY0_ORIGINAL_LOCATION_COUNT_MISMATCH")
+    latitude, longitude, zone = requests[index]
+    if (float(latitude) != float(scope["latitude"]) or float(longitude) != float(scope["longitude"])
+            or float(point["requested_latitude"]) != float(latitude)
+            or float(point["requested_longitude"]) != float(longitude)
+            or zone != vector.timezone_name or point["timezone"] != zone or payload["timezone"] != zone):
+        raise ValueError("DAY0_ORIGINAL_REQUESTED_LOCATION_MISMATCH")
+    for key, proofkey, low, high in (("latitude", "selected_latitude", -90, 90),
+            ("longitude", "selected_longitude", -180, 180), ("elevation", "target_dem_elevation_m", -500, 9000)):
+        actual = float(payload[key])
+        if not math.isfinite(actual) or not low <= actual <= high or actual != float(point[proofkey]):
+            raise ValueError("DAY0_ORIGINAL_RETURNED_POINT_MISMATCH")
+    lat1, lat2 = math.radians(float(latitude)), math.radians(float(payload["latitude"]))
+    dlat, dlon = lat2-lat1, math.radians(float(payload["longitude"])-float(longitude))
+    hav = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
+    if 2*6371.0088*math.asin(math.sqrt(min(1., hav))) >= 50.:
+        raise ValueError("DAY0_ORIGINAL_WRONG_SITE")  # existing wrong-site bound, not sensor equivalence
+    keyed = f"temperature_2m_{OPENMETEO_MODEL_IDS.get(vector.model, vector.model)}"
+    units = payload["hourly_units"]
+    if units.get(keyed, units.get("temperature_2m")) != "°C":
+        raise ValueError("DAY0_ORIGINAL_NATIVE_UNIT_MISMATCH")
+    raw_times, raw_values = payload["hourly"]["time"], payload["hourly"].get(keyed, payload["hourly"].get("temperature_2m"))
+    if (not isinstance(raw_times, list) or not isinstance(raw_values, list) or len(raw_times) != len(raw_values)
+            or not raw_times or len(set(raw_times)) != len(raw_times)):
+        raise ValueError("DAY0_ORIGINAL_ARRAY_INVALID")
+    scope_hours = scope.get("forecast_hours", len(raw_times))
+    transport_hours = params.get("forecast_hours", len(raw_times))
+    if (type(scope_hours) is not int or type(transport_hours) is not int
+            or not 0 < scope_hours <= transport_hours):
+        raise ValueError("DAY0_ORIGINAL_TRANSPORT_PROJECTION_MISMATCH")
+    limit = scope_hours if endpoint == SINGLE_RUNS_FORECAST_URL else len(raw_times)
+    pairs = [(str(t), float(v)) for t, v in zip(raw_times[:limit], raw_values[:limit], strict=True)
+             if v is not None and not isinstance(v, bool) and isinstance(v, (int, float)) and math.isfinite(float(v))]
+    if tuple(t for t, _ in pairs) != vector.times or tuple(v for _, v in pairs) != vector.temps_c:
+        raise ValueError("DAY0_ORIGINAL_CONSUMED_ARRAY_MISMATCH")
+    if endpoint == STANDARD_FORECAST_URL:
+        evidence = meta.get("provider_metadata_bracket_evidence")
+        if not isinstance(evidence, Mapping) or evidence.get("status") != "CAPTURED":
+            raise ValueError("DAY0_ORIGINAL_METADATA_BRACKET_MISSING")
+        encoded = Path(str(evidence["manifest_path"])).read_bytes()
+        if hashlib.sha256(encoded).hexdigest() != evidence["sha256"]:
+            raise ValueError("DAY0_ORIGINAL_METADATA_BRACKET_HASH_MISMATCH")
+        bracket = json.loads(encoded)
+        if (bracket["revision"] != "openmeteo_standard_metadata_bracket_v1"
+                or bracket["model"] != vector.model or bracket["model_reference_time_utc"] != run.isoformat()
+                or bracket["provider_modification_time_utc"] != meta["provider_source_modified_at_utc"]
+                or bracket["temperature"]["body_sha256"] != capture["sha256"]
+                or bracket["temperature"]["byte_size"] != capture["byte_size"]
+                or bracket["temperature"]["request_url"] != endpoint
+                or bracket["temperature"]["request_params"] != params
+                or bracket["temperature"]["fetched_at_utc"] != capture["captured_at"]):
+            raise ValueError("DAY0_ORIGINAL_METADATA_TEMPERATURE_MISMATCH")
+        from src.data.openmeteo_model_updates import parse_model_update, metadata_model_id
+        from urllib.parse import urlsplit
+        possession = []
+        for role in ("before", "after"):
+            original = bracket[role]
+            url = urlsplit(str(original["request_url"]))
+            if (url.scheme != "https" or url.hostname != "api.open-meteo.com"
+                    or url.path != f"/data/{metadata_model_id(vector.model)}/static/meta.json"
+                    or original["request_params"] or original["response_role"] != "NETWORK_200_ENTITY"
+                    or original["clock_role"] != "LOCAL_HTTP_ENTITY_POSSESSION"):
+                raise ValueError("DAY0_ORIGINAL_METADATA_SOURCE_MISMATCH")
+            encoded_meta = Path(original["artifact_path"]).read_bytes()
+            if len(encoded_meta) != original["byte_size"] or hashlib.sha256(encoded_meta).hexdigest() != original["body_sha256"]:
+                raise ValueError("DAY0_ORIGINAL_METADATA_BODY_MISMATCH")
+            update = parse_model_update(vector.model, json.loads(encoded_meta))
+            if update.last_run_initialisation_time != run or update.last_run_modification_time.isoformat() != bracket["provider_modification_time_utc"]:
+                raise ValueError("DAY0_ORIGINAL_METADATA_RUN_MISMATCH")
+            possession.append(_day0_parse_aware_clock(original["fetched_at_utc"], field_name=role))
+        if not (run <= possession[0] <= possession[1]
+                <= _day0_parse_aware_clock(meta["fetch_finished_at"], field_name="fetch_finished")
+                and _day0_parse_aware_clock(capture["captured_at"], field_name="body_possession") <= possession[1]):
+            raise ValueError("DAY0_ORIGINAL_METADATA_POSSESSION_INVALID")
+    return {"capture": capture, "point": point, "run": run}
+
+
+def _day0_artifact(conn: sqlite3.Connection, artifact_id: int) -> dict:
+    columns = ("artifact_id", "source_id", "product_id", "data_version", "source_cycle_time",
+        "source_available_at", "captured_at", "artifact_path", "sha256", "byte_size", "request_url",
+        "request_params_json", "artifact_metadata_json", "recorded_at")
+    row = conn.execute("SELECT " + ",".join(columns) + " FROM raw_forecast_artifacts WHERE artifact_id=?", (artifact_id,)).fetchone()
+    if row is None:
+        raise ValueError("DAY0_ORIGINAL_ARTIFACT_ROW_MISSING")
+    artifact = dict(zip(columns, row, strict=True))
+    artifact["metadata"] = artifact.pop("artifact_metadata_json")
+    return artifact
+
+
+def _day0_register_vector_original(conn: sqlite3.Connection, vector: Day0HourlyVector, meta: dict) -> dict:
+    from src.data.bayes_precision_fusion_download import _persist_physical_response_artifact, _persist_http_capture_receipt
+    original = _day0_original_entity(vector, meta)
+    capture = original["capture"]
+    mode = "single_runs" if meta["endpoint_mode"] == "single_runs" else "standard_meta_stamped"
+    product = (f"{meta['model_api_id']}::single_runs" if mode == "single_runs" else
+        f"{meta['model_api_id']}::standard_api_meta_stamped::run={meta['provider_source_cycle_time_utc']}::modified={meta['provider_source_modified_at_utc']}")
+    row = {"source_id": f"{vector.model}_{mode}", "product_id": product,
+           "source_cycle_time": capture["source_cycle_time"], "source_available_at": capture["captured_at"]}
+    body_id, _captured, _available = _persist_physical_response_artifact(conn, row, capture)
+    event = capture.get("network_capture")
+    receipt = conn.execute("SELECT artifact_id FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? "
+        "AND source_cycle_time=? AND data_version='openmeteo_single_model_http_capture_receipt_v1' "
+        "AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=? "
+        "AND captured_at=? ORDER BY artifact_id LIMIT 1",
+        (row["source_id"], row["product_id"], row["source_cycle_time"], body_id, capture["captured_at"])).fetchone()
+    if receipt is None and isinstance(event, Mapping):
+        _persist_http_capture_receipt(conn, row, capture, body_id)
+        receipt = conn.execute("SELECT artifact_id FROM raw_forecast_artifacts WHERE source_id=? AND product_id=? "
+            "AND source_cycle_time=? AND data_version='openmeteo_single_model_http_capture_receipt_v1' "
+            "AND json_extract(artifact_metadata_json,'$.physical_http_capture_receipt.body_artifact_id')=? "
+            "AND captured_at=? ORDER BY artifact_id LIMIT 1",
+            (row["source_id"], row["product_id"], row["source_cycle_time"], body_id, capture["captured_at"])).fetchone()
+    if receipt is None:
+        raise ValueError("DAY0_ORIGINAL_HTTP_RECEIPT_MISSING")
+    written_at = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%f+00:00','now')").fetchone()[0]
+    from src.data.replacement_current_value_serving import _current_model_surface_witness
+    surface = _current_model_surface_witness({"model": vector.model,
+        "latitude_requested": original["point"]["requested_latitude"],
+        "longitude_requested": original["point"]["requested_longitude"],
+        "physical_proof_cutoff": written_at}, original["point"], _day0_artifact(conn, body_id))
+    if surface is None:
+        raise ValueError("DAY0_ORIGINAL_MODEL_SURFACE_UNAVAILABLE")
+    return {**meta, "__physical_response_reference_v1": {
+        "body_artifact_id": body_id, "http_receipt_artifact_id": int(receipt[0]),
+        "body_sha256": capture["sha256"],
+        "model_surface_witness": surface, "vector_written_at": written_at}}
+
+
+def _day0_replay_vector_original(conn: sqlite3.Connection, vector: Day0HourlyVector, *,
+        decision_bound_utc: datetime, provider: str = "openmeteo", endpoint: str | None = None,
+        request_hash: str | None = None) -> dict:
+    meta = json.loads(str(vector.source_run_meta_json or ""))
+    # The existing native ENS family is not a deterministic API vector. A retained
+    # deterministic descriptor cannot be relabelled as an ENS member to bypass replay.
+    if vector.immutable_run_member and "__physical_response_capture_v1" not in meta:
+        if not _day0_source_clock_ensemble_metadata_is_current(vector):
+            raise ValueError("DAY0_ORIGINAL_PRODUCER_FAMILY_MISMATCH")
+        return {}  # separate ENS run/member closure; no new qualification here
+    original = _day0_original_entity(vector, meta)
+    if (provider != "openmeteo" or (endpoint is not None and endpoint != meta["endpoint"])
+            or (request_hash is not None and (request_hash != meta["request_hash"]
+                or meta["source_run_id"] != f"day0_hourly:{request_hash}"))):
+        raise ValueError("DAY0_ORIGINAL_CANONICAL_IDENTITY_MISMATCH")
+    reference = meta["__physical_response_reference_v1"]
+    body = _day0_artifact(conn, reference["body_artifact_id"])
+    receipt = _day0_artifact(conn, reference["http_receipt_artifact_id"])
+    capture = original["capture"]
+    if body["sha256"] != reference["body_sha256"] or body["sha256"] != capture["sha256"]:
+        raise ValueError("DAY0_ORIGINAL_REFERENCE_HASH_MISMATCH")
+    receipt["body_artifact"] = body
+    from src.data.replacement_current_value_serving import _resolve_http_capture_receipt
+    resolved = _resolve_http_capture_receipt({"physical_artifact": receipt, "artifact_id": body["artifact_id"]})
+    if resolved is None:
+        raise ValueError("DAY0_ORIGINAL_HTTP_RECEIPT_INVALID")
+    physical = resolved["physical_artifact"]
+    mode = "single_runs" if meta["endpoint_mode"] == "single_runs" else "standard_meta_stamped"
+    if (physical["source_cycle_time"] != capture["source_cycle_time"]
+            or physical["source_id"] != f"{vector.model}_{mode}"
+            or physical["request_url"] != capture["request_url"]
+            or json.loads(physical["request_params_json"]) != capture["request_params"]
+            or physical["captured_at"] != capture["captured_at"]):
+        raise ValueError("DAY0_ORIGINAL_HTTP_BODY_IDENTITY_MISMATCH")
+    clocks = [original["run"], _day0_parse_aware_clock(capture["captured_at"], field_name="first_possession"),
+              _day0_parse_aware_clock(physical["recorded_at"], field_name="http_written"),
+              _day0_parse_aware_clock(reference["vector_written_at"], field_name="vector_written")]
+    body_written = _day0_parse_aware_clock(body["recorded_at"], field_name="body_written")
+    first_possession = _day0_parse_aware_clock(body["captured_at"], field_name="body_first_possession")
+    if (not clocks[0] <= first_possession <= body_written <= decision_bound_utc
+            or not first_possession <= clocks[1] <= clocks[2] <= clocks[3] <= decision_bound_utc):
+        raise ValueError("DAY0_ORIGINAL_POSSESSION_WRITTEN_PIT_INVALID")
+    request_capture = _day0_parse_aware_clock(vector.captured_at, field_name="request_capture")
+    started = _day0_parse_aware_clock(meta["fetch_started_at"], field_name="fetch_started")
+    finished = _day0_parse_aware_clock(meta["fetch_finished_at"], field_name="fetch_finished")
+    available = _day0_parse_aware_clock(meta["provider_source_available_at_utc"], field_name="provider_available")
+    modified = _day0_parse_aware_clock(meta["provider_source_modified_at_utc"], field_name="provider_modified")
+    if (not request_capture <= started <= finished <= decision_bound_utc
+            or not original["run"] <= available <= finished or not original["run"] <= modified <= finished):
+        raise ValueError("DAY0_ORIGINAL_LOCAL_PROVIDER_CLOCK_INVALID")
+    # Replay the frozen static witness, not an always-newest static reader.
+    surface = reference["model_surface_witness"]
+    point = original["point"]
+    if vector.model == "ecmwf_ifs":
+        from src.data.openmeteo_ecmwf_ifs9_bucket_transport import validate_source_cell_geometry_proof
+        reason = validate_source_cell_geometry_proof(point["source_cell_geometry_proof"],
+            latitude=float(point["selected_latitude"]), longitude=float(point["selected_longitude"]),
+            target_elevation_m=float(point["target_dem_elevation_m"]),
+            requested_latitude=float(point["requested_latitude"]), requested_longitude=float(point["requested_longitude"]),
+            decision_at=decision_bound_utc)
+        if surface.get("geometry") != {**point["source_cell_geometry_proof"],
+                "native_surface": "SEA" if point["source_cell_geometry_proof"]["cell_is_sea"] else "LAND",
+                "native_grid_elevation_m": point["source_cell_geometry_proof"]["raw_grid_elevation_m"]}:
+            reason = "DAY0_ORIGINAL_STATIC_WITNESS_MISMATCH"
+    else:
+        from src.data.openmeteo_model_surface import validate_model_surface_witness
+        reason = validate_model_surface_witness(surface, model=vector.model,
+            selected_latitude=float(point["selected_latitude"]), selected_longitude=float(point["selected_longitude"]),
+            body_captured_at=body["captured_at"], decision_at=decision_bound_utc)
+    if reason is not None:
+        raise ValueError(f"DAY0_ORIGINAL_MODEL_SURFACE_UNAVAILABLE:{reason}")
+    return original
+
+
 def parse_openmeteo_hourly_payload(
     payload: object,
     *,
@@ -3842,7 +4122,7 @@ def parse_openmeteo_hourly_payload(
         ]
         if not pairs:
             return None
-        return Day0HourlyVector(
+        vector = Day0HourlyVector(
             model=model,
             city=city_name,
             target_date="",  # stamped per consumption window
@@ -3852,6 +4132,12 @@ def parse_openmeteo_hourly_payload(
             temps_c=tuple(v for _, v in pairs),
             source_run_meta_json=source_run_meta_json,
         )
+        try:
+            meta = json.loads(str(source_run_meta_json or ""))
+            _day0_original_entity(vector, meta)
+        except (KeyError, TypeError, ValueError, OSError, IndexError):
+            return None
+        return vector
 
     out: list[Day0HourlyVector] = []
     if isinstance(payload, list):
@@ -3927,6 +4213,7 @@ def persist_day0_hourly_vectors(
             if own_conn:
                 conn = get_forecasts_connection(write_class=WriteClass.LIVE)
             _ensure_schema(conn)
+            conn.execute("SAVEPOINT day0_vector_originals")
             for vector in vectors:
                 if not _vector_covers_target_from_capture(
                     vector, target_date=target_date
@@ -3941,15 +4228,22 @@ def persist_day0_hourly_vectors(
                     )
                     continue
                 row_id = _vector_id(vector.model, vector.city, target_date, vector.captured_at)
+                if conn.execute("SELECT 1 FROM day0_hourly_vectors WHERE vector_id=?", (row_id,)).fetchone():
+                    continue  # immutable prior rows, including unproved legacy captures, are not backfilled
                 row_endpoint = endpoint
+                stored_meta = vector.source_run_meta_json
                 try:
                     source_meta = json.loads(str(vector.source_run_meta_json or ""))
                     if isinstance(source_meta, Mapping) and str(
                         source_meta.get("endpoint") or ""
                     ).strip():
                         row_endpoint = str(source_meta["endpoint"]).strip()
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    pass
+                    if not vector.immutable_run_member or "__physical_response_capture_v1" in source_meta:
+                        source_meta = _day0_register_vector_original(conn, vector, dict(source_meta))
+                        stored_meta = json.dumps(source_meta, sort_keys=True, separators=(",", ":"))
+                except (KeyError, TypeError, ValueError, OSError, IndexError) as exc:
+                    logger.warning("DAY0_ORIGINAL_VECTOR_UNAVAILABLE city=%s model=%s reason=%s", vector.city, vector.model, exc)
+                    continue
                 cur = conn.execute(
                     """
                     INSERT OR IGNORE INTO day0_hourly_vectors (
@@ -3963,7 +4257,7 @@ def persist_day0_hourly_vectors(
                         vector.timezone_name, vector.captured_at, row_endpoint,
                         request_hash, json.dumps(list(vector.times)),
                         json.dumps(list(vector.temps_c)),
-                        vector.source_run_meta_json,
+                        stored_meta,
                     ),
                 )
                 written += int(cur.rowcount or 0)
@@ -3974,7 +4268,12 @@ def persist_day0_hourly_vectors(
                 "DELETE FROM day0_hourly_vectors WHERE captured_at < ?",
                 (cutoff_iso,),
             )
+            conn.execute("RELEASE SAVEPOINT day0_vector_originals")
             conn.commit()
+    except Exception:
+        if conn is not None:
+            conn.rollback()
+        raise
     finally:
         # conn can be None when the connection-open itself failed inside the
         # flock — guard so the original exception is never masked (PR review
@@ -4425,7 +4724,7 @@ def read_freshest_day0_hourly_vectors(
             rows = conn.execute(
                 """
                 SELECT model, city, target_date, timezone_name, captured_at,
-                       times_json, temps_c_json, source_run_meta_json
+                       times_json, temps_c_json, source_run_meta_json, provider, endpoint, request_hash
                 FROM day0_hourly_vectors
                 WHERE city = ? AND target_date = ?
                   AND julianday(captured_at) <= julianday(?)
@@ -4473,6 +4772,11 @@ def read_freshest_day0_hourly_vectors(
                     None if row[7] in (None, "") else str(row[7])
                 ),
             )
+            try:
+                _day0_replay_vector_original(conn, candidate, decision_bound_utc=moment,
+                    provider=str(row[8]), endpoint=str(row[9]), request_hash=str(row[10]))
+            except (KeyError, TypeError, ValueError, OSError, IndexError):
+                continue
             candidates.append(candidate)
         return select_ready_day0_hourly_vectors(
             candidates,
