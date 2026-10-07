@@ -4056,6 +4056,81 @@ def _materialize_current_global_day0_probability(
     return held_probability, refreshed, True
 
 
+def _current_wrh_monitor_observation_carrier(conn, position: Position, *, now: datetime):
+    """A read-only adapter carrier for the qualified current resolver product.
+
+    This is never persisted as a monotone event. SCOPE: this owned WRH
+    city/day/metric. DRAIN: the current-product acquisition/repair path.
+    RESET: a valid nonempty current snapshot. Unknown/EMPTY cannot resurrect
+    an obsolete event; the probability adapter still proves its own source,
+    carrier and action authority under its existing laws.
+    """
+    city = cities_by_name.get(str(position.city))
+    if city is None or str(city.settlement_source_type).lower() != "noaa":
+        return None
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.events.day0_authority import (
+        DAY0_LIVE_AUTHORITY_MATCHES,
+        DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
+    )
+    from src.events.opportunity_event import (
+        Day0ExtremeUpdatedPayload,
+        make_day0_extreme_updated_event,
+    )
+
+    metric = resolve_position_metric(position)[0]
+    owned, snapshot = read_current_noaa_wrh_snapshot(
+        conn, city=city, target_date=str(position.target_date), as_of=now,
+        _canonical_owner=True,  # Opened by the canonical FORECAST+WORLD reader below.
+    )
+    if owned is False:
+        return None
+    extreme = snapshot.extreme(metric) if owned is True and snapshot is not None else None
+    if extreme is None:
+        raise ObservationUnavailableError("WRH_CURRENT_SNAPSHOT_UNAVAILABLE")
+    fact = _latest_authorized_day0_fact(
+        conn, city=str(position.city), target_date=str(position.target_date),
+        temperature_metric=metric, decision_time=now, require_settlement_channel=True,
+    )
+    if not isinstance(fact, Mapping) or any((
+        fact.get("source") != "current_wrh_product:" + snapshot.source,
+        fact.get("raw_payload_sha256") != snapshot.response_sha256,
+        fact.get("observation_available_at") != snapshot.received_at.isoformat(),
+        fact.get("observed_extreme_native") != extreme.value,
+        fact.get("station_id") != snapshot.station,
+        fact.get("unit") != snapshot.unit,
+    )):
+        raise ObservationUnavailableError("WRH_CURRENT_SNAPSHOT_SUPERSEDED_DURING_READ")
+    payload = Day0ExtremeUpdatedPayload(
+        city=str(position.city), target_date=str(position.target_date), metric=metric,
+        settlement_source=snapshot.source, station_id=snapshot.station,
+        settlement_source_type="noaa",
+        observation_time=str(fact["observation_time"]),
+        observation_available_at=snapshot.received_at.isoformat(),
+        raw_value=extreme.value,
+        rounded_value=int(SettlementSemantics.for_city(city).round_single(extreme.value)),
+        high_so_far=extreme.value if metric == "high" else None,
+        low_so_far=extreme.value if metric == "low" else None,
+        evidence_finality=DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
+        observation_availability_basis="canonical_current_product_receipt",
+        observation_transport="held_monitor_current_wrh_view",
+        raw_report_identity=snapshot.response_sha256,
+        **DAY0_LIVE_AUTHORITY_MATCHES,
+    )
+    carrier = make_day0_extreme_updated_event(
+        entity_key="|".join((payload.city, payload.target_date, metric, payload.station_id)),
+        source="held_monitor_current_wrh_view", observed_at=payload.observation_time,
+        received_at=snapshot.received_at.isoformat(), payload=payload,
+        causal_snapshot_id="current_wrh_product:" + snapshot.response_sha256,
+    )
+
+    # Creation describes this read-only view, not a new source receipt. Neither
+    # source availability nor the semantic carrier identity is renewed here.
+    return replace(carrier, created_at=now.isoformat())
+
+
 def _build_current_global_day0_family_snapshot(
     position: Position,
     *,
@@ -4148,48 +4223,51 @@ def _build_current_global_day0_family_snapshot(
                 if "world" in attached
                 else "opportunity_events"
             )
-            row = world.execute(
-                f"""
-            SELECT event_id, event_type, entity_key, source, observed_at,
-                   available_at, received_at, causal_snapshot_id, payload_hash,
-                   idempotency_key, priority, expires_at, payload_json,
-                   schema_version, created_at
-              FROM {opportunity_events_table}
-                   INDEXED BY idx_opportunity_events_day0_family_extreme
-             WHERE event_type = 'DAY0_EXTREME_UPDATED'
-               AND json_extract(payload_json, '$.city') = ?
-               AND json_extract(payload_json, '$.target_date') = ?
-               AND json_extract(payload_json, '$.metric') = ?
-               AND available_at <= ?
-               AND received_at <= ?
-               AND created_at <= ?
-             ORDER BY available_at DESC, received_at DESC, event_id DESC
-             LIMIT 1
-            """,
-                (
-                    str(position.city),
-                    str(position.target_date),
-                    metric,
-                    now.isoformat(),
-                    now.isoformat(),
-                    now.isoformat(),
-                ),
-            ).fetchone()
-            _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
-            if row is None:
-                if not _target_day_has_canonical_observation(
-                    world,
-                    position,
-                    decision_time=now,
-                ):
-                    raise _Day0UnobservedPrefixUnavailable(
-                        "current global Day0 family event unavailable: "
-                        "zero target-date canonical observations"
+            event = _current_wrh_monitor_observation_carrier(world, position, now=now)
+            prepare_context.checkpoint("held_monitor_probability_prepare:current_wrh")
+            if event is None:
+                row = world.execute(
+                    f"""
+                SELECT event_id, event_type, entity_key, source, observed_at,
+                       available_at, received_at, causal_snapshot_id, payload_hash,
+                       idempotency_key, priority, expires_at, payload_json,
+                       schema_version, created_at
+                  FROM {opportunity_events_table}
+                       INDEXED BY idx_opportunity_events_day0_family_extreme
+                 WHERE event_type = 'DAY0_EXTREME_UPDATED'
+                   AND json_extract(payload_json, '$.city') = ?
+                   AND json_extract(payload_json, '$.target_date') = ?
+                   AND json_extract(payload_json, '$.metric') = ?
+                   AND available_at <= ?
+                   AND received_at <= ?
+                   AND created_at <= ?
+                 ORDER BY available_at DESC, received_at DESC, event_id DESC
+                 LIMIT 1
+                """,
+                    (
+                        str(position.city),
+                        str(position.target_date),
+                        metric,
+                        now.isoformat(),
+                        now.isoformat(),
+                        now.isoformat(),
+                    ),
+                ).fetchone()
+                _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+                if row is None:
+                    if not _target_day_has_canonical_observation(
+                        world,
+                        position,
+                        decision_time=now,
+                    ):
+                        raise _Day0UnobservedPrefixUnavailable(
+                            "current global Day0 family event unavailable: "
+                            "zero target-date canonical observations"
+                        )
+                    raise ObservationUnavailableError(
+                        _DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE
                     )
-                raise ObservationUnavailableError(
-                    _DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE
-                )
-            event = OpportunityEvent(**dict(row))
+                event = OpportunityEvent(**dict(row))
             from src.engine.event_reactor_adapter import (
                 _CurrentProbabilityUse,
                 _prepare_current_global_probability_family,
@@ -4279,7 +4357,8 @@ def _build_current_global_day0_family_snapshot(
                     settlement_unit=settlement_unit,
                 )
             ):
-                # The latest authorized Day0 event is the observation authority.
+                # The qualified current product view (or legacy event) owns
+                # the observation cut; an obsolete monotone event cannot pin q.
                 # SCOPE: this held city/date/metric family. DRAIN: a successor
                 # posterior materialized from this exact fact. RESET: the next
                 # read can pin that matching carrier.  Never pass an older q as

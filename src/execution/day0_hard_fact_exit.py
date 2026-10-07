@@ -240,6 +240,9 @@ class FinalDailyObservation:
     station_id: str
     unit: str
     fetched_at: datetime
+    # Semantic identity of the decisive canonical read, including native body
+    # identity where that source already records it. This adds no source gate.
+    source_evidence_identity: str = ""
 
 
 def _target_local_day_complete(
@@ -473,6 +476,30 @@ def _noaa_wrh_hard_fact_evidence(
     except (TypeError, ValueError):
         return None
     source = f"noaa_wrh_{station.lower()}"
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+
+    owned, snapshot = read_current_noaa_wrh_snapshot(
+        world_conn, city=city, target_date=target_date, as_of=now,
+    )
+    if owned is not False:
+        if snapshot is None or ((complete_day or now >= end) and not snapshot.complete_day):
+            return None
+        extreme = snapshot.extreme(metric)
+        if extreme is None:
+            return None
+        from src.contracts.settlement_semantics import SettlementSemantics
+        evidence = HardFactEvidence(
+            source=source, station_id=station,
+            observed_at=datetime.fromisoformat(extreme.local_timestamp).isoformat(),
+            # Legacy field name: this is possessed-at, never a provider-issued
+            # measurement. The current product explicitly preserves UNKNOWN.
+            issued_at=snapshot.received_at.isoformat(), raw_extreme=extreme.value,
+            rounded_extreme=float(SettlementSemantics.for_city(city).round_single(extreme.value)),
+            payload_identity=snapshot.response_sha256,
+            source_identity=f"{source}:{station}:{view}:{target_date}:{metric}",
+            contributor_payload_identities=(snapshot.response_sha256,),
+        )
+        return evidence if evidence.is_complete_for(city) else None
     try:
         attached = {str(row[1]): str(row[2]) for row in world_conn.execute("PRAGMA database_list")}
     except Exception:  # noqa: BLE001 - unknown truth plane cannot authorize q
@@ -562,12 +589,15 @@ def _final_daily_observation_extreme(
         )
         if evidence is None:
             return None
+        from src.decision_kernel.canonicalization import stable_hash
+
         return FinalDailyObservation(
             raw_extreme=evidence.raw_extreme,
             settled_extreme=evidence.rounded_extreme,
             source=evidence.source, station_id=evidence.station_id,
             unit=str(city.settlement_unit).upper(),
             fetched_at=datetime.fromisoformat(evidence.issued_at),
+            source_evidence_identity=stable_hash(evidence.as_dict()),
         )
     field = "high_temp" if metric == "high" else "low_temp" if metric == "low" else ""
     if not field:
@@ -630,6 +660,30 @@ def _final_daily_observation_extreme(
                 settled_grid = SettlementSemantics.for_city(city).round_single(raw_extreme)
             except Exception:  # noqa: BLE001 - invalid semantics/value cannot authorize q
                 continue
+            # HKO's existing daily writer records the native response digest in
+            # metric provenance. Older admitted rows may lack that metadata;
+            # their canonical decisive values still have a semantic identity.
+            payload_digest = None
+            try:
+                provenance_row = conn.execute(
+                    f"SELECT {metric}_provenance_metadata FROM {table_ref} "
+                    f"WHERE city=? AND target_date=? AND source=? AND station_id=? "
+                    f"AND fetched_at=? AND {field}=? LIMIT 1",
+                    (str(city.name), target_date, source, station, fetched_at_raw, extreme),
+                ).fetchone()
+                if provenance_row is not None:
+                    payload_digest = _provenance_payload_digest(provenance_row[0])
+            except Exception:  # noqa: BLE001 - optional legacy provenance
+                pass
+            from src.decision_kernel.canonicalization import stable_hash
+
+            source_identity = stable_hash({
+                "city": str(city.name), "target_date": target_date, "metric": metric,
+                "source": str(source), "station_id": station_norm,
+                "unit": str(unit).strip().upper(), "raw_extreme": raw_extreme,
+                "settled_extreme": float(settled_grid), "fetched_at": fetched_at.isoformat(),
+                "native_payload_sha256": payload_digest,
+            })
             return FinalDailyObservation(
                 raw_extreme=raw_extreme,
                 settled_extreme=float(settled_grid),
@@ -637,6 +691,7 @@ def _final_daily_observation_extreme(
                 station_id=station_norm,
                 unit=str(unit).strip().upper(),
                 fetched_at=fetched_at,
+                source_evidence_identity=source_identity,
             )
     return None
 

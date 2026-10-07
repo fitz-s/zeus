@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-10-04
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-30; last_reused=2026-09-30
-# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+# Last reused/audited: 2026-10-06
+# Lifecycle: created=2026-04-27; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md (2026-10-06 cloud-only physical-evidence exit repair)
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
 """R3 M4 exit-safety antibodies for cancel/replace and exit mutex behavior."""
@@ -38,6 +38,15 @@ def conn():
     init_collateral_schema(c)
     yield c
     c.close()
+
+
+@pytest.fixture(autouse=True)
+def fake_public_funder_identity_for_exit_safety_tests(monkeypatch):
+    """Fake venue tests must not depend on a developer's host keychain."""
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "0x0000000000000000000000000000000000000001",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -9654,94 +9663,25 @@ def test_hard_fact_exit_uses_fresh_bid_protective_fak(
     conn, monkeypatch, direction, expected_token
 ):
     from src.execution import exit_lifecycle
-    from src.state.portfolio import ExitContext, PortfolioState, Position
-
-    position = Position(
-        trade_id="pos-hard-fact-protective-fak",
-        market_id="condition-test",
-        condition_id="condition-test",
-        city="Manila",
-        cluster="asia",
-        target_date="2026-07-02",
-        bin_label="32C",
-        direction=direction,
-        token_id=YES_TOKEN,
-        no_token_id=NO_TOKEN,
-        entry_price=0.71,
-        size_usd=7.1,
-        shares=10.0,
-        chain_shares=10.0,
-        cost_basis_usd=7.1,
-        state="day0_window",
-        chain_state="synced",
-        strategy_key="forecast_qkernel_entry",
-        env="live",
-    )
-    submitted = {}
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_hard_fact_sell_authority_valid",
-        lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_latest_or_capture_exit_snapshot_context",
-        lambda *_args, **_kwargs: {
-            "executable_snapshot_id": "snapshot-hard-fact-protective",
-            "executable_snapshot_hash": "hash-hard-fact-protective",
-            "executable_snapshot_orderbook_top_bid": 0.18,
-            "executable_snapshot_min_order_size": 0.01,
-        },
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "check_sell_collateral",
-        lambda *_args, **_kwargs: (True, ""),
-    )
-
+    from src.state.portfolio import PortfolioState
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction)
+    context, verdict = _bind_canonical_hard_fact_case(conn, position, context, now)
+    submitted = []
     def return_pending(**kwargs):
-        submitted.update(kwargs)
-        return exit_lifecycle.OrderResult(
-            trade_id=position.trade_id,
-            status="pending",
-            order_id="ord-hard-fact-protective",
-            external_order_id="ord-hard-fact-protective",
-        )
-
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(trade_id=position.trade_id, status="pending", order_id="hard-fact")
     monkeypatch.setattr(exit_lifecycle, "place_sell_order", return_pending)
-
-    class Clob:
-        @staticmethod
-        def get_order_status(_order_id):
-            return {"status": "OPEN"}
-
     outcome = exit_lifecycle.execute_exit(
-        PortfolioState(positions=[position]),
-        position,
-        ExitContext(
-            exit_reason="DAY0_HARD_FACT_BIN_DEAD",
-            probability_receipt={
-                "probability_authority": "day0_absorbing_hard_fact",
-                "hard_fact_evidence": {"source": "test-final-observation"},
-            },
-            current_market_price=0.22,
-            current_market_price_is_fresh=False,
-            best_bid=0.20,
-            hours_to_settlement=0.5,
-            day0_active=True,
-        ),
-        clob=Clob(),
-        conn=conn,
-        hard_fact_authority=object(),
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, hard_fact_authority=verdict,
     )
-
-    assert outcome.startswith("sell_pending: order=ord-hard-fact-protective")
-    assert submitted["submit_order_type"] == "FAK"
-    assert submitted["exact_limit_price"] == 0.18
-    authority = submitted["protective_sell_execution_authority"]
+    assert outcome.startswith("sell_pending:"), outcome
+    assert submitted[0]["submit_order_type"] == "FAK"
+    assert submitted[0]["exact_limit_price"] == 0.10
+    authority = submitted[0]["protective_sell_execution_authority"]
     assert authority.kind == "DAY0_HARD_FACT_BIN_DEAD"
     assert authority.token_id == expected_token
-    assert authority.best_bid == "0.18"
 
 
 @pytest.mark.parametrize(
@@ -19313,3 +19253,857 @@ def test_exit_absence_debt_resolves_from_later_chain_proof(conn, monkeypatch, un
         ("RESOLVED","src.execution.exit_lifecycle.chain_truth")]
     if units:
         assert position in portfolio.positions and position.state=="day0_window"
+
+
+def _bind_exact_zero_source_receipt(conn, position, now):
+    """Bind a NOAA print with the real source reader and receipt compactor.
+
+    ``conn`` owns the temporary observation ledger, not a production trade DB.
+    The caller owns canonical position/monitor publication separately.
+    """
+    from src.config import runtime_cities_by_name
+    city = runtime_cities_by_name()[position.city]
+    station = city.wu_station
+    direction = position.direction
+    metric = position.temperature_metric
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.engine.monitor_refresh import _compact_monitor_probability_receipt
+
+    ensure_table(conn)
+    append_print(conn, city=position.city, station_id=station, source_channel="noaa_wrh_" + station.lower(),
+                 publish_ts_utc=now.isoformat(), value_native=32.0, unit="C",
+                 fetched_at_utc=now.isoformat(), raw_report="accepted NOAA page 32C")
+    fact = _latest_authorized_day0_fact(conn, city=position.city, target_date=position.target_date,
+                                      temperature_metric=metric, decision_time=now, require_settlement_channel=True)
+    assert fact is not None
+    full_receipt = {
+        "probability_authority": "day0_deterministic_bin_payoff_v1",
+        "probability_content_identity": "exact-zero-content",
+        "probability_witness_identity": "exact-zero-witness",
+        "source_truth_identity": "accepted-observation-snapshot",
+        "q_version": "exact-zero-q", "held_direction": direction,
+        "held_side_probability": 0.0, "metric": metric,
+        "band": {"basis": "day0_deterministic_bin_payoff_v1", "sample_count": 2},
+        "observation": {
+            "city": position.city, "target_date": position.target_date, "metric": metric,
+            **{key: fact[value] for key, value in {
+                "settlement_source": "observation_source", "station_id": "station_id",
+                "settlement_unit": "unit", "observed_extreme_native": "observed_extreme_native",
+                "observation_time": "observation_time", "observation_available_at": "observation_available_at",
+                "raw_payload_sha256": "raw_payload_sha256", "sample_count": "sample_count",
+            }.items()},
+        },
+    }
+    receipt = _compact_monitor_probability_receipt(full_receipt)
+    position._day0_monitor_probability_receipt = full_receipt
+    position._monitor_probability_receipt = receipt
+    return receipt
+
+
+def _exact_zero_exit_case(conn, monkeypatch, *, direction="buy_yes", shares=10.0, metric="high"):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, Position
+
+    now = datetime.now(timezone.utc)
+    from zoneinfo import ZoneInfo
+    position = Position(
+        trade_id="exact-zero-exit", market_id="condition-test",
+        condition_id="condition-test", city="London", cluster="europe",
+        target_date=now.astimezone(ZoneInfo("Europe/London")).date().isoformat(), bin_label=(
+            ("30°C or below" if direction == "buy_yes" else "31°C or higher") if metric == "high"
+            else ("34°C or higher" if direction == "buy_yes" else "33°C or below")
+        ), direction=direction, temperature_metric=metric,
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN, entry_price=0.40,
+        size_usd=shares * 0.40, cost_basis_usd=shares * 0.40,
+        shares=shares, chain_shares=shares, chain_state="synced",
+        state="day0_window", env="live", strategy_key="center_buy",
+        last_monitor_at=now.isoformat(), last_monitor_prob=0.0,
+        last_monitor_prob_is_fresh=True,
+    )
+    position._current_global_held_probability_samples = (0.0, 0.0)
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    receipt = _bind_exact_zero_source_receipt(conn, position, now)
+    _seed_canonical_position_identity(
+        conn, position_id=position.trade_id, shares=shares, direction=direction,
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN,
+    )
+    conn.execute(
+        "UPDATE position_current SET city=?,target_date=?,bin_label=?,condition_id=?,market_id=?,unit='C',temperature_metric=? WHERE position_id=?",
+        (position.city, position.target_date, position.bin_label, position.condition_id, position.market_id, metric, position.trade_id),
+    )
+    conn.execute(
+        "INSERT INTO position_events(event_id, position_id, event_version, "
+        "sequence_no, event_type, occurred_at, phase_before, phase_after, "
+        "source_module, env, payload_json) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', "
+        "?, 'day0_window', 'day0_window', 'src.engine.cycle_runtime', 'live', ?)",
+        ("exact-zero-monitor", position.trade_id, now.isoformat(), json.dumps({
+            "monitor_probability_receipt": receipt,
+            "last_monitor_prob": 0.0, "last_monitor_prob_is_fresh": True,
+            "held_sell_full_depth_action_authority": True,
+            "direction": direction,
+        })),
+    )
+    _ensure_snapshot(
+        conn, snapshot_id="exact-zero-book", selected_outcome_token_id=token,
+        outcome_label="YES" if direction == "buy_yes" else "NO",
+        captured_at=now, freshness_deadline=now + timedelta(seconds=180),
+        orderbook_top_bid="0.10", orderbook_top_ask="0.12", min_order_size="5",
+    )
+    conn.commit()
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    context = ExitContext(
+        exit_reason="POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
+        fresh_prob=0.0, fresh_prob_is_fresh=True,
+        probability_receipt=receipt, current_market_price=0.10,
+        current_market_price_is_fresh=True, best_bid=0.10, best_ask=0.12,
+        hours_to_settlement=1.0, day0_active=True,
+    )
+    return position, context, now
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("shares", (10.0, 2.0))
+def test_exact_zero_exit_crosses_bid_with_distinct_protected_authority(
+    conn, monkeypatch, direction, shares,
+):
+    from src.execution import exit_lifecycle, executor
+    from src.state.portfolio import PortfolioState
+
+    position, context, _ = _exact_zero_exit_case(
+        conn, monkeypatch, direction=direction, shares=shares,
+    )
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    submitted = []
+
+    def submit(**kwargs):
+        submitted.append(kwargs)
+        assert kwargs["submit_order_type"] == "FAK"
+        assert kwargs["exact_limit_price"] == 0.10
+        proof = kwargs["protective_sell_execution_authority"]
+        assert proof.kind == "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+        assert executor._marketable_sell_certificate_error(
+            conn, SimpleNamespace(
+                protective_sell_execution_authority=proof,
+                trade_id=position.trade_id, token_id=kwargs["token_id"],
+                executable_snapshot_id=proof.snapshot_id,
+                executable_snapshot_hash=proof.snapshot_hash,
+            ), limit_price=0.10, shares=shares,
+        ) is None
+        return exit_lifecycle.OrderResult(
+            trade_id=position.trade_id, status="pending", order_id="exact-zero-order",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit)
+    result = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, branchwise_sell_authority=authority,
+    )
+    assert result.startswith("sell_pending:"), result
+    assert len(submitted) == 1
+    assert submitted[0]["shares"] == shares
+
+
+@pytest.mark.parametrize("tiny", (1e-13, 1e-100))
+def test_exact_zero_authority_never_promotes_tiny_numeric_probability(conn, monkeypatch, tiny):
+    from src.execution import exit_lifecycle
+
+    position, context, _ = _exact_zero_exit_case(conn, monkeypatch)
+    position._current_global_held_probability_samples = (tiny, tiny)
+    with pytest.raises(ValueError, match="CURRENT_EVIDENCE_INVALID|SUPPORT_NOT_ZERO"):
+        exit_lifecycle.BranchwiseDominantSellAuthority.from_current(
+            position, replace(context, fresh_prob=tiny),
+        )
+
+
+def test_fresh_liquidity_change_releases_retry_before_deadline(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+
+    position, _, now = _exact_zero_exit_case(conn, monkeypatch)
+    position.state = "pending_exit"
+    position.pre_exit_state = "day0_window"
+    position.exit_reason = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+    position.exit_trigger = position.exit_reason
+    exit_lifecycle._mark_exit_retry(
+        position, reason=position.exit_reason, error="exit_no_executable_bid", conn=conn,
+    )
+    deadline = position.next_exit_retry_at
+    later = now + timedelta(seconds=10)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    _ensure_snapshot(
+        conn, snapshot_id="returned-liquidity", selected_outcome_token_id=YES_TOKEN,
+        captured_at=later, freshness_deadline=later + timedelta(seconds=180),
+        orderbook_top_bid="0.10", orderbook_top_ask="0.12", min_order_size="5",
+    )
+    assert later < datetime.fromisoformat(deadline)
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is True
+    assert position.exit_state == ""
+    assert position.state == "day0_window"
+
+
+@pytest.mark.parametrize("mutation", ("stale", "receipt", "wrong_token", "untyped"))
+def test_exact_zero_protected_gateway_rejects_unbound_evidence(conn, monkeypatch, mutation):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch)
+    typed = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    proofs = []
+
+    def submit(**kwargs):
+        proofs.append(kwargs["protective_sell_execution_authority"])
+        return exit_lifecycle.OrderResult(trade_id=position.trade_id, status="pending", order_id="proof-order")
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit)
+    assert exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, branchwise_sell_authority=typed,
+    ).startswith("sell_pending:")
+    proof = proofs[0]
+    if mutation == "stale":
+        monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now + timedelta(seconds=181))
+    elif mutation == "receipt":
+        conn.execute(
+            "INSERT INTO position_events(event_id, position_id, event_version, sequence_no, "
+            "event_type, occurred_at, phase_before, phase_after, source_module, env, payload_json) "
+            "SELECT 'superseding-monitor', position_id, 1, "
+            "(SELECT MAX(sequence_no)+1 FROM position_events WHERE position_id=?), "
+            "'MONITOR_REFRESHED', occurred_at, 'pending_exit', 'pending_exit', source_module, env, '{}' "
+            "FROM position_events WHERE event_id='exact-zero-monitor'", (position.trade_id,),
+        )
+    elif mutation == "wrong_token":
+        fields = {key: value for key, value in vars(proof).items() if key != "authority_identity"}
+        fields["token_id"] = NO_TOKEN
+        proof = replace(proof, token_id=NO_TOKEN,
+                        authority_identity=exit_lifecycle._protective_sell_authority_identity(**fields))
+    else:
+        proof = dict(vars(proof))
+    assert exit_lifecycle._protective_sell_execution_authority_error(
+        proof, conn=conn, trade_id=position.trade_id, token_id=YES_TOKEN,
+        shares=10.0, limit_price=0.10, snapshot_id=proofs[0].snapshot_id,
+        snapshot_hash=proofs[0].snapshot_hash,
+    ) is not None
+
+
+@pytest.mark.parametrize("block", ("unchanged_book", "transport", "unknown", "outside_band"))
+def test_liquidity_wake_retains_order_and_transport_fences(conn, monkeypatch, block):
+    from src.execution import exit_lifecycle
+
+    position, _, now = _exact_zero_exit_case(conn, monkeypatch)
+    position.state = "pending_exit"
+    position.pre_exit_state = "day0_window"
+    position.exit_trigger = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+    exit_lifecycle._mark_exit_retry(
+        position, reason=position.exit_trigger,
+        error="exit_no_executable_bid" if block != "transport" else "network_timeout",
+        conn=conn,
+    )
+    later = now + timedelta(seconds=10)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    if block != "unchanged_book":
+        _ensure_snapshot(
+            conn, snapshot_id="liquidity-block-book", selected_outcome_token_id=YES_TOKEN,
+            captured_at=later, freshness_deadline=later + timedelta(seconds=180),
+            orderbook_top_bid="0.04" if block == "outside_band" else "0.10",
+            orderbook_top_ask="0.12", min_order_size="5",
+        )
+    if block == "unknown":
+        _insert_exit_command(conn, command_id="unknown-exit", position_id=position.trade_id,
+                             token_id=YES_TOKEN, size=10.0, price=0.10)
+        from src.state.venue_command_repo import append_event
+        append_event(conn, command_id="unknown-exit", event_type="SUBMIT_REQUESTED",
+                     occurred_at=now.isoformat(), payload={})
+        append_event(conn, command_id="unknown-exit", event_type="SUBMIT_TIMEOUT_UNKNOWN",
+                     occurred_at=now.isoformat(), payload={"reason": "network_timeout"})
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    assert position.exit_state == "retry_pending"
+
+
+@pytest.mark.parametrize("corruption", ("missing_source_truth", "wrong_direction"))
+def test_exact_zero_matching_canonical_receipt_requires_source_and_held_side(conn, monkeypatch, corruption):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch)
+    receipt = dict(context.probability_receipt)
+    if corruption == "missing_source_truth":
+        receipt.pop("source_truth_identity")
+    else:
+        receipt["held_direction"] = "buy_no"
+    context = replace(context, probability_receipt=receipt)
+    conn.execute(
+        "INSERT INTO position_events(event_id, position_id, event_version, sequence_no, "
+        "event_type, occurred_at, phase_before, phase_after, source_module, env, payload_json) "
+        "VALUES ('malformed-current-monitor', ?, 1, 2, 'MONITOR_REFRESHED', ?, 'day0_window', "
+        "'day0_window', 'src.engine.cycle_runtime', 'live', ?)",
+        (position.trade_id, now.isoformat(), json.dumps({
+            "monitor_probability_receipt": receipt, "last_monitor_prob": 0.0,
+            "last_monitor_prob_is_fresh": True, "held_sell_full_depth_action_authority": True,
+        })),
+    )
+    with pytest.raises(ValueError, match="BRANCHWISE_SELL_SOURCE_BINDING_REQUIRED"):
+        exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("response", (
+    "open", "terminal_partial", "matched_without_economics", "superseded_before_sdk", "deadline_during_source_read",
+))
+def test_exact_zero_exit_real_executor_persists_fak_before_fake_sdk(
+    conn, monkeypatch, direction, response,
+):
+    import inspect
+    from src.execution import exit_lifecycle, executor
+    from src.state.portfolio import PortfolioState
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction, shares=2.0)
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    _enable_exit_submit_prereqs(conn, monkeypatch, ctf_shares=2.0)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={token: 2.0}))
+    configure_global_ledger(ledger)
+    # A fixed public test identity replaces host keychain discovery only.
+    # All real authority, command, collateral and envelope checks remain live.
+    monkeypatch.setattr("src.data.polymarket_client.resolve_funder_address",
+                        lambda: "0x0000000000000000000000000000000000000001")
+    calls = []
+    source_read_armed = [False]
+    if response == "deadline_during_source_read":
+        from src.data import replacement_forecast_current_target_plan as source_reader
+        real_reader = source_reader._latest_authorized_day0_fact
+        clock = [now]
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock[0] if tz else clock[0].replace(tzinfo=None)
+        monkeypatch.setattr(executor, "datetime", Clock)
+        monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: clock[0])
+        def read_then_cross_deadline(*args, **kwargs):
+            result = real_reader(*args, **kwargs)
+            if source_read_armed[0]:
+                clock[0] = now + timedelta(seconds=11)
+            return result
+        monkeypatch.setattr(source_reader, "_latest_authorized_day0_fact", read_then_cross_deadline)
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [token]
+            return _fresh_exit_collateral_payload(token_id=token, shares=2.0)
+
+        def get_collateral_payload(self):
+            return _fresh_exit_collateral_payload(token_id=token, shares=2.0)
+
+        def bind_submission_envelope(self, envelope):
+            self.envelope = envelope
+            source_read_armed[0] = True
+            if response == "superseded_before_sdk":
+                conn.execute(
+                    "INSERT INTO position_events(event_id, position_id, event_version, sequence_no, "
+                    "event_type, occurred_at, phase_before, phase_after, source_module, env, payload_json) "
+                    "SELECT 'superseded-before-sdk', position_id, 1, "
+                    "(SELECT MAX(sequence_no)+1 FROM position_events WHERE position_id=?), "
+                    "'MONITOR_REFRESHED', occurred_at, 'pending_exit', 'pending_exit', source_module, env, '{}' "
+                    "FROM position_events WHERE event_id='exact-zero-monitor'", (position.trade_id,),
+                )
+                conn.commit()
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.persister = persister
+
+        def place_limit_order(self, **kwargs):
+            calls.append(kwargs)
+            command = conn.execute(
+                "SELECT state, price, size FROM venue_commands WHERE position_id=?", (position.trade_id,),
+            ).fetchone()
+            assert command["state"] == "SUBMITTING"
+            assert command["price"] == pytest.approx(0.10)
+            assert command["size"] == pytest.approx(2.0)
+            assert self.envelope.order_type == "FAK"
+            assert self.envelope.post_only is False
+            assert self.envelope.min_order_size == Decimal("5")
+            if response == "open":
+                return _fake_submit_result(self.envelope, order_id="real-executor-test")
+            raw = {
+                "success": True, "status": "MATCHED", "orderID": "real-executor-test",
+                "size_matched": "1", "avgPrice": "0.10",
+                "tradeIDs": ["synthetic-exit-trade"], "transactionHashes": ["0xsynthetic"],
+            }
+            if response == "terminal_partial":
+                raw["remaining_size"] = "0"
+            else:
+                for field in ("size_matched", "avgPrice", "tradeIDs", "transactionHashes"):
+                    raw.pop(field)
+            final = self.envelope.with_updates(
+                raw_response_json=json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                order_id=raw["orderID"],
+            )
+            return {**raw, "_venue_submission_envelope": final.to_dict()}
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    intent_fields = inspect.signature(executor.create_exit_order_intent).parameters
+
+    def submit_with_test_connection(**kwargs):
+        if response == "deadline_during_source_read":
+            kwargs["execution_authority_deadline_utc"] = (now + timedelta(seconds=10)).isoformat()
+        intent = executor.create_exit_order_intent(**{k: v for k, v in kwargs.items() if k in intent_fields})
+        return executor.execute_exit_order(
+            intent, conn=conn, decision_id=kwargs["decision_id"], q_version=kwargs["q_version"],
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit_with_test_connection)
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    try:
+        result = exit_lifecycle.execute_exit(
+            PortfolioState(positions=[position]), position, context,
+            clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+            conn=conn, branchwise_sell_authority=authority,
+        )
+        if response in {"superseded_before_sdk", "deadline_during_source_read"}:
+            assert calls == []
+            expected_error = ("exit_execution_authority_expired_before_venue_submit"
+                              if response == "deadline_during_source_read"
+                              else "protective_sell_authority_revoked_pre_venue")
+            assert result == "sell_error: " + expected_error
+            command_id = conn.execute(
+                "SELECT command_id FROM venue_commands WHERE position_id=?", (position.trade_id,),
+            ).fetchone()[0]
+            assert exit_lifecycle._command_terminally_rejected_without_venue_order(
+                conn, command_id, position_id=position.trade_id,
+            )
+            return
+        assert len(calls) == 1, result
+        assert calls[0]["order_type"] == "FAK"
+        assert calls[0]["price"] == pytest.approx(0.10)
+        assert calls[0]["token_id"] == token
+        if response == "terminal_partial":
+            assert result.startswith("position_reduced:"), result
+            assert position.effective_shares == pytest.approx(1.0)
+            assert position.exit_state == ""
+            assert position.last_exit_order_id == ""
+        elif response == "matched_without_economics":
+            assert position.exit_state in {"sell_placed", "sell_pending"}, result
+            assert position.effective_shares == pytest.approx(2.0)
+        else:
+            assert result.startswith("sell_pending:"), result
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("bid,allowed", (("0.05", True), ("0.04", False), ("0.96", False)))
+def test_exact_zero_jit_bid_keeps_absolute_band(conn, monkeypatch, direction, bid, allowed):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction)
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    later = now + timedelta(seconds=1)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    _ensure_snapshot(
+        conn, snapshot_id="new-jit-band-book", selected_outcome_token_id=token,
+        outcome_label="YES" if direction == "buy_yes" else "NO",
+        captured_at=later, freshness_deadline=later + timedelta(seconds=180),
+        orderbook_top_bid=bid, orderbook_top_ask="0.98", min_order_size="5",
+    )
+    submitted = []
+
+    def submit(**kwargs):
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(trade_id=position.trade_id, status="pending", order_id="band-order")
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit)
+    result = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, branchwise_sell_authority=authority,
+    )
+    if allowed:
+        assert result.startswith("sell_pending:"), result
+        assert submitted[0]["exact_limit_price"] == 0.05
+    else:
+        assert result == "exit_blocked: no_in_band_bid"
+        assert submitted == []
+
+
+@pytest.mark.parametrize("state,eligible", (
+    ("pending_exit", True), ("day0_window", True), ("holding", True),
+    ("economically_closed", False), ("settled", False), ("pending_tracked", False),
+))
+def test_hard_fact_reobservation_retains_pending_exposure(state, eligible):
+    from src.engine.cycle_runtime import _day0_hard_fact_position_eligible
+
+    assert _day0_hard_fact_position_eligible(SimpleNamespace(state=state)) is eligible
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("quote_kind", (
+    "fresh_depth", "bba_only", "stale", "wrong_direction", "wrong_writer", "outside_band",
+))
+def test_liquidity_recovery_accepts_only_current_canonical_full_depth_monitor(
+    conn, monkeypatch, direction, quote_kind,
+):
+    from src.execution import exit_lifecycle
+
+    position, _, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction, shares=2.0)
+    # The failed JIT saw no bid. Only a later canonical monitor quote returns;
+    # no executable snapshot will exist until the released retry reaches JIT.
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    failed_at = now + timedelta(seconds=1)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: failed_at)
+    _ensure_snapshot(
+        conn, snapshot_id="failed-jit-no-bid", selected_outcome_token_id=token,
+        outcome_label="YES" if direction == "buy_yes" else "NO",
+        captured_at=failed_at, freshness_deadline=failed_at + timedelta(seconds=180),
+        orderbook_top_bid=None, orderbook_top_ask="0.12", min_order_size="5",
+    )
+    position.state = "pending_exit"
+    position.pre_exit_state = "day0_window"
+    position.exit_trigger = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+    exit_lifecycle._mark_exit_retry(
+        position, reason=position.exit_trigger, error="exit_no_executable_bid", conn=conn,
+    )
+    later = now + timedelta(seconds=10)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    seq = conn.execute("SELECT MAX(sequence_no)+1 FROM position_events").fetchone()[0]
+    conn.execute(
+        "INSERT INTO position_events(event_id, position_id, event_version, sequence_no, "
+        "event_type, occurred_at, phase_before, phase_after, source_module, env, payload_json) "
+        "VALUES ('returned-monitor-book', ?, 1, ?, 'MONITOR_REFRESHED', ?, 'pending_exit', "
+        "'pending_exit', ?, 'live', ?)",
+        (position.trade_id, seq, later.isoformat(),
+         "untrusted.writer" if quote_kind == "wrong_writer" else "src.engine.cycle_runtime",
+         json.dumps({
+             "direction": "unknown" if quote_kind == "wrong_direction" else direction,
+             "last_monitor_market_price_is_fresh": quote_kind != "stale",
+             "held_sell_full_depth_action_authority": quote_kind != "bba_only",
+             "last_monitor_best_bid": 0.04 if quote_kind == "outside_band" else 0.10,
+         })),
+    )
+    assert exit_lifecycle.check_pending_retries(
+        position, conn=conn, current_min_order_size=Decimal("0.01"),
+    ) is (quote_kind == "fresh_depth")
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("authority_kind,source_change", [
+    (kind, change) for kind in ("branchwise", "hard_fact", "final_daily")
+    for change in ("unchanged", "correction", "unreadable")
+] + [("final_daily", "body_revision")])
+def test_source_only_correction_revokes_real_exact_exit_before_sdk(conn, monkeypatch, direction, source_change, authority_kind):
+    """Real source reader/exact-family/materialization, real command gateway, fake SDK only."""
+    import inspect
+    from src.execution import exit_lifecycle, executor
+    from src.engine import event_reactor_adapter as era, monitor_refresh as mr
+    from src.events.day0_authority import DAY0_LIVE_AUTHORITY_MATCHES
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.config import runtime_cities_by_name
+    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, shares=2.0, direction=direction)
+    condition = '0x' + 'a' * 64
+    position.condition_id = condition
+    position.market_id = condition
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+    old_book = get_snapshot(conn, 'exact-zero-book')
+    insert_snapshot(conn, replace(old_book, snapshot_id='source-bound-book', condition_id=condition))
+    conn.execute('UPDATE position_current SET condition_id=?,market_id=? WHERE position_id=?', (condition,condition,position.trade_id))
+    position.city = 'Singapore'
+    position.bin_label = '30°C or below' if direction == 'buy_yes' else '31°C or higher'
+    position.unit = 'C'
+    target = now.astimezone(__import__('zoneinfo').ZoneInfo('Asia/Singapore')).date().isoformat()
+    position.target_date = target
+    conn.execute('UPDATE position_current SET city=?,target_date=?,unit=?,bin_label=? WHERE position_id=?',
+                 ('Singapore', target, 'C', position.bin_label, position.trade_id))
+    ensure_table(conn)
+    observed = now
+    append_print(conn, city='Singapore', station_id='WSSS', source_channel='noaa_wrh_wsss',
+                 publish_ts_utc=observed.isoformat(), value_native=32.0, unit='C',
+                 fetched_at_utc=now.isoformat(), raw_report='canonical native page 32')
+    conn.commit()
+    family = SimpleNamespace(city='Singapore', target_date=target, metric='high',
+        family_id=f'Singapore|{target}|high', binding_hash='source-only-family', candidates=(
+            SimpleNamespace(condition_id=condition, yes_token_id=position.token_id, no_token_id=position.no_token_id,
+                            bin=SimpleNamespace(low=None if direction == 'buy_yes' else 31.0, high=30.0 if direction == 'buy_yes' else None, unit='C', label=position.bin_label)),
+            SimpleNamespace(condition_id='condition-above', yes_token_id='above-yes', no_token_id='above-no',
+                            bin=SimpleNamespace(low=31.0 if direction == 'buy_yes' else None, high=None if direction == 'buy_yes' else 30.0, unit='C', label='complement'))))
+    event = SimpleNamespace(event_id='source-only-event', event_type='DAY0_EXTREME_UPDATED',
+        causal_snapshot_id='source-only-event-cut', payload_json=json.dumps({**DAY0_LIVE_AUTHORITY_MATCHES,
+        'city':'Singapore','target_date':target,'metric':'high','settlement_source':'noaa_wrh_wsss'}))
+    def prepare(at):
+        fact = _latest_authorized_day0_fact(conn, city='Singapore', target_date=target,
+                temperature_metric='high', decision_time=at, require_settlement_channel=True)
+        payload = {}
+        prepared = era._prepare_current_day0_exact_family(event, family=family,
+            observation_conn=conn, settlement_fact=fact, physical_fact=fact, decision_time=at,
+            max_age=timedelta(seconds=180), required_condition_id=condition,
+            day0_payload_out=payload, cache_metadata_out={})
+        return prepared, payload
+    prepared, payload = prepare(now)
+    assert prepared is not None
+    witness = prepared.probability_witness
+    snapshot = mr._CurrentGlobalDay0FamilySnapshot(witness=witness,
+        token_pairs=tuple((b.condition_id,b.yes_token_id,b.no_token_id) for b in witness.bindings),
+        deterministic_condition_ids=frozenset((condition,)), day0_payload=payload,
+        metric='high', probability_authority='day0_deterministic_bin_payoff_v1')
+    probability, refreshed, fresh = mr._materialize_current_global_day0_probability(position, snapshot)
+    assert probability == 0.0 and fresh
+    position.__dict__.update(refreshed.__dict__)
+    receipt = mr._compact_monitor_probability_receipt(position._day0_monitor_probability_receipt)
+    context = replace(context, fresh_prob=probability, probability_receipt=receipt)
+    conn.execute("INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,occurred_at,phase_before,phase_after,source_module,env,payload_json) VALUES ('real-source-monitor',?,1,2,'MONITOR_REFRESHED',?,'day0_window','day0_window','src.engine.cycle_runtime','live',?)",
+                 (position.trade_id,now.isoformat(),json.dumps({'direction':direction,'monitor_probability_receipt':receipt,'last_monitor_prob':0.0,'last_monitor_prob_is_fresh':True,'held_sell_full_depth_action_authority':True})))
+    conn.commit()
+    hard_fact_authority = None
+    if authority_kind == "hard_fact":
+        context, hard_fact_authority = _bind_canonical_hard_fact_case(conn, position, context, now)
+    if authority_kind == "final_daily":
+        context = _bind_canonical_final_daily_case(conn, position, context, now)
+        receipt = context.probability_receipt
+        conn.execute("INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,occurred_at,phase_before,phase_after,source_module,env,payload_json) VALUES ('real-final-monitor',?,1,3,'MONITOR_REFRESHED',?,'day0_window','day0_window','src.engine.cycle_runtime','live',?)", (position.trade_id, now.isoformat(), json.dumps({
+            'direction':direction,'monitor_probability_receipt':receipt,'last_monitor_prob':0.0,
+            'last_monitor_prob_is_fresh':True,'held_sell_full_depth_action_authority':True,
+        })))
+        conn.commit()
+    _enable_exit_submit_prereqs(conn,monkeypatch,ctf_shares=2.0)
+    monkeypatch.setattr('src.data.polymarket_client.resolve_funder_address',lambda:'0x'+'1'*40)
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+    token = position.token_id if direction == 'buy_yes' else position.no_token_id
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={token: 2.0}))
+    configure_global_ledger(ledger)
+    calls=[]
+    source_changed=[]
+    class FakeClient:
+        def _ensure_v2_adapter(self):return self
+        def get_ctf_collateral_payload(self, *, token_ids):return _fresh_exit_collateral_payload(token_id=token,shares=2.0)
+        def get_collateral_payload(self):return _fresh_exit_collateral_payload(token_id=token,shares=2.0)
+        def bind_signed_submission_identity_persister(self,persister):pass
+        def bind_submission_envelope(self,envelope):
+            self.envelope=envelope
+            if source_changed:
+                return
+            # Only canonical source changes after command preparation. No new monitor.
+            changed = now + timedelta(seconds=1)
+            monkeypatch.setattr(exit_lifecycle, '_utcnow', lambda: changed)
+            if source_change == "correction":
+                assert append_print(conn, city='Singapore', station_id='WSSS', source_channel='noaa_wrh_wsss',
+                    publish_ts_utc=observed.isoformat(), value_native=29.0, unit='C',
+                    fetched_at_utc=changed.isoformat(), raw_report='canonical correction 29')
+                conn.commit()
+                if authority_kind == "final_daily":
+                    conn.execute("UPDATE observations SET high_temp=29.0,fetched_at=?", (changed.isoformat(),))
+                    conn.commit()
+                elif authority_kind == "hard_fact":
+                    conn.execute("UPDATE observations SET high_temp=29.0,high_fetch_utc=?,fetched_at=?", (changed.isoformat(), changed.isoformat()))
+                    conn.commit()
+                    from src.config import runtime_cities_by_name
+                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+                    current = evaluate_hard_fact_exit(position=position, city=runtime_cities_by_name()[position.city], now=changed, world_conn=conn, durable_only=True)
+                    assert current is None or current.action != "EXIT_DEAD_BIN"
+                else:
+                    current, _ = prepare(changed)
+                    assert current is None, 'current exact family no longer proves held bin dead'
+            elif source_change == "unreadable":
+                conn.execute("DROP TABLE " + ("observation_prints" if authority_kind == "branchwise" else "observations"))
+                conn.commit()
+            elif source_change == "body_revision":
+                # Existing native provenance changes without value/time changes.
+                conn.execute("UPDATE observations SET high_provenance_metadata=?", (json.dumps({"payload_hash":"sha256:"+"b"*64}),))
+                conn.commit()
+            source_changed.append(True)
+            assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='MONITOR_REFRESHED'").fetchone()[0] == (3 if authority_kind == "final_daily" else 2)
+        def place_limit_order(self,**kwargs):
+            calls.append(kwargs)
+            return _fake_submit_result(self.envelope,order_id='source-race-order')
+    monkeypatch.setattr('src.data.polymarket_client.PolymarketClient',FakeClient)
+    fields=inspect.signature(executor.create_exit_order_intent).parameters
+    def submit(**kwargs):
+        intent=executor.create_exit_order_intent(**{k:v for k,v in kwargs.items() if k in fields})
+        return executor.execute_exit_order(intent,conn=conn,decision_id=kwargs['decision_id'],q_version=kwargs['q_version'])
+    monkeypatch.setattr(exit_lifecycle,'place_sell_order',submit)
+    authority = (exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position,context)
+                 if authority_kind != "hard_fact" else None)
+    try:
+        result=exit_lifecycle.execute_exit(PortfolioState(positions=[position]),position,context,
+            clob=SimpleNamespace(get_order_status=lambda _: {'status':'OPEN'}),conn=conn,branchwise_sell_authority=authority,hard_fact_authority=hard_fact_authority)
+        assert source_changed == [True], result
+        if source_change == "unchanged":
+            assert len(calls) == 1, result
+            assert calls[0]["order_type"] == "FAK" and calls[0]["price"] == pytest.approx(0.10)
+        else:
+            assert calls == [], result
+            assert result == "sell_error: protective_sell_authority_revoked_pre_venue"
+            command_id = conn.execute("SELECT command_id FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0]
+            assert exit_lifecycle._command_terminally_rejected_without_venue_order(conn, command_id, position_id=position.trade_id)
+            assert position.exit_retry_count == 0
+            assert not exit_lifecycle.is_exit_cooldown_active(position)
+            assert not exit_lifecycle.check_pending_retries(position, conn=conn, current_min_order_size=Decimal("0.01"))
+            assert calls == []  # Unchanged stale monitor cannot hot-loop another command.
+            sequence = conn.execute("SELECT MAX(sequence_no)+1 FROM position_events WHERE position_id=?", (position.trade_id,)).fetchone()[0]
+            stale_payload = {"direction": direction, "monitor_probability_receipt": context.probability_receipt,
+                             "last_monitor_prob": 0.0, "last_monitor_prob_is_fresh": True,
+                             "held_sell_full_depth_action_authority": True}
+            conn.execute("INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,occurred_at,phase_before,phase_after,source_module,env,payload_json) VALUES ('replayed-stale-monitor',?,1,?,'MONITOR_REFRESHED',?,'pending_exit','pending_exit','src.engine.cycle_runtime','live',?)",
+                         (position.trade_id, sequence, (now+timedelta(seconds=1)).isoformat(), json.dumps(stale_payload)))
+            conn.commit()
+            assert not exit_lifecycle.check_pending_retries(position, conn=conn, current_min_order_size=Decimal("0.01"))
+            assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0] == 1
+            if source_change == "correction" and authority_kind != "final_daily":
+                restored_at = now + timedelta(seconds=2)
+                monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: restored_at)
+                append_print(conn, city='Singapore', station_id='WSSS', source_channel='noaa_wrh_wsss',
+                    publish_ts_utc=observed.isoformat(), value_native=32.0, unit='C',
+                    fetched_at_utc=restored_at.isoformat(), raw_report='canonical restored 32')
+                if authority_kind == "hard_fact":
+                    conn.execute("UPDATE observations SET high_temp=32.0,high_fetch_utc=?,fetched_at=?", (restored_at.isoformat(), restored_at.isoformat()))
+                    conn.commit()
+                    hard_fact_authority = evaluate_hard_fact_exit(position=position, city=runtime_cities_by_name()[position.city], now=restored_at, world_conn=conn, durable_only=True)
+                    new_receipt = {"probability_authority": "day0_absorbing_hard_fact", "hard_fact_evidence": hard_fact_authority.evidence.as_dict()}
+                else:
+                    conn.commit()
+                    prepared, payload = prepare(restored_at)
+                    assert prepared is not None
+                    refreshed_snapshot = replace(snapshot, witness=prepared.probability_witness, day0_payload=payload)
+                    probability, refreshed, fresh = mr._materialize_current_global_day0_probability(position, refreshed_snapshot)
+                    assert fresh and probability == 0.0
+                    position.__dict__.update(refreshed.__dict__)
+                    new_receipt = mr._compact_monitor_probability_receipt(position._day0_monitor_probability_receipt)
+                context = replace(context, probability_receipt=new_receipt)
+                position.last_monitor_at = restored_at.isoformat()
+                sequence = conn.execute("SELECT MAX(sequence_no)+1 FROM position_events WHERE position_id=?", (position.trade_id,)).fetchone()[0]
+                conn.execute("INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,occurred_at,phase_before,phase_after,source_module,env,payload_json) VALUES ('restored-source-monitor',?,1,?,'MONITOR_REFRESHED',?,'pending_exit','pending_exit','src.engine.cycle_runtime','live',?)", (
+                    position.trade_id, sequence, restored_at.isoformat(), json.dumps({
+                        'direction': direction, 'monitor_probability_receipt': new_receipt,
+                        'last_monitor_prob': 0.0, 'last_monitor_prob_is_fresh': True,
+                        'held_sell_full_depth_action_authority': True,
+                    })))
+                insert_snapshot(conn, replace(old_book, snapshot_id='restored-source-book', condition_id=condition,
+                    captured_at=restored_at, freshness_deadline=restored_at+timedelta(seconds=180)))
+                conn.commit()
+                assert exit_lifecycle.check_pending_retries(position, conn=conn, current_min_order_size=Decimal("0.01"))
+                authority = (exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position,context)
+                             if authority_kind != "hard_fact" else None)
+                result = exit_lifecycle.execute_exit(PortfolioState(positions=[position]),position,context,
+                    clob=SimpleNamespace(get_order_status=lambda _: {'status':'OPEN'}), conn=conn,
+                    branchwise_sell_authority=authority, hard_fact_authority=hard_fact_authority)
+                assert result.startswith("sell_pending:"), result
+                assert len(calls) == 1
+                assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0] == 2
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+def _bind_canonical_hard_fact_case(conn, position, context, now):
+    """Real resolver-product reader and verdict; no execution authority is mocked."""
+    import hashlib
+    from src.config import runtime_cities_by_name
+    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+    city = runtime_cities_by_name()[position.city]
+    station = city.wu_station
+    provenance = {
+        "upstream": "weather.gov_wrh_timeseries", "station": station,
+        "settlement_page_view": "all", "payload_hash": "sha256:" + hashlib.sha256(b"canonical WRH page 32").hexdigest(),
+        "high_local_timestamp": (now-timedelta(seconds=2)).isoformat(),
+        "low_local_timestamp": (now-timedelta(seconds=2)).isoformat(),
+    }
+    conn.execute("""CREATE TABLE IF NOT EXISTS observations (
+        id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, source TEXT,
+        station_id TEXT, unit TEXT, authority TEXT, high_temp REAL, low_temp REAL,
+        high_provenance_metadata TEXT, low_provenance_metadata TEXT,
+        high_fetch_utc TEXT, low_fetch_utc TEXT, fetched_at TEXT)""")
+    conn.execute("INSERT INTO observations (id,city,target_date,source,station_id,unit,authority,high_temp,low_temp,high_provenance_metadata,low_provenance_metadata,high_fetch_utc,low_fetch_utc,fetched_at) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        position.city, position.target_date, "noaa_wrh_" + station.lower(), station, "C", "VERIFIED",
+        32.0, 27.0, json.dumps(provenance), json.dumps(provenance),
+        (now-timedelta(seconds=1)).isoformat(), (now-timedelta(seconds=1)).isoformat(),
+        (now-timedelta(seconds=1)).isoformat(),
+    ))
+    conn.commit()
+    verdict = evaluate_hard_fact_exit(position=position, city=city, now=now, world_conn=conn, durable_only=True)
+    assert verdict is not None and verdict.action == "EXIT_DEAD_BIN"
+    return replace(context, exit_reason="DAY0_HARD_FACT_BIN_DEAD", probability_receipt={
+        "probability_authority": "day0_absorbing_hard_fact", "hard_fact_evidence": verdict.evidence.as_dict(),
+    }), verdict
+
+
+def _bind_canonical_final_daily_case(conn, position, context, now):
+    from zoneinfo import ZoneInfo
+    from src.config import runtime_cities_by_name
+    from src.engine.event_reactor_adapter import _global_final_daily_probability_payload
+    from src.engine.monitor_refresh import _compact_monitor_probability_receipt
+    from src.execution.day0_hard_fact_exit import _final_daily_observation_extreme, final_observed_bin_verdict
+    position.city = "Hong Kong"
+    position.target_date = (now.astimezone(ZoneInfo("Asia/Hong_Kong")).date() - timedelta(days=1)).isoformat()
+    conn.execute("UPDATE position_current SET city=?,target_date=? WHERE position_id=?", (position.city,position.target_date,position.trade_id))
+    conn.execute("INSERT INTO observations (city,target_date,source,station_id,unit,authority,high_temp,low_temp,fetched_at,high_provenance_metadata) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                 (position.city,position.target_date,"hko_daily_api","HKO","C","VERIFIED",32.0,27.0,now.isoformat(),json.dumps({"payload_hash":"sha256:"+"a"*64})))
+    conn.commit()
+    final = _final_daily_observation_extreme(city=runtime_cities_by_name()[position.city], target_date=position.target_date, metric="high", now=now, conn=conn)
+    assert final is not None
+    low, high = (None,30.0) if position.direction == "buy_yes" else (31.0,None)
+    assert final_observed_bin_verdict(metric="high",direction=position.direction,bin_low=low,bin_high=high,final_extreme=final.settled_extreme).action == "EXIT_DEAD_BIN"
+    payload = _global_final_daily_probability_payload(family=SimpleNamespace(city=position.city,target_date=position.target_date,metric="high"),final_observation=final,probability_base_identity="canonical-final-daily")
+    full = {**position._day0_monitor_probability_receipt,
+            "probability_authority": payload["probability_authority"],
+            "observation": payload["_edli_global_day0_binding"]}
+    full["band"] = {"basis": payload["probability_authority"], "sample_count": 2}
+    position._day0_monitor_probability_receipt = full
+    receipt = _compact_monitor_probability_receipt(full)
+    return replace(context, probability_receipt=receipt)
+
+
+@pytest.mark.parametrize("case", ("transaction", "deadline", "mutated_full_receipt", "different_source_role"))
+def test_exact_source_binding_does_not_renew_or_mutate_original_proof(conn, monkeypatch, case):
+    from src.execution import exit_lifecycle
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch)
+    proof = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    frozen = proof.source_receipt_json
+    assert exit_lifecycle._protective_source_receipt_current(conn, position_id=position.trade_id,
+        receipt=context.probability_receipt, source_receipt_json=frozen)
+    if case == "transaction":
+        conn.execute("BEGIN IMMEDIATE")
+        assert not exit_lifecycle._protective_source_receipt_current(conn, position_id=position.trade_id,
+            receipt=context.probability_receipt, source_receipt_json=frozen)
+        conn.rollback()
+    elif case == "deadline":
+        assert not exit_lifecycle._protective_source_receipt_current(conn, position_id=position.trade_id,
+            receipt=context.probability_receipt, source_receipt_json=frozen, deadline_utc=now)
+    else:
+        position._day0_monitor_probability_receipt["observation"]["observed_extreme_native"] = 29.0
+        if case == "different_source_role":
+            position._day0_monitor_probability_receipt["observation"]["settlement_source"] = "metar"
+        assert proof.source_receipt_json == frozen
+        with pytest.raises(ValueError, match="BRANCHWISE_SELL_SOURCE_BINDING_REQUIRED"):
+            exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+        assert exit_lifecycle._protective_source_receipt_current(conn, position_id=position.trade_id,
+            receipt=context.probability_receipt, source_receipt_json=frozen)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_exact_source_correction_before_command_preparation_has_no_command_effect(conn, monkeypatch, direction, metric):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+    from src.state.schema.observation_prints_schema import append_print
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction, metric=metric)
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    binding = position._day0_monitor_probability_receipt["observation"]
+    append_print(conn, city=position.city, station_id="EGLC", source_channel="noaa_wrh_eglc",
+                 publish_ts_utc=binding["observation_time"], value_native=29.0 if metric == "high" else 35.0, unit="C",
+                 fetched_at_utc=now.isoformat(), raw_report="corrected native page 29")
+    conn.commit()
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", lambda **_: pytest.fail("superseded source prepared command"))
+    result = exit_lifecycle.execute_exit(PortfolioState(positions=[position]), position, context,
+        clob=object(), conn=conn, branchwise_sell_authority=authority)
+    assert result == "exit_blocked: protective_authority_unavailable"
+    assert position.last_exit_error == "protective_source_redecision_required"
+    assert position.exit_retry_count == 0
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0] == 0

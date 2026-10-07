@@ -263,6 +263,7 @@ def _capture_held_point_base(vector, mixture, *, payload=None) -> None:
                 "observation_time", "observation_available_at", "raw_payload_sha256",
                 "_edli_day0_current_temperature_native", "_edli_day0_current_temperature_source",
                 "_edli_day0_current_temperature_observed_at_utc", "posterior_id",
+                "_edli_day0_current_temperature_source_revision_identity",
                 "_edli_day0_remaining_provider_source_cycle_time_utc",
             ) if key in payload and not isinstance(payload[key], (Mapping, list, tuple))}
             binding = payload.get("_edli_global_day0_binding")
@@ -38995,6 +38996,7 @@ def _global_day0_execution_payload(
                 ("value_native", "_edli_day0_current_temperature_native"),
                 ("observed_at_utc", "_edli_day0_current_temperature_observed_at_utc"),
                 ("source", "_edli_day0_current_temperature_source"),
+                ("source_revision_identity", "_edli_day0_current_temperature_source_revision_identity"),
             ):
                 if field in current_state:
                     payload[destination] = current_state[field]
@@ -39193,6 +39195,10 @@ def _global_day0_probability_authority_payload(
             (
                 "current_temperature_source",
                 "_edli_day0_current_temperature_source",
+            ),
+            (
+                "current_temperature_source_revision_identity",
+                "_edli_day0_current_temperature_source_revision_identity",
             ),
             (
                 "conditional_high_shape_identity",
@@ -39664,6 +39670,9 @@ def _global_final_daily_probability_payload(
         "settlement_unit": str(final_observation.unit),
         "source_available_at": final_observation.fetched_at.isoformat(),
         "probability_base_identity": probability_base_identity,
+        "source_evidence_identity": str(
+            getattr(final_observation, "source_evidence_identity", "") or ""
+        ),
         "final_daily": True,
     }
     return {
@@ -42913,6 +42922,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_current_temperature_native",
             "_edli_day0_current_temperature_observed_at_utc",
             "_edli_day0_current_temperature_source",
+            "_edli_day0_current_temperature_source_revision_identity",
             "_edli_day0_trajectory_conditioning_basis",
             "_edli_day0_model_innovations_c",
             "_edli_day0_current_state_innovation_e_fold_hours",
@@ -43011,6 +43021,9 @@ def _prepare_current_global_probability_family(
             "current_temperature_source": payload.get(
                 "_edli_day0_current_temperature_source"
             ),
+            **({"current_temperature_source_revision_identity": payload[
+                "_edli_day0_current_temperature_source_revision_identity"]}
+               if "_edli_day0_current_temperature_source_revision_identity" in payload else {}),
             "conditional_high_shape_identity": payload.get(
                 "_edli_day0_conditional_high_shape_identity"
             ),
@@ -48661,9 +48674,12 @@ def _latest_day0_current_temperature_native(
     world_conn: sqlite3.Connection,
     family,
     decision_time: datetime,
+    identity_out: dict[str, object] | None = None,
 ) -> tuple[float, datetime, str] | None:
     """Compatibility wrapper around the shared Day0 current-state reader."""
 
+    if identity_out is not None:
+        identity_out.clear()
     city = runtime_cities_by_name().get(str(family.city))
     if city is None:
         return None
@@ -48677,6 +48693,8 @@ def _latest_day0_current_temperature_native(
     )
     if state is None:
         return None
+    if identity_out is not None:
+        identity_out.update(state.identity())
     return state.value_native, state.observed_at, state.source
 
 
@@ -48807,18 +48825,8 @@ def _day0_carrier_written_inputs(payload: Mapping[str, object]) -> dict[str, obj
     written = payload.get("_edli_day0_carrier_written_inputs")
     if isinstance(written, Mapping):
         return dict(written)
-    value = payload.get("_edli_day0_current_temperature_native")
-    observed_at = payload.get("_edli_day0_current_temperature_observed_at_utc")
-    source = payload.get("_edli_day0_current_temperature_source")
     return {
-        "current_path_state": (
-            None if value is None or observed_at is None or source is None
-            else {
-                "value_native": float(value),
-                "observed_at_utc": str(observed_at),
-                "source": str(source),
-            }
-        ),
+        "current_path_state": _day0_current_temperature_identity(payload),
         "conditional_high_shape_identity": payload.get(
             "_edli_day0_conditional_high_shape_identity"
         ),
@@ -48828,6 +48836,31 @@ def _day0_carrier_written_inputs(payload: Mapping[str, object]) -> dict[str, obj
         "remaining_variance_basis": payload.get("_edli_day0_remaining_variance_basis"),
         "domain_role_shapes": deepcopy(payload.get("_edli_day0_measurement_domain_shapes")),
     }
+
+
+def _day0_current_temperature_identity(payload: Mapping[str, object]) -> dict[str, object] | None:
+    """Preserve the current state's optional qualified product dependency."""
+    value = payload.get("_edli_day0_current_temperature_native")
+    observed_at = payload.get("_edli_day0_current_temperature_observed_at_utc")
+    source = payload.get("_edli_day0_current_temperature_source")
+    if value is None or observed_at is None or source is None:
+        return None
+    identity = {
+        "value_native": float(value),
+        "observed_at_utc": str(observed_at),
+        "source": str(source),
+    }
+    revision = payload.get("_edli_day0_current_temperature_source_revision_identity")
+    if revision is not None:
+        from src.data.day0_hourly_vectors import Day0CurrentTemperatureState
+
+        qualified = Day0CurrentTemperatureState(
+            value_native=float(value),
+            observed_at=datetime.fromisoformat(str(observed_at).replace("Z", "+00:00")),
+            source=str(source), source_revision_identity=revision,
+        ).identity()
+        identity["source_revision_identity"] = qualified["source_revision_identity"]
+    return identity
 
 
 def _bind_day0_carrier_written_inputs(payload: dict[str, object]) -> None:
@@ -48873,6 +48906,10 @@ def _snapshot_day0_source_clock_carrier_provenance(
         for field in carrier_fields
         if field in payload
     }
+    written = payload.get("_edli_day0_carrier_written_inputs")
+    current_state = written.get("current_path_state") if isinstance(written, Mapping) else None
+    if isinstance(current_state, Mapping) and current_state.get("source_revision_identity") is not None:
+        provenance["carrier_written_inputs"] = deepcopy(written)
     binding = payload.get("_edli_global_day0_binding")
     for field in ("posterior_id", "probability_base_identity"):
         value = payload.get(field)
@@ -49078,21 +49115,9 @@ def _rebuild_decision_time_day0_carrier(
         station_id=configured_station,
         preliminary_survival_identity=likelihood_identity,
     )
-    current_value = payload.get("_edli_day0_current_temperature_native")
-    current_observed_at = payload.get(
-        "_edli_day0_current_temperature_observed_at_utc"
-    )
-    current_source = payload.get("_edli_day0_current_temperature_source")
-    if (
-        current_value is not None
-        and current_observed_at is not None
-        and current_source is not None
-    ):
-        identity_inputs["current_path_state"] = {
-            "value_native": float(current_value),
-            "observed_at_utc": str(current_observed_at),
-            "source": str(current_source),
-        }
+    current_identity = _day0_current_temperature_identity(payload)
+    if current_identity is not None:
+        identity_inputs["current_path_state"] = current_identity
     conditional_high = payload.get("_edli_day0_conditional_high_shape")
     if conditional_high is not None:
         identity_inputs["conditional_high_shape_identity"] = (
@@ -49846,10 +49871,12 @@ def _day0_direct_entry_source_clock_carrier(
     city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
     if city is None:
         return None
+    current_state_identity: dict[str, object] = {}
     current_state = _latest_day0_current_temperature_native(
         world_conn=world_conn or forecast_conn,
         family=family,
         decision_time=decision_time,
+        identity_out=current_state_identity,
     )
     if current_state is None:
         return None
@@ -49989,6 +50016,8 @@ def _day0_direct_entry_source_clock_carrier(
         "current_temperature_native": float(current_native),
         "current_temperature_observed_at_utc": current_observed_at.isoformat(),
         "current_temperature_source": str(current_source),
+        **({"current_temperature_source_revision_identity": current_state_identity["source_revision_identity"]}
+           if "source_revision_identity" in current_state_identity else {}),
         "future_extremes_c": [float(value) for value in values.tolist()],
         "vector_witness": dict(witness),
     }
@@ -50303,11 +50332,13 @@ def _day0_remaining_day_members(
             payload["_edli_day0_remaining_unavailable_reason"] = "city_config_missing_for_hourly_bundle"
             return None
         current_state: tuple[float, datetime, str] | None = None
+        current_state_identity: dict[str, object] = {}
         if world_conn is not None:
             current_state = _latest_day0_current_temperature_native(
                 world_conn=world_conn,
                 family=family,
                 decision_time=decision_time,
+                identity_out=current_state_identity,
             )
             if current_state is None:
                 payload["_edli_day0_remaining_unavailable_reason"] = (
@@ -50546,6 +50577,11 @@ def _day0_remaining_day_members(
                 current_observed_at.isoformat()
             )
             payload["_edli_day0_current_temperature_source"] = current_source
+            payload.pop("_edli_day0_current_temperature_source_revision_identity", None)
+            if "source_revision_identity" in current_state_identity:
+                payload["_edli_day0_current_temperature_source_revision_identity"] = (
+                    current_state_identity["source_revision_identity"]
+                )
             payload["_edli_day0_trajectory_conditioning_basis"] = (
                 "current_state_exponential_residual_decay_v1"
             )
@@ -50599,6 +50635,7 @@ def _day0_remaining_day_members(
                 current_state=Day0CurrentTemperatureState(
                     value_native=float(current_state[0]),
                     observed_at=current_state[1], source=str(current_state[2]),
+                    source_revision_identity=current_state_identity.get("source_revision_identity"),
                 ),
                 provider_vectors=complete_provider_vectors,
             )
@@ -50653,6 +50690,8 @@ def _day0_remaining_day_members(
                 )
                 or carrier_current_source
                 != str(payload.get("_edli_day0_current_temperature_source"))
+                or entry_carrier.get("current_temperature_source_revision_identity")
+                != payload.get("_edli_day0_current_temperature_source_revision_identity")
             ):
                 raise ValueError(
                     "DAY0_DIRECT_ENTRY_SOURCE_CLOCK_CARRIER_MISMATCH"

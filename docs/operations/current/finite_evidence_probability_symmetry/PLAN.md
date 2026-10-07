@@ -1,5 +1,338 @@
 # finite_evidence_probability_symmetry -- Plan
 
+## 2026-10-07 independent-branch draft-PR continuation
+
+The operator approved the previously proposed new GitHub branch and draft PR
+for the completed offline physical-evidence exit repair. This does not authorize
+merge, auto-merge, deployment, restart, trading, production DB access or work on
+the user's computer. Retained frozen candidate is `8997b7561`; current remote
+live is `a04f19478bc283a4d3611e0e196d2f7728a2a231`, advanced from `620a0b5f5`.
+The publication worktree starts from that exact current head and squash-applies
+the reviewed repair. All peer changes are preserved. Five code/test overlaps
+merged mechanically; the sole text conflict joins the independent new native
+held-point rationale with the repair's final-daily receipt rationale.
+
+Current-head workflow inspection is read-only. Branch push and draft PR run
+hosted static/test/report gates; the operational live-release gate is manual
+only. No workflow or CI authority is changed by this repair. Re-run affected
+source/execution/data relationships and independently review the current native
+source/custody/q seams before publication. Any newly proven compatibility defect
+gets a causal regression and narrow repair, not a relaxed source/identity gate.
+Existing synthetic-versus-live and baseline-failure limitations remain explicit.
+
+Current-head rerun initially has 18 setup errors from undeclared ecCodes/ECMWF
+OpenData dependencies, distinct from nine old WRH fixture source-custody failures.
+The official PyPI wheels are installed in the isolated venv and the direct
+imports are declared exactly in requirements.txt. Native fixtures are refreshed
+through normal original capture/decoding; source guards are not stubbed out.
+The ten required data suites pass 386 on both untouched a04f and this candidate.
+The Wellington 24-versus-26 failure is also reproduced on untouched a04f.
+
+Independent shared fast-tail replay exposed a defect already in 8997: WRH
+source_revision_identity is dropped by persisted/current-state projections in
+the adapter and public bundle reader. Actual source/residual/carrier replay
+rejects its own identity; restoring only that field restores exact mixed q.
+A narrow propagation repair and full native replay negatives are in progress.
+The owned 8997 Library artifact is versioned with an explicit erratum; its old
+code and tests remain historical proof, not the current publication candidate.
+
+Publication runtime/test freeze is `3196897c8cf41e31f34a544e7b013c8a5d43207e`.
+The final nine-suite integrated run passes 865, with only the same Wellington
+24-versus-26 baseline failure and 11 skips (856.63 seconds under concurrent cloud
+load). This includes 23 new native WRH HIGH/LOW persisted/public-reader replay
+and tamper/legacy/fresh/frozen controls. Four exact baseline cases are RED before
+repair; 26 existing carrier controls also pass independently. The independent
+current-head overlap and frozen carrier review has no remaining Critical or
+Important finding within that bounded slice, not a whole-PR production pass.
+
+The nine WRH acceptance cases now use real synthetic native GRIB originals
+through ordinary capture/decoding/custody, with immutable forecast-row assertions.
+HKO updates retain raw CSV and actual fixture capture clocks. Two finite-window
+cases use the same 0.444 bid at both cuts, legal on the 0.001 tick grid: current
+rounding-safe unit proceeds 0.4193136 lie between held q 0.424400099194124 and
+0.4163514484965418. The two-share/one-share-minimum, JIT, confirmed partial,
+residual and stale-order/reentry assertions remain active. This is fixture
+alignment to current law; no live fee/probability guard is changed.
+
+Hosted base a04f already has failing money-path-required and release runs.
+Decoded logs identify missing eccodes errors plus separate other failures;
+the native dependencies are declared here to execute those source fixtures.
+Do not misattribute all hosted failures to dependencies. The local semantic
+scan's 43 messages match untouched a04f exactly, but hosted a04f's single-live
+step succeeded; that comparison is local evidence, not the established hosted
+failure cause. Schema, semantic registration (no unknown objects), test-quality
+and scoped freshness/map/planning checks pass locally. Broader current-base
+release comparison and exact published-head CI results remain separately tracked.
+
+Remote live was observed unchanged as a04f at 01:41 UTC; the new publication
+branch did not exist. Read-only workflow review found no branch/draft-PR path
+to repository-defined deployment or trading; live-release remains manual. Only
+new-branch publication and a draft PR are authorized. No merge, auto-merge,
+deployment, restart, production DB or live venue action is authorized.
+
+## 2026-10-06 cloud-only physical-evidence exit repair
+
+Operator-authorized implementation is isolated source and synthetic-fixture work,
+initially based on remote live `6fa8f663dcbe2e3337cdcc12d18892b411c09c2a`,
+then reconciled onto `620a0b5f50e9d0dc12563611b08a6b84f3da29dc`. No production
+database, credentials, settings, venue connection, daemon, deployment, remote
+publication or accounting repair is authorized by this slice. The existing
+inclusive [0.05, 0.95] execution band is unchanged. The objective is the earliest
+causally justified exit while lawful executable depth remains, including positive-q
+statistical exits under the current global action law; it is not a price stop-loss
+or a promise that a profitable exit window always exists.
+
+Execution owner: exit_lifecycle.py, executor.py, cycle_runtime.py and paired tests.
+Reproduce the exact-payoff branchwise path losing its immediate order intent;
+carry distinct verified authority through marketable FAK and legal lot handling,
+without granting numerical/statistical zero hard-fact authority. Reevaluate a
+liquidity-wait position when a new exact-token executable book arrives only after
+live/unknown command and cancel/fill fences clear. Reuse canonical terminal-partial
+reduction and reauthorize only the proved residual, never infer fills from ACK.
+
+Upstream owner: main.py, ingest_main.py, physical_current_delivery.py,
+replacement_forecast_current_target_plan.py, day0_hard_fact_exit.py,
+station_temperature_adapters.py, monitor_refresh.py and paired tests as required.
+Preserve product/view/station/unit/date/body/receipt/correction identity. Raw
+print maxima are not absorbing authority when complete snapshot membership or
+deletion/retraction evidence is missing. Prefer an existing canonical product
+writer over a parallel authority. Independently repair revision delivery and
+effective availability, including late older-clock corrections and decisive
+retractions. Any bounded publication marker is derived transport bookkeeping,
+not source or decision-completion truth, and advances only after durable publish.
+
+Independent acceptance owner adds real-selector early-exit/churn relationship
+tests, with no production source edits. The integrator owns this plan and changed
+source/test/artifact registries. Parallel children use separate cloud worktrees.
+
+SCOPE: one exact held condition and qualified evidence/quote/command identities.
+DRAIN: existing post-commit family wake and held-monitor/redecision machinery.
+RESET: genuinely new admissible evidence/book and reconciled command state, not
+elapsed time alone, renewed source clocks or a fabricated probability certificate.
+Preserve INV-01/02/05/06/21/28/37/47 and current ENTRY/HELD probability parity.
+
+Acceptance uses clean-environment pytest, temporary synthetic databases, fake
+venue responses and a non-loopback-network guard. Baseline and candidate run the
+same focused suites; pre-existing failures remain separately enumerated. Required
+cases include YES/NO and high/low twins, exact-proof .10/.12/.01 FAK, numeric-zero
+rejection, bid loss at JIT followed by return inside the prior 120-second wait,
+terminal partial/late-fill/duplicate-ACK/unknown-order fences, and positive-q
+physical deterioration whose real global selector chooses taker SELL before the
+above-floor book window closes. HOLD/other-winner and stale reentry controls are
+mandatory. Final diff receives independent review; no merge/deploy readiness is
+inferred from fixture passes. Rollback is a code revert, never deletion of facts.
+
+### First-slice work record (2026-10-06, offline only)
+
+Branch: `fix/physical-exit-current-20261006`. Task: preserve strict exact-proof
+marketability, release proven restored-liquidity redecision debt, and deliver
+causal physical revision hints. Changed files are the seven execution/delivery
+source owners above and paired tests; source_rationale/test_topology describe
+the same existing owners, without changing invariant law or source eligibility.
+
+The original six-commit candidate `71ce90aad69c41a54518b28888f3032b309a62a1`
+passed all 479 execution/independent acceptance cases in one frozen run.
+Independent review of byte-identical contents established no remaining
+Critical/Important defect in its seven changed production files. Separate
+acceptance+delivery run: 55 passed and seven explicitly excluded pre-existing
+13-field fixtures against the current 14-field posterior contract. Those two
+fixture definitions are now repaired without changing their assertions;
+all 22 delivery cases then pass. The original execution baseline had 14 missing
+Mac public-funder-resolver fixture failures; unchanged production source plus
+the same synthetic public-identity fixture passed all 390 baseline cases.
+Production signing/venue integration remains unverified.
+
+Peer drift through `620a0b5f5` is preserved, including source-clock residual
+budgeting, HKO witness forwarding and global-model city routing. The only shared
+production file is ingest_main; physical-tick changes and peer anchor-drain
+changes apply in distinct sections. Current-base reruns are recorded at the
+final candidate, not inferred from the earlier baseline.
+
+Further adversarial review found an Important delivery liveness defect in the
+first frozen slice: a 50,000-revision current-day scope repeatedly exhausts its
+50 ms read budget without progress; 20,000 can do so under CPU contention.
+The original no-remaining-findings review is superseded for that issue. Publication
+is blocked until bounded continuation/restart/no-new-data progress passes.
+The source-only correction race is now independently reproduced as well: a real
+canonical correction committed after MONITOR but before SDK invalidates the
+current exact-family proof without a new MONITOR event, yet the frozen executor
+still sends FAK. Publication is also blocked on source-currentness proof at the
+pre-SDK boundary. Residual second-order dispatch remains an explicit acceptance
+question, not inferred from a partial reduction or a superseding-monitor test.
+
+Current-base verification before that continuation repair: exit safety 439 and
+complete delivery 22 pass together; independent acceptance 40 and source-city
+routing 14 pass. Full neighboring Day0 bridge: 229 pass / 16 failures on both the untouched `620a0b5f5` base and
+candidate, with no new failure names or normalized assertions/traces. Full live safety: 537 pass / 67 failures
+on both baseline and candidate, with identical failure names and normalized
+assertions/traces (only checkout/temp paths, runtime object addresses and shifted
+traceback line numbers normalized). These suites are not green; no claim that
+all baseline failures are environment-only. Scoped freshness/map/planning checks
+pass; whole-repository source/test topology is non-green on both baselines.
+
+Next: independently review complete WRH current-product ownership and all
+current-q correction consumers before integrating that separate slice. The first
+slice has no dependency on it or a schema migration and does not claim that
+WRH empty/retraction completeness is solved. Immediate physical-wake coverage
+of venue-confirmed exposure awaiting chain projection is also unproved because
+the reused fast-path held filter requires chain shares/cost basis. Shared-ledger
+churn replay starts from an admitted BUY remainder and confirms a partial exit;
+original BUY admission, full liquidation and genuine corrected-source reentry
+are not represented as end-to-end proven. No runtime or capital-readiness claim.
+
+### Corrected first-slice freeze (2026-10-06)
+
+Both adversarial blockers above are repaired in the corrected first slice.
+Source-currentness commit `365fa9ca4` reproduces the qualified current source at
+pre-SDK; the identical real-source matrix is 14 failed / 6 passed before repair
+and 20 passed after. Full execution suite is 469 passed. The adaptive delivery
+repair `bd90d007c` passes 15 independent frozen controls, including first-turn
+dense/sparse hints, retained progress, long accepted clocks, failed-direct replay
+and lower-rowid future receipts becoming causal. Under CPU/GIL stress whole
+calls took about 1.3–1.6 seconds; there is no hard 50 ms wall-time guarantee or
+claim of complete stressed-backlog drainage.
+
+On current-base source target `2db52c88c`, all 42 independent source-bound
+acceptance cases pass, including actual +10-second monitoring recovery and
+YES/NO first-confirmed-partial, chain reconciliation, fresh residual order,
+canonical closure and late duplicate-fill idempotency before a synthetic
+30-second above-floor window closes. The full core run gives 630 passed,
+one Wellington legacy margin assertion failure and 11 skips. Untouched
+`620a0b5f5` hard-fact baseline has that same 24-versus-26 failure and 11 skips.
+Broad live-safety, bridge, target-plan and topology debt remains separately
+reported; no whole-repository green or production readiness claim.
+
+The remote live head was rechecked as `620a0b5f5` at 16:31 UTC. Registry/doc
+changes after the source target do not alter runtime logic. No merge, push,
+PR, deployment or live action is authorized by this record. The separately
+owned complete-current-WRH writer, acquisition scheduling, current-q membership
+identity and missing-event monitor work remains under independent review and
+is not a dependency or claimed completion of this first slice.
+
+### Complete-current-WRH integration (2026-10-06, offline candidate)
+
+This additive slice starts at corrected first-slice `2b49ac184` and preserves the
+same remote base `620a0b5f5`, rechecked at 17:53 UTC. It has no schema migration.
+It does change the canonical WRH writer/reader and adds a dedicated acquisition
+job; these are separate deployment/compatibility considerations from the
+standalone first slice. No deployment or remote publication has occurred.
+
+Qualified complete current WRH products retain native body, station-batch,
+product/view, unit, local-day coverage and request/receipt provenance. They can
+replace and journal full membership, including downward corrections and EMPTY.
+Intraday/EMPTY remains UNVERIFIED for settlement; only reproduced nonempty
+complete-day evidence is settlement-ready. Generic disputed/backfill writes do
+not gain current-owner authority. Source preparation and body I/O occur before
+the short canonical FORECAST+WORLD write lease, and the commit compares the
+prepared row image. Unknown/unreadable claimed ownership does not revive an old
+max, old event, stale current fact or an obsolete WU absence permission.
+
+Dedicated WRH scheduling is isolated from other providers. Current exposure has
+priority; bounded aged completion recovery advances fairly even when one oldest
+scope fails, and completed EMPTY remains eligible for late nonempty publication
+when exposure has closed. Native objects, store and in-memory cache are bounded.
+Current/finality semantic identity and first source possession clocks do not
+renew on a metadata-only confirmation. Immutable referenced custody is not
+ordinary disposable scratch.
+
+The current-state delivery identity includes the qualified complete membership,
+even when the newest point is unchanged or a different qualified feed supplies
+the current point. An admitted WRH source can supply an in-memory provisional
+family carrier when no stored DAY0 event exists. Corrected lower extrema replace
+obsolete event overlays; genuine BLOCKED carriers, EMPTY and unknown current
+owner remain non-authorizing. No synthetic monotone WORLD event is persisted.
+
+Runtime/test target `af5240d33` contains owner `155c388aa`/`804755e78`/`d49c4457c`,
+monitor `32f09c69b`, membership identity `ad6bf200c` and test-only
+`d0e91cee3`/`a13682309`. Its combined eight-suite run has 830 passed, one unchanged
+Wellington 24-versus-26 baseline failure and 11 skips. The ten required data suites separately pass 332 tests on both untouched `620a0b5f5`
+and the integrated candidate. These are synthetic cloud fixtures with network
+denied, not production state or venue evidence. Independent
+owner review before the final quota probe passed 141 product/recovery checks and
+15 selected scheduling/parser/cache checks. Broader owner comparison retains
+53 failed test names on both the earlier baseline and candidate (389 versus 430
+passed); this is not a claim that all failure details or causes are identical.
+
+Nine new native-WRH relationship tests use actual writer, current reader,
+materializer, held q, global selector and submit-time probability reproof. A held
+HIGH/NO 30-degree bin changes q from 0.0890358 to 0.0360761 while the newest point
+stays fixed. At the same 0.07 bid the lawful action changes HOLD to taker SELL.
+Actual JIT/lifecycle/executor receives a synthetic CONFIRMED two-share FAK fill
+at +61 seconds, before the finite +120-second above-floor window ends, leaving
+three shares. A stale selected SELL cannot submit again. Downward/deletion,
+irrelevant member, metadata NOOP, EMPTY, competing BUY and below-floor controls
+are included. No new probability threshold or price stop-loss is introduced.
+
+Canonical fee is separately proved as 6,510 micros. Existing lifecycle projection
+records gross -0.10; separately calculated fee-net realized PnL is -0.10651.
+Accounting code is unchanged. The test explicitly composes queue/materializer
+and batch-to-executor scheduling boundaries; it does not prove daemon latency,
+a native-WRH stale BUY/rest cancellation, a second residual order or LOW/YES
+positive-q execution. Earlier first-slice residual/reentry evidence retains its
+own scope. Deployed source availability/book/fill replay remains absent.
+
+The additional custody probe found a real operational stall: byte-distinct
+semantic NOOP confirmations filled a reduced three-object store despite no
+semantic revision, blocking even a later real correction. Repair `0425bc79d`
+(integrated as `e0e3430a6`) validates incoming native bytes before a strictly typed
+transport-order receipt, while retaining the first semantic body and clocks.
+Eleven NOOPs/restarts now consume one body; a genuine correction then commits
+with two. Malformed controls, legacy full confirmations, missing main-body
+recovery and late changed responses retain their fences. No native body is
+deleted, cap raised or semantic proof replaced by an administrative receipt.
+An already-full legacy directory or a store full of real retained semantic
+history remains an explicit capacity condition requiring authorized archival;
+there is no automatic custody sweep or infinite-retention promise.
+
+Final integrated runtime/test target `e0e3430a689b9fe9e76df2d897ba486142779e19`
+passes 841 core/relationship tests, with the same Wellington baseline failure
+and 11 skips. The ten data suites pass 332 again. Independent final WRH/control
+and membership-identity review passes 154 checks: all 145 product tests, five
+membership identity tests and four complementary custody/control probes. The
+review confirms that control-only confirmations change neither first source
+clocks, current-state identity, hard-fact evidence, finality nor wake identity;
+missing main custody still blocks authority. The earlier full owner/scheduler
+review and first-slice execution review retain their separately stated scope.
+
+The remote live head was rechecked unchanged at `620a0b5f5` at 18:11 UTC. Scoped
+freshness, map maintenance and planning checks pass. Source topology has 455
+existing issues and test topology has 540 (baseline 541); artifact topology has
+four identical absent-base-tree liminal paths. No new issue keys were introduced,
+and new importer companions are registered. Whole-repository debt is not repaired
+or relabelled as green. Later documentation-only freeze does not change runtime.
+This intermediate freeze is superseded by the final named-refusal guard below.
+
+### Final integrated freeze after known-refusal retention guard
+
+A final same-quota check reproduced custody accumulation before the writer
+returned `existing_disputed` for a real typed QUARANTINED row. Five preparation
+lines in `6fda26b67` return the same exact-row-CAS-bound noncommitting disposition
+before old-body retention/recovery I/O. Five refused incoming products now leave
+body count, canonical row and journal unchanged; a changed row after preparation
+still fails CAS and must be prepared anew. Current captured schema does not admit
+DISPUTED, so that defensive legacy spelling is source-reviewed, not claimed as a
+runtime fixture test. This is the last named retention follow-up, not a broad
+cleanup or garbage-collection change.
+
+Final runtime/test target `73cc249d674d7072a207c8f89cf76bd959657c36` passes 842
+combined core/relationship tests, with one identical pre-existing Wellington
+failure and 11 skips. All ten required data suites pass 332 again. Independent
+final owner/identity/control review passes 156: 146 complete-product, five
+membership-identity and five complementary probes. The earlier NOOP and later
+quarantine quota counterexamples both have retained RED logs and passing final
+antibodies. No remaining Critical/Important finding is open in that bounded
+review; the broader limitations and baseline suite debt above remain.
+
+The full slice introduces persisted WRH provenance/control formats and native
+body storage despite no SQL schema migration. Treat writer, readers and scheduler
+as one coordinated version. Mixed old/new operation and code rollback after new
+format writes have not been validated. Never remove immutable bodies or journal
+facts to roll back code; revalidate fail-closed reader behavior. The independently
+usable first slice does not introduce these WRH owner-format dependencies.
+
+This is an offline tested patch for review. No push, PR, merge, production load,
+trade or funding-readiness claim follows from this freeze.
+
 ## 2026-10-02 immutable Day0 serving-window parity
 
 Verified source-to-q-consumer defect: the materializer passes the request's

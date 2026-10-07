@@ -157,6 +157,11 @@ _INGEST_MAIN: tuple[SourceJobSpec, ...] = (
                   misfire_grace_time=120,
                   notes="bounded EFHK current-temperature poll; changed physical prints "
                         "wake the existing fusion revision and materialization queue"),
+    SourceJobSpec("ingest_day0_noaa_wrh_current", "ingest_main", "live", "default", True,
+                  source_id="noaa_wrh_timeseries", callable_ref="_day0_current_noaa_wrh_tick", family="observation",
+                  misfire_grace_time=120,
+                  notes="bounded held/current-product full-snapshot acquisition; original body preparation precedes "
+                        "short canonical CAS, and committed source membership wakes held redecision"),
     SourceJobSpec("ingest_current_temperature_delivery", "ingest_main", "live", "default", True,
                   callable_ref="_current_temperature_delivery_tick", family="forecast",
                   misfire_grace_time=5,

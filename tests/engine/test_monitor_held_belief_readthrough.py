@@ -1,6 +1,6 @@
 # Created: 2026-06-21
-# Last reused or audited: 2026-10-03
-# Lifecycle: created=2026-06-21; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused or audited: 2026-10-06
+# Lifecycle: created=2026-06-21; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Preserve held belief freshness, current receipt/CI and Day0 source roles.
 # Reuse: Inspect current replacement revision, empty-prefix proof and ENTRY reader.
 # Current authority: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
@@ -1229,6 +1229,9 @@ def zero_observation_monitor_case(monkeypatch, zero_observation_entry_provider):
         trade, _world = zero_observation_entry_provider(position)
         canonical = sqlite3.connect(":memory:")
         canonical.row_factory = sqlite3.Row
+        # Explicit readable empty FORECAST owner: unknown WRH custody cannot
+        # stand in for this fixture's intended zero-observation proof.
+        canonical.execute("CREATE TABLE observations (city TEXT,target_date TEXT,source TEXT)")
         canonical.execute(schema.CREATE_TABLE_SQL)
         canonical.execute(schema.CREATE_DAY0_FAMILY_EXTREME_INDEX_SQL)
         canonical.execute("""CREATE TABLE observation_instants (
@@ -1718,6 +1721,9 @@ def _day0_event_connection() -> sqlite3.Connection:
         "CREATE INDEX idx_opportunity_events_day0_family_extreme "
         "ON opportunity_events(event_type)"
     )
+    # Legacy event-route fixtures prove that the independently readable
+    # canonical WRH owner is absent; UNKNOWN is not an absence witness.
+    conn.execute("CREATE TABLE observations (city TEXT,target_date TEXT,source TEXT)")
     at = "2026-06-12T12:00:00+00:00"
     conn.execute(
         "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

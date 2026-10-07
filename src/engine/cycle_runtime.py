@@ -4432,7 +4432,7 @@ def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
         return False
     fresh_prob = _finite_float_or_none(getattr(exit_context, "fresh_prob", None))
     best_bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
-    if fresh_prob is None or fresh_prob > 1e-12:
+    if fresh_prob is None or fresh_prob != 0.0:
         return False
     if best_bid is None or not 0.05 <= best_bid <= 0.95:
         return False
@@ -4444,7 +4444,7 @@ def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
     except (TypeError, ValueError):
         return False
     return bool(samples) and all(
-        math.isfinite(value) and 0.0 <= value <= 1e-12
+        math.isfinite(value) and value == 0.0
         for value in samples
     )
 
@@ -4605,7 +4605,11 @@ def _day0_hard_fact_position_eligible(pos) -> bool:
     # gate (state == 'quarantined') is now provably unreachable — no writer
     # mints the literal and the DB CHECK no longer admits it post-migration —
     # so the predicate and its supporting helpers have been retired.
-    return _position_state_value(pos) in {"active", "entered", "holding", "day0_window"}
+    # Pending exits still hold exposure. Reobserve their physical evidence
+    # while liquidity/transport/order fences independently govern actuation.
+    return _position_state_value(pos) in {
+        "active", "entered", "holding", "day0_window", "pending_exit",
+    }
 
 
 def _venue_confirmed_local_fill_needs_monitor(pos) -> bool:
@@ -10189,6 +10193,7 @@ def execute_monitoring_phase(
             )
             protective_fak_redecision = should_exit and local_exit_trigger in {
                 "RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD",
+                "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
             }
             if should_exit:
                 # Global redecision may choose an immediate FAK below the
@@ -11037,6 +11042,21 @@ def execute_monitoring_phase(
                     exit_trigger == "RED_FORCE_EXIT"
                     and exit_reason == "RED_FORCE_EXIT"
                 )
+                if (
+                    pending_exit_monitor_only
+                    and protective_fak_redecision
+                    and check_pending_retries(
+                        pos, conn=conn, current_min_order_size=Decimal("0.01"),
+                    )
+                ):
+                    # A new in-band book may discharge liquidity-only debt.
+                    # The helper retains command/unknown/transport fences; the
+                    # direct authority and fresh JIT book are rechecked below.
+                    pending_exit_monitor_only = False
+                    portfolio_dirty = True
+                    summary["monitor_released_exit_retry_for_current_liquidity"] = (
+                        summary.get("monitor_released_exit_retry_for_current_liquidity", 0) + 1
+                    )
                 if (
                     pending_exit_monitor_only
                     and not red_force_exit

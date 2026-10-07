@@ -1,3 +1,6 @@
+# Lifecycle: created=2026-06-10; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Purpose: Protect source-bound physical and final-daily exit authority.
+# Reuse: Run when hard-fact source readers or immediate exit evidence changes.
 # Created: 2026-06-10
 # Last reused or audited: 2026-08-20
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
@@ -3529,4 +3532,23 @@ def test_broken_canonical_attachment_cannot_use_main_ghost(broken_schema):
         conn.execute("CREATE TABLE forecasts.observations (city TEXT)")
     assert _noaa_wrh_hard_fact_evidence(city=_singapore_noaa(),target_date="2026-09-20",
         metric="high",now=datetime(2026,9,20,7,1,tzinfo=UTC),world_conn=conn) is None
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_final_hko_semantic_identity_preserves_legacy_and_binds_native_digest(metric):
+    conn = _final_daily_observation_conn()
+    kwargs = dict(city=_hong_kong(), target_date="2026-07-15", metric=metric,
+                  now=datetime(2026, 7, 15, 22, tzinfo=UTC), conn=conn)
+    legacy = _final_daily_observation_extreme(**kwargs)
+    assert legacy is not None and len(legacy.source_evidence_identity) == 64
+    conn.execute(f"ALTER TABLE observations ADD COLUMN {metric}_provenance_metadata TEXT")
+    conn.execute(f"UPDATE observations SET {metric}_provenance_metadata=?",
+                 (json.dumps({"payload_hash": "sha256:" + "a" * 64}),))
+    first = _final_daily_observation_extreme(**kwargs)
+    assert first is not None and first.source_evidence_identity != legacy.source_evidence_identity
+    assert _final_daily_observation_extreme(**kwargs).source_evidence_identity == first.source_evidence_identity
+    conn.execute(f"UPDATE observations SET {metric}_provenance_metadata=?",
+                 (json.dumps({"payload_hash": "sha256:" + "b" * 64}),))
+    assert _final_daily_observation_extreme(**kwargs).source_evidence_identity != first.source_evidence_identity
     conn.close()

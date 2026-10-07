@@ -1388,7 +1388,9 @@ def _latest_authorized_day0_fact(
             local_day_start_utc = datetime.combine(
                 target_day, datetime.min.time(), tzinfo=tz
             ).astimezone(timezone.utc)
-            local_day_end_utc = local_day_start_utc + timedelta(days=1)
+            local_day_end_utc = datetime.combine(
+                target_day + timedelta(days=1), datetime.min.time(), tzinfo=tz
+            ).astimezone(timezone.utc)
         except (ValueError, ZoneInfoNotFoundError):
             local_day_start_utc = None
             local_day_end_utc = None
@@ -1684,6 +1686,16 @@ def _latest_authorized_day0_fact(
                         (value for _source_clock, value in channel_prints),
                         key=lambda item: (item[0], item[1]),
                     )
+                    # MAX/MIN depends on the complete latest-revision fold,
+                    # including a later correction that removed an old peak.
+                    # Its receipt can be newer than both the winning reading
+                    # and the source-clock frontier. Keep observation age on
+                    # the source clock, but never backdate possession of the
+                    # effective extreme to either of those earlier receipts.
+                    available = max(
+                        (value[1] for _source_clock, value in channel_prints),
+                        key=_utc_instant,
+                    )
                     ledger_facts.append(
                         {
                             "observed_extreme_native": float(best[2]),
@@ -1693,7 +1705,7 @@ def _latest_authorized_day0_fact(
                             "observation_source": channel,
                             "station_id": expected_station or "",
                             "unit": expected_unit,
-                            "observation_available_at": str(frontier[1]),
+                            "observation_available_at": str(available),
                             "extreme_source_time": str(best_clock),
                             "raw_payload_sha256": _raw_payload_sha256(
                                 str(best[3] or "")
@@ -1826,6 +1838,34 @@ def _latest_authorized_day0_fact(
                     "raw_payload_sha256": _raw_payload_sha256(raw_identity),
                 })
 
+    wrh_claimed_unavailable = False
+    if source_type == "noaa" and city_obj is not None:
+        from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+        owned, snapshot = read_current_noaa_wrh_snapshot(
+            conn, city=city_obj, target_date=target_date, as_of=decision_utc,
+        )
+        if owned is not False:
+            wrh_claimed_unavailable = snapshot is None or snapshot.extreme(metric) is None
+            page_source = f"noaa_wrh_{expected_station.lower()}"
+            # One owner for page membership. A corrected/empty complete page
+            # replaces ALL older page event/ledger projections, never MAXes
+            # with the very reading the provider removed. Other physical
+            # channels retain their statistical roles.
+            facts = [fact for fact in facts if fact.get("observation_source") != page_source]
+            extreme = snapshot.extreme(metric) if snapshot is not None else None
+            if extreme is not None:
+                facts.append({
+                    "observed_extreme_native": extreme.value,
+                    "observation_time": max(row.utc for row in snapshot.rows
+                        if snapshot.view == "all" or row.is_official_report).isoformat(),
+                    "extreme_source_time": datetime.fromisoformat(extreme.local_timestamp).isoformat(),
+                    "observation_available_at": snapshot.received_at.isoformat(),
+                    "sample_count": extreme.n_rows,
+                    "source": f"current_wrh_product:{page_source}",
+                    "observation_source": page_source, "station_id": snapshot.station,
+                    "unit": snapshot.unit, "raw_payload_sha256": snapshot.response_sha256,
+                })
+
     def fact_time(fact: Mapping[str, object]) -> datetime:
         parsed = datetime.fromisoformat(
             str(fact.get("observation_time") or "").replace("Z", "+00:00")
@@ -1835,6 +1875,18 @@ def _latest_authorized_day0_fact(
         return parsed.astimezone(timezone.utc)
 
     if not facts:
+        if wrh_claimed_unavailable:
+            # A retraction is not an unobserved prefix. An independent
+            # statistical channel may still serve the physical-only path.
+            if require_settlement_channel:
+                alternate = _latest_authorized_day0_fact(
+                    conn, city=city, target_date=target_date, temperature_metric=metric,
+                    decision_time=decision_time, require_settlement_channel=False,
+                )
+                if alternate is not None:
+                    return None
+            from src.contracts.exceptions import ObservationUnavailableError
+            raise ObservationUnavailableError(f"WRH_CURRENT_SNAPSHOT_UNAVAILABLE:{city}:{target_date}")
         return None
     if source_type == "hko":
         # HKO publishes cumulative official snapshots. The provider may correct
@@ -1913,15 +1965,20 @@ def _latest_authorized_day0_fact(
         == winner_source
     ]
     frontier = max(same_source_facts, key=fact_time)
-    if fact_time(frontier) <= fact_time(winner):
-        return winner
+    available = max(
+        (str(fact["observation_available_at"]) for fact in facts),
+        key=_utc_instant,
+    )
     # The value is the cumulative day-so-far extreme; its clock is the latest
     # authorized sample from the same station channel, even when that sample
     # lies inside the already-observed plateau. Keeping the time at the instant
     # the extreme first occurred makes a current posterior look stale forever.
     advanced = dict(winner)
-    advanced["observation_time"] = frontier["observation_time"]
-    advanced["observation_available_at"] = frontier["observation_available_at"]
+    if fact_time(frontier) > fact_time(winner):
+        advanced["observation_time"] = frontier["observation_time"]
+    # Cross-channel reduction also depends on the nonwinning channels: their
+    # revisions may have removed the previously winning boundary.
+    advanced["observation_available_at"] = available
     return advanced
 
 

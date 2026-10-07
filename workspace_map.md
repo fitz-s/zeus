@@ -55,6 +55,7 @@ Use it after `AGENTS.md` to answer two questions quickly:
 | `config/` | Runtime settings and reality contracts | `config/AGENTS.md` |
 | `.code-review-graph/` | Tracked derived online context | graph status via `python3 scripts/topology_doctor.py --code-review-graph-status --json` |
 | `state/` | Runtime DBs and local control files | classify before treating as truth |
+| `state/noaa_wrh_response_bodies/` | Bounded immutable native WRH custody, not disposable scratch or standalone authority | `src/data/noaa_wrh_timeseries.py`, `src/data/daily_observation_writer.py`, `architecture/artifact_lifecycle.yaml` |
 | `loop/` | 24/7 improvement loop v3 (codex-sandbox single tick, INTERVAL cadence knob, query escrow `queries/`, HALT/JOURNAL/LEDGER state, prompts) — inert until the operator loads the launchd plist | `loop/tick.sh` header; design: `docs/operations/current/plans/allday_improvement_loop_v3_codex_2026-07-09.md` (method authority: v2 design doc) |
 | artifacts (untracked) | Review artifacts untracked 2026-05-23 — bodies on disk, gitignored. See `docs/archive_registry.md`. | untracked |
 | historical evidence (untracked) | Historical evidence trails untracked 2026-05-23 — bodies on disk, gitignored. | untracked |

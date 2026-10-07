@@ -147,7 +147,13 @@ def observation_selection(conn, city, target_date, source: str, *, row=None, met
     source_type = settlement_source_type_for_city(city, target_date)
     name = str(source).strip().lower()
     if source_type == "noaa":
+        from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+        owned, snapshot = read_current_noaa_wrh_snapshot(
+            conn, city=city, target_date=str(target_date), as_of=as_of or datetime.now(timezone.utc),
+        )
         if name == "noaa_wrh_" + city.wu_station.lower():
+            if owned is not False and (snapshot is None or not snapshot.complete_day or snapshot.extreme(metric) is None):
+                return None
             return 0, {"rule": RULE, "selected": "PRIMARY_WRH", "page_view": city.settlement_page_view}
         if name != "wu_icao_history":
             return None  # Ogimet is neither the primary product nor the named fallback.
@@ -167,6 +173,16 @@ def observation_selection(conn, city, target_date, source: str, *, row=None, met
                     witness = None
             except (KeyError, IndexError, TypeError, ValueError):
                 witness = None
+        if owned is not False:
+            # A later nonempty owner supersedes an older absence permission.
+            # Lost custody is UNKNOWN, never a return to that old empty state.
+            # SCOPE: this primary contract only. DRAIN: qualified current EMPTY
+            # plus the existing after-deadline absence writer. RESET: its real
+            # absence receipt covers the current empty revision.
+            if snapshot is None or not snapshot.complete_day or snapshot.extreme(metric) is not None:
+                return None
+            if witness is None or datetime.fromisoformat(witness["absence_observed_at"]) < snapshot.received_at:
+                return None
         return (1, {**witness, "selected": "FALLBACK_WU"}) if witness else None
     if source_type == "wu_icao" and (name == "wu_icao_history" or name.startswith("wu_icao_history_")):
         return 0, {"selected": "PRIMARY_WU"}

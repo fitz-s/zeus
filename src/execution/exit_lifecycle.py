@@ -1883,6 +1883,7 @@ def _terminal_fak_partial_submit_fill(
 # any other reason, including post-SDK missing_order_id, stays command-owned.
 _PRE_VENUE_EXIT_REJECTION_REASONS = frozenset({
     "global_final_authority_revoked_pre_venue",
+    "protective_sell_authority_revoked_pre_venue",
     "pre_submit_client_init_failed",
     "RED_B2_EXPIRED",
     "exit_execution_authority_deadline_invalid",
@@ -2932,11 +2933,13 @@ class ProtectiveSellExecutionAuthority:
     semantic_event_id: str
     semantic_payload_sha256: str
     authority_identity: str
+    source_receipt_json: str = ""
 
     def __post_init__(self) -> None:
         if self.kind not in {
             "RED_FORCE_EXIT",
             "DAY0_HARD_FACT_BIN_DEAD",
+            "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
         }:
             raise ValueError("protective sell kind invalid")
         if not all((
@@ -2962,11 +2965,13 @@ class ProtectiveSellExecutionAuthority:
             best_bid=self.best_bid,
             semantic_event_id=self.semantic_event_id,
             semantic_payload_sha256=self.semantic_payload_sha256,
+            source_receipt_json=self.source_receipt_json,
         ):
             raise ValueError("protective sell authority identity invalid")
 
 
 def _protective_sell_authority_identity(**material: object) -> str:
+    material.setdefault("source_receipt_json", "")
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
@@ -3015,13 +3020,23 @@ def _build_protective_sell_execution_authority(
     shares: float,
     snapshot_context: Mapping[str, object],
     conn: sqlite3.Connection,
+    source_receipt_json: str = "",
 ) -> ProtectiveSellExecutionAuthority:
+    from src.state.snapshot_repo import get_snapshot
+
+    source_snapshot = get_snapshot(
+        conn, str(snapshot_context.get("executable_snapshot_id") or ""),
+    )
     semantic = _protective_sell_semantic_receipt(
         conn,
         position_id=str(position.trade_id),
         token_id=str(token_id),
         shares=shares,
         kind=kind,
+        source_receipt_json=source_receipt_json,
+        source_deadline_utc=(
+            source_snapshot.freshness_deadline if source_snapshot is not None else None
+        ),
     )
     if semantic is None:
         raise ValueError("protective sell semantic authority unavailable")
@@ -3036,6 +3051,7 @@ def _build_protective_sell_execution_authority(
         "best_bid": str(Decimal(str(snapshot_context["executable_snapshot_orderbook_top_bid"]))),
         "semantic_event_id": semantic_event_id,
         "semantic_payload_sha256": semantic_payload_sha256,
+        "source_receipt_json": source_receipt_json,
     }
     return ProtectiveSellExecutionAuthority(
         **material,
@@ -3053,6 +3069,7 @@ def _protective_sell_execution_authority_error(
     limit_price: float,
     snapshot_id: str,
     snapshot_hash: str,
+    execution_deadline_utc: str = "",
 ) -> str | None:
     """Independently bind protective FAK authority to canonical snapshot truth."""
     if type(authority) is not ProtectiveSellExecutionAuthority:
@@ -3070,27 +3087,45 @@ def _protective_sell_execution_authority_error(
         or authority.snapshot_hash != snapshot_hash
     ):
         return "protective_sell_execution_authority_binding_mismatch"
-    semantic = _protective_sell_semantic_receipt(
-        conn,
-        position_id=trade_id,
-        token_id=token_id,
-        shares=shares,
-        kind=authority.kind,
-        event_id=authority.semantic_event_id,
-    )
+    from src.state.snapshot_repo import get_snapshot
+
+    source_snapshot = get_snapshot(conn, authority.snapshot_id)
+    source_deadline = source_snapshot.freshness_deadline if source_snapshot is not None else None
+    if execution_deadline_utc:
+        try:
+            explicit_deadline = datetime.fromisoformat(execution_deadline_utc.replace("Z", "+00:00"))
+            if explicit_deadline.tzinfo is None:
+                return "protective_sell_execution_deadline_invalid"
+            source_deadline = min(source_deadline, explicit_deadline) if source_deadline else explicit_deadline
+        except (TypeError, ValueError):
+            return "protective_sell_execution_deadline_invalid"
+    try:
+        semantic = _protective_sell_semantic_receipt(
+            conn,
+            position_id=trade_id,
+            token_id=token_id,
+            shares=shares,
+            kind=authority.kind,
+            event_id=authority.semantic_event_id,
+            source_receipt_json=authority.source_receipt_json,
+            source_deadline_utc=source_deadline,
+        )
+    except _ProtectiveSourceUnavailable:
+        return "protective_source_redecision_required"
     if semantic != (
         authority.semantic_event_id,
         authority.semantic_payload_sha256,
     ):
         return "protective_sell_semantic_authority_superseded"
-    from src.state.snapshot_repo import get_snapshot
+    from src.state.snapshot_repo import snapshot_is_invalidated
 
-    snapshot = get_snapshot(conn, snapshot_id)
+    snapshot = source_snapshot
     if snapshot is None:
         return "protective_sell_execution_snapshot_missing"
     try:
         snapshot_superseded = (
-            snapshot.executable_snapshot_hash != snapshot_hash
+            snapshot_is_invalidated(conn, snapshot, checked_at=_utcnow())
+            or snapshot.executable_snapshot_hash != snapshot_hash
             or snapshot.selected_outcome_token_id != token_id
             or Decimal(str(snapshot.orderbook_top_bid)) != Decimal(authority.best_bid)
             or snapshot.freshness_deadline is None
@@ -3103,6 +3138,166 @@ def _protective_sell_execution_authority_error(
     return None
 
 
+class _ProtectiveSourceUnavailable(ValueError):
+    """Current source truth must be redecided before another direct SELL."""
+
+
+_PROTECTIVE_SOURCE_READ_MAX_SECONDS = 0.1
+
+
+def _bound_exact_source_receipt_json(receipt: object, full_receipt: object) -> str:
+    """Freeze the original full receipt under its canonical compact digest."""
+    if not isinstance(receipt, Mapping) or not isinstance(full_receipt, Mapping):
+        return ""
+    try:
+        encoded = json.dumps(
+            full_receipt, sort_keys=True, separators=(",", ":"), default=str,
+        )
+    except (TypeError, ValueError):
+        return ""
+    if (
+        hashlib.sha256(encoded.encode()).hexdigest() != receipt.get("evidence_content_hash")
+        or any(full_receipt.get(key) != receipt.get(key) for key in (
+            "probability_authority", "probability_content_identity", "probability_witness_identity",
+            "source_truth_identity", "held_direction", "held_side_probability",
+        ))
+        or not isinstance(full_receipt.get("observation"), Mapping)
+    ):
+        return ""
+    return encoded
+
+
+def _protective_source_receipt_current(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    receipt: Mapping[str, object],
+    source_receipt_json: str = "",
+    deadline_utc: datetime | None = None,
+) -> bool:
+    """Reproduce existing exact-source authority, outside any write transaction.
+
+    SCOPE: this held position's direct exact SELL. DRAIN: ordinary source and
+    monitor refresh rebuild its original receipt. RESET: current canonical
+    exact evidence agrees again. This neither runs an auction nor renews q.
+    """
+    if conn.in_transaction:
+        return False
+    now = _utcnow()
+    budget = _PROTECTIVE_SOURCE_READ_MAX_SECONDS
+    if deadline_utc is not None:
+        budget = min(budget, (deadline_utc - now).total_seconds())
+    if budget <= 0:
+        return False
+    deadline = _time_module.monotonic() + budget
+    try:
+        from contextlib import ExitStack
+        from src.config import runtime_cities_by_name
+        from src.data.market_scanner import _parse_temp_range
+        from src.execution.day0_hard_fact_exit import (
+            _final_daily_observation_extreme,
+            evaluate_hard_fact_exit,
+            final_observed_bin_verdict,
+            hard_fact_bin_verdict,
+        )
+        row = conn.execute(
+            """SELECT city, target_date, temperature_metric, bin_label, direction,
+                      condition_id, token_id, no_token_id, phase
+                 FROM position_current WHERE position_id=?""", (position_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        pos = SimpleNamespace(**dict(row), trade_id=position_id, state=row["phase"])
+        city = runtime_cities_by_name().get(pos.city)
+        if city is None or pos.temperature_metric not in {"high", "low"}:
+            return False
+        low, high = _parse_temp_range(str(pos.bin_label))
+        with ExitStack() as stack:
+            databases = {str(r[1]): str(r[2]) for r in conn.execute("PRAGMA database_list")}
+            if not databases.get("main") or "forecasts" in databases:
+                source = conn
+            else:
+                from src.state.db import get_forecasts_connection_with_world_read_only
+                source = stack.enter_context(get_forecasts_connection_with_world_read_only(
+                    deadline_monotonic=deadline,
+                ))
+            ensure_live = stack.enter_context(_held_monitor_preparation_deadline(source, deadline))
+            if receipt.get("probability_authority") == "day0_absorbing_hard_fact":
+                current = evaluate_hard_fact_exit(
+                    position=pos, city=city, now=now, world_conn=source, durable_only=True,
+                )
+                ensure_live()
+                return bool(
+                    current is not None and current.action == "EXIT_DEAD_BIN"
+                    and current.evidence is not None
+                    and current.evidence.as_dict() == receipt.get("hard_fact_evidence")
+                )
+            full = json.loads(source_receipt_json)
+            if _bound_exact_source_receipt_json(receipt, full) != source_receipt_json:
+                return False
+            binding = full["observation"]
+            if any(str(binding.get(key) or "") != str(value) for key, value in (
+                ("city", pos.city), ("target_date", pos.target_date), ("metric", pos.temperature_metric),
+            )):
+                return False
+            if receipt.get("probability_authority") == "day0_deterministic_bin_payoff_v1":
+                from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+                from src.events.day0_authority import DAY0_ABSORBING_FINALITIES, day0_evidence_finality
+                fact = _latest_authorized_day0_fact(
+                    source, city=pos.city, target_date=pos.target_date,
+                    temperature_metric=pos.temperature_metric, decision_time=now,
+                    require_settlement_channel=True,
+                )
+                if fact is None or day0_evidence_finality({
+                    "settlement_source": fact.get("observation_source"),
+                }) not in DAY0_ABSORBING_FINALITIES:
+                    return False
+                fields = {
+                    "settlement_source": "observation_source", "station_id": "station_id",
+                    "settlement_unit": "unit", "observed_extreme_native": "observed_extreme_native",
+                    "observation_time": "observation_time", "observation_available_at": "observation_available_at",
+                    "raw_payload_sha256": "raw_payload_sha256", "sample_count": "sample_count",
+                }
+                if any(binding.get(key) != fact.get(value) for key, value in fields.items()):
+                    return False
+                from src.contracts.settlement_semantics import SettlementSemantics
+                rounded = float(SettlementSemantics.for_city(city).round_single(
+                    fact["observed_extreme_native"],
+                ))
+                verdict = hard_fact_bin_verdict(
+                    metric=pos.temperature_metric, direction=pos.direction,
+                    bin_low=low, bin_high=high, effective_extreme=rounded,
+                )
+            elif receipt.get("probability_authority") == "final_daily_observation_exact_global_probability_v1":
+                current = _final_daily_observation_extreme(
+                    city=city, target_date=pos.target_date, metric=pos.temperature_metric,
+                    now=now, conn=source,
+                )
+                if current is None or binding.get("final_daily") is not True:
+                    return False
+                expected = {
+                    "raw_value": current.raw_extreme,
+                    "rounded_value": current.settled_extreme,
+                    "settlement_source": current.source,
+                    "station_id": current.station_id,
+                    "settlement_unit": current.unit,
+                    "source_available_at": current.fetched_at.isoformat(),
+                    "source_evidence_identity": current.source_evidence_identity,
+                }
+                if any(binding.get(key) != value for key, value in expected.items()):
+                    return False
+                verdict = final_observed_bin_verdict(
+                    metric=pos.temperature_metric, direction=pos.direction,
+                    bin_low=low, bin_high=high, final_extreme=current.settled_extreme,
+                )
+            else:
+                return False
+            ensure_live()
+            return verdict is not None and verdict.action == "EXIT_DEAD_BIN"
+    except (sqlite3.Error, ValueError, TypeError, KeyError, AttributeError, OSError, TimeoutError):
+        return False
+
+
 def _protective_sell_semantic_receipt(
     conn: sqlite3.Connection | None,
     *,
@@ -3111,6 +3306,8 @@ def _protective_sell_semantic_receipt(
     shares: float,
     kind: str,
     event_id: str | None = None,
+    source_receipt_json: str = "",
+    source_deadline_utc: datetime | None = None,
 ) -> tuple[str, str] | None:
     """Bind a protective order to exact canonical semantic exit evidence."""
     if conn is None:
@@ -3212,6 +3409,63 @@ def _protective_sell_semantic_receipt(
             or not isinstance(receipt.get("hard_fact_evidence"), Mapping)
         ):
             return None
+        if not _protective_source_receipt_current(
+            conn, position_id=position_id, receipt=receipt, deadline_utc=source_deadline_utc,
+        ):
+            raise _ProtectiveSourceUnavailable("protective_source_redecision_required")
+    elif kind == "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES":
+        receipt = payload.get("exit_intent_probability_receipt")
+        if (
+            reason != kind
+            or not BranchwiseDominantSellAuthority.has_exact_payoff_receipt(receipt)
+            or payload.get("exit_intent_fresh_prob_is_fresh") is not True
+            or payload.get("exit_intent_fresh_prob") != 0.0
+            or payload.get("exit_intent_close_position") is not True
+        ):
+            return None
+        # The label and a numeric zero are not authority. Reproduce the exact
+        # current, canonical monitor cut that supplied this deterministic
+        # receipt; a superseding/stale/wrong-side receipt drains via refresh.
+        # SCOPE: this position's direct SELL. DRAIN: normal fresh monitoring.
+        # RESET: an exact canonical receipt and current book rebuild the proof.
+        try:
+            monitor = conn.execute(
+                """SELECT occurred_at, payload_json, source_module, env
+                     FROM position_events
+                    WHERE position_id=? AND event_type='MONITOR_REFRESHED'
+                    ORDER BY sequence_no DESC LIMIT 1""",
+                (position_id,),
+            ).fetchone()
+            monitor_payload = json.loads(str(monitor["payload_json"] or "{}"))
+            observed_at = _parse_iso(str(monitor["occurred_at"] or ""))
+            from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
+            now = _utcnow()
+            canonical_receipt = monitor_payload.get("monitor_probability_receipt")
+            valid_monitor = (
+                str(monitor["source_module"] or "") == "src.engine.cycle_runtime"
+                and str(monitor["env"] or "") == "live"
+                and observed_at is not None
+                and timedelta(0) <= now - observed_at <= FRESHNESS_WINDOW_DEFAULT
+                and canonical_receipt == receipt
+                and monitor_payload.get("last_monitor_prob_is_fresh") is True
+                and monitor_payload.get("last_monitor_prob") == 0.0
+                and monitor_payload.get("held_sell_full_depth_action_authority") is True
+                and receipt.get("held_direction") == direction
+                and receipt.get("held_side_probability") == 0.0
+                and bool(receipt.get("source_truth_identity"))
+                and bool(receipt.get("probability_content_identity"))
+                and bool(receipt.get("probability_witness_identity"))
+            )
+        except (sqlite3.Error, TypeError, ValueError, AttributeError):
+            return None
+        if not valid_monitor:
+            return None
+        if not _protective_source_receipt_current(
+            conn, position_id=position_id, receipt=receipt,
+            source_receipt_json=source_receipt_json, deadline_utc=source_deadline_utc,
+        ):
+            raise _ProtectiveSourceUnavailable("protective_source_redecision_required")
     else:
         return None
     try:
@@ -3600,6 +3854,7 @@ class BranchwiseDominantSellAuthority:
     probability_observed_at: str
     support_identity: str
     authority_identity: str
+    source_receipt_json: str = ""
 
     @staticmethod
     def has_exact_payoff_receipt(receipt: object) -> bool:
@@ -3616,7 +3871,7 @@ class BranchwiseDominantSellAuthority:
         except (TypeError, ValueError):
             raise ValueError("BRANCHWISE_SELL_SUPPORT_INVALID") from None
         if not values or not all(
-            math.isfinite(value) and 0.0 <= value <= 1e-12
+            math.isfinite(value) and value == 0.0
             for value in values
         ):
             raise ValueError("BRANCHWISE_SELL_SUPPORT_NOT_ZERO")
@@ -3634,6 +3889,7 @@ class BranchwiseDominantSellAuthority:
         probability_witness_identity: str,
         probability_observed_at: str,
         support_identity: str,
+        source_receipt_json: str = "",
     ) -> dict[str, str]:
         return {
             "position_id": position_id,
@@ -3643,6 +3899,7 @@ class BranchwiseDominantSellAuthority:
             "probability_witness_identity": probability_witness_identity,
             "probability_observed_at": probability_observed_at,
             "support_identity": support_identity,
+            "source_receipt_json": source_receipt_json,
         }
 
     @classmethod
@@ -3660,7 +3917,7 @@ class BranchwiseDominantSellAuthority:
             not exit_context.fresh_prob_is_fresh
             or not exit_context.current_market_price_is_fresh
             or not math.isfinite(fresh_prob)
-            or not 0.0 <= fresh_prob <= 1e-12
+            or fresh_prob != 0.0
             or not math.isfinite(best_bid)
             or not 0.05 <= best_bid <= 0.95
         ):
@@ -3702,6 +3959,10 @@ class BranchwiseDominantSellAuthority:
         support_identity = cls._support_identity(
             getattr(position, "_current_global_held_probability_samples", None)
         )
+        full_receipt = getattr(position, "_day0_monitor_probability_receipt", None)
+        source_receipt_json = _bound_exact_source_receipt_json(receipt, full_receipt)
+        if not source_receipt_json:
+            raise ValueError("BRANCHWISE_SELL_SOURCE_BINDING_REQUIRED")
         payload = cls._identity_payload(
             position_id=position_id,
             token_id=token_id,
@@ -3710,6 +3971,7 @@ class BranchwiseDominantSellAuthority:
             probability_witness_identity=probability_witness_identity,
             probability_observed_at=probability_observed_at,
             support_identity=support_identity,
+            source_receipt_json=source_receipt_json,
         )
         return cls(
             **payload,
@@ -3729,8 +3991,9 @@ class BranchwiseDominantSellAuthority:
             probability_witness_identity=self.probability_witness_identity,
             probability_observed_at=self.probability_observed_at,
             support_identity=self.support_identity,
+            source_receipt_json=self.source_receipt_json,
         )
-        if not all(payload.values()):
+        if not all(value for key, value in payload.items() if key != "source_receipt_json"):
             raise ValueError("BRANCHWISE_SELL_IDENTITY_INCOMPLETE")
         expected = hashlib.sha256(
             json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -5627,11 +5890,13 @@ def _branchwise_dominant_sell_authority_error(
         or not held_shares.is_finite()
         or not intended_shares.is_finite()
         or held_shares <= 0
-        or intended_shares != held_shares
+        or intended_shares not in {
+            held_shares, held_shares.quantize(Decimal("0.01"), rounding=ROUND_FLOOR),
+        }
         or not exit_intent.close_position
         or exit_intent.fresh_prob_is_fresh is not True
         or not math.isfinite(fresh_prob)
-        or not 0.0 <= fresh_prob <= 1e-12
+        or fresh_prob != 0.0
     ):
         return "branchwise_dominant_sell_authority_mismatch"
     if snapshot_context is not None:
@@ -8167,6 +8432,12 @@ def _execute_live_exit(
         is_red_force_exit
         or is_hard_fact_force_exit
         or (
+            branchwise_sell_authority is not None
+            and _branchwise_dominant_sell_authority_error(
+                position, exit_intent, branchwise_sell_authority,
+            ) is None
+        )
+        or (
             isinstance(global_sell_authority, GlobalSellExecutionAuthority)
             and _global_sell_taker_fak_min_order_floor_bypass_authorized(
                 exit_intent, global_sell_authority,
@@ -8385,6 +8656,8 @@ def _execute_live_exit(
         if is_red_force_exit
         else "DAY0_HARD_FACT_BIN_DEAD"
         if hard_fact_authorized
+        else "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+        if branchwise_authorized
         else ""
     )
     protective_bid = _positive_decimal(
@@ -8427,13 +8700,19 @@ def _execute_live_exit(
                 shares=exit_intent.shares,
                 snapshot_context=snapshot_context,
                 conn=conn,
+                source_receipt_json=(
+                    branchwise_sell_authority.source_receipt_json
+                    if branchwise_authorized else ""
+                ),
             )
         except (InvalidOperation, TypeError, ValueError) as exc:
             authority_reason = (
                 f"{exit_context.exit_reason} [PROTECTIVE_AUTHORITY_ERROR]"
             )
             authority_error = (
-                "protective_sell_execution_authority_unavailable:"
+                "protective_source_redecision_required"
+                if isinstance(exc, _ProtectiveSourceUnavailable)
+                else "protective_sell_execution_authority_unavailable:"
                 f"{type(exc).__name__}:{str(exc)[:400]}"
             )
             _mark_exit_retry(
@@ -8476,7 +8755,7 @@ def _execute_live_exit(
                 snapshot_context=snapshot_context,
                 now=_utcnow(),
             )
-        elif branchwise_authorized:
+        elif branchwise_authorized and not protective_bid_unavailable:
             authority_error = _branchwise_dominant_sell_authority_error(
                 position,
                 exit_intent,
@@ -8614,7 +8893,9 @@ def _execute_live_exit(
     # that floor.  The capital certificate, exact snapshot, absolute submit
     # band, post-only check, and venue boundary remain cumulative gates.
     liquidity_error = (
-        _exit_sell_liquidity_error(exit_intent, snapshot_context)
+        "exit_no_in_band_bid"
+        if protective_kind and protective_bid is not None and protective_bid_unavailable
+        else _exit_sell_liquidity_error(exit_intent, snapshot_context)
         if conn is not None and not passive_global_rest
         else ""
     )
@@ -12508,11 +12789,134 @@ def check_pending_exits(
     return stats
 
 
+def _fresh_exit_liquidity_recovered(
+    position: Position, *, conn: sqlite3.Connection | None,
+) -> bool:
+    """A later fresh in-band book may discharge only a no-liquidity wait."""
+    if conn is None:
+        return False
+    try:
+        rejected = conn.execute(
+            """SELECT occurred_at, payload_json FROM position_events
+                WHERE position_id=? AND event_type='EXIT_ORDER_REJECTED'
+                ORDER BY sequence_no DESC LIMIT 1""",
+            (position.trade_id,),
+        ).fetchone()
+        payload = json.loads(str(rejected["payload_json"] or "{}"))
+        rejected_at = _parse_iso(str(rejected["occurred_at"] or ""))
+        if (
+            payload.get("status") != "liquidity_wait"
+            or not _is_exit_liquidity_wait_error(payload.get("error"))
+            or rejected_at is None
+        ):
+            return False
+        context = _latest_exit_snapshot_context(
+            conn, _asset_id_for_position(position), require_sell_bid=False,
+            reject_future_captured=True,
+        )
+        from src.state.snapshot_repo import get_snapshot
+
+        snapshot = get_snapshot(conn, str(context.get("executable_snapshot_id") or ""))
+        bid = _positive_decimal(context.get("executable_snapshot_orderbook_top_bid"))
+        if (
+            snapshot is not None and snapshot.captured_at > rejected_at
+            and bid is not None
+            and LIVE_ORDER_MIN_UNIT_PRICE <= bid <= LIVE_ORDER_MAX_UNIT_PRICE
+        ):
+            return True
+        # Monitoring normally persists its fresh full-depth quote before JIT
+        # creates an executable snapshot. Requiring that future snapshot here
+        # deadlocks the retry before the only code that can capture it runs.
+        # This releases redecision only; executor still captures/checks JIT.
+        monitor = conn.execute(
+            """SELECT event.occurred_at, event.payload_json, event.source_module,
+                      event.env, current.direction, current.token_id, current.no_token_id
+                 FROM position_events event
+                 JOIN position_current current ON current.position_id=event.position_id
+                WHERE event.position_id=? AND event.event_type='MONITOR_REFRESHED'
+                ORDER BY event.sequence_no DESC LIMIT 1""",
+            (position.trade_id,),
+        ).fetchone()
+        payload = json.loads(str(monitor["payload_json"] or "{}"))
+        observed_at = _parse_iso(str(monitor["occurred_at"] or ""))
+        bid = _positive_decimal(payload.get("last_monitor_best_bid"))
+        direction = str(monitor["direction"] or "")
+        token = monitor["token_id"] if direction == "buy_yes" else monitor["no_token_id"]
+        from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+
+        return bool(
+            str(monitor["source_module"] or "") == "src.engine.cycle_runtime"
+            and str(monitor["env"] or "") == "live"
+            and direction in {"buy_yes", "buy_no"}
+            and payload.get("direction") == direction
+            and str(token or "") == _asset_id_for_position(position)
+            and observed_at is not None and observed_at > rejected_at
+            and timedelta(0) <= _utcnow() - observed_at <= FRESHNESS_WINDOW_DEFAULT
+            and payload.get("held_sell_full_depth_action_authority") is True
+            and payload.get("last_monitor_market_price_is_fresh") is True
+            and bid is not None
+            and LIVE_ORDER_MIN_UNIT_PRICE <= bid <= LIVE_ORDER_MAX_UNIT_PRICE
+        )
+    except (sqlite3.Error, TypeError, ValueError, AttributeError):
+        return False
+
+
+def _fresh_protective_source_redecision(position: Position, *, conn: sqlite3.Connection | None) -> bool:
+    """Release semantic debt only after a new canonical monitor cut.
+
+    A different current probability receipt may enter its normal action law.
+    An unchanged receipt must reproduce its source, so repeatedly replaying a
+    stale witness never creates commands. This releases no order fence.
+    """
+    if conn is None:
+        return False
+    try:
+        rejected = conn.execute(
+            "SELECT sequence_no FROM position_events WHERE position_id=? "
+            "AND event_type='EXIT_ORDER_REJECTED' ORDER BY sequence_no DESC LIMIT 1",
+            (position.trade_id,),
+        ).fetchone()
+        monitor = conn.execute(
+            "SELECT sequence_no,occurred_at,payload_json,source_module,env FROM position_events "
+            "WHERE position_id=? AND event_type='MONITOR_REFRESHED' ORDER BY sequence_no DESC LIMIT 1",
+            (position.trade_id,),
+        ).fetchone()
+        intent = conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id=? "
+            "AND event_type='EXIT_INTENT' ORDER BY sequence_no DESC LIMIT 1", (position.trade_id,),
+        ).fetchone()
+        payload = json.loads(monitor["payload_json"])
+        receipt = payload.get("monitor_probability_receipt")
+        previous = json.loads(intent["payload_json"]).get("exit_intent_probability_receipt")
+        observed = _parse_iso(monitor["occurred_at"])
+        from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+        if not (
+            monitor["sequence_no"] > rejected["sequence_no"]
+            and monitor["source_module"] == "src.engine.cycle_runtime" and monitor["env"] == "live"
+            and observed is not None and timedelta(0) <= _utcnow() - observed <= FRESHNESS_WINDOW_DEFAULT
+            and payload.get("last_monitor_prob_is_fresh") is True
+            and payload.get("held_sell_full_depth_action_authority") is True
+            and isinstance(receipt, Mapping) and bool(receipt)
+        ):
+            return False
+        if receipt != previous:
+            return True
+        return _protective_source_receipt_current(
+            conn, position_id=position.trade_id, receipt=receipt,
+            source_receipt_json=_bound_exact_source_receipt_json(
+                receipt, getattr(position, "_day0_monitor_probability_receipt", None),
+            ),
+        )
+    except (sqlite3.Error, TypeError, ValueError, KeyError, AttributeError):
+        return False
+
+
 def check_pending_retries(
     position: Position,
     conn: sqlite3.Connection | None = None,
     *,
     global_sell_reauction_requester: Callable[[Position, bool], bool] | None = None,
+    current_min_order_size: Decimal | None = None,
 ) -> bool:
     """Check if a retry-pending position's cooldown has expired.
 
@@ -12533,6 +12937,10 @@ def check_pending_retries(
             getattr(position, "trade_id", ""),
             command_ownership,
         )
+        return False
+    if previous_error in {
+        "protective_source_redecision_required", "protective_sell_authority_revoked_pre_venue",
+    } and not _fresh_protective_source_redecision(position, conn=conn):
         return False
     post_only_cross_reauction = _is_post_only_cross_reauction_error(previous_error)
     if post_only_cross_reauction and not _post_only_cross_reauction_proof_for_position(
@@ -12591,7 +12999,12 @@ def check_pending_retries(
     dust_error = (
         ""
         if global_snapshot_reauction
-        else _latest_snapshot_min_order_dust_error(position, conn=conn)
+        else (
+            "" if current_min_order_size == Decimal("0.01")
+            and _positive_decimal(position.effective_shares) is not None
+            and Decimal(str(position.effective_shares)) >= current_min_order_size
+            else _latest_snapshot_min_order_dust_error(position, conn=conn)
+        )
     )
     if dust_error:
         current_reason = str(getattr(position, "exit_reason", "") or "EXIT_RETRY_PENDING")
@@ -12634,8 +13047,15 @@ def check_pending_retries(
             )
         return False
 
-    if not runtime_gate_block and is_exit_cooldown_active(position):
-        return False  # Still cooling down
+    liquidity_recovered = bool(
+        _is_exit_liquidity_wait_error(previous_error)
+        and _fresh_exit_liquidity_recovered(position, conn=conn)
+    )
+    if (
+        not runtime_gate_block and is_exit_cooldown_active(position)
+        and not liquidity_recovered
+    ):
+        return False  # Transport/backoff waits never yield to a changed book.
 
     # A statistical SELL owned by the global auction may only leave pending_exit
     # when its caller can immediately request a fresh q/book/wealth cut. Releasing
@@ -12644,7 +13064,10 @@ def check_pending_retries(
     if global_snapshot_reauction and global_sell_reauction_requester is None:
         return False
 
-    if _is_exit_liquidity_wait_error(previous_error):
+    # A current canonical monitor book can discharge this liquidity-only
+    # wait before JIT creates its next executable snapshot. Do not reapply
+    # the obsolete no-bid snapshot after that independent proof succeeded.
+    if _is_exit_liquidity_wait_error(previous_error) and not liquidity_recovered:
         snapshot = _latest_exit_snapshot_context(
             conn,
             _asset_id_for_position(position),
@@ -12687,11 +13110,15 @@ def check_pending_retries(
             release_reason=(
                 "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
                 if global_snapshot_reauction
+                else "EXIT_LIQUIDITY_RECOVERED"
+                if liquidity_recovered
                 else "EXIT_RETRY_COOLDOWN_EXPIRED"
             ),
             caused_by=(
                 "global_sell_snapshot_reauction"
                 if global_snapshot_reauction
+                else "exit_liquidity_recovered"
+                if liquidity_recovered
                 else "exit_retry_cooldown_expired"
             ),
         )
@@ -14370,6 +14797,21 @@ def _mark_exit_retry(
             position.trade_id,
             reason,
             position.next_exit_retry_at,
+        )
+        return
+
+    if str(error) in {
+        "protective_source_redecision_required",
+        "protective_sell_authority_revoked_pre_venue",
+    }:
+        position.last_exit_error = str(error)
+        position.exit_state = "retry_pending"
+        position.order_status = "retry_pending"
+        position.next_exit_retry_at = _utcnow().isoformat()
+        _dual_write_canonical_pending_exit_if_available(
+            conn, position, reason=reason, error=str(error), event_type="EXIT_ORDER_REJECTED",
+            extra_payload={"status": "source_redecision_required", "retry_count": position.exit_retry_count,
+                           "next_retry_at": position.next_exit_retry_at},
         )
         return
 

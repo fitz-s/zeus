@@ -80,14 +80,18 @@ disagreement this module removes.
 from __future__ import annotations
 
 import hashlib
+import zlib
+import os
+import tempfile
 import json
 import logging
 import math
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Literal, Optional
 
 import httpx
@@ -243,6 +247,11 @@ class WrhProduct:
 
     response_sha256: str
     station_reference: Optional[WrhStationReference] = None
+    request_started_at: Optional[datetime] = None
+    coverage_start_utc: Optional[datetime] = None
+    coverage_end_utc: Optional[datetime] = None
+    native_body: Optional[bytes] = None
+    request_station_ids: tuple[str, ...] = ()
 
     def confirms_empty(self, *, target_date_local: date | str, view: PageView) -> bool:
         """True iff this response is a valid explicit-empty product for the day.
@@ -540,6 +549,7 @@ def fetch_wrh_product(
     for attempt in range(_RETRY_COUNT + 1):
         _wait_for_request_slot()
         try:
+            request_started_at = datetime.now(timezone.utc)
             response = httpx.get(
                 WRH_TIMESERIES_URL,
                 params=params,
@@ -560,10 +570,13 @@ def fetch_wrh_product(
                 )
             if response.status_code == 200:
                 fetched_at = datetime.now(timezone.utc)
-                return product_from_response(
+                return replace(product_from_response(
                     response.content, station, unit=unit, fetched_at=fetched_at,
                     source_response_sha256=hashlib.sha256(response.content).hexdigest(),
-                )
+                ), request_started_at=request_started_at,
+                    coverage_start_utc=(request_started_at - timedelta(minutes=recent_minutes)
+                                        if recent_minutes is not None else start_utc),
+                    coverage_end_utc=(request_started_at if recent_minutes is not None else end_utc))
             last_error = f"HTTP {response.status_code}"
             if response.status_code < 500:
                 raise WrhFetchFailed(f"{station}: {last_error}")
@@ -710,12 +723,23 @@ def station_reference_from_payload(
 def product_from_response(
     body: bytes, station: str, *, unit: Unit, fetched_at: Optional[datetime] = None,
     source_response_sha256: Optional[str] = None,
+    request_station_ids: tuple[str, ...] | None = None,
 ) -> WrhProduct:
     """Validate one raw 200 body into a :class:`WrhProduct`."""
     try:
         payload = json.loads(body)
     except (TypeError, ValueError, UnicodeDecodeError) as exc:
         raise WrhPayloadInvalid(f"{station}: response body is not JSON") from exc
+    requested = (station.strip().upper(),) if request_station_ids is None else tuple(request_station_ids)
+    if request_station_ids is not None:
+        stations = payload.get("STATION") if isinstance(payload, dict) else None
+        response_ids = [item.get("STID") for item in stations] if isinstance(stations, list) and all(isinstance(item, dict) for item in stations) else []
+        if (not requested or len(set(requested)) != len(requested) or station.strip().upper() not in requested
+                or sorted(response_ids) != sorted(requested)):
+            raise WrhStationIdentityInvalid("WRH_CURRENT_BATCH_STATION_SCOPE_INVALID")
+        # Selection is bound to our actual request and the retained full body;
+        # strict native row parsing remains exactly single-station.
+        payload = {**payload, "STATION": [item for item in stations if item["STID"] == station.strip().upper()]}
     rows = _parse_rows(payload, station)
     summary = payload.get("SUMMARY")
     # Absent UNITS is the documented sparse case; a present non-object is a
@@ -742,4 +766,255 @@ def product_from_response(
             payload, response_sha256=response_sha256, fetched_at=fetched_at,
             source_response_sha256=source_response_sha256,
         ),
+        native_body=body if source_response_sha256 == response_sha256 else None,
+        request_station_ids=requested,
     )
+
+
+CURRENT_SNAPSHOT_REVISION = "noaa_wrh_complete_current_product_v1"
+_CURRENT_BODY_MAX_FILES = 65_536
+_CURRENT_BODY_MAX_STORED_BYTES = 2 * 1024 ** 3
+
+
+@dataclass(frozen=True)
+class WrhCurrentSnapshot:
+    """A complete resolver-view snapshot, including proven empty membership.
+
+    Availability is our real HTTP receipt; provider-issued/public availability
+    is unknown. Completeness is requested product coverage, not day finality.
+    """
+    city: str
+    target_date: str
+    station: str
+    unit: str
+    view: str
+    timezone_name: str
+    received_at: datetime
+    request_started_at: datetime
+    coverage_start_utc: datetime
+    coverage_end_utc: datetime
+    response_sha256: str
+    rows: tuple[WrhRow, ...]
+    native_body: bytes
+    request_station_ids: tuple[str, ...]
+
+    @property
+    def source(self) -> str:
+        return f"noaa_wrh_{self.station.lower()}"
+
+    @property
+    def local_day_end(self) -> datetime:
+        day = date.fromisoformat(self.target_date) + timedelta(days=1)
+        return datetime.combine(day, datetime.min.time(), ZoneInfo(self.timezone_name)).astimezone(timezone.utc)
+
+    @property
+    def complete_day(self) -> bool:
+        return self.request_started_at >= self.local_day_end and self.coverage_end_utc >= self.local_day_end
+
+    def extreme(self, metric: Metric) -> Optional[WrhExtreme]:
+        return daily_extreme(list(self.rows), target_date_local=self.target_date, view=self.view, metric=metric)
+
+    def provenance(self) -> dict:
+        return {
+            "revision": CURRENT_SNAPSHOT_REVISION,
+            "product": "weather.gov_wrh_timeseries", "city": self.city,
+            "target_date": self.target_date, "station": self.station,
+            "unit": self.unit, "view": self.view, "timezone": self.timezone_name,
+            "received_at": self.received_at.isoformat(),
+            "request_started_at": self.request_started_at.isoformat(),
+            "coverage_start_utc": self.coverage_start_utc.isoformat(),
+            "coverage_end_utc": self.coverage_end_utc.isoformat(),
+            "response_sha256": self.response_sha256, "hash_kind": "HTTP_RESPONSE_BODY_BYTES",
+            "request_station_ids": list(self.request_station_ids),
+            "native_body_ref": self.response_sha256,
+            "native_body_encoding": "zlib_content_addressed_v1",
+            "provider_issued_at": None, "provider_public_available_at": None,
+            "response_ok": True, "complete_day": self.complete_day,
+            "rows": [{"local_timestamp": row.local_timestamp, "utc": row.utc.isoformat(),
+                      "air_temp": row.air_temp, "is_routine_metar": row.is_routine_metar,
+                      "is_official_report": row.is_official_report, "raw_metar": row.raw_metar}
+                     for row in self.rows],
+        }
+
+
+def replay_current_snapshot(proof: dict, *, city, target_date: str, as_of: datetime,
+                            _native_body: bytes | None = None) -> WrhCurrentSnapshot:
+    """Validate the same source contract for producer, hard-fact and q readers."""
+    def clock(name):
+        value = datetime.fromisoformat(str(proof[name]).replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            raise ValueError("WRH_SNAPSHOT_CLOCK_NAIVE")
+        return value.astimezone(timezone.utc)
+
+    if (not isinstance(proof, dict) or as_of.tzinfo is None
+            or proof.get("revision") != CURRENT_SNAPSHOT_REVISION
+            or str(getattr(city, "settlement_source_type", "")).lower() != "noaa"
+            or proof.get("product") != "weather.gov_wrh_timeseries"
+            or proof.get("city") != city.name or proof.get("target_date") != target_date
+            or proof.get("station") != city.wu_station.upper()
+            or proof.get("unit") != city.settlement_unit
+            or proof.get("view") != city.settlement_page_view
+            or proof.get("view") not in {"all", "hourly"}
+            or proof.get("timezone") != city.timezone
+            or proof.get("hash_kind") != "HTTP_RESPONSE_BODY_BYTES"
+            or proof.get("response_ok") is not True
+            or not re.fullmatch(r"[0-9a-f]{64}", str(proof.get("response_sha256", "")))
+            or proof.get("provider_issued_at") is not None
+            or proof.get("provider_public_available_at") is not None):
+        raise ValueError("WRH_SNAPSHOT_SOURCE_CONTRACT_INVALID")
+    received, requested, start, end = (clock(name) for name in (
+        "received_at", "request_started_at", "coverage_start_utc", "coverage_end_utc"))
+    day = date.fromisoformat(target_date)
+    zone = ZoneInfo(city.timezone)
+    day_start = datetime.combine(day, datetime.min.time(), zone).astimezone(timezone.utc)
+    day_end = datetime.combine(day + timedelta(days=1), datetime.min.time(), zone).astimezone(timezone.utc)
+    if not (start <= day_start <= requested <= received <= as_of
+            and end >= min(requested, day_end) and start < end
+            and end - start <= timedelta(days=MAX_REQUEST_WINDOW_DAYS)):
+        raise ValueError("WRH_SNAPSHOT_COVERAGE_OR_CAUSALITY_INVALID")
+    try:
+        if (proof.get("native_body_ref") != proof["response_sha256"]
+                or proof.get("native_body_encoding") != "zlib_content_addressed_v1"):
+            raise ValueError("WRH_SNAPSHOT_BODY_REFERENCE_INVALID")
+        body = _native_body if _native_body is not None else read_current_snapshot_body(proof["response_sha256"])
+        if len(body) > 10_000_000:
+            raise ValueError("WRH_SNAPSHOT_BODY_TOO_LARGE")
+        if hashlib.sha256(body).hexdigest() != proof["response_sha256"]:
+            raise ValueError("WRH_SNAPSHOT_BODY_DIGEST_MISMATCH")
+        native = product_from_response(body, proof["station"], unit=proof["unit"],
+                                       fetched_at=received, source_response_sha256=proof["response_sha256"],
+                                       request_station_ids=tuple(proof["request_station_ids"]))
+        if not native.response_ok or native.unit_label != _UNIT_LABELS[proof["unit"]]:
+            raise ValueError("WRH_SNAPSHOT_NATIVE_STATUS_INVALID")
+    except (KeyError, TypeError, zlib.error, ValueError, WrhError) as exc:
+        raise ValueError("WRH_SNAPSHOT_NATIVE_BODY_INVALID") from exc
+    raw_rows = proof.get("rows")
+    if not isinstance(raw_rows, list):
+        raise ValueError("WRH_SNAPSHOT_MEMBERSHIP_INVALID")
+    rows = []
+    clocks = set()
+    for row in raw_rows:
+        if (not isinstance(row, dict) or type(row.get("air_temp")) not in {int, float}
+                or not math.isfinite(row["air_temp"])
+                or type(row.get("is_official_report")) is not bool
+                or type(row.get("is_routine_metar")) is not bool):
+            raise ValueError("WRH_SNAPSHOT_ROW_INVALID")
+        observed = datetime.fromisoformat(row["utc"].replace("Z", "+00:00"))
+        local = datetime.fromisoformat(row["local_timestamp"].replace("Z", "+00:00"))
+        if (observed.tzinfo is None or local.tzinfo is None or observed != local
+                or observed > received or not day_start <= observed < day_end
+                or local.date() != day or observed.astimezone(zone).date() != day
+                or observed in clocks):
+            raise ValueError("WRH_SNAPSHOT_ROW_CLOCK_INVALID")
+        clocks.add(observed)
+        rows.append(WrhRow(row["local_timestamp"], observed.astimezone(timezone.utc), float(row["air_temp"]),
+                           row["is_routine_metar"], row["is_official_report"], row.get("raw_metar")))
+    snapshot = WrhCurrentSnapshot(city.name, target_date, city.wu_station.upper(), city.settlement_unit,
+                                  city.settlement_page_view, city.timezone, received, requested, start, end,
+                                  proof["response_sha256"], tuple(rows), body, tuple(proof["request_station_ids"]))
+    if snapshot.rows != tuple(row for row in native.rows if row.local_date == target_date):
+        raise ValueError("WRH_SNAPSHOT_MEMBERSHIP_DOES_NOT_REPLAY")
+    if proof.get("complete_day") is not snapshot.complete_day:
+        raise ValueError("WRH_SNAPSHOT_FINALITY_INVALID")
+    return snapshot
+
+
+def current_snapshot_from_product(product: WrhProduct, *, city, target_date: str,
+                                  as_of: datetime) -> WrhCurrentSnapshot:
+    """Qualify a native, successful full-local-day response without inventing clocks."""
+    reference = product.station_reference if isinstance(product, WrhProduct) else None
+    if (reference is None or reference.hash_kind != "HTTP_RESPONSE_BODY_BYTES"
+            or reference.fetched_at is None or product.station != city.wu_station.upper()
+            or product.unit != city.settlement_unit or product.unit_label != _UNIT_LABELS[product.unit]
+            or not product.response_ok or product.response_sha256 != reference.response_sha256
+            or product.native_body is None
+            or any(value is None for value in (product.request_started_at,
+                                               product.coverage_start_utc, product.coverage_end_utc))):
+        raise ValueError("WRH_SNAPSHOT_NATIVE_PRODUCT_REQUIRED")
+    target = date.fromisoformat(target_date)
+    snapshot = WrhCurrentSnapshot(city.name, target_date, product.station, product.unit,
+                                  city.settlement_page_view, city.timezone, reference.fetched_at,
+                                  product.request_started_at, product.coverage_start_utc,
+                                  product.coverage_end_utc, product.response_sha256,
+                                  tuple(row for row in product.rows if row.local_date == target.isoformat()), product.native_body,
+                                  product.request_station_ids or (product.station,))
+    # A corrupt/future row outside the selected day also invalidates the body.
+    if any(row.utc > reference.fetched_at for row in product.rows):
+        raise ValueError("WRH_SNAPSHOT_FUTURE_ROW")
+    return replay_current_snapshot(snapshot.provenance(), city=city, target_date=target_date, as_of=as_of,
+                                   _native_body=product.native_body)
+
+
+
+def read_current_snapshot_body(digest: str) -> bytes:
+    """Read only the named immutable source blob, under a bounded byte budget."""
+    from src.config import state_path
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("WRH_SNAPSHOT_BODY_REFERENCE_INVALID")
+    path = state_path("noaa_wrh_response_bodies") / (digest + ".zlib")
+    with path.open("rb") as handle:
+        compressed = handle.read(10_010_001)
+    if len(compressed) > 10_010_000:
+        raise ValueError("WRH_SNAPSHOT_BODY_TOO_LARGE")
+    inflater = zlib.decompressobj()
+    body = inflater.decompress(compressed, 10_000_001)
+    if (len(body) > 10_000_000 or not inflater.eof or inflater.unused_data
+            or hashlib.sha256(body).hexdigest() != digest):
+        raise ValueError("WRH_SNAPSHOT_BODY_CUSTODY_INVALID")
+    return body
+
+
+def persist_current_snapshot_body(body: bytes) -> str:
+    """Stage one shared immutable response before committing its canonical row."""
+    from src.config import state_path
+    if not isinstance(body, bytes) or len(body) > 10_000_000:
+        raise ValueError("WRH_SNAPSHOT_BODY_INVALID")
+    digest = hashlib.sha256(body).hexdigest()
+    directory = state_path("noaa_wrh_response_bodies")
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / (digest + ".zlib")
+    if path.exists():
+        try:
+            if read_current_snapshot_body(digest) != body:
+                raise ValueError("WRH_SNAPSHOT_IMMUTABLE_BODY_CONFLICT")
+        except (ValueError, zlib.error):
+            # Preserve corrupt bytes for audit. Only an incoming body whose
+            # digest is this object's name may restore that immutable object.
+            path.rename(path.with_name(path.name + ".invalid." + str(time.time_ns())))
+        else:
+            return digest
+    compressed = zlib.compress(body)
+    # SCOPE: new source bodies only; existing referenced evidence is never
+    # deleted. DRAIN: retry after an operator raises the custody budget or an
+    # authorized archive removes unreferenced blobs. RESET: capacity is again
+    # sufficient. Failure leaves the current canonical transaction unchanged.
+    count, total = 0, len(compressed)
+    for entry in directory.iterdir():
+        if entry.is_file() and not entry.name.startswith(".wrh-"):
+            count += 1
+            total += entry.stat().st_size
+            if count >= _CURRENT_BODY_MAX_FILES or total > _CURRENT_BODY_MAX_STORED_BYTES:
+                raise ValueError("WRH_SNAPSHOT_BODY_CAPACITY")
+    if _CURRENT_BODY_MAX_FILES <= 0 or total > _CURRENT_BODY_MAX_STORED_BYTES:
+        raise ValueError("WRH_SNAPSHOT_BODY_CAPACITY")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=directory, prefix=".wrh-", delete=False) as handle:
+            temporary = handle.name
+            handle.write(compressed)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if read_current_snapshot_body(digest) != body:
+                raise ValueError("WRH_SNAPSHOT_IMMUTABLE_BODY_CONFLICT")
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+    return digest

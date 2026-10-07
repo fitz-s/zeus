@@ -28,6 +28,26 @@ def _wrh_metadata_payload(station, *, unit="C", metadata=None):
                                           "air_temp_set_1": [28.5], "sea_level_pressure_set_1": [1010]}}]}
 
 
+@pytest.fixture(autouse=True)
+def _readable_unclaimed_wrh_owner(monkeypatch):
+    """Legacy print-only fixtures have a readable empty FORECAST truth owner.
+
+    Unknown/unreadable current-product authority is no longer equivalent to
+    proven absence. Supply real empty owner DDL rather than bypass that reader.
+    """
+    from contextlib import contextmanager
+    from src.state import db
+    @contextmanager
+    def owner(**kwargs):
+        conn = sqlite3.connect(":memory:")
+        db._create_observations(conn)
+        try:
+            yield conn
+        finally:
+            conn.close()
+    monkeypatch.setattr(db, "get_forecasts_connection_with_world_read_only", owner)
+
+
 @pytest.mark.parametrize("unit", ["C", "F"])
 @pytest.mark.parametrize("metadata", [None, {"LATITUDE": None, "ELEVATION": {"invalid": True}}])
 def test_wrh_native_metadata_survives_existing_day0_json_and_sqlite(unit, metadata):
@@ -1043,3 +1063,22 @@ def test_audit_reducer_rounds_through_settlement_semantics():
     assert module.contract_value(-0.5, "C", toronto) == 0  # WMO half-up toward +inf
     assert module.contract_value(-1.5, "C", toronto) == -1
     assert module.contract_value(18.5, "C", toronto) == 19
+
+
+def test_current_wrh_native_body_cache_and_dynamic_locks_are_bounded():
+    from src.data import station_temperature_adapters as adapters
+    adapters._WRH_CURRENT_PRODUCT_CACHE.clear()
+    try:
+        for index in range(20):
+            (body, _started), _received = adapters._current_wrh_cached_fetch(
+                ("changing-held-scopes", index), lambda: (b"x" * 6_000_000, "fixture"), prefix="fixture:")
+            assert len(body) == 6_000_000
+            assert len(adapters._WRH_CURRENT_PRODUCT_CACHE) <= 4
+            assert sum(len(entry[1][0]) for entry in adapters._WRH_CURRENT_PRODUCT_CACHE.values()) <= 20_000_000
+            assert sum(1 for key in adapters._FETCH_KEY_LOCKS if key[0] == "wrh_current_snapshot") <= 4
+    finally:
+        adapters._WRH_CURRENT_PRODUCT_CACHE.clear()
+        with adapters._FETCH_CACHE_LOCK:
+            for key in tuple(adapters._FETCH_KEY_LOCKS):
+                if key[0] == "wrh_current_snapshot":
+                    adapters._FETCH_KEY_LOCKS.pop(key)

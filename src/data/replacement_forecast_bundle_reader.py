@@ -559,6 +559,15 @@ def _wu_fast_pinned_carrier_reason(
             "source": str(current_state["source"]),
         }
         state_time = _parse_utc(current_path["observed_at_utc"], field_name="current_state_time")
+        if current_state.get("source_revision_identity") is not None:
+            from src.data.day0_hourly_vectors import Day0CurrentTemperatureState
+
+            qualified = Day0CurrentTemperatureState(
+                value_native=current_path["value_native"], observed_at=state_time,
+                source=current_path["source"],
+                source_revision_identity=current_state["source_revision_identity"],
+            ).identity()
+            current_path["source_revision_identity"] = qualified["source_revision_identity"]
         if state_time > cutoff:
             raise ValueError("future_current_state")
         likelihood_time = _parse_utc(str(likelihood["as_of"]), field_name="likelihood_as_of")
