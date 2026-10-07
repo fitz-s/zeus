@@ -1508,6 +1508,9 @@ def _shanghai_reader_certificate(tmp_path, monkeypatch, *, expires_at,
     from src.data import replacement_forecast_materializer as materializer
     from src.data.replacement_forecast_readiness import latest_replacement_readiness
     from src.data.station_ground_evidence import forecast_db_from_connection
+    from src.config import runtime_cities_by_name
+    from tests.integration.test_w3_solve_seam_g3 import _normal_native_role_inputs
+    from tests import test_replacement_forecast_materializer as source_fixtures
     from dataclasses import replace
     root = tmp_path.resolve()
     native = _hko_native_surfaces.__wrapped__(root,monkeypatch)
@@ -1518,17 +1521,48 @@ def _shanghai_reader_certificate(tmp_path, monkeypatch, *, expires_at,
         try:
             cut = computed_at or datetime(2026,10,1,8,15,tzinfo=UTC)
             actual_override = materializer._replacement_bayes_precision_fusion_override
-            conn,request = _shanghai_current_owner_request(root,monkeypatch,
-                target_date=target_date,source_cycle_time=source_cycle_time,
-                computed_at=cut,first_compute_at=first_compute_at or cut-timedelta(minutes=10),
-                ground_recorded_at=ground_recorded_at)
+            builtin = sqlite3.connect(":memory:")
+            originals = [None]
+            sql_clock = [source_cycle_time + timedelta(hours=8, minutes=5)]
+
+            def normal_shape_inputs(source_conn, staged_request, scoped_patch, *, members_c):
+                # Prepare normal originals before the legacy test seam would
+                # write its scalar-only SUCCESS. Existing custody is never
+                # overwritten, and a later provider stage cannot renew it.
+                from src.state.db import init_schema_forecasts
+                init_schema_forecasts(source_conn)
+                source_conn.create_function("strftime",2,lambda fmt,value: sql_clock[0].isoformat(timespec="milliseconds")
+                    if (fmt,value)==("%Y-%m-%dT%H:%M:%f+00:00","now") else builtin.execute("SELECT strftime(?,?)",(fmt,value)).fetchone()[0])
+                if originals[0] is None:
+                    assert sql_clock[0] <= staged_request.computed_at
+                    originals[0] = _normal_native_role_inputs(root,monkeypatch,conn=source_conn,
+                        city=runtime_cities_by_name()[staged_request.city],cycle=staged_request.source_cycle_time,
+                        target=staged_request.target_date,capture_at=sql_clock[0],metric=staged_request.temperature_metric,
+                        center_c=24.5,member_step_c=.02)
+                snapshot = originals[0].snapshot
+                assert snapshot["city"] == staged_request.city
+                assert snapshot["source_cycle_time"] == staged_request.source_cycle_time.isoformat()
+                assert snapshot["target_date"] == staged_request.target_date.isoformat()
+                proof = json.loads(snapshot["provenance_json"])
+                return snapshot, grid_surface_evidence_identity_hash(proof["grid_surface_evidence"]), tuple(json.loads(snapshot["members_json"]))
+
+            with monkeypatch.context() as preparation:
+                preparation.setattr(source_fixtures,"_fixture_native_shape_identity",normal_shape_inputs)
+                conn,request = _shanghai_current_owner_request(root,monkeypatch,
+                    target_date=target_date,source_cycle_time=source_cycle_time,
+                    computed_at=cut,first_compute_at=first_compute_at or cut-timedelta(minutes=10),
+                    ground_recorded_at=ground_recorded_at)
             assert conn.execute("SELECT COUNT(*) FROM forecast_posteriors").fetchone()[0] == 0
             # This is the first certificate construction, never a renewal of
             # an existing posterior. None delegates expiry to the owner law.
             request = replace(request,expires_at=expires_at)
-            builtin = None
             try:
-                request,snapshot,builtin = _reader_shanghai_native_high(conn,request,root,monkeypatch)
+                snapshot = originals[0].snapshot
+                request = replace(request,city_id=request.city.upper().replace(" ","_"),
+                    baseline_source_run_id=snapshot["source_run_id"],
+                    baseline_data_version=snapshot["dataset_id"],
+                    baseline_source_available_at=datetime.fromisoformat(snapshot["source_available_at"]))
+                sql_clock[0] = cut
                 monkeypatch.setattr(materializer,"_replacement_bayes_precision_fusion_override",actual_override)
                 # The normal source path now derives its current shape from
                 # the actually ingested ID, not A25's controlled 9001 seam.
@@ -1571,6 +1605,55 @@ def _shanghai_reader_certificate(tmp_path, monkeypatch, *, expires_at,
             next(source,None)
     finally:
         next(native,None)
+
+
+def test_shanghai_reader_missing_physical_original_refuses_then_resets(tmp_path, monkeypatch):
+    from zoneinfo import ZoneInfo
+    from src.config import runtime_cities_by_name
+    from src.data import ecmwf_open_data as native, replacement_input_hwm as hwm
+    from src.data.day0_hourly_vectors import read_native_measurement_role
+
+    world = _shanghai_reader_certificate(tmp_path,monkeypatch,expires_at=None)
+    normal = next(world)
+    try:
+        city = runtime_cities_by_name()[normal.request.city]
+        snapshot_id = json.loads(normal.row["dependency_source_run_ids_json"])["current_ensemble_snapshot"]
+        paths = native._resolve_opendata_paths()
+        role = read_native_measurement_role(conn=normal.conn,city=city,
+            target_date=normal.request.target_date.isoformat(),metric="high",role="full_Y",
+            scope_start=datetime.combine(normal.request.target_date,datetime.min.time(),
+                tzinfo=ZoneInfo(city.timezone)).astimezone(UTC),
+            decision_time=normal.request.computed_at,snapshot_id=snapshot_id,_paths=paths)
+        digest = role["native_scope"]["native_interval_originals"][0]
+        original = native._role_message_path(paths.raw_root,digest)
+        original_bytes = original.read_bytes()
+        from scripts.extract_open_ens_localday import TRACKS
+        assembled = native._download_output_path(run_date=normal.request.source_cycle_time.date(),
+            run_hour=normal.request.source_cycle_time.hour,param=TRACKS["mx2t6_high"].open_data_param,
+            raw_root=paths.raw_root)
+        aliases = [original] + ([assembled] if assembled.is_file() else [])
+        quarantined = [(path,path.with_suffix(".private-missing")) for path in aliases]
+        for path, saved in quarantined:
+            path.rename(saved)
+        try:
+            reader._LIVE_GRADE_MEMO.clear()
+            hwm.clear_consumed_proof_memo()
+            with hwm.fresh_source():
+                refused = read_replacement_forecast_bundle(normal.conn,**normal.kwargs)
+            assert not refused.ok
+            assert "NOT_LIVE_GRADE" in refused.reason_code
+        finally:
+            for path, saved in quarantined:
+                saved.rename(path)
+        assert original.read_bytes() == original_bytes
+        reader._LIVE_GRADE_MEMO.clear()
+        hwm.clear_consumed_proof_memo()
+        with hwm.fresh_source():
+            restored = read_replacement_forecast_bundle(normal.conn,**normal.kwargs)
+        assert restored.ok,restored.reason_code
+        assert restored.bundle.posterior_id == normal.row["posterior_id"]
+    finally:
+        next(world,None)
 
 
 def _reader_with_posterior_fault(normal, *, missing=False, **fields):

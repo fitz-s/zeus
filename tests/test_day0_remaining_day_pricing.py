@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-10-01
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Last reused or audited: 2026-10-07
+# Lifecycle: created=2026-06-10; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -350,9 +350,9 @@ def test_kma_invalid_evidence_cannot_replace_current_temperature(damage):
         state = read_day0_current_temperature_state(
             conn=conn, city=city, target_date="2026-09-22", decision_time=cutoff,
         )
-        assert state is not None
-        assert state.value_native == 29.0
-        assert state.observed_at.hour == 4
+        # Invalid declared KMA custody cannot silently become the older AWC
+        # print. The adjacent valid-window test proves the real RESET path.
+        assert state is None
     finally:
         conn.close()
 
@@ -2434,8 +2434,12 @@ def test_attached_world_witness_keeps_producer_and_held_paths_identical(
 
     request = SimpleNamespace(
         city="NYC",
+        city_timezone=city.timezone,
         target_date=target_date,
         computed_at=decision_time.isoformat(),
+        day0_observed_extreme_c=None,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_unit=city.settlement_unit,
         day0_observed_extreme_observation_time="2026-06-10T19:00:00+00:00",
     )
     producer_values, _sigma, _cutoff = materializer._day0_noaa_future_vector_members(
@@ -2454,6 +2458,8 @@ def test_attached_world_witness_keeps_producer_and_held_paths_identical(
         observation_time=held_state[1],
         current_temp_c=(held_state[0] - 32.0) * 5.0 / 9.0,
         metric=metric,
+        unresolved_window_start=datetime.combine(date.fromisoformat(target_date),
+            datetime.min.time(), tzinfo=ZoneInfo(city.timezone)).astimezone(UTC),
     )
     assert held_values == pytest.approx(producer_values)
     forecast.close()
@@ -2488,12 +2494,11 @@ def test_producer_carrier_members_equal_consumer_members_on_real_munich_bundle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    """Live 2026-09-27/28: 25 families failed VECTOR_MISMATCH on every cut.
+    """Historical provider-collapse math agrees; its missing prefix is not live.
 
-    The producer kept both DWD paths for LOW while every consumer collapsed
-    them to one provider, so the replay compared four persisted members with
-    three current ones.  Producer members must equal the consumer's for both
-    metrics, and the replay must accept its own persisted vector.
+    Preserve the captured 02:00/08:00-starting paths exactly. A spot at 09:50
+    does not prove the unobserved past, so the current producer must reject
+    this incomplete bundle rather than licensing the old persisted carrier.
     """
     import src.data.day0_hourly_vectors as hourly
     import src.data.replacement_forecast_materializer as materializer
@@ -2543,61 +2548,39 @@ def test_producer_carrier_members_equal_consumer_members_on_real_munich_bundle(
     forecast = sqlite3.connect(":memory:")
     forecast.execute("ATTACH DATABASE ? AS world", (str(world_path),))
 
-    def conditional_high_shape(**kwargs):
-        # The 51-member ENS half is out of scope; its provider half is the
-        # same one-path-per-provider collapse both sides must reproduce.
-        state = kwargs["current_state"]
-        centers, _ = hourly.remaining_day_extremes_c_with_current_state(
-            hourly.day0_hourly_provider_representatives(
-                list(kwargs.get("provider_vectors") or vectors)
-            ),
-            target_date=target_date, decision_time=decision_time, metric="high",
-            current_state=state, settlement_unit="C",
-            fallback_window_start=state.observed_at,
-        )
-        return SimpleNamespace(
-            provider_centers_c=tuple(centers), identity="shape", witness={},
-            extra_sigma_c=0.5,
-        )
-
-    monkeypatch.setattr(hourly, "day0_conditional_high_shape", conditional_high_shape)
     request = SimpleNamespace(
         city="Munich",
         city_timezone="Europe/Berlin",
         target_date=target_date,
         computed_at=decision_time.isoformat(),
+        day0_observed_extreme_c=20.0,
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_unit="C",
         day0_observed_extreme_observation_time="2026-09-28T09:50:00+00:00",
     )
-    producer, *_rest = materializer._day0_noaa_carrier_future_members(
-        forecast, request, metric=metric,
-        fusion=SimpleNamespace(
-            used_models=("ecmwf_ifs", "icon_d2"), predictive_sigma_c=2.681048413410214,
-        ),
-    )
-    monkeypatch.setattr(era, "_day0_current_vector_witness", lambda **_kwargs: {})
-    monkeypatch.setattr(
-        era, "_validate_day0_causal_bundle_successor", lambda **_kwargs: None
-    )
-    monkeypatch.setattr(
-        era, "_pinned_station_extreme_providers_c", lambda **_kwargs: ()
-    )
-    payload = {"metric": metric, "observation_time": "2026-09-28T09:50:00+00:00"}
-    consumer = era._day0_remaining_day_members(
-        payload=payload,
-        family=SimpleNamespace(city="Munich", target_date=target_date, metric=metric),
-        unit="C",
-        decision_time=decision_time,
-        world_conn=forecast,
-        forecast_conn=forecast,
-    )
+    with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING"):
+        materializer._day0_noaa_carrier_future_members(forecast, request, metric=metric,
+            fusion=SimpleNamespace(used_models=("ecmwf_ifs", "icon_d2"), predictive_sigma_c=2.681048413410214))
+    state = hourly.read_day0_current_temperature_state(conn=forecast,
+        city=runtime_cities_by_name()["Munich"], target_date=target_date, decision_time=decision_time)
+    assert state is not None and state.observed_at == datetime(2026, 9, 28, 9, 50, tzinfo=UTC)
+    representatives = hourly.day0_hourly_provider_representatives(vectors)
+    # Explicitly offline suffix math: no q, native role, or READY witness is
+    # constructed from the partial historical paths on either side.
+    producer, _ = hourly.remaining_day_extremes_c_with_current_state(representatives,
+        target_date=target_date, decision_time=decision_time, metric=metric,
+        current_state=state, settlement_unit="C", fallback_window_start=state.observed_at)
+    consumer, _ = era._remaining_day_extremes_c_with_current_state_evidence(representatives,
+        target_date=target_date, decision_time=decision_time, observation_time=state.observed_at,
+        current_temp_c=state.value_native, metric=metric)
     forecast.close()
     assert consumer is not None
-    assert payload["_edli_day0_provider_representative_models"] == [
+    assert [vector.model for vector in representatives] == [
         "icon_d2", "ecmwf_ifs", "ukmo_global_deterministic_10km",
     ]
     # Same content, same representation: exact, not tolerance.
     assert np.array_equal(
-        np.sort(np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"])),
+        np.sort(np.asarray(consumer)),
         np.sort(np.asarray(producer)),
     )
     if metric == "low":
@@ -3065,6 +3048,233 @@ def _serialize_unshifted_component_carrier(era, *, carrier, identity_inputs, pay
     payload.update(_edli_day0_remaining_center_policy=conditioning["day0_remaining_center_policy"],
         _edli_day0_probability_mixture_policy=conditioning["day0_probability_mixture_policy"],
         _edli_day0_remaining_center_bias_c=conditioning["day0_remaining_center_bias_c"])
+
+
+def _offline_rebuild_component_carrier(*, payload, family, cut, future, final=(), path_sigma=None, city=None):
+    """Numerical constructor/serialization fixture, never a current-role proof.
+
+    Preserve the old component arithmetic and written-input assertions without
+    pretending its toy vectors possess native originals or licensing an action.
+    The actual adapter request is separately required to refuse these inputs.
+    """
+    import src.engine.event_reactor_adapter as era
+    from src.config import ensemble_n_mc
+    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+    from src.signal.ensemble_signal import sigma_instrument_for_city
+    city = runtime_cities_by_name()[family.city] if city is None else city
+    unit = str(city.settlement_unit).upper()
+    scale, offset = (1.,0.) if unit == "C" else (9./5.,32.)
+    likelihood = payload["_edli_day0_provisional_revision_likelihood"]
+    source = era._day0_probability_conditioning_source(payload).lower()
+    station = era._day0_provisional_carrier_station(city=city,source=source,
+        likelihood=likelihood,target_date=getattr(family,"target_date",None))
+    identity = day0_remaining_carrier_identity_inputs(city=city.name,unit=unit,
+        decision_time_utc=cut.isoformat(),station_id=station,
+        preliminary_survival_identity=likelihood["identity_hash"])
+    identity.update(day0_remaining_center_policy=DAY0_REMAINING_CENTER_POLICY,
+        day0_probability_mixture_policy=DAY0_PROBABILITY_MIXTURE_POLICY)
+    written = era._day0_carrier_written_inputs(payload)
+    if written["current_path_state"] is not None:
+        identity["current_path_state"] = written["current_path_state"]
+    if written["conditional_high_shape_identity"] is not None:
+        identity["conditional_high_shape_identity"] = written["conditional_high_shape_identity"]
+    sigma = float(np.std(future)) if path_sigma is None else float(path_sigma)
+    boundary = era._day0_probability_boundary_native(payload,family.metric,city=city,unit=unit)
+    survival = likelihood["boundary_survival_probability"]
+    from src.data import day0_hourly_vectors as hourly
+    carrier = hourly.build_day0_remaining_probability_carrier(
+        future_extremes_c=tuple(v*scale+offset for v in future),
+        final_extreme_centers_c=tuple(v*scale+offset for v in final),
+        boundary_scenarios=((boundary,survival),(None,1-survival)),
+        metric=family.metric,path_error_sigma_c=sigma*scale,
+        instrument_sigma_c=float(sigma_instrument_for_city(city).to(unit).value),
+        bin_bounds_c=[(c.bin.low,c.bin.high) for c in family.candidates],
+        n_point=ensemble_n_mc(),n_samples=500,identity_inputs=identity,
+        settlement_semantics=SettlementSemantics.for_city(city),
+        operator=(hourly.DAY0_REMAINING_CARRIER_OPERATOR_V3 if final
+            else hourly.DAY0_REMAINING_CARRIER_OPERATOR_V2))
+    era._snapshot_day0_source_clock_carrier_provenance(payload)
+    payload.update(_edli_day0_remaining_content_identity=carrier["content_identity"],
+        _edli_day0_probability_operator=carrier["operator"],
+        _edli_day0_remaining_carrier_q=carrier["q"],
+        _edli_day0_remaining_probability_samples=carrier["samples"],
+        _edli_day0_remaining_probability_sample_count=carrier["sample_count"],
+        _edli_day0_remaining_carrier_future_extremes_c=list(future),
+        _edli_day0_remaining_carrier_final_extremes_c=list(final),
+        _edli_day0_remaining_carrier_path_error_sigma_c=sigma,
+        _edli_day0_remaining_carrier_probability_cutoff_utc=cut.isoformat(),
+        _edli_day0_carrier_written_inputs=written,
+        _edli_day0_carrier_bin_topology=[{"bin_id":c.bin.label,
+            "lower_c":None if c.bin.low is None else (c.bin.low-32.)*5./9. if unit == "F" else c.bin.low,
+            "upper_c":None if c.bin.high is None else (c.bin.high-32.)*5./9. if unit == "F" else c.bin.high}
+            for c in family.candidates],
+        _edli_day0_decision_carrier_rebuild_basis="OFFLINE_NUMERICAL_COMPONENT_ONLY")
+    _serialize_unshifted_component_carrier(era,carrier=carrier,identity_inputs=identity,
+        payload=payload,unit=unit,cut=cut)
+    return carrier
+
+
+def _assert_normal_hko_role_replay(tmp_path, monkeypatch, metric):
+    """Original native capture -> normal materialization -> public/adapter q.
+
+    This is the live-grade positive; the numerical toys above are not one.
+    Only the frozen integration fixture's original HTTP transport is fake.
+    """
+    from tests.integration import test_w3_solve_seam_g3 as normal
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import day0_hourly_vectors as hourly
+    from src.data.replacement_forecast_readiness import latest_replacement_readiness
+    from src.events.triggers.day0_extreme_updated import (
+        build_day0_extreme_updated_event, observation_instant_row_to_day0_observation,
+    )
+    import src.engine.event_reactor_adapter as era
+    root = tmp_path/"qualified-native"
+    root.mkdir()
+    with monkeypatch.context() as transport:
+        sources = normal._hko_clock_native_sources.__wrapped__(root,transport)
+        next(sources)
+        fixture = None
+        try:
+            fixture = normal._hko_clock_normal_materializer_fixture(root,transport,metric)
+            conn, cut = fixture.conn, fixture.cut
+            clocks = [tuple(r) for r in conn.execute(
+                "SELECT raw_model_forecast_id,source_cycle_time,source_available_at,captured_at,recorded_at"
+                " FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
+            ready = latest_replacement_readiness(conn,city=fixture.city.name,
+                target_date=str(fixture.request.target_date),temperature_metric=metric,decision_time=cut)
+            row = dict(conn.execute("SELECT * FROM observation_instants ORDER BY utc_timestamp DESC LIMIT 1").fetchone())
+            event = build_day0_extreme_updated_event(
+                observation=observation_instant_row_to_day0_observation(row,metric=metric),
+                settlement_semantics=SettlementSemantics.for_city(fixture.city),
+                decision_time=cut,received_at=cut.isoformat())
+            original_builder = hourly.build_day0_remaining_probability_carrier
+            kernel_calls = []
+            def record_kernel(**kwargs):
+                result = original_builder(**kwargs)
+                kernel_calls.append((kwargs,result))
+                return result
+            transport.setattr(hourly,"build_day0_remaining_probability_carrier",record_kernel)
+            for use,purpose in ((era._CurrentProbabilityUse.ENTRY,reader.ReplacementForecastAuthorityPurpose.ENTRY),
+                    (era._CurrentProbabilityUse.HELD_MONITOR,reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION)):
+                public = reader.read_replacement_forecast_bundle(conn,baseline_bundle=None,readiness=ready,
+                    city=fixture.city.name,target_date=str(fixture.request.target_date),temperature_metric=metric,
+                    decision_time=cut,require_baseline_bundle=False,enforce_raw_input_hwm=True,
+                    raw_input_hwm_conn=conn,authority_purpose=purpose)
+                assert public.ok and public.bundle.posterior_id == fixture.result.posterior_id, public.reason_code
+                payload = {}
+                kernel_calls.clear()
+                prepared = era._prepare_current_global_probability_family(event,forecast_conn=conn,
+                    topology_conn=conn,observation_conn=conn,decision_time=cut,max_age=timedelta(seconds=30),
+                    allow_provisional_day0_replacement=True,probability_use=use,
+                    raw_input_hwm_conn=conn,day0_payload_out=payload)
+                roles = payload["_edli_day0_measurement_domain_shapes"]
+                for axis in ("X","Y"):
+                    assert len(roles[axis]["member_points_native"]) == 51
+                    assert datetime.fromisoformat(roles[axis]["physical_dependency_available_at"]) < cut
+                assert payload["_edli_day0_remaining_carrier_path_error_sigma_c"] == 0.0
+                inputs,carrier = next((inputs,result) for inputs,result in reversed(kernel_calls)
+                    if result["content_identity"] == payload["_edli_day0_remaining_content_identity"])
+                assert inputs["identity_inputs"]["domain_role_shapes"] == roles
+                assert inputs["path_error_sigma_c"] == inputs["instrument_sigma_c"] == 0.0
+                replay = original_builder(**inputs)
+                for key in ("content_identity","q","samples","identification_bounds"):
+                    assert replay[key] == carrier[key]
+                np.testing.assert_array_equal(replay["q"],prepared.probability_witness.yes_point_q)
+                assert prepared.posterior_id == fixture.result.posterior_id
+            assert clocks == [tuple(r) for r in conn.execute(
+                "SELECT raw_model_forecast_id,source_cycle_time,source_available_at,captured_at,recorded_at"
+                " FROM raw_model_forecasts ORDER BY raw_model_forecast_id")]
+        finally:
+            if fixture is not None:
+                fixture.conn.close()
+            next(sources,None)
+
+
+def _assert_normal_noaa_native_role_math(tmp_path, monkeypatch, *, city, metric):
+    """NOAA cities' source-layer proof, not Day0 replacement/action READY.
+
+    Original GRIB encoding uses this city's actual grid before transport. The
+    public native reader verifies member/run/static/PIT; normal hourly parser
+    and writer supply the provider centers for the owning role mathematics.
+    """
+    from tests.integration import test_w3_solve_seam_g3 as normal
+    from src.data import day0_hourly_vectors as hourly
+    from src.state.db import get_connection, init_schema_forecasts
+    from src.strategy.live_inference.source_clock_vnext import provider_family_for_source
+    root = tmp_path/"normal-native-source"
+    root.mkdir()
+    cycle = datetime(2026,10,1,tzinfo=UTC)
+    capture = cycle+timedelta(hours=8,minutes=5)
+    target = date(2026,10,2)
+    conn = get_connection(root/"forecasts.db")
+    init_schema_forecasts(conn)
+    conn.create_function("strftime",2,lambda fmt,text:capture.isoformat(timespec="milliseconds"))
+    sources = normal._noaa_native_sources.__wrapped__(root,monkeypatch)
+    next(sources)
+    try:
+        source = normal._normal_native_role_inputs(root,monkeypatch,conn=conn,city=city,
+            cycle=cycle,target=target,capture_at=capture,metric=metric,center_c=28.5,member_step_c=.01)
+        models = hourly.day0_hourly_models_for_city(city)
+        centers = (28.5,29.,30.5,31.25)
+        vectors = []
+        for index,model in enumerate(models):
+            body = {"timezone":city.timezone,"hourly":{"time":[f"{target}T{h:02d}:00" for h in range(24)],
+                "temperature_2m":[centers[index%len(centers)]]*24},"hourly_units":{"temperature_2m":"°C"}}
+            meta = hourly._day0_provider_run_meta(model=model,model_api_id=model,run=cycle,
+                available_at=cycle+timedelta(hours=1),modified_at=cycle+timedelta(hours=1),
+                authority="run_pinned_single_runs",endpoint_mode="single_runs",request_params={"models":model},
+                request_hash=hashlib.sha256(json.dumps(body,sort_keys=True).encode()).hexdigest(),
+                fetch_started_at=capture,fetch_finished_at=capture)
+            parsed = hourly.parse_openmeteo_hourly_payload(body,city=city,models=[model],
+                captured_at=capture.isoformat(),source_run_meta_json=json.dumps(meta))
+            assert len(parsed) == 1
+            assert hourly.persist_day0_hourly_vectors(parsed,target_date=str(target),conn=conn,
+                request_hash=meta["request_hash"],endpoint="https://single-runs-api.open-meteo.com/v1/forecast",
+                now=capture) == 1
+            vectors.extend(parsed)
+        # This is a future full-Y source-layer test, not a Day0 remaining path.
+        # Select the target's actual local-calendar support without pretending
+        # the earlier capture cut already lies in that local day.
+        provider = []
+        for vector in vectors:
+            values = hourly.day0_hourly_vector_target_values_utc(vector,target=target,
+                tz=ZoneInfo(city.timezone))
+            assert values is not None and len(values) == 24
+            provider.append((max if metric == "high" else min)(v for _,v in values))
+        assert len(provider) == len(models)
+        role = hourly.read_native_measurement_role(conn=conn,city=city,target_date=str(target),metric=metric,
+            role="full_Y",scope_start=source.window.start_utc,decision_time=source.readback_at,
+            snapshot_id=source.snapshot["snapshot_id"],_paths=source.paths)
+        assert role["member_points_native"] == source.role["member_points_native"]
+        assert role["city"] == city.name and role["unit"] == city.settlement_unit
+        scale,offset = (1.,0.) if city.settlement_unit == "C" else (9./5.,32.)
+        projected = {**role,"provider_centers_native":[v*scale+offset for v in provider],
+            "provider_families":[provider_family_for_source(v.model) for v in vectors]}
+        members = np.asarray(role["member_points_native"])
+        current = np.sort(np.asarray(projected["provider_centers_native"]))
+        residual,bounds = hourly._day0_role_noise(projected,role="full_Y",centers=current)
+        assert residual**2 == pytest.approx(
+            np.std(members)**2+(np.mean(current)-np.mean(members))**2)
+        assert bounds[0] <= residual <= bounds[1]
+        assert sqrt(residual**2+np.std(current)**2) == pytest.approx(sqrt(
+            np.std(members)**2+(np.mean(current)-np.mean(members))**2+np.std(current)**2))
+        before = dict(source.snapshot)
+        conn.execute("UPDATE ensemble_snapshots SET recorded_at=? WHERE snapshot_id=?",
+            (source.readback_at.isoformat(),source.snapshot["snapshot_id"]))
+        conn.commit()
+        with pytest.raises(ValueError,match="MEASUREMENT_ROLE_NATIVE_POINT_UNAVAILABLE"):
+            hourly.read_native_measurement_role(conn=conn,city=city,target_date=str(target),metric=metric,
+                role="full_Y",scope_start=source.window.start_utc,decision_time=source.readback_at,
+                snapshot_id=source.snapshot["snapshot_id"],_paths=source.paths)
+        conn.execute("UPDATE ensemble_snapshots SET recorded_at=? WHERE snapshot_id=?",
+            (before["recorded_at"],source.snapshot["snapshot_id"]))
+        conn.commit()
+        assert hourly.read_native_measurement_role(conn=conn,city=city,target_date=str(target),metric=metric,
+            role="full_Y",scope_start=source.window.start_utc,decision_time=source.readback_at,
+            snapshot_id=source.snapshot["snapshot_id"],_paths=source.paths) == role
+    finally:
+        next(sources,None)
+        conn.close()
 
 
 @pytest.mark.parametrize(
@@ -3780,16 +3990,13 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
         ],
     )
     next_decision_time = decision_time + timedelta(minutes=1)
-    era._rebuild_decision_time_day0_carrier(
-        payload=payload,
-        family=family,
-        unit="C",
-        decision_time=next_decision_time,
-        future_extremes_c=changed_future,
-        final_extreme_centers_c=final_centers,
-        authority_kind="held_current_remaining_path",
-        entry_authority=False,
-    )
+    with pytest.raises(ValueError,match="DAY0_CURRENT_ROLE_REBUILD_CONNECTION_UNAVAILABLE"):
+        era._rebuild_decision_time_day0_carrier(payload=payload,family=family,unit="C",
+            decision_time=next_decision_time,future_extremes_c=changed_future,
+            final_extreme_centers_c=final_centers,authority_kind="held_current_remaining_path",
+            entry_authority=False)
+    _offline_rebuild_component_carrier(payload=payload,family=family,cut=next_decision_time,
+        future=changed_future,final=final_centers,path_sigma=path_sigma)
     rebuilt = era._day0_remaining_p_raw_vector(
         np.sort(np.asarray((*changed_future, *final_centers))),
         city=city,
@@ -3826,16 +4033,10 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
             "_edli_day0_carrier_bin_topology": malformed_topology,
         }
         with pytest.raises(ValueError, match="DAY0_NOAA_PRELIMINARY_CARRIER_TOPOLOGY_INVALID"):
-            era._rebuild_decision_time_day0_carrier(
-                payload=invalid,
-                family=family,
-                unit="C",
-                decision_time=next_decision_time,
-                future_extremes_c=changed_future,
-                final_extreme_centers_c=final_centers,
-                authority_kind="held_current_remaining_path",
-                entry_authority=False,
-            )
+            era._day0_remaining_p_raw_vector(np.asarray((*changed_future,*final_centers)),
+                city=city,settlement_semantics=SettlementSemantics.for_city(city),
+                bins=[c.bin for c in family.candidates],payload=invalid,
+                extra_member_sigma=0.0,decision_time=next_decision_time)
 
     mutated = dict(payload)
     mutated["_edli_day0_remaining_carrier_q"] = [1.0, 0.0, 0.0, 0.0]
@@ -3857,6 +4058,7 @@ def test_hko_adapter_replays_materialized_carrier_identity_and_q(
             extra_member_sigma=0.0,
             decision_time=next_decision_time,
         )
+    _assert_normal_hko_role_replay(tmp_path,monkeypatch,metric)
 
 
 def test_istanbul_ogimet_materializer_carrier_path_has_numpy_and_500_rows(
@@ -3987,6 +4189,15 @@ def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
     monkeypatch: pytest.MonkeyPatch,
 ):
     import src.data.replacement_forecast_materializer as materializer
+    # This pinning fixture has no original role/CurrentTemp proof. Observe the
+    # genuine selector before its real qualification rejection; never return
+    # a forged domain or the old common instrument/residual sigma.
+    observed = {}
+    real_domains = materializer._day0_measurement_domain_shapes
+    def observe_domains(*args, **kwargs):
+        observed.update(kwargs)
+        return real_domains(*args, **kwargs)
+    monkeypatch.setattr(materializer, "_day0_measurement_domain_shapes", observe_domains)
 
     monkeypatch.setattr(
         materializer,
@@ -4041,8 +4252,13 @@ def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
         )
     request = SimpleNamespace(
         city="Taipei",
+        city_timezone=runtime_cities_by_name()["Taipei"].timezone,
         target_date="2026-08-31",
         computed_at="2026-08-31T02:57:00+00:00",
+        day0_observed_extreme_c=None,
+        day0_observed_extreme_source=None,
+        day0_observed_extreme_unit="C",
+        day0_observed_extreme_observation_time=None,
     )
     fusion = SimpleNamespace(
         used_models=("ecmwf_ifs", "cwa_township"),
@@ -4052,31 +4268,18 @@ def test_materialized_day0_carrier_keeps_exact_station_extreme_provider(
         },
     )
 
-    future, sigma, cutoff, evidence, conditional_shape = (
+    with pytest.raises(ValueError, match="DAY0_DOMAIN_PROVIDER_REBUILD_MISMATCH"):
         materializer._day0_noaa_carrier_future_members(
             conn,
             request,
             metric="high",
             fusion=fusion,
         )
-    )
-
+    future = observed["future"]
+    evidence = tuple(observed["station_evidence"])
     assert future == (31.0, 32.0)
-    assert conditional_shape is None, "typed final-daily station law remains independent"
     assert tuple(item["forecast_value_c"] for item in evidence) == (33.0,)
-    from src.config import runtime_cities_by_name
-    from src.signal.ensemble_signal import sigma_instrument_for_city
-
-    center_sigma = float(np.std(np.asarray((*future, 33.0)), ddof=0))
-    instrument_sigma = float(
-        sigma_instrument_for_city(runtime_cities_by_name()["Taipei"])
-        .to("C")
-        .value
-    )
-    assert sigma == pytest.approx(
-        np.sqrt(max(1.4**2 - center_sigma**2 - instrument_sigma**2, 0.0))
-    )
-    assert cutoff == "2026-08-31T02:57:00+00:00"
+    assert request.computed_at == "2026-08-31T02:57:00+00:00"
     assert evidence == (
         {
             "model": "cwa_township",
@@ -5167,12 +5370,13 @@ def test_tel_aviv_ogimet_publish_clock_uses_real_pair_history(
 
 
 def test_held_a_prime_rebuilds_real_tel_aviv_eleven_bin_carrier():
-    """HELD A' rebuilds current vectors; ENTRY-shaped payloads cannot invoke it."""
+    """Eleven-bin numerical composition is not an original-backed HELD A'."""
     import src.engine.event_reactor_adapter as era
 
     bounds = [(None, 29)] + [(value, value) for value in range(30, 39)] + [(39, None)]
     family = SimpleNamespace(
         city="Tel Aviv",
+        target_date="2026-08-24",
         metric="high",
         candidates=[
             SimpleNamespace(bin=Bin(low, high, "C", f"bin-{index}"))
@@ -5195,13 +5399,11 @@ def test_held_a_prime_rebuilds_real_tel_aviv_eleven_bin_carrier():
         ),
     }
     payload = dict(base_payload)
-    era._rebuild_held_day0_shared_carrier(
-        payload=payload,
-        family=family,
-        unit="C",
-        decision_time=datetime(2026, 8, 24, 12, 30, tzinfo=UTC),
-        future_extremes_c=(28.5, 29.0, 30.5, 31.25),
-    )
+    with pytest.raises(ValueError,match="DAY0_CURRENT_ROLE_REBUILD_CONNECTION_UNAVAILABLE"):
+        era._rebuild_held_day0_shared_carrier(payload=payload,family=family,unit="C",
+            decision_time=datetime(2026,8,24,12,30,tzinfo=UTC),future_extremes_c=(28.5,29.,30.5,31.25))
+    _offline_rebuild_component_carrier(payload=payload,family=family,
+        cut=datetime(2026,8,24,12,30,tzinfo=UTC),future=(28.5,29.,30.5,31.25))
     assert len(payload["_edli_day0_remaining_carrier_q"]) == 11
     assert payload["_edli_day0_remaining_probability_sample_count"] == 500
     assert len(payload["_edli_day0_remaining_probability_samples"]) == 500
@@ -5210,11 +5412,8 @@ def test_held_a_prime_rebuilds_real_tel_aviv_eleven_bin_carrier():
         for row in payload["_edli_day0_remaining_probability_samples"]
     )
     assert sum(payload["_edli_day0_remaining_carrier_q"]) == pytest.approx(1.0)
-    assert payload["_edli_day0_held_carrier_rebuild_basis"].startswith(
-        "prior_complete_source_clock_plus_current_causal_hourly_vectors"
-    )
     assert payload["_edli_day0_decision_carrier_rebuild_basis"] == (
-        "held_a_prime_current_state_same_vector_witness_v1"
+        "OFFLINE_NUMERICAL_COMPONENT_ONLY"
     )
     assert payload["_edli_day0_remaining_content_identity"]
     assert payload["_edli_day0_remaining_carrier_path_error_sigma_c"] >= 0.0
@@ -5223,18 +5422,10 @@ def test_held_a_prime_rebuilds_real_tel_aviv_eleven_bin_carrier():
     current_bundle_payload["_edli_day0_redecision_authority_scope"] = (
         "held_exposure_current_bundle_day0_only_v1"
     )
-    era._rebuild_decision_time_day0_carrier(
-        payload=current_bundle_payload,
-        family=family,
-        unit="C",
-        decision_time=datetime(2026, 8, 24, 12, 30, tzinfo=UTC),
-        future_extremes_c=(28.5, 29.0, 30.5, 31.25),
-        authority_kind="held_current_remaining_path",
-        entry_authority=False,
-    )
-    assert current_bundle_payload[
-        "_edli_day0_decision_carrier_rebuild_basis"
-    ] == "held_current_bundle_current_state_vector_witness_v1"
+    with pytest.raises(ValueError,match="DAY0_CURRENT_ROLE_REBUILD_CONNECTION_UNAVAILABLE"):
+        era._rebuild_decision_time_day0_carrier(payload=current_bundle_payload,family=family,unit="C",
+            decision_time=datetime(2026,8,24,12,30,tzinfo=UTC),future_extremes_c=(28.5,29.,30.5,31.25),
+            authority_kind="held_current_remaining_path",entry_authority=False)
 
     entry_payload = dict(base_payload)
     entry_payload.pop("_edli_day0_redecision_authority_scope")
@@ -5285,7 +5476,7 @@ def test_day0_redecision_scope_keeps_reduce_only_symmetric_with_monitor():
 def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_authority(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """ENTRY rebuilds from A(now), while the source-clock carrier stays provenance."""
+    """Numerical current-state response preserves provenance, not ENTRY authority."""
     from src.data.day0_hourly_vectors import DAY0_REMAINING_CARRIER_OPERATOR_V3
 
     import src.engine.event_reactor_adapter as era
@@ -5295,6 +5486,7 @@ def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_au
     bounds = [(None, 29)] + [(value, value) for value in range(30, 39)] + [(39, None)]
     family = SimpleNamespace(
         city="Tel Aviv",
+        target_date="2026-08-24",
         metric="high",
         candidates=[
             SimpleNamespace(bin=Bin(low, high, "C", f"bin-{index}"))
@@ -5371,16 +5563,13 @@ def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_au
         },
     }
 
-    era._rebuild_decision_time_day0_carrier(
-        payload=payload,
-        family=family,
-        unit="C",
-        decision_time=decision_time,
-        future_extremes_c=current_vector,
-        final_extreme_centers_c=final_centers,
-        authority_kind="entry_current_remaining_path",
-        entry_authority=True,
-    )
+    with pytest.raises(ValueError,match="DAY0_CURRENT_ROLE_REBUILD_CONNECTION_UNAVAILABLE"):
+        era._rebuild_decision_time_day0_carrier(payload=payload,family=family,unit="C",
+            decision_time=decision_time,future_extremes_c=current_vector,
+            final_extreme_centers_c=final_centers,authority_kind="entry_current_remaining_path",
+            entry_authority=True)
+    _offline_rebuild_component_carrier(payload=payload,family=family,cut=decision_time,
+        future=current_vector,final=final_centers)
 
     assert payload["_edli_day0_remaining_carrier_future_extremes_c"] == list(current_vector)
     assert payload["_edli_day0_remaining_carrier_final_extremes_c"] == list(final_centers)
@@ -5389,7 +5578,7 @@ def test_entry_current_state_rebuilds_effective_carrier_without_widening_held_au
         "remaining_carrier_future_extremes_c"
     ] == source_clock_vector
     assert payload["_edli_day0_decision_carrier_rebuild_basis"] == (
-        "entry_current_state_same_vector_witness_v1"
+        "OFFLINE_NUMERICAL_COMPONENT_ONLY"
     )
     city = runtime_cities_by_name()["Tel Aviv"]
     replay = era._day0_remaining_p_raw_vector(
@@ -5539,7 +5728,12 @@ def test_canonical_entry_seam_rebuilds_changed_current_state_carrier(monkeypatch
             world_conn=object(),
             entry_authority=kwargs["entry_authority"],
         )
-        assert members is not None
+        # The dispatch reaches ENTRY, but toy hourly rows are not native roles.
+        assert members is None
+        assert "_edli_day0_decision_carrier_rebuild_basis" not in kwargs["payload"]
+        current = tuple(kwargs["payload"]["_edli_day0_unclamped_remaining_extrema_native"])
+        _offline_rebuild_component_carrier(payload=kwargs["payload"],family=family,
+            cut=decision_time,future=current)
         city = runtime_cities_by_name()["Tel Aviv"]
         era._day0_remaining_p_raw_vector(
             np.asarray(kwargs["payload"]["_edli_day0_unclamped_remaining_extrema_native"]),
@@ -5694,9 +5888,13 @@ def test_held_scope_none_rebuilds_shared_current_remaining_carrier(
             forecast_conn=object(),
             entry_authority=entry_authority,
         )
-        assert members is not None
+        assert members is None  # Validating a toy vector bundle is not native-role authority.
+        current = remaining_day_extremes_c(vectors,target_date=family.target_date,
+            now=decision_time,metric="high")
+        _offline_rebuild_component_carrier(payload=payload,family=family,
+            cut=decision_time,future=current,city=_paris())
         q = era._day0_remaining_p_raw_vector(
-            np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+            np.asarray(current),
             city=_paris(),
             settlement_semantics=SettlementSemantics.for_city(_paris()),
             bins=[candidate.bin for candidate in family.candidates],
@@ -5732,10 +5930,10 @@ def test_held_scope_none_rebuilds_shared_current_remaining_carrier(
     entry_payload, entry_q = run(entry_authority=True)
     held_payload, held_q = run(entry_authority=False)
     assert entry_payload["_edli_day0_decision_carrier_rebuild_basis"] == (
-        "entry_current_state_same_vector_witness_v1"
+        "OFFLINE_NUMERICAL_COMPONENT_ONLY"
     )
     assert held_payload["_edli_day0_decision_carrier_rebuild_basis"] == (
-        "held_shared_current_remaining_path_vector_witness_v1"
+        "OFFLINE_NUMERICAL_COMPONENT_ONLY"
     )
     assert held_payload["_edli_day0_remaining_content_identity"] == (
         entry_payload["_edli_day0_remaining_content_identity"]
@@ -5755,7 +5953,7 @@ def test_held_scope_none_rebuilds_shared_current_remaining_carrier(
     )
     later_payload, later_q = run(entry_authority=False)
     assert later_payload["_edli_day0_decision_carrier_rebuild_basis"] == (
-        "held_shared_current_remaining_path_vector_witness_v1"
+        "OFFLINE_NUMERICAL_COMPONENT_ONLY"
     )
     assert later_q.tolist() != pytest.approx(held_q.tolist())
 
@@ -5838,21 +6036,35 @@ def test_pure_hourly_high_current_shape_rebuild_replays_its_persisted_witness(
         payload=payload, family=family, unit="C", decision_time=decision,
         world_conn=object(), forecast_conn=object(),
     )
-    assert members is not None
+    assert members is None  # Parsed hourly ENS is not a native original role.
+    shape = hourly.day0_conditional_high_shape(conn=sqlite3.connect(":memory:"),city=city,
+        target_date=family.target_date,decision_time=decision,
+        current_state=Day0CurrentTemperatureState(value_native=24.,observed_at=observed,
+            source="aviationweather_metar"),provider_vectors=providers)
+    assert shape.ensemble_within_sigma_c == pytest.approx(np.std(shape.ensemble_centers_c))
+    assert shape.provider_between_sigma_c == pytest.approx(np.std(shape.provider_centers_c))
+    assert shape.ensemble_center_delta_c == pytest.approx(abs(
+        np.mean(shape.provider_centers_c)-np.mean(shape.ensemble_centers_c)))
+    payload.update(_edli_day0_conditional_high_shape_identity=shape.identity,
+        _edli_day0_conditional_high_shape_witness=dict(shape.witness),
+        _edli_day0_remaining_variance_basis="conditional_ens_within_plus_provider_center_delta_v1")
+    future = shape.provider_centers_c
+    _offline_rebuild_component_carrier(payload=payload,family=family,cut=decision,
+        future=future,path_sigma=shape.extra_sigma_c)
     assert payload["_edli_day0_remaining_variance_basis"] == (
         "conditional_ens_within_plus_provider_center_delta_v1"
     )
     assert payload["_edli_day0_conditional_high_shape_identity"]
     assert isinstance(payload["_edli_day0_conditional_high_shape_witness"], dict)
     q = era._day0_remaining_p_raw_vector(
-        np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+        np.asarray(future),
         city=city, settlement_semantics=SettlementSemantics.for_city(city),
         bins=[candidate.bin for candidate in family.candidates], payload=payload,
         extra_member_sigma=0.0, decision_time=decision,
     )
     assert q.sum() == pytest.approx(1.0)
     assert payload["_edli_day0_decision_carrier_rebuild_basis"] == (
-        "held_shared_current_remaining_path_vector_witness_v1"
+        "OFFLINE_NUMERICAL_COMPONENT_ONLY"
     )
     # Replay verifies the carrier's written inputs; the top-level keys are the
     # latest recompute and may move on without touching verification.
@@ -5862,7 +6074,7 @@ def test_pure_hourly_high_current_shape_rebuild_replays_its_persisted_witness(
     )
     recomputed = {**payload, "_edli_day0_conditional_high_shape_identity": "a" * 64}
     assert era._day0_remaining_p_raw_vector(
-        np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+        np.asarray(future),
         city=city, settlement_semantics=SettlementSemantics.for_city(city),
         bins=[candidate.bin for candidate in family.candidates], payload=recomputed,
         extra_member_sigma=0.0, decision_time=decision,
@@ -5875,7 +6087,7 @@ def test_pure_hourly_high_current_shape_rebuild_replays_its_persisted_witness(
         broken = {**payload, "_edli_day0_carrier_written_inputs": {**written, missing: None}}
         with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_INVALID"):
             era._day0_remaining_p_raw_vector(
-                np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+                np.asarray(future),
                 city=city, settlement_semantics=SettlementSemantics.for_city(city),
                 bins=[candidate.bin for candidate in family.candidates], payload=broken,
                 extra_member_sigma=0.0, decision_time=decision,
@@ -5890,7 +6102,7 @@ def test_pure_hourly_high_current_shape_rebuild_replays_its_persisted_witness(
         broken = {**payload, "_edli_day0_carrier_written_inputs": {**written, **tampered}}
         with pytest.raises(ValueError, match="DAY0_CONDITIONAL_HIGH_PERSISTED_WITNESS_MISMATCH"):
             era._day0_remaining_p_raw_vector(
-                np.asarray(payload["_edli_day0_unclamped_remaining_extrema_native"]),
+                np.asarray(future),
                 city=city, settlement_semantics=SettlementSemantics.for_city(city),
                 bins=[candidate.bin for candidate in family.candidates], payload=broken,
                 extra_member_sigma=0.0, decision_time=decision,
@@ -5949,8 +6161,13 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
     sigma_mode,
     authority_kind,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ):
-    """Each actual producer and consumer path must bind one canonical C sigma."""
+    """Offline C/F component replay; it cannot license legacy shared live sigma.
+
+    Four representatives separately verify real original-backed native roles.
+    That source-layer proof is not a replacement/ENTRY/HELD READY assertion.
+    """
     import src.data.day0_hourly_vectors as hourly
     import src.engine.event_reactor_adapter as era
 
@@ -6052,18 +6269,18 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
         return result
 
     monkeypatch.setattr(hourly, "build_day0_remaining_probability_carrier", recording_builder)
-    era._rebuild_decision_time_day0_carrier(
-        payload=payload,
-        family=family,
-        unit=unit,
-        decision_time=decision_time,
-        future_extremes_c=future_c,
-        authority_kind=authority_kind,
-        entry_authority=entry_authority,
-        held_shared_current_remaining_path=(
-            authority_kind == "held_shared_current_remaining_path"
-        ),
-    )
+    with pytest.raises(ValueError,match="DAY0_CURRENT_ROLE_REBUILD_CONNECTION_UNAVAILABLE"):
+        era._rebuild_decision_time_day0_carrier(payload=payload,family=family,unit=unit,
+            decision_time=decision_time,future_extremes_c=future_c,authority_kind=authority_kind,
+            entry_authority=entry_authority,held_shared_current_remaining_path=(
+                authority_kind == "held_shared_current_remaining_path"))
+    assert not builder_calls
+    sigma_native = capture_extra_sigma(payload=payload,family=family,unit=unit,
+        decision_time=decision_time,members_native=tuple(v*(1. if unit=="C" else 9./5.)
+            +(0. if unit=="C" else 32.) for v in future_c))
+    sigma_c = sigma_native if unit == "C" else sigma_native*5./9.
+    _offline_rebuild_component_carrier(payload=payload,family=family,cut=decision_time,
+        future=future_c,path_sigma=sigma_c)
 
     expected_sigma_native = captured_sigma[-1]
     expected_sigma_c = (
@@ -6119,6 +6336,11 @@ def test_noaa_actual_producer_consumer_reuses_canonical_path_sigma(
         era=era, family=family, payload=payload, q=replay,
         decision_time=decision_time, monkeypatch=monkeypatch,
     )
+    if sigma_mode == "fixed" and authority_kind == "entry_current_remaining_path":
+        with monkeypatch.context() as source:
+            # Drop only test recorders; every production source/read gate stays.
+            source.setattr(hourly,"build_day0_remaining_probability_carrier",original_builder)
+            _assert_normal_noaa_native_role_math(tmp_path,source,city=city,metric=metric)
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))

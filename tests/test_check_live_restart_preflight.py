@@ -150,7 +150,6 @@ def test_upgrade_probability_connection_keeps_exact_read_only_roots_and_lifetime
         failed.execute("SELECT 1")
 
 
-@pytest.mark.skip(reason="v7 native-role producer restored to 620a0b5f5 bytes by 6f9bca665; re-lands with that series")
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeypatch, metric):
@@ -251,7 +250,6 @@ def test_upgrade_qualification_normal_producer_public_receipts(tmp_path, monkeyp
     assert any(item.get("current_input_proof", {}).get("basis") == "qualified_current_inputs" for item in proofs)
 
 
-@pytest.mark.skip(reason="v7 native-role producer restored to 620a0b5f5 bytes by 6f9bca665; re-lands with that series")
 @pytest.mark.parametrize("metric", ("high", "low"))
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_upgrade_full_Y_public_local_day_rollover(tmp_path, monkeypatch, metric):
