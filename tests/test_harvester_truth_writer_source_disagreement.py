@@ -1,5 +1,5 @@
 # Created: 2026-05-08
-# Last reused/audited: 2026-05-08
+# Last reused/audited: 2026-10-07
 # Authority basis: docs/operations/task_2026-05-08_post_merge_full_chain/TASK.md
 #   Phase C — fix #263 SOURCE_DISAGREEMENT isolation layer
 """Antibody: _write_settlement_truth SOURCE_DISAGREEMENT dispute reason.
@@ -248,3 +248,98 @@ def test_obs_beyond_tolerance_is_obs_outside_bin():
     assert result["reason"] == "harvester_live_obs_outside_bin", (
         f"Obs beyond tolerance should be obs_outside_bin, got {result['reason']!r}"
     )
+
+
+@pytest.mark.parametrize("writer_lane", ["ingest", "legacy"])
+@pytest.mark.parametrize("metric,target", [("high", "2026-09-27"),
+                                          ("low", "2026-09-27"),
+                                          ("high", "2026-09-28")])
+def test_hko_later_decimal_revision_matching_winner_is_not_source_verified(writer_lane, metric, target):
+    """A captured later source value can fit the paid bin without proving first publication."""
+    conn = _make_world_conn()
+    city = City(name="Hong Kong", lat=22.3, lon=114.2, timezone="Asia/Hong_Kong",
+                settlement_unit="C", cluster="HK", wu_station="HKO",
+                country_code="HK", settlement_source_type="hko")
+    obs = dict(_obs(32.7, "C"), source="hko_daily_api", station_id="HKO",
+               fetched_at="2026-09-29T00:00:00Z",
+               observation_local_time="2026-09-27T15:00:00+08:00",
+               high_provenance_metadata={"response_sha256": "a" * 64,
+                                         "first_publication": True})
+    obs[metric + "_temp"] = 32.7
+    writer = _write_settlement_truth
+    if writer_lane == "legacy":
+        from src.execution.harvester import _write_settlement_truth as writer
+    result = writer(conn, city, target, 32.0, 32.0,
+                    event_slug="hko-sep27-high", obs_row=obs, temperature_metric=metric)
+    assert result["authority"] == "DISPUTED", result
+    assert result["source_grade"] == "UNKNOWN"
+    assert conn.execute("SELECT count(*) FROM settlements").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM settlement_outcomes").fetchone()[0] == 0
+    before = conn.total_changes
+    assert writer(conn, city, target, 32.0, 32.0,
+                  event_slug="hko-sep27-high", obs_row=obs,
+                  temperature_metric=metric)["changed"] is False
+    assert conn.total_changes == before
+
+
+@pytest.mark.parametrize("writer_lane", ["ingest", "legacy"])
+def test_hko_unknown_call_preserves_historical_verified_without_recertifying(writer_lane):
+    conn = _make_world_conn()
+    city = City(name="Hong Kong", lat=22.3, lon=114.2, timezone="Asia/Hong_Kong",
+                settlement_unit="C", cluster="HK", wu_station="HKO",
+                country_code="HK", settlement_source_type="hko")
+    conn.execute("INSERT INTO settlements(city,target_date,market_slug,temperature_metric,"
+                 "settlement_value,authority,provenance_json) VALUES (?,?,?,?,?,?,?)",
+                 (city.name, "2026-09-27", "hko-sep27-high", "high", 32.0, "VERIFIED", "{}"))
+    before = list(conn.execute("SELECT * FROM settlements"))[0]
+    changes = conn.total_changes
+    writer = _write_settlement_truth
+    if writer_lane == "legacy":
+        from src.execution.harvester import _write_settlement_truth as writer
+    result = writer(conn, city, "2026-09-27", 32.0, 32.0,
+                    event_slug="hko-sep27-high", obs_row=dict(_obs(32.7, "C"), source="hko_daily_api"))
+    assert result["status"] == "preserved_existing_fact"
+    assert result["source_grade"] == "UNKNOWN"
+    assert result["authority"] == "DISPUTED"
+    assert tuple(conn.execute("SELECT * FROM settlements").fetchone()) == tuple(before)
+    assert conn.total_changes == changes
+
+
+def test_hko_old_matching_verified_noop_cannot_certify_publication_or_emit_outcomes():
+    import json
+    from src.ingest.harvester_truth_writer import (
+        _SETTLEMENT_TRUTH_REVISION, _metric_identity_for, _stable_settlement_truth_matches,
+    )
+    conn = _make_world_conn()
+    conn.execute("ALTER TABLE settlement_outcomes ADD COLUMN settlement_unit TEXT")
+    city = City(name="Hong Kong", lat=22.3, lon=114.2, timezone="Asia/Hong_Kong",
+                settlement_unit="C", cluster="HK", wu_station="HKO",
+                country_code="HK", settlement_source_type="hko")
+    metric = _metric_identity_for("high")
+    conn.execute("INSERT INTO settlements(city,target_date,market_slug,winning_bin,settlement_value,"
+                 "settlement_source,settled_at,authority,pm_bin_lo,pm_bin_hi,unit,settlement_source_type,"
+                 "temperature_metric,physical_quantity,observation_field,data_version,provenance_json) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (city.name, "2026-09-27", "hko-high", "32°C", 32.0, city.settlement_source,
+                  "2026-09-29T00:00:00Z", "VERIFIED", 32.0, 32.0, "C", "HKO", "high",
+                  metric.physical_quantity, metric.observation_field, "hko_daily_api",
+                  json.dumps({"truth_revision": _SETTLEMENT_TRUTH_REVISION})))
+    conn.execute("INSERT INTO settlement_outcomes(city,target_date,temperature_metric,market_slug,"
+                 "winning_bin,settlement_value,settlement_source,settled_at,authority,settlement_unit) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                 (city.name, "2026-09-27", "high", "hko-high", "32°C", 32.0,
+                  city.settlement_source, "2026-09-29T00:00:00Z", "VERIFIED", "C"))
+    assert _stable_settlement_truth_matches(conn, city=city, target_date="2026-09-27",
+             metric_identity=metric, event_slug="hko-high", winning_bin="32°C", settlement_value=32.0,
+             settled_at="2026-09-29T00:00:00Z", authority="VERIFIED", pm_bin_lo=32.0, pm_bin_hi=32.0,
+             db_source_type="HKO", data_version="hko_daily_api")
+    changes = conn.total_changes
+    result = _write_settlement_truth(conn, city, "2026-09-27", 32.0, 32.0,
+             event_slug="hko-high", obs_row=dict(_obs(32.7, "C"), source="hko_daily_api",
+                  fetched_at="2026-09-29T00:00:00Z"),
+             resolved_market_outcomes=[{"condition_id": "cond", "yes_token_id": "yes", "yes_won": True}])
+    assert result["source_grade"] == "UNKNOWN"
+    assert result["authority"] == "DISPUTED"
+    assert result["status"] == "preserved_existing_fact"
+    assert conn.total_changes == changes
+    assert conn.execute("SELECT count(*) FROM market_events").fetchone()[0] == 0

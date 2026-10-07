@@ -9146,6 +9146,26 @@ def log_settlement(
     recorded_at_value = _forward_clean_str(recorded_at) or datetime.now(timezone.utc).isoformat()
     provenance_payload = dict(provenance or {})
     provenance_payload.setdefault("legacy_table", "settlements")
+    from src.contracts.settlement_semantics import settlement_source_publication_grade
+    publication = settlement_source_publication_grade(
+        city=clean_city, target_date=clean_target_date,
+        temperature_metric=clean_metric, market_slug=clean_market_slug,
+        settlement_source=settlement_source, provenance=provenance_payload,
+    )
+    if publication is not None:
+        # Independent final source boundary, including direct/era callers.
+        # Never UPSERT UNKNOWN over historical truth or certify a null source
+        # value from venue payout evidence. No polling debt is created here.
+        existing = conn.execute(
+            "SELECT authority FROM settlement_outcomes WHERE city=? "
+            "AND target_date=? AND temperature_metric=?",
+            (clean_city, clean_target_date, clean_metric),
+        ).fetchone()
+        return {
+            **publication, "table": table, "authority": "DISPUTED",
+            "status": ("preserved_existing_fact" if existing and existing[0] == "VERIFIED"
+                       else "refused_unknown_source_publication"),
+        }
     provenance_json = json.dumps(provenance_payload, sort_keys=True, default=str)
 
     try:

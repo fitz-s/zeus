@@ -171,7 +171,30 @@ def observation_selection(conn, city, target_date, source: str, *, row=None, met
     if source_type == "wu_icao" and (name == "wu_icao_history" or name.startswith("wu_icao_history_")):
         return 0, {"selected": "PRIMARY_WU"}
     if source_type == "hko" and (name == "hko_daily_api" or name.startswith("hko_daily_api_")):
-        return 0, {"selected": "PRIMARY_HKO_DAILY_EXTRACT"}
+        def original(field):
+            try:
+                return row[field] if row is not None else None
+            except (KeyError, IndexError, TypeError):
+                return None
+        metadata = original(f"{metric}_provenance_metadata")
+        try:
+            parsed = json.loads(metadata) if isinstance(metadata, str) else metadata
+            entity = parsed.get("source_entity") if isinstance(parsed, dict) else None
+        except (ValueError, TypeError):
+            entity = None
+        # Selection names the product, never publication eligibility. Keep the
+        # metric's original provenance/entity/clocks without borrowing its twin.
+        return 0, {
+            "selected": "PRIMARY_HKO_DAILY_EXTRACT", "source_grade": "UNKNOWN",
+            "city": city.name, "target_date": str(target_date),
+            "temperature_metric": metric, "source": source,
+            "station_id": original("station_id"),
+            "source_entity": entity,
+            "provenance_metadata": metadata,
+            "source_issued_at": (entity.get("source_issued_at_utc")
+                                 if isinstance(entity, dict) else None),
+            "fetched_at": original("fetched_at"),
+        }
     return None
 
 

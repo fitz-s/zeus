@@ -54,6 +54,40 @@ logger = logging.getLogger(__name__)
 RoundingRule = Literal["wmo_half_up", "floor", "ceil", "oracle_truncate"]
 
 
+def settlement_source_publication_grade(
+    *, city: str, target_date: str, temperature_metric: str,
+    market_slug: str | None, source_family: str | None = None,
+    settlement_source: str | None = None, provenance: dict | None = None,
+) -> dict | None:
+    """Separate HKO source publication eligibility from integer rounding/payout.
+
+    No supported original publication record or market-specific accepted
+    correction format is available yet. Capture hashes, fetch clocks, first-seen
+    flags and generic correction terms cannot authenticate the initial value.
+    Retain such originals as evidence, but never mint a positive witness from
+    them. Non-HKO sources keep their existing qualification law.
+    """
+    evidence = provenance or {}
+    sources = (source_family, settlement_source, evidence.get("source_family"),
+               evidence.get("settlement_source_type"), evidence.get("obs_source"))
+    is_hko = city.replace(" ", "").lower() == "hongkong" or any(
+        "hko" in str(source or "").lower() for source in sources
+    )
+    if not is_hko:
+        return None
+    # SCOPE: this HKO city/date/metric/entity/contract source grade only.
+    # DRAIN: original publication/accepted correction evidence, not repeated
+    # latest-endpoint fetches that cannot reconstruct first publication.
+    # RESET: a supported native witness parser for this exact tuple, following
+    # the existing DISPUTED reactivation law; another date/track cannot reset it.
+    return {
+        "source_grade": "UNKNOWN",
+        "reason": "hko_publication_witness_unavailable",
+        "city": city, "target_date": target_date,
+        "temperature_metric": temperature_metric, "market_slug": market_slug,
+    }
+
+
 def expected_settlement_station_id(city: Any) -> str:
     """One station identity for both settlement writers; no airport substitution."""
     if city.settlement_source_type == "hko":

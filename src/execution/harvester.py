@@ -28,7 +28,7 @@ from src.calibration.decision_group import compute_id
 from src.calibration.store import add_calibration_pair
 from src.types.metric_identity import MetricIdentity
 from src.config import City
-from src.contracts.settlement_semantics import SettlementSemantics
+from src.contracts.settlement_semantics import SettlementSemantics, settlement_source_publication_grade
 from src.contracts.settlement_outcome import SettlementOutcome, classify_settlement_outcome
 from src.contracts.exceptions import SettlementPrecisionError
 from src.data.market_scanner import _match_city, _parse_temp_range, infer_temperature_metric, GAMMA_BASE
@@ -1996,6 +1996,33 @@ def _write_settlement_truth(
         city.settlement_source_type, "unknown"
     )
     metric_identity = _metric_identity_for(temperature_metric)
+    publication = settlement_source_publication_grade(
+        city=city.name, target_date=target_date,
+        temperature_metric=metric_identity.temperature_metric,
+        market_slug=event_slug or None, source_family=db_source_type,
+        settlement_source=city.settlement_source, provenance=obs_row,
+    )
+    if publication is not None:
+        # This legacy twin must reject before INSERT OR REPLACE; central
+        # refusal alone would leave a partially written VERIFIED legacy row.
+        preserved = False
+        for table in ("settlements", "settlement_outcomes"):
+            try:
+                preserved |= conn.execute(
+                    f"SELECT 1 FROM {table} WHERE city=? AND target_date=? "
+                    "AND temperature_metric=? AND authority='VERIFIED' LIMIT 1",
+                    (city.name, target_date, metric_identity.temperature_metric),
+                ).fetchone() is not None
+            except sqlite3.OperationalError:
+                pass
+        return {
+            **publication, "authority": SETTLEMENT_AUTHORITY_DISPUTED,
+            "status": "preserved_existing_fact" if preserved else "refused_unknown_source_publication",
+            "changed": False, "settlement_changed": False,
+            "settlement_value": None, "winning_bin": None,
+            "settlement_result": {"status": "refused_unknown_source_publication", "table": "settlement_outcomes"},
+            "market_events": {"status": "skipped_unverified_settlement", "table": "market_events"},
+        }
     # M1 (timing-semantics fix 2026-06-16): settled_at is the SETTLEMENT EVENT
     # TIME — it is written to settlements.settled_at AND fed to
     # dispatch_era_basis() to GRADE every position's P&L. It must derive from the

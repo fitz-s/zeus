@@ -1,5 +1,5 @@
 # Created: 2026-04-27 (BATCH C of 2026-04-27 harness debate executor work)
-# Last reused/audited: 2026-04-27
+# Last reused/audited: 2026-10-07
 # Authority basis: docs/operations/task_2026-04-27_harness_debate/round2_verdict.md
 #   §1.1 #4 + §4.1 #4 + opponent §3.1 (relationship test for type-encoded HK
 #   HKO antibody). Per Fitz "test relationships, not just functions" — these
@@ -18,6 +18,7 @@ Test count = 3 (per BATCH C dispatch baseline arithmetic 73 + 3 = 76).
 from __future__ import annotations
 
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -26,6 +27,35 @@ from src.contracts.settlement_semantics import (
     WMO_HalfUp,
     settle_market,
 )
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_hko_selection_keeps_original_metric_provenance_without_publication_authority(metric):
+    from src.config import City
+    from src.data.settlement_observation_selection import observation_selection
+
+    city = City(name="Hong Kong", lat=22.3, lon=114.2, timezone="Asia/Hong_Kong",
+                settlement_unit="C", cluster="HK", wu_station="HKO",
+                country_code="HK", settlement_source_type="hko")
+    original = json.dumps({"source_entity": {
+        "entity_sha256": ("a" if metric == "high" else "b") * 64,
+        "entity_bytes_b64": "e30=", "source_issued_at_utc": None,
+        "capture_received_at_utc": "2026-09-29T00:00:00Z",
+        "first_publication": True,
+    }})
+    row = {metric + "_provenance_metadata": original,
+           "station_id": "HKO", "fetched_at": "2026-09-29T00:00:00Z",
+           ("low" if metric == "high" else "high") + "_provenance_metadata": "twin"}
+    _, selected = observation_selection(None, city, "2026-09-27", "hko_daily_api",
+                                         row=row, metric=metric)
+    assert selected["provenance_metadata"] == original
+    assert selected["source_entity"] == json.loads(original)["source_entity"]
+    assert selected["temperature_metric"] == metric
+    assert selected["source_grade"] == "UNKNOWN"
+    from src.contracts.settlement_semantics import SettlementSemantics
+    sem = SettlementSemantics.for_city(city)
+    assert sem.precision == 1.0
+    assert sem.assert_settlement_value(32.7) == 32.0
 
 
 def test_hko_policy_required_for_hong_kong():

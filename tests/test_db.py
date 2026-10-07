@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-09-15
+# Last reused/audited: 2026-10-07
 # Lifecycle: created=2026-03-30; last_reviewed=2026-09-15; last_reused=2026-09-15
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
@@ -23,6 +23,68 @@ from src.state.db import (
     init_schema,
     init_schema_forecasts,
 )
+
+
+@pytest.mark.parametrize("lane", ["direct", "era"])
+@pytest.mark.parametrize("claim", [
+    {}, {"first_publication": True}, {"source_grade": "VERIFIED"},
+    {"correction": "HKO may revise daily data"},
+    {"source_entity": {"entity_sha256": "a" * 64,
+                       "capture_received_at_utc": "2026-09-29T00:00:00Z"}},
+    {"city": "NYC", "target_date": "2026-09-28", "temperature_metric": "low",
+     "station_id": "VHHH", "first_publication": True},
+])
+def test_hko_canonical_publication_refusal_preserves_existing_truth(tmp_path, lane, claim):
+    from src.state.db import log_settlement
+    from src.state.settlement_writers import dispatch_era_basis, write_settlement_with_era_provenance
+    from datetime import date
+
+    conn = get_connection(tmp_path / "private-hko-forecasts.db")
+    init_schema_forecasts(conn)
+    row = dict(city="Hong Kong", target_date="2026-09-27", temperature_metric="high",
+               market_slug="hko-sep27-high", winning_bin="32°C", settlement_value=32.0,
+               settlement_source="HKO", settled_at="2026-09-29T00:00:00Z",
+               authority="VERIFIED", provenance=claim, settlement_unit="C")
+    def write():
+        if lane == "era":
+            return write_settlement_with_era_provenance(
+                row, dispatch_era_basis(date(2026, 9, 29)).era_basis, conn=conn)
+        return log_settlement(conn, **row)
+    changes = conn.total_changes
+    for _ in range(2):
+        result = write()
+        assert result["source_grade"] == "UNKNOWN"
+        assert result["authority"] == "DISPUTED"
+        assert result["status"] == "refused_unknown_source_publication"
+    assert conn.total_changes == changes
+    assert conn.execute("SELECT count(*) FROM settlement_outcomes").fetchone()[0] == 0
+    # Private historical fact fixture: refusal must not revise any field.
+    conn.execute("INSERT INTO settlement_outcomes(city,target_date,temperature_metric,market_slug,"
+                 "winning_bin,settlement_value,settlement_source,settled_at,authority,provenance_json,settlement_unit) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 ("Hong Kong", "2026-09-27", "high", "historical-contract", "32°C", 32.0,
+                  "HKO", "2026-09-28T00:00:00Z", "VERIFIED", '{"historical":true}', "C"))
+    original = tuple(conn.execute("SELECT * FROM settlement_outcomes").fetchone())
+    changes = conn.total_changes
+    result = write()
+    assert result["status"] == "preserved_existing_fact"
+    assert result["source_grade"] == "UNKNOWN"
+    assert tuple(conn.execute("SELECT * FROM settlement_outcomes").fetchone()) == original
+    assert conn.total_changes == changes
+    conn.close()
+
+
+def test_non_hko_canonical_settlement_keeps_existing_source_law(tmp_path):
+    from src.state.db import log_settlement
+    conn = get_connection(tmp_path / "private-wu-forecasts.db")
+    init_schema_forecasts(conn)
+    result = log_settlement(conn, city="NYC", target_date="2026-09-27",
+             temperature_metric="high", market_slug="nyc-high", winning_bin="74°F",
+             settlement_value=74.0, settlement_source="WU_KLGA",
+             settled_at="2026-09-28T00:00:00Z", authority="VERIFIED", settlement_unit="F")
+    assert result["status"] == "written"
+    assert conn.execute("SELECT authority FROM settlement_outcomes").fetchone()[0] == "VERIFIED"
+    conn.close()
 
 
 def _create_opportunity_fact_table(conn):
