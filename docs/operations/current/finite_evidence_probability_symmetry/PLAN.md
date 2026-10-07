@@ -21607,3 +21607,12 @@ money call full_y_ready and retain original inputs/early return. Test source
 is the only mutation; replay/clock/source gates stay unchanged. Validate both
 normal_public twins first and the narrowly affected caller set, not a whole
 matrix. This is coherent initial synthetic input, not an online source repair.
+
+Same capture-context SQL chronology supplemental: actual coherent H/L2F now
+passes daily entity selection; the read-only vector observer proves the
+remaining rejection is vector_written_atOct7 against decisionOct4. The earlier
+normal daily helper restored SQLite's real wall clock. Restore this private
+connection's existing fixture_clock strftime binding BEFORE first vector INSERT
+(body/HTTP Python clock is already bound). Do not UPDATE any created descriptor,
+row or original clock. This is the already authorized chronological private
+writer simulation, with production PIT unchanged and module clocks scoped.

@@ -1956,6 +1956,10 @@ def _normal_native_originals_public_case(tmp_path, monkeypatch, metric, *, missi
             assert [row.model for row in vectors] == provider_models
             for index, row in enumerate(vectors):
                 assert row.temps_c == tuple([20. if city_name == "Hong Kong" else 10. + index * .5] * 25)
+            s.conn.create_function("strftime", 2, lambda fmt, value:
+                fixture_clock[0].isoformat(timespec="milliseconds")
+                if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now")
+                else builtin.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0])
             assert persist_day0_hourly_vectors(vectors, target_date="2026-10-04", request_hash=request_hash,
                 now=fixture_clock[0], conn=s.conn) == len(provider_models)
         day0_request = replace(full_request, computed_at=fixture_clock[0], expires_at=fixture_clock[0] + timedelta(hours=1),
