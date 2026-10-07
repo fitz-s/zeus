@@ -1,6 +1,6 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-10-03
-# Lifecycle: created=2026-06-11; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused or audited: 2026-10-07
+# Lifecycle: created=2026-06-11; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Preserve serving substitution and exact typed queue drain/reset.
 # Reuse: Run for current serving, materialization queue, or typed block evidence.
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
@@ -3529,6 +3529,186 @@ def test_materialization_queue_batch_routes_each_envelope_independently(
     assert len(restored) == 1
     assert "Tokyo" in restored[0].name
     assert not tuple(failed_dir.glob("*.json"))
+
+
+def _deadline_batch_queue(tmp_path, monkeypatch, *, cities, envelope_for):
+    """Run one queue claim over ``cities`` with a fake child; ``envelope_for(i)``
+    returns (returncode, stdout, stderr) for the i-th claimed request."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    request_dir.mkdir()
+    base_request = {
+        "target_date": "2026-07-02",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-07-02T00:00:00+00:00",
+        "computed_at": "2026-07-02T08:31:11+00:00",
+        "baseline_source_run_id": "ecmwf_open_data:mx2t6_high:2026-07-02T00Z",
+        "openmeteo_source_run_id": "openmeteo-current-targets-20260702T000000Z",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    for position, city in enumerate(cities):
+        path = request_dir / f"{city}.2026-07-02.high.json"
+        path.write_text(json.dumps({**base_request, "city": city}), encoding="utf-8")
+        os.utime(path, ns=(1_000_000_000 * (1000 + position),) * 2)
+    arrival_ns = {p.name: p.stat().st_mtime_ns for p in request_dir.glob("*.json")}
+    claimed: list[list[str]] = []
+
+    def _batch_runner(argv):
+        command = list(argv)
+        start = command.index("--batch-input-json") + 1
+        input_paths = command[start : command.index("--deadline-utc")]
+        claimed.append([Path(path).name for path in input_paths])
+        lines = []
+        for position, path in enumerate(input_paths):
+            returncode, stdout, stderr = envelope_for(position)
+            lines.append(json.dumps({
+                "input_json": path, "returncode": returncode,
+                "stdout": stdout, "stderr": stderr,
+            }))
+        return subprocess.CompletedProcess(
+            command, 0, stdout="\n".join(lines) + "\n", stderr=""
+        )
+
+    monkeypatch.setattr(queue_mod, "_run_command", _batch_runner)
+
+    def claim(limit):
+        return queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=tmp_path / "processed",
+            failed_dir=tmp_path / "failed",
+            forecast_db=tmp_path / "forecasts.db",
+            raw_manifest_dir=None,
+            limit=limit,
+        )
+
+    return request_dir, arrival_ns, claimed, claim
+
+
+_READY_STDOUT = (
+    '{"status":"READY","reason_codes":[],"committed":true,'
+    '"posterior_id":42,"reactor_wake_published":true}\n'
+)
+
+
+def test_materialization_queue_restores_not_started_requests_for_immediate_retry(
+    tmp_path, monkeypatch
+) -> None:
+    """The child skipped three requests for lack of deadline budget (explicit
+    not-started marker). They did no work and failed nothing, so the queue
+    restores them under their own names: no timeout-retry attempt, no backoff,
+    arrival order untouched, and the very next claim takes them first."""
+
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    cities = ("Shanghai", "Paris", "Tokyo", "London", "Madrid")
+    not_started = json.dumps(
+        cli._deadline_deferred_response(
+            cli.MaterializationDeadlineExceeded(
+                cli.DEADLINE_NOT_STARTED_STAGE,
+                datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+            )
+        ),
+        sort_keys=True,
+    ) + "\n"
+    phase = {"first": True}
+
+    def envelope_for(position):
+        if phase["first"] and position >= 2:
+            return 75, "", not_started
+        return 0, _READY_STDOUT, ""
+
+    request_dir, arrival_ns, claimed, claim = _deadline_batch_queue(
+        tmp_path, monkeypatch, cities=cities, envelope_for=envelope_for
+    )
+    report = claim(len(cities))
+
+    assert report.failed_count == 0
+    assert report.processed_count == 2
+    assert report.committed_posterior_count == 2
+    assert report.started_count == 2
+    assert report.deferred_count == 3
+    assert queue_mod.DEADLINE_NOT_STARTED_REASON in report.reason_codes
+    # Not a timeout: neither the timeout reason nor the retry-deferred reason.
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT" not in report.reason_codes
+    assert queue_mod._TIMEOUT_RETRY_DEFERRED_REASON not in report.reason_codes
+    assert not tuple((tmp_path / "failed").glob("*.json"))
+    assert not tuple((tmp_path / "processed").glob("*.json"))
+    assert len(tuple((tmp_path / "succeeded_latest").glob("*.json"))) == 2
+
+    retained = sorted(request_dir.glob("*.json"))
+    assert len(retained) == 3
+    for path in retained:
+        # Own name, attempt 0, no retry clock, arrival mtime preserved.
+        assert queue_mod._TIMEOUT_RETRY_MARKER not in path.name
+        assert queue_mod._timeout_retry_state(path) == (path.stem, 0, None)
+        assert path.stat().st_mtime_ns == arrival_ns[path.name]
+    assert {p.name for p in retained} == {claimed[0][i] for i in (2, 3, 4)}
+
+    # Eligible on the very next claim, in their original order, ahead of nothing newer.
+    phase["first"] = False
+    second = claim(len(cities))
+    assert second.failed_count == 0
+    assert second.processed_count == 3
+    assert len(claimed) == 2
+    assert claimed[1] == [claimed[0][i] for i in (2, 3, 4)]
+    assert not tuple(request_dir.glob("*.json"))
+
+
+def test_materialization_queue_started_then_deadline_keeps_timeout_backoff(
+    tmp_path, monkeypatch
+) -> None:
+    """A request that started and hit its deadline mid-run still gets the
+    ordinary timeout retry: attempt 1, parked behind the 60 s backoff, and not
+    claimable on the next claim."""
+
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    started_deadline = json.dumps({
+        "status": "DEFERRED",
+        "reason_codes": ["REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_PREPARE_FUSION"],
+        "stage": "prepare_fusion",
+        "deadline_at": "2026-07-02T09:00:00+00:00",
+        "committed": False,
+        "reactor_wake_published": False,
+    }, sort_keys=True) + "\n"
+    phase = {"first": True}
+
+    def envelope_for(position):
+        if phase["first"] and position >= 1:
+            return 75, "", started_deadline
+        return 0, _READY_STDOUT, ""
+
+    request_dir, _arrival, claimed, claim = _deadline_batch_queue(
+        tmp_path, monkeypatch, cities=("Shanghai", "Paris", "Tokyo"),
+        envelope_for=envelope_for,
+    )
+    now = time.time()
+    report = claim(3)
+
+    assert report.failed_count == 0
+    assert report.processed_count == 1
+    assert report.started_count == 3  # all three began; two hit the deadline
+    assert "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT" in report.reason_codes
+    assert queue_mod._TIMEOUT_RETRY_DEFERRED_REASON in report.reason_codes
+    assert queue_mod.DEADLINE_NOT_STARTED_REASON not in report.reason_codes
+    retained = sorted(request_dir.glob("*.json"))
+    assert len(retained) == 2
+    for path in retained:
+        base, attempt, retry_at = queue_mod._timeout_retry_state(path)
+        assert base.endswith(".2026-07-02.high") and attempt == 1
+        assert retry_at is not None
+        assert retry_at >= now + queue_mod._TIMEOUT_RETRY_BASE_SECONDS - 5
+
+    phase["first"] = False
+    second = claim(3)
+    assert len(claimed) == 1  # backoff: nothing was claimable
+    assert second.processed_count == 0
+    assert len(tuple(request_dir.glob("*.json"))) == 2
 
 
 def test_materialization_queue_batch_restores_requests_missing_an_envelope(

@@ -1,6 +1,6 @@
 # Created: 2026-07-19
-# Last reused/audited: 2026-10-04
-# Lifecycle: created=2026-07-19; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Last reused/audited: 2026-10-07
+# Lifecycle: created=2026-07-19; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Prove Day0 reseed ownership and single-writer materialization ordering.
 # Reuse: Run after changing Day0 enqueue, replacement queue claims, or writer concurrency.
 # Authority basis: operator directive 2026-07-19 (Day0 is a zero-sum race against the market
@@ -4001,6 +4001,76 @@ def test_background_materialize_claims_three_real_requests_and_leaves_fourth(
     assert len(tuple(request_dir.glob("*.json"))) == 1
     assert report["skipped_count"] == 1
     assert len(report["processed_files"]) == 3
+
+
+def test_materialize_lane_claim_limits_priority_five_background_one(
+    monkeypatch, tmp_path,
+) -> None:
+    """The priority lane claims five requests per tick (the child defers what does
+    not fit its deadline); the background lane stays at one."""
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.ingest import forecast_live_daemon as daemon
+
+    cfg = {**_queue_config(tmp_path), "request_dir": tmp_path / "requests"}
+    seen: dict[str, int] = {}
+
+    class _Report:
+        def as_dict(self):
+            return {"status": "NO_REQUESTS"}
+
+    def fake_queue(**kwargs):
+        seen[kwargs["lane"]] = kwargs["limit"]
+        return _Report()
+
+    monkeypatch.setattr(queue, "process_replacement_forecast_live_materialization_queue", fake_queue)
+    daemon._replacement_forecast_materialize_lane(cfg, lane="priority", seed_limit=0)
+    daemon._replacement_forecast_materialize_lane(cfg, lane="background", seed_limit=0)
+
+    assert seen == {"priority": 5, "background": 1}
+
+
+def test_priority_materialize_claims_five_real_requests_and_leaves_sixth(
+    monkeypatch, tmp_path,
+) -> None:
+    from datetime import timedelta
+
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data import replacement_forecast_production as prod
+    from src.ingest import forecast_live_daemon as daemon
+
+    cfg = _queue_config(tmp_path)
+    request_dir = Path(cfg["request_dir"])
+    request_dir.mkdir()
+    target_date = (datetime.now(timezone.utc).date() + timedelta(days=2)).isoformat()
+    for city in ("London", "Oslo", "Paris", "Munich", "Rome", "Berlin"):
+        (request_dir / f"{city}.json").write_text(json.dumps({
+            "city": city, "target_date": target_date, "temperature_metric": "high",
+            "source_cycle_time": "2026-09-23T00:00:00+00:00",
+            "baseline_source_run_id": "baseline:0",
+            "openmeteo_source_run_id": "openmeteo:0",
+        }), encoding="utf-8")
+    monkeypatch.setattr(prod, "_replacement_forecast_live_materialization_queue_config", lambda: cfg)
+    monkeypatch.setattr(queue, "_validate_request_payload", lambda _path: (True, "", ""))
+    monkeypatch.setattr(
+        queue, "_priority_map_with_names",
+        lambda _db, files, *_a, **_k: ({}, {path.name for path in files}),
+    )
+    batches: list[list[str]] = []
+
+    def batch_runner(pending):
+        batches.append([item.input_json.name for item in pending])
+        return {
+            item.input_json: subprocess.CompletedProcess(item.command, 0, stdout="", stderr="")
+            for item in pending
+        }
+
+    monkeypatch.setattr(queue, "_run_materialization_batch", batch_runner)
+    report = daemon._replacement_forecast_materialize_lane(cfg, lane="priority", seed_limit=0)
+
+    assert len(batches) == 1 and len(batches[0]) == 5
+    assert report["processed_count"] == 5
+    assert len(tuple(request_dir.glob("*.json"))) == 1
+    assert report["skipped_count"] == 1
 
 
 def test_background_materialize_soft_deadline_checks_before_next_claim(
