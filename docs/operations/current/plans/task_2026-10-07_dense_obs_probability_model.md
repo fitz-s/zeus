@@ -165,3 +165,44 @@ All CURRENT_REUSABLE, audited 2026-10-07 against bc024fedd law (AGENTS.md sectio
 ### Rebase and late fix (2026-10-07 evening)
 - Rebased onto origin/live 900b1ef90. One mechanical conflict in src/data/physical_current_sources.py (G5 current_path, G2 settlement_instant): both kept.
 - a34c413a6: a page fetch resolves only the instants it spans. Found by the live replay of Helsinki 10-07 HIGH at 20:07 local: q was 1.0 on 13 although AWC showed 14; after the fix, 1.0 on 14.
+
+## Consult NO-GO (REQ-20261007-125708-2dc18b) and D2 measurement — STOPPED at D2(i)
+
+Rebased onto origin/live b452210d5 (clean). Coordinator decisions D1-D7 recorded in the coordinator brief. The order is D2(i)-(iii), then D1 and onward. D2(i) > 0, so I stopped before D1 as instructed. Every query below is read-only WORLD (`?mode=ro`, `query_only`), run 2026-10-07 at about 18:40Z.
+
+### D2(i) page-row revision (observation_prints, noaa_wrh_*, 2026-09-13..2026-10-07)
+- 40,399 page instants (station, instant): 33,439 °C and 6,960 °F, from 1,946 distinct fetch receipts.
+- **Value changed across fetches: 31 instants (0.077 %), all °F, all on the 9 US intraday resolver routes** (KATL, KAUS, KDAL, KHOU, KLAX, KLGA, KMIA, KSEA, KSFO), dated 2026-10-01..10-05 across 20 station-days. Each changed exactly once, 4–19 min after first receipt (p50 5.5 min).
+  - Every one follows the same pattern. The first value is a tenth-°C conversion (e.g. 75.02 °F = 23.9 °C), and the second is a whole-°C conversion (75.2 °F = 24 °C). It is the page swapping the precise T-group value for the body integer.
+  - **17 of the 31 change the settlement integer** (8 up, 9 down), e.g. KAUS 2026-10-02T03:30Z 73.94 → 73.4 °F (74 → 73).
+  - No °C page instant ever changed value (0 / 33,439).
+  - 5,894 of 6,960 °F instants are still tenth-°C valued at their latest version, so the page does not always revise.
+- **Row vanishing after appearing: 0 observed.** For an earlier-seen instant to be testable it must fall strictly inside a later multi-row fetch's span: 891 °C and 235 °F such fetches; 0 testable instants, 0 absent. The recent_minutes=180 fetch window means later fetches never re-cover earlier rows. **The ledger cannot observe removal at all**, so vanishing is unmeasured, not measured zero.
+- Daily derived extreme (daily_observation_revisions, noaa_wrh): 145 re-fetch records, 1 changed value. Denver 2026-09-14 low 71.24 → 67.82 °F; the low time moved 20:58 → 23:58 local after a re-fetch two days later. That is a later row arriving, not a revision of an existing row.
+
+**Verdict: D2(i) > 0.** For °F pages a received page row is not immutable: in 17 cases its settlement integer changed minutes after first receipt. This is a law fork against `day0_evidence_finality` treating `noaa_wrh_*` as MONOTONE_SETTLEMENT_BOUND. For °C pages: 0 value revisions over N = 33,439 instants; removal is unobservable in the current ledger.
+
+### D2(ii) page visibility lag, first page receipt minus observation instant
+- All history, minutes, p10/p50/p90/p99 (per-station table in the agent report):
+  - US 60-s routes: p10 ≈ 4–12, p50 ≈ 490–675 (backfilled history dominates).
+  - The other 37: p10 ≈ 220–335, p50 ≈ 735–996, p99 ≈ 3,800–5,000.
+  - This reflects the after-day-end daily fetch before G5.
+- **Since intraday polling (≥ 2026-10-07T14:00Z):**
+  - °C: n = 261, p10/p50/p90/max 5.9 / 13.0 / 33.3 / 84.6 min;
+  - °F: n = 46, 4.1 / 5.9 / 13.0 / 22.9 min.
+  - About 4 hours of history; not yet a distribution per station.
+
+### D2(iii) final outcome of AWC METAR rows on finalized page-covered days
+- Finalized means day end + 2 days before now; page-covered means ≥ 20 h of page span that day.
+- 36,442 rows: **kept 35,861 (98.41 %), absent 514 (1.41 %), corrected to a different integer 67 (0.18 %).**
+  - Corrections are all US °F routes plus VILK 10 / 994 and RPLL 1, SAEZ 1 (KORD 17).
+- Absence clusters in time:
+  - 2026-09-20 holds 257 of 514 absent rows. Hours 03–07Z have 30–62 absent rows each across all stations, the shared outage.
+  - 2026-09-22 11Z: 31.
+  - Excluding those, absences are 1–4 per UTC hour.
+- Per station: UUWW 105 / 1,089 and LTFM 47 / 1,027 are high (station-specific); others 2–19.
+- By report kind (all finalized days): routine 60,318 kept / 836 absent; SPECI 1,569 kept / 118 absent. A SPECI is about 5× more likely absent.
+- Helsinki retention figure reconciled: the artifact cohort is 1,035 / 1,043 (AWC instants vs page, page-covered days ≤ 10-05). The plan's earlier 1,085 / 1,127 was a different (pre-fit probe) cohort that included 09-20 days with partial page coverage.
+
+### Status
+Stopped before D1 per brief: the D2(i) law fork needs a coordinator decision (how to treat °F page revisions: the precise→integer swap on US resolver routes).
