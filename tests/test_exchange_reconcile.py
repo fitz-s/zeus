@@ -10478,11 +10478,17 @@ def test_terminal_non_pending_redeem_state_does_not_mask_position_drift(conn, se
     assert '"expected_wallet_size":"0"' in evidence
 
 
-def test_backoff_exhausted_chain_absent_pending_exit_admin_closes_canonical(conn):
+def test_backoff_exhausted_chain_absence_unknown_preserves_canonical(conn, monkeypatch):
     from src.execution.exit_lifecycle import handle_exit_pending_missing
     from src.state.portfolio import PortfolioState, Position
 
-    token = "backoff-chain-absent-token"
+    token = "1049501"
+    monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", "0x" + "12" * 20)
+    rpc_calls = []
+
+    def unavailable_rpc(url, method, params):
+        rpc_calls.append((method, params))
+        raise TimeoutError("private absence probe timed out")
     position_id = "pos-backoff-chain-absent"
     seed_position_baseline(conn, position_id=position_id, order_id="ord-backoff-exit")
     conn.execute(
@@ -10530,7 +10536,7 @@ def test_backoff_exhausted_chain_absent_pending_exit_admin_closes_canonical(conn
     )
     portfolio = PortfolioState(positions=[pos])
 
-    result = handle_exit_pending_missing(portfolio, pos, conn=conn)
+    result = handle_exit_pending_missing(portfolio, pos, conn=conn, rpc_call=unavailable_rpc)
 
     current = conn.execute(
         "SELECT phase, order_status FROM position_current WHERE position_id = ?",
@@ -10546,22 +10552,31 @@ def test_backoff_exhausted_chain_absent_pending_exit_admin_closes_canonical(conn
         """,
         (position_id,),
     ).fetchone()
-    assert result["action"] == "closed"
-    assert result["position"].state == "admin_closed"
-    assert portfolio.positions == []
-    assert dict(current) == {"phase": "admin_closed", "order_status": "backoff_exhausted"}
-    assert dict(latest_event) == {
-        "event_type": "MANUAL_OVERRIDE_APPLIED",
-        "phase_after": "admin_closed",
-        "source_module": "src.execution.exit_lifecycle",
-    }
+    assert len(rpc_calls) == 1 and rpc_calls[0][0] == "eth_call"
+    assert result["action"] == "skip"
+    assert result["reason"] == "CHAIN_ABSENCE_UNCONFIRMED"
+    assert result["position"] is pos and pos.state == "pending_exit"
+    assert portfolio.positions == [pos] and pos.shares == pytest.approx(4.95)
+    assert dict(current) == {"phase": "pending_exit", "order_status": "backoff_exhausted"}
+    assert latest_event is None or latest_event["event_type"] != "MANUAL_OVERRIDE_APPLIED"
+    review = conn.execute(
+        "SELECT status, reason_code FROM review_work_items WHERE subject_id=?",
+        (position_id,),
+    ).fetchone()
+    assert dict(review) == {"status": "OPEN", "reason_code": "TIMEOUT_ABSENCE_UNCONFIRMED"}
 
 
-def test_recoverable_exit_pending_missing_does_not_persist_admin_close(conn):
+def test_recoverable_exit_pending_missing_does_not_persist_admin_close(conn, monkeypatch):
     from src.execution.exit_lifecycle import handle_exit_pending_missing
     from src.state.portfolio import PortfolioState, Position
 
-    token = "recoverable-chain-absent-token"
+    token = "1049502"
+    monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", "0x" + "12" * 20)
+    rpc_calls = []
+
+    def unavailable_rpc(url, method, params):
+        rpc_calls.append((method, params))
+        raise TimeoutError("private absence probe timed out")
     position_id = "pos-recoverable-chain-absent"
     seed_position_baseline(conn, position_id=position_id, order_id="ord-recoverable-exit")
     conn.execute(
@@ -10608,7 +10623,8 @@ def test_recoverable_exit_pending_missing_does_not_persist_admin_close(conn):
         entered_at=NOW.isoformat(),
     )
 
-    result = handle_exit_pending_missing(PortfolioState(positions=[pos]), pos, conn=conn)
+    portfolio = PortfolioState(positions=[pos])
+    result = handle_exit_pending_missing(portfolio, pos, conn=conn, rpc_call=unavailable_rpc)
 
     current = conn.execute(
         "SELECT phase FROM position_current WHERE position_id = ?",
@@ -10623,9 +10639,30 @@ def test_recoverable_exit_pending_missing_does_not_persist_admin_close(conn):
         """,
         (position_id,),
     ).fetchone()[0]
-    assert result["action"] == "closed"
+    assert len(rpc_calls) == 1 and rpc_calls[0][0] == "eth_call"
+    assert result["action"] == "skip"
+    assert result["reason"] == "CHAIN_ABSENCE_UNCONFIRMED"
     assert current["phase"] == "pending_exit"
     assert admin_events == 0
+    assert portfolio.positions == [pos] and pos.shares == pytest.approx(4.95)
+    review = conn.execute(
+        "SELECT status, reason_code FROM review_work_items WHERE subject_id=?",
+        (position_id,),
+    ).fetchone()
+    assert dict(review) == {"status": "OPEN", "reason_code": "TIMEOUT_ABSENCE_UNCONFIRMED"}
+
+    def held_balance_rpc(url, method, params):
+        rpc_calls.append((method, params))
+        return hex(4_950_000)
+
+    recovered = handle_exit_pending_missing(portfolio, pos, conn=conn, rpc_call=held_balance_rpc)
+    assert len(rpc_calls) == 2 and rpc_calls[-1][0] == "eth_call"
+    assert recovered["action"] == "evaluate"
+    assert portfolio.positions == [pos] and pos.shares == pytest.approx(4.95)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=? AND event_type='MANUAL_OVERRIDE_APPLIED'",
+        (position_id,),
+    ).fetchone()[0] == 0
 
 
 def test_pending_exit_chain_missing_filled_order_is_not_current_journal_exposure(conn):

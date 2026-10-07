@@ -20502,3 +20502,85 @@ identified11 fixture failures, not the unvisited mandatory tail. Freeze this
 test-only slice, then run the complete required union and money-path commands
 on the same source epoch with independent private namespaces; retain all
 failures and do not run final CLI/secrets or land until required is acceptable.
+
+### Required78a first-batch followup — bounded BEFOREEDIT
+
+Actual required union on78a24cb ended3874P8F0E/S at797.74s (maxfail8),
+XML /tmp/zeus-AB-final-0EcO4P/required-union-repaired.xml,
+SHA e4cf0975d9b2853c2e129a4fb9a7cf4d9493065aeea6ee7e049b7daf8570768c.
+Complete money-path255P0F/E/S remains valid for that frozen source/test tree.
+The unvisited required tail is not a pass; prior5619 collection belongs to the
+earlier fixture epoch and is not a precise current-tail count.
+
+ROOT assigns native worker sole test-only ownership of
+tests/test_replacement_fused_q_shape.py: two geometry-free refusal probes omit
+the restored helper's required request/conn binding. SCOPE is that one fixture
+module, no source or authority changes. DRAIN/RESET supplies truthful private
+request/connection inputs and preserves the geometry-free False and numerical
+decomposition/disagreement antibodies. Use a clean child from78a if needed;
+integrate only its reviewed single-test delta, never an older branch snapshot.
+
+Held is read-only owner of the two exchange-reconcile failures (skip versus
+closed), including isolated RPC/credential and necessary actual baseline proof.
+XY is read-only owner of the four W3 failures: persisted domain_role_shapes=None
+contract mismatch and three METAR revision-authority failures whose actual
+first exception is missing observation_prints. Neither lane may delete role
+fields, weaken gates or edit without a further precise scope decision. Parent
+keeps its existing two-test migration ownership and performs only integration
+and this packet update. Keep all XMLs, raw/ref/config custody and source bytes;
+CLI/secret/push/load remain paused pending required failure dispositions.
+
+ROOT additionally accepts B executor sole test-only ownership of
+tests/integration/test_w3_solve_seam_g3.py for the four reproduced failures.
+Preserve domain_role_shapes in the expected frozen identity and add a non-None
+unchanged-freeze antibody. Exact-sibling/fallback cases may reuse this module's
+real qualified WRH normal parser/writer/reader inputs, with one consistent actual
+city/station/source/date/conditioning/event; never relabel an LTFM observation
+as EGLC or turn Ogimet statistical evidence into absorbing hard fact. Keep the
+METAR missing revision-authority refusal negative. Any METAR positive requires
+canonical prior same-station AWC/later-Ogimet append_print inputs and real
+survival reader/PIT, not a mocked authority verdict. SCOPE is the one W3 fixture
+file; DRAIN/RESET is genuine matching source qualification restoring its original
+statistical-versus-exact comparison. B uses a clean child branch from78a while
+retaining0c96 history; only its reviewed single-test commit returns to parent.
+Native's fused-shape fixture and B's W3 fixture do not overlap, and no production
+source, source-grade, lifecycle or probability law is changed by these slices.
+
+One diagnostic tail re-collection on78a found5635 unique nodes; all3882 executed
+XML keys match collected node identities exactly, leaving1753 unvisited nodes.
+Run that difference once nonfailfast with independent private state and the
+existing network deny. The excluded nodes are not newly passed, and this tail
+does not replace the eventual complete original mandatory command.
+
+ROOT authorizes parent sole test-only ownership of
+tests/test_exchange_reconcile.py, limited to the two reproduced absence tests
+and adjacent behavioral antibodies. Held's actual02849 baseline also fails2/2
+(XML /tmp/zeus-exchange-baseline.3HGMJH/baseline-two.xml,
+SHA7886528ee922090ebfd9805d74bf3946d0c21046247b2dd1765a8ce845f9e8ab).
+The existing chain-truth law treats missing/failed proof as UNKNOWN: preserve
+pending_exit/exposure and OPEN absence review, not admin_closed/MANUAL_OVERRIDE.
+Bind a numeric token, explicit private wallet and controlled RPC None to prove
+that refusal without Keychain/network. SCOPE is exact position/token; DRAIN is
+normal current chain/venue reconciliation, RESET uses genuine typed positive
+balance routing to evaluate or an existing lawful zero-chain/no-fill ghost
+voiding control. Confirmed-fill disputes retain exposure. No production changes
+or fabricated absence, and preserve the original candidate/baseline XMLs.
+
+Diagnostic tail completed1602P131F20E0S/1753 nodes at222.35s, with3882 exact
+previously-executed exclusions; head before/after78a. XML diagnostic-tail.xml
+under the existing external artifact root has SHA
+e7d9de8a0799423872ca4e969fe2fb34dc185f3cad2147c32f9022ac48072013.
+Distinct residual failing files are W3 (138 failures/errors) and day0 pricing
+(13 failures); mostly old shared native-shape fixtures. These are diagnostic
+results, not a full required pass or waivers of any mandatory node.
+
+Parent exchange migration actual focused2P0F/E/S2.57s proves controlled numeric
+token/private wallet RPC timeout opens review while preserving exposure, and
+a subsequent definite positive balance returns the held position to evaluate.
+No manual override/admin close is written. exchange-green.xml SHA
+79a5f3035eb449f7d9feafe1dfda398c38a2fe86d1b4e2b6786ae045eee522c4.
+Module AST outside the two owned functions is unchanged. Native's fused-shape
+single-testdc178 was normally integrated as01b7cfdf4; exact final test SHA
+999d353ef949f6e6c6fcf43dd506c4f7bfa77d45ee691ba52786e8bf390cd20c,
+full-module20P author evidence retained. Production bytes remain78a. Remaining
+W3/pricing fixture repairs and the final complete mandatory commands stay open.
