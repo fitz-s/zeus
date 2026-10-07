@@ -580,6 +580,22 @@ Legend:
 
 Their channels write (except Jinan AWC, G3), but no Day0 posterior exists to confirm the algorithm.
 
+- **Resolution: NO_MARKET_LISTED for all five. Not a discovery gap. Config unchanged.**
+  - Evidence: Gamma API, public, queried 2026-10-07 09:47–09:53Z.
+  - **Discovery covers all five.** `src/data/market_scanner.py` walks the `weather`, `temperature` and
+    `daily-temperature` tags (`:553`, `:1814-1879`). It then probes `highest-` and `lowest-temperature-in-{city}-on-{date}`
+    slugs for today through today+2 (`:569-572`, `:1907`, `:1927`, `:2002-2088`). The city list is every
+    `slug_names` in `config/cities.json` (`:566-568`), with no exclusion.
+  - **The slug spelling is proven.** These past slugs return their events (closed): Jinan 09-29 (high 1096063,
+    low 1095948), Zhengzhou 10-01 (1106946, 1106836), Jakarta 05-21 (500709), Lagos 05-15 (479754). Controls Tokyo,
+    Seoul, London and Wellington 10-08 return open events.
+  - **Current dates are empty.** All 50 high/low probes for 10-05 to 10-09 return `[]`. So do Jinan 09-30 to 10-06
+    and Zhengzhou 10-02 to 10-06.
+  - **The open weather-tag scan agrees.** 364 events cover 51 cities, and none of the five has a current date.
+    Jinan and Zhengzhou appear only as stale May 20/21 events.
+  - **Auckland has never been listed.** It has no `market_events` rows and no public-search hit.
+  - Discovery's 2-day lookahead would pick up a relisting with no code change.
+
 **G8 — Toronto and Tokyo: a raw-precision comparison fires the fast tail on equal settlement integers.**
 
 - Replay at 2026-10-07T08:05Z:
