@@ -71,7 +71,8 @@ FUSED_NORMAL_FULL`/`PARTIAL` (1,075 rows in 48 h for the six fast-admission citi
     (`src/ingest_main.py:2154`, `:2182`, `:2243`). The minimum poll is 60 s and the view is `hourly`.
   - **Other 37 NOAA cities.** Only `daily_tick` writes `noaa_wrh_<icao>` (`src/data/daily_obs_append.py:2603-2630`).
     It fetches once the city's local day has ended + 1 h (`_noaa_daily_target_dates_due`, `:1772`;
-    `src/engine/time_context.py:130`). Gap G5 covers the consequence.
+    `src/engine/time_context.py:130`). Gap G5 covers the consequence. G5's resolution adds a °C batch route per
+    city (view `all`); see §5.
   - **WU cities.** `wu_icao_history` comes from `scripts/obs_live_tick.py` through `_k2_obs_tick` (:15 hourly) and
     `_k2_obs_fast_tick` (15 min) (`src/ingest_main.py:1869`, `:1953`, `:6245-6251`). Jinan additionally has the
     `wu_station_history_temperature` canonical_resolver route (`physical_current_sources.json:804`).
@@ -522,6 +523,41 @@ Legend:
   (`daily_obs_append.py:1812-1826`). But the class
   definition "the settlement product sets B" holds intraday for 11 cities only. Elsewhere, Day0 runs on AWC, the
   fast tail and the POS fallback.
+- **Resolution (branch `fix/noaa-page-intraday-all-cities`, 2026-10-07; not live until landed and restarted).**
+  - **Routes.** Every °C NOAA city now has a `canonical_resolver` `noaa_wrh` route in
+    `config/physical_current_sources.json`, with the same shape as the US rows: station = `wu_station`, unit C,
+    `resolver_view: all`, 60 s. All 37 are admitted. The registry now carries 48 page routes, one per NOAA city.
+  - **Request volume.** `_fetch_wrh_batch` polls the °C set as one request per minute: one cache key per
+    unit and station set, no `units` param, `recent=180`. That is separate from the °F batch. Each batch now
+    takes the module request slot (`_MIN_REQUEST_INTERVAL_SECONDS`). An HTTP 403 is cached per batch as a typed
+    `WrhTokenRefused` for the 60 s retry floor, so a refused °C batch does not stop the °F batch, and the
+    reverse holds too.
+  - **Smoke test.** One live call, 2026-10-07T11:38:50Z: HTTP 200, 141,874 bytes, 0.76 s, `RESPONSE_CODE` 1,
+    37/37 stations returned. Every station parsed: latest rows were 09:43Z–11:30Z, with 2–6 rows per station.
+  - **Proof.** `artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json` is a read-only replay of the daily
+    `noaa_wrh_<icao>` row against settlement cells. VERIFIED cells match exactly for every city: 72–90 pairs
+    per city, 3,209 in total. Against the chain bin there are two sets of exceptions:
+    - Panama City, 72/78: the six 2026-08-30..09-01 lowest-bracket cells, which are the no-data clause.
+    - Wellington, 87/88: the 2026-09-17 low. That daily row was fetched at 05:33Z, before the local day ended.
+
+    Both stay DISPUTED.
+  - **Consumers.** Daily product and readers are unchanged. `daily_tick` still writes the daily
+    `observations` row and its prints; a print it writes for a clock already polled intraday is a suppressed
+    repeat. The intraday rows go to `WORLD.observation_prints` as `noaa_wrh_<icao>`, already the base settlement
+    channel in `day0_current_temperature_channels`, the settlement fact and `day0_evidence_finality`
+    (MONOTONE_SETTLEMENT_BOUND).
+  - **Fast-admission rivals.** Without a loader change, the six FAST_ADMISSION routes fail with
+    `LEAD_NOT_FASTER:noaa_wrh`. The loader now counts a canonical-resolver route as the existing `resolver`
+    comparator, which the round-3/4 latency evidence measured on this same Synoptic product. All six stay
+    admitted against their measured resolver lag.
+  - **Residual risk: page revisions.**
+    - *Mechanism.* The ledger is append-only. A same-clock revision is a later-receipt row, and the reduction
+      takes the latest version per clock (`replacement_forecast_current_target_plan.py:1506-1663`). A row the
+      page later removes stays in the ledger and keeps voting in MAX/MIN, because nothing retracts a clock.
+    - *Evidence.* US intraday, 2026-09-30..10-07: 31 of 2,261 clocks carried a second value. All were sub-degree
+      re-decodes, for example 75.02→75.2 °F. Across 132 US cells on local days 10-01..10-06, the intraday
+      extreme never went past the day-end page value.
+    - *Status.* Removal is not handled in code. It is listed here, not fixed in `day0_authority.py`.
 
 **G6 — Lucknow AWC margin 7.0 contradicts the later agreement audit.**
 
