@@ -210,3 +210,9 @@ Stopped before D1 per brief: the D2(i) law fork needs a coordinator decision (ho
   - KAUS 2026-10-02 LOW: first value 74 at 11:30Z → 73, and the day's LOW went 74 → 73; settled 73, so the revised value is the settlement one.
   - The page's first-received °F value is therefore not a safe semantic boundary for that row within about 20 min of receipt.
   - The remaining 16 were not the day extreme.
+
+### Coordinator ruling on D2(i) (2026-10-07)
+- °C page rows stay the semantic certificate (0 revisions / 33,439). Deletion-after-appearance is a named residual, the same assumption live's MONOTONE noaa_wrh makes; G10 (another lane) will measure it. No page-row retention marks in this branch.
+- **G9 (out of scope here):** the °F page swaps its tenth-°C conversion for the whole-°C conversion within about 20 min, 31 / 6,960 instants, and once moved a settled LOW (KAUS 10-02). Nothing in this branch changes noaa_wrh °F finality or the legacy boundary; the dense operator is °C only.
+- D2 implementation gets the refinements in the coordinator message: retention per station × report kind; a removal mixture of outage vs isolated (plausible vs gross); a shared-UTC-interval outage latent Z; a measured corrected branch; a posterior-predictive visibility a(lag) pooled over °C stations with exact 180-min fetch coverage.
+- Order: D1 → D3/D4 → D2 implementation → D5 → D6 → D7. Stop if D3 needs a protected-file seam.
