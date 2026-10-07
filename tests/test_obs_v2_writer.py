@@ -1,6 +1,6 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-10-06; last_reused=2026-10-06
-# Last reused/audited: 2026-10-06 (strict owned custody repeat/revision twins)
+# Lifecycle: created=2026-04-21; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Last reused/audited: 2026-10-07 (custody revises another writer version; identity still vetoes)
 # Authority basis: plan v3 antibodies A1/A2; P1 obs_v2 provenance identity packet;
 #                  2026-05-20 live tick payload hash material-extrema repair.
 #                  WRH required-check baseline repair 2026-10-03; current A2 date parsing contract.
@@ -133,7 +133,7 @@ def test_owned_capture_lawful_widening_updates_matching_file(mem_db, tmp_path, m
 
 
 @pytest.mark.parametrize('metric', ['HIGH', 'LOW'])
-@pytest.mark.parametrize('key', ['foreign_authority', 'metric', 'source_url', 'parser_version', 'tier'])
+@pytest.mark.parametrize('key', ['foreign_authority', 'metric', 'source_url', 'tier'])
 def test_owned_revision_non_custody_core_is_not_licensed(mem_db, tmp_path, metric, key):
     first = _captured_row(tmp_path, running_max=34.0, running_min=30.0)
     provenance = json.loads(_valid_provenance(payload_hash='sha256:'+'b'*64))
@@ -250,6 +250,75 @@ def test_owned_custody_preserves_wu_correction_law_and_matching_file(mem_db, tmp
     reason, old = mem_db.execute('SELECT reason,existing_row_json FROM observation_revisions').fetchone()
     assert reason == 'payload_hash_mismatch_source_revision_applied'
     assert json.loads(old)['source_file'] == first.source_file
+
+
+_T0, _T30 = '2024-01-15T14:00:00+00:00', '2024-01-15T14:30:00+00:00'
+
+
+def _backfill_version_row(*, latest_raw_ts=None, **provenance):
+    """A Chicago hour at backfill_obs's writer version, without custody."""
+    from scripts.backfill_obs import OBS_V2_BACKFILL_PARSER_VERSION
+    clock = {'latest_raw_ts': latest_raw_ts, 'latest_temp': 31.0} if latest_raw_ts else {}
+    return _make_row(temp_current=31.0 if latest_raw_ts else None, running_max=31.0,
+        running_min=31.0, observation_count=1, provenance_json=_valid_provenance(
+            parser_version=OBS_V2_BACKFILL_PARSER_VERSION, hour_max_raw_ts=latest_raw_ts or _T0,
+            hour_min_raw_ts=latest_raw_ts or _T0, raw_obs_count=1, **clock, **provenance))
+
+
+def _live_custody_row(tmp_path, *, latest, low, count, **provenance):
+    """The live tick's custody row reporting 33 for the same hour, imported later."""
+    from scripts.obs_live_tick import LIVE_TICK_PARSER_VERSION
+    fields = dict(parser_version=LIVE_TICK_PARSER_VERSION, hour_max_raw_ts=latest,
+        hour_min_raw_ts=_T0, latest_raw_ts=latest, latest_temp=33.0, raw_obs_count=count)
+    return _captured_row(tmp_path, body=b'live-original\r\n', running_max=33.0, running_min=low,
+        temp_current=33.0, observation_count=count, imported_at='2026-04-21T23:31:00+00:00',
+        finish='2026-04-21T23:30:30+00:00', provenance_json=_valid_provenance(
+            payload_hash='sha256:' + 'b' * 64, **{**fields, **provenance}))
+
+
+@pytest.mark.parametrize('path', ['widening', 'correction'])
+def test_owned_revision_over_other_writer_version_applies(mem_db, tmp_path, path):
+    """parser_version names the writer, not the bucket: custody revises a backfill row.
+
+    backfill_obs rows carry no latest_raw_ts, so the widening twin is their real
+    shape. The correction path requires that raw report clock; its twin adds it
+    at the backfill writer version, pinning the core rule at both call sites.
+    """
+    if path == 'widening':  # a second report at 33 reveals a higher max
+        existing = _backfill_version_row()
+        incoming = _live_custody_row(tmp_path, latest=_T30, low=31.0, count=2)
+    else:  # the provider corrects the one report from 31 to 33
+        existing = _backfill_version_row(latest_raw_ts=_T0)
+        incoming = _live_custody_row(tmp_path, latest=_T0, low=33.0, count=1)
+    insert_rows(mem_db, [existing])
+    insert_rows(mem_db, [incoming])
+    *values, provenance = mem_db.execute('SELECT running_max,running_min,temp_current,'
+        'observation_count,source_file,provenance_json FROM observation_instants').fetchone()
+    assert values == [33.0, incoming.running_min, 33.0, incoming.observation_count, incoming.source_file]
+    provenance = json.loads(provenance)
+    assert provenance['hour_max_raw_ts'] == provenance['latest_raw_ts'] == (_T30 if path == 'widening' else _T0)
+    assert provenance['parser_version'] == json.loads(incoming.provenance_json)['parser_version']
+    reason = mem_db.execute('SELECT reason FROM observation_revisions').fetchone()[0]
+    assert reason == 'payload_hash_mismatch_' + (
+        'monotone_widening_applied' if path == 'widening' else 'source_revision_applied')
+
+
+@pytest.mark.parametrize('mutation', ['station_id', 'source_url', 'tier', 'aggregation', 'raw_clock_regression'])
+def test_owned_revision_over_other_writer_version_still_vetoes_identity(mem_db, tmp_path, mutation):
+    if mutation == 'raw_clock_regression':
+        existing = _backfill_version_row(latest_raw_ts=_T30)
+        incoming = _live_custody_row(tmp_path, latest=_T0, low=31.0, count=2)
+    else:
+        existing = _backfill_version_row(aggregation='utc_hour_bucket_extremum')
+        changed = {'station_id': 'KMDW', 'tier': 'OGIMET_METAR', 'aggregation': 'utc_hour_aligned',
+            'source_url': 'https://api.weather.com/v1/location/KMDW:9:US/observations/historical.json?apiKey=REDACTED'}
+        incoming = _live_custody_row(tmp_path, latest=_T30, low=31.0, count=2,
+            **{'aggregation': 'utc_hour_bucket_extremum', mutation: changed[mutation]})
+    insert_rows(mem_db, [existing])
+    insert_rows(mem_db, [incoming])
+    assert mem_db.execute('SELECT running_max,temp_current,source_file,provenance_json FROM observation_instants'
+        ).fetchone() == (31.0, existing.temp_current, None, existing.provenance_json)
+    assert mem_db.execute('SELECT reason FROM observation_revisions').fetchone()[0] == 'payload_hash_mismatch'
 
 
 def _make_row_with_payload_hash(payload_hash: str, **overrides) -> ObsV2Row:
