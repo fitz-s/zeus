@@ -20739,3 +20739,276 @@ money-path-required.yml:117 separately requires ci/assert_invariant_coverage.py.
 Name the legacy CLI failure, do not count it as a pass or repair unrelated code.
 B's W3 actual run, real HKO optional replay and final original mandatory union/
 money commands remain open; no final CLI/secrets/landing were started.
+
+BEFOREEDIT W3 residual fixture slice (ROOT-authorized B sole writer): only
+tests/integration/test_w3_solve_seam_g3.py, with these seven failed node IDs from
+the actual bb060 whole-module XML: test_noaa_kord_fast_public_q_reaches_actual_held_and_jit;
+test_hko_normal_kernel_uses_the_producers_instrument_variance[high] and[low];
+test_hko_native_kernel_repairs_change_counterfactual_fixed_sell_law[high-32.9]
+and[low-27.4]; test_optional_universe_hint_cannot_consume_normal_claim_window[False]
+and[True]. The additionally authorized eighth node is
+test_selected_order_runner_up_trace_binds_final_held_family_proposal: the
+current source repaired its composition, revealing sqlite3.Row-vs-tuple at
+52088. Compare tuple(native) against the same exact token/q values and retain
+the final52098 replay assertion; no production change. Preserve list/tuple serialization meaning, original raw/sample/point
+values and current role variance decomposition; retired instrument-floor
+expectations cannot re-enable a floor or delete a noise component. Complete
+the controlled Clock interface with its actual perf_counter boundary without
+relaxing deadlines or mocks of qualification. SCOPE is these test assumptions;
+DRAIN/RESET is lawfully equivalent representations/current role inputs and
+valid isolated clock doubles. Necessary neighboring positive/negative controls
+precede a single test-only freeze. Parent owns no edits inside B's W3 file.
+Keep whole-qualified.xml actual1181P44F/1225/1742.11s and its old source epoch,
+never count its44 failures or its1181 passes as final345 evidence. Other groups
+retain ROOT's distinct readonly/implementation owners; no random44-node patch.
+
+BEFOREEDIT B's two snapshot fixtures in this same W3 file:
+test_hko_normal_writer_clock_proof_reaches_legal_pin_and_same_cut_consumers[high]
+and[low] retain the original prior_hour6. ROOT corrects the earlier00/08:05
+proposal: it lacks the target-local-day start, and Sep30/06:22 calendar selection
+does not pick the former fake12 run. Instead a chronological test preparation
+callback must possess the old Sep29/06 native originals at14:05, then the real
+Sep29/12 originals at20:05, each through normal original encoding/static/grid/
+HTTP/collector/readback before the provider/decision cuts. Preserve original
+provider23:10 and oldpin Sep30/06:20; the actual new12 provider wave at06:22
+and new materialization at06:23 must bind the actual12 collector/full-Y/source
+scope. Old6 rows stay byte-identical. Bind actual snapshot/source_run results;
+never assign fixed IDs, clone old proofs/receipts, backclock a decision-time
+capture, or invent an18Z run at06:22. SCOPE is the private chronological newer
+frontier; DRAIN/RESET is actual possessed complete source input under the
+original source-clock and HWM law. Source4
+remain reviewed345 bytes. ROOT approves B's clean task child new branch from345,
+preserving bb060 branch/ref and only committing subsequent W3 test deltas;
+do not resolve obsolete whole-branch rebase conflicts or overwrite parent PLAN.
+Parent merged HKO2 is actual2P30.70s (trace-hko-merged.xml SHA
+f2a426f488384dda2cc1c3422703ee7bf650fcc0f24e18aa496809484cff0388).
+Its remaining eight trace nodes are actual7P1F112.28s; the sole Row/tuple test
+interface failure is above, not another production composition finding.
+KORD's public-replay identity recipe intentionally excludes economic cutoff
+clocks, while live producer/ENTRY/HELD/JIT recipes retain their complete clocks.
+For that single fixture comparison, ROOT authorizes separate full-field deep
+equality against each actual recipe; retain all q/content/sample/settlement and
+refusal checks, never delete fields to erase the contract distinction.
+
+BEFOREEDIT B's five held-RO-attributed W3 nodes, still test-only in the same
+sole-owned file: test_fast_residual_day0_bundle_cannot_replace_remaining_window_q;
+test_post_day_complete_hourly_observation_builds_exact_global_simplex[wu] and
+[noaa-ogimet]; test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme[high]
+and[low]. The fast residual fixture must construct/hash the actual owning
+ownproduct_minus_fast_v2 identity with its physical sign, not just relabel a
+legacy identity or promote METAR provisional evidence. Post-day tests bootstrap
+the canonical observation_revisions schema with an empty private table so the
+held-prior owner can run;24 hourly samples remain a non-final refusal, while a
+source-correct actual daily/normal WRH parser/writer/qualified-reader fixture
+provides RESET with matching city/station/date/unit. Do not promote hourly,
+Ogimet or non-settlement NOAA to final authority. HKO minute tests bind the
+owning06:21:30 remaining-from cut and verify the three actually written rows'
+source_run/target/model/original-body scopes plus unchanged old rows; full-Y
+still refuses absent local-midnight coverage, while lawful remaining-X and the
+unchanged extreme/minute-driven seed/q redecision are checked. Never merely
+change expected0 to3. SCOPE is these stale test assumptions; DRAIN/RESET uses
+existing qualified truth routes and chronological source input, without new
+production fields, source clocks or retrospective evidence. Keep original44F
+XML and focused actual outcomes distinct; cache14/role4 remain separately owned.
+
+BEFOREEDIT B role4 identity migration in the same W3 file:
+test_hko_normal_producer_and_reactor_consume_one_physical_kernel[False-high-32.9],
+[False-low-27.4], [True-high-32.9], [True-low-27.4]. XY's actual observer shows
+the sole nested difference Y.provider_inputs[0].posterior_id: the adapter adds
+the canonical posterior reference after exact model/raw-id/value/cycle/source
+availability/capture/PIT joins. Assert that canonical posterior and referenced
+raw_model_forecast_id first, then bind the actual fixture.result.posterior_id
+in expected full identity. Every other physical/scalar/clock/hash/role leaf
+remains deep-equal. Reproduce the reference builder with this same published
+identity and consumer bin order, not deleted roles, edited SQL JSON or a
+chosen draw seed. Source code stays reviewed345.
+
+Cache14 is authorized only for a bounded representative decision first:
+future Oct2 at Oct1/08:15 has actual six caps and no exact child, so the owning
+store1566 correctly leaves zero cache; retain fresh-proof loss/refusal/restore.
+A warm-eviction positive must use a truly current qualified HELD fixture with
+naturally empty caps/no exact child. Never strip caps, fake READY/namespace,
+alter the store gate or force all14 old cache assertions green. First prove
+one such real current HELD positive and the future refusal; if no lawful warm
+case is available, report that exact contract boundary to ROOT before broader
+parameter migration. B remains sole writer of W3; parent records/integrates.
+
+Residual checkpoint (not final required proof): accepted B's ten-node test-only
+commit28a3ecfc20c42cdb02945f84fac4df51870e8f3d is normally picked as parent
+0f9462a700c23b246f77a2ac83980c42b058dbe0. W3 SHA
+0d7e4c543e7bbce8361f7afa762c3432f1e4ba823505c4ec4a6c5b96b3885869
+matches; reviewed345 source4 and ignored template config are unchanged. The
+author's ten-final.xml is actual10P141.36s, SHA
+c0463e33869f408dd6d68c21eb59c2dced19ec408cbb49800fea4fa6991e9e28;
+do not repeat ten nodes or count that as a whole-W3/final-head run.
+B's pending next test delta has actual role4 4P0F/E/S55.07s,
+/private/tmp/w3-role-published.Kh1NfG/role-published.xml SHA
+6fef89d5ee3f853fdb3aad25cfd1fa4834305234c36f068517a94c69ef71b6b7,
+and naturally current qualified HELD cache representative1P0F/E/S15.71s,
+/private/tmp/w3-current-held-cache.vZKnzf/current-held-cache.xml SHA
+d01ed81dabd763a809cf5e2e1514bca304aac4420a7469304f4ca1cec8c8ad8a.
+Parent parsed both XMLs and matched full hashes without rerunning them. Native
+made no role4 edits; B owns this pending delta. ROOT reports minute H/L2P37.76s
+through real tick/seed/posterior/held-exit math; its exact XML/hash still needs
+the author's frozen handoff before parent records it as independently parsed.
+Post-daily two-node focused outcome and this B commit are still pending.
+Cache14 migration remains a separate native single-file slice only after B's
+commit, now grounded by the lawful current-HELD representative; one positive
+is not fourteen completed antibodies. Final65 union plus full money remain
+unexecuted on the final combined candidate. Preparation only at0f946 confirms
+45 classifier selectors plus25 release selectors deduplicate to65 and retains
+the literal maxfail8/timeout300 union and maxfail5/timeout300 full-money commands.
+Refresh the manifest/classifier for the final frozen input set; this preparation
+is not a collected count, gate execution or permission to land/load.
+
+BEFOREEDIT ROOT-authorized cache14 test-only slice: after B's pending W3 commit
+is frozen and integrated, native alone owns these two W3 functions and their
+necessary local helper on a new child branch from that exact combined parent.
+test_actual_consumed_proof_refusal_evicts_both_cached_lanes covers
+recorded_row_deleted/inplace_body_same_mtime/consumed_read_locked times BUY/SELL:
+use current qualified HKO, prove ENTRY has zero cache while HELD naturally
+stores; transient read-lock retry does not evict, hard consumed-proof damage
+evicts, and restoring the same originals provides real RESET.
+test_a_lost_cohort_input_refuses_the_posterior_on_every_lane covers
+cohort_row_deleted/cohort_body_same_mtime times partial/full times BUY/SELL:
+preserve Chicago's actual cohort/future context with six caps/no exact child,
+zero cache, warm/cold public-reader and preflight refusal, then same-original
+RESET. Do not force future cacheability, strip caps, mock qualification, alter
+source/PIT/clock/math/production, or change B's common native helpers/other
+functions. SCOPE is these fourteen stale cache assumptions; DRAIN/RESET follows
+the owning transient-lock versus missing/corrupt-proof distinction and actual
+restoration. Preserve original failure artifacts and all side/cohort twins;
+focused fourteen plus necessary neighboring controls precede a single-file
+freeze, not another whole W3 or partial result relabeled as the final gate.
+
+Peer/runtime checkpoint at ROOT's10:20-10:22Z cut: live disk02849, remote
+24d65cb46c49377727593ed4e040a7a1b99acfa6, MAIN9870 not restarted and strict
+loaded SHA unknown; FORECAST boot6f9 and INGESTa04 remain mixed old runtime.
+HK monitor2900 q0.124311706/bid0/ask0.001/HOLD consumes v34/v6 without a native
+point;12 source PARTIAL509/663 and18 PARTIAL83/561 do not certify the new role
+or authorize an out-of-band SELL. These are ROOT's indexed runtime findings,
+not candidate deployment or a fresh local qualification computation.
+Parent's actual fetch confirms one new peer commit24d65cb afterbc024, only
+docs_registry/reference_replacement/docs-reference router plus the new
+fast_obs_city_algorithm_matrix reference; no source/test/config/DB/runtime or
+owned-source intersection and clean merge-tree preview. Normal rebase yields
+0d3eb1c133a78f8f59f1e0e5c70d1e24d8d9c474 on this peer. Entire src/scripts/tests
+tree IDs respectively02ef5c6d1ec91b1cb79f3819f730e18fd8de4f9c,
+f3d71bd0c213e187729a01cb2915f17159ae18c1,
+a0519722b1b64743e5ea4626870eb96161eda4ef remain exact before/after, as do W3
+and the temporarily preserved/restored PLAN bytes. Raw123 was neither stashed
+nor staged. This documentation peer requires final input/HEAD proof rather
+than reuse of an old scanner signature; it does not justify another runtime
+action. B's next single-file delta must integrate against this rebased parent;
+native cache14 starts only after that combined frozen commit. Final gates and
+landing/loading remain pending, with no new source repair opened from this cut.
+
+B residual freeze8b7ad3c57ea78138cc54146b4fc8a003cb0baf20 (parent28a) is normally
+picked only as W3 delta into parenta4782144cfee6d78477398d031959a897ff9db3c.
+W3 SHAa295c10f48ccfb0826231b1279098c145fd0b114c83ac1ce25484f034fe8bd4c
+matches, entire src/scripts tree IDs above remain exact, config stayse95,
+and diffcheck is0. Parent parsed the author's frozen actual10P0F/E/S99.80s
+/private/tmp/w3-held-role-slice-final.xRfHUD/held-role-slice-final.xml SHA
+a7768e1a9c7ffd8685cb1a98b6ae2172ad4d52e3ed6058cf93054f19c9116e57:
+fast residual1, source-specific post-daily2, minute H/L2, current-HELD cache1,
+and published-role4. Preserve the two record_property warnings and older mixed
+failure artifacts; no rerun of these10 or claim of whole-W3/final65 completion.
+The renamed test_post_day_hourly_and_daily_product_authority_remain_source_specific
+refutes hourly aggregation as WU final publication, while the NOAA/Ogimet branch
+retains its source-specific daily RESET. WU official final/historical source-date
+binding remains UNKNOWN, not a new proved current-HK defect or permission to
+weaken production. Statistical seam doubles remain seam evidence, not normal
+Beijing or live forecast authority. Native cache14 may now start only from this
+exact combined candidate with the two-function ownership above. Final required
+union/full-money and subsequent scanner/secret/landing/loading remain pending.
+
+BEFOREEDIT modern HELD fallback role-closure slice, XY-confirmed Important and
+ROOT writer READY to native: only src/engine/event_reactor_adapter.py,
+with native's already-owned two W3 cache functions as behavioral antibodies.
+Cache diagnostic is not closed: the first14 run was8ChicagoP/6HKO F, and the
+third six-node HKO attempt remained6F101.32s. The common fresh ENTRY/preflight
+refusal, hard-proof eviction and transient-lock non-eviction already pass; do
+not delete the remaining assertion or rerun the eight Chicago passes. Actual
+single-family identity observer /tmp/zeus-w3-held-identity.xml SHA
+899e53b67215f4966599de4cff3c0043997d9b8423c695b08edb78befbf86922 is1F25.224s:
+recorded_row_deleted-BUY returns GLOBAL_CURRENT_PROBABILITY_PREPARED in warm
+prepare_held_event although public ENTRY refuses its damaged consumed proof.
+The observed modernv35 fallback reaches _rebuild_decision_time_day0_carrier:
+when domain roles are absent, adapter49144 still supplies city instrument
+sigma, allowing the old common-noise builder rather than owning independent
+role math. The returned carrier has no persisted posterior ID and changed q;
+this is not proof of simply reissuing the old invalid certificate, nor a
+lawful modern role qualification. Preserve the identity XML and previous F.
+The authorized minimal rule is same-frame owning-role reconstruction using
+actual lawful originals, or typed unavailable: no missing-role-to-shared-sigma
+path under the modern revision. Native solely edits
+_rebuild_decision_time_day0_carrier and its two existing W3 cache antibodies;
+the owning factory must receive actual request.baseline_data_version and
+carrier.source_cycle_time, absent from the former fallback namespace. Neither
+current time, observation time nor guessed version may fill those inputs.
+Missing/invalid current role proof raises plain ValueError into the existing
+family typed-UNAVAILABLE/false-proof handling (family_fault_scope62-76 and
+adapter9930-9957), never GlobalValueFault or a global RED sweep.
+SCOPE is the exact statistical family/current
+cut, DATA_DEGRADED retaining held exposure rather than global RED. DRAIN is the
+existing normal source/seed/materialization loop once actual role dependencies
+are complete; RESET restores the same immutable originals or obtains a new
+lawfully qualified same-frame carrier, never legacy fill, source-clock renewal
+or manual seed. Exact qualified final/hard-fact authority must remain distinct
+and not be blocked by an inappropriate statistical-role requirement. Require
+ENTRY/HELD/JIT and H/L twins, original-damage/refusal/restoration plus naturally
+complete same-frame positive proof. No other source, schema, lock, quote,
+instrument-floor law, public grade or modern revision is changed. Native is
+released to implement now; parent records/integrates only. XY reviews this
+new frozen one-source slice after actual controls. Earlier129 trace/axis proof
+retains its original345 dependency epoch and is not relabeled as a full pass
+for this new source. Final65/money, CLI/secrets and any landing/loading remain
+paused until this confirmed defect is closed and the source is frozen.
+
+HELD role-closure source freeze d22ba13405173a0e36cb4624c959806b333fec2d is
+XY independently APPROVED0C/I and normally picked only into parent915d15ef061ca732d84e60cc8926ce34e670263b.
+Adapter SHAfc340c5e5c23880506f2ec4654657f9a125cd670bcf9ceb71fab517d97ac5e6a
+and W3 SHA9d1f2477fcb139773c7c11603d0778f38445d59d5a49abd3bf5792c0484dc917
+match. A fresh normal fetch still finds origin/live24d65cb with no intervening
+peer, and clean merge-tree preview before the single delta. Only the adapter
+rebuild function and two W3 cache functions change; missing role input now
+uses the owning same-frame factory or family-scoped refusal, not modern-label
+common/instrument sigma. Independent legitimate hourly/native evidence may
+construct a new typed HELD witness after an old daily proof fails; that new
+carrier is not the damaged certificate reissued, and cannot borrow its clocks.
+Actual primary/paired/static/PIT loss blocks statistical ENTRY/HELD and final
+BUY/SELL entry points for H/L; restoring the same originals reopens role/book/
+JIT authority without SDK commands. Qualified exact/final paths remain earlier.
+
+Parent independently parses four complete author XML hashes: cache14-first.xml
+32a372829372e5b08b6317edc156fe8b048d7c738d7752ab45eb6c34d4350bc1
+is8P6F and contributes only the eight unchanged future-Chicago nodes;
+role-serving-final.xml966ab3e70a5700b4ebee120f2b965c67c4bebcc86986d14df64262ebaec41bf5
+is6P150.15s, of which the later representative supersedes one;
+role-jit-fixed.xml491ba1a155ce5ac731ef4aede9ff2ee77ad694c57c00be4df0f58b4c688176b8
+is1P124.72s for recorded_row_deleted-BUY, internally covering both H/L without
+counting two nodes; role-twins-final.xml5523ec8f30366145404030a9eb27730d12a5ae20e0e911afa3ef4789efda8556
+is3P35.20s (qualified native H/L and deterministic actuation). All final three
+XMLs have0F/E/S. These are17 unique passes across explicit epochs, not one
+same-tip whole suite. Preserve the six original cache failures, roleless HELD
+identity RED and other mixed artifacts rather than overwriting them.
+
+This existing PLAN closes the bounded fixture/source dispositions and freezes
+before final machine execution. Required acceptance is the actual refreshed
+classifier45 plus release25 deduplicated union (currently65 selectors) with
+maxfail8/timeout300, and integrationTRUE full tests/money_path with
+maxfail5/timeout300, separate private STATE/TMP/log/XML and at most two heavy
+CPU jobs with BLAS/OMP/MKL1 and external-network denial. Do not replace them
+with17/129/local author evidence or repeat unrelated old matrices. Once heavy
+tests release CPU, run one actual180s-capped single-live CLI on this final
+source/PLAN input signature and HEAD-ancestry gitleaks --redact --no-banner
+--log-opts=HEAD; old15a and preparation-only metadata are not final passes.
+Required classifier/schema/test-quality/invariant coverage and changed-doc
+checks retain actual command/rc and pre-existing unrelated issue disposition.
+Any material failure is recorded at its exact node/first cause before the
+smallest authorized repair, not skipped or concealed by a premature clean
+claim. Runtime MAIN/version/held probability and physical/station/publication
+gaps remain separate; no push/load, manual source GET, seed/wake or raw staging
+is authorized by these code/test checks. Later gate receipts stay in existing
+external logs until ROOT's exact-tip acceptance so this scanner input is not
+rewritten merely to report results.
