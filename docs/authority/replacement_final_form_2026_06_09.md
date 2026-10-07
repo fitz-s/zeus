@@ -475,6 +475,33 @@ quantity/member/run/grid and causal possession proof. Neither route may invent
 issuance or unresolved-past coverage. Deployment must preserve lawful held
 monitoring; no empty revised carrier may replace its serving belief.
 
+2026-10-07 dense-observation state-space law (survival
+`day0_settlement_channel_revision_model_v36_dense_state_space_page_only_boundary_observation_clock_city_instrument_native_boundary_v1`,
+resolver
+`day0_resolver_terminal_composition_v35_dense_state_space_page_only_boundary_observation_clock_city_instrument_native_boundary_v1`;
+names chosen so they cannot alias the reverted `day0_native_domain_roles_v35_*`). For a city/metric
+fitted in `config/day0_dense_state_space_params.json` whose dense channel has fresh receipt-gated
+rows today, `build_day0_remaining_probability_carrier` returns the operator
+`dense_observation_state_space_extreme_v1` (q_shape `day0_remaining_shared_carrier_dense_v1`):
+a forward recursion over the settlement tape (theory: `docs/authority/day0_dense_observation_probability.md`,
+PR #536; backtest: `artifacts/fast_obs_audit/dense_station_model/METHOD.md` §5). Any other family
+receives the legacy V2/V3/resolver result on unchanged arguments, byte for byte. Laws:
+- Only received `noaa_wrh_<icao>` page rows create semantic zeros. AWC/Ogimet METARs and
+  fast-admission route rows at their proven METAR minutes are provisional tape rows with a
+  measured page-retention probability. They never create zeros; Lucknow 2026-09-06 is the
+  example: a mirrored 37 C was dropped by the page, which settled 31.
+- Dense readings are likelihood terms only.
+- Evidence is admitted at the first receipt of the carrier's current-state print. Persisted
+  certificates therefore replay at any later clock, and a newer state is a new content identity.
+- A persisted dense certificate whose preconditions no longer hold fails closed
+  (`DAY0_DENSE_STATE_SPACE_REPLAY_UNAVAILABLE`); the seed loop rewrites it.
+- The fitted parameters are a statistical observation model of the tape, not the excluded fitted
+  sigma/mixture/center fallback of root AGENTS.md. They apply only inside this operator and only
+  where the dense channel qualifies.
+- Fast-admission route sources are provisional at every instant (never
+  MONOTONE_SETTLEMENT_BOUND), and they reach q through the carrier region.
+- Fast-tail supersession compares settlement integers.
+
 The shared-carrier V1 is retained only for explicit, immutable historical replay. Current ENTRY and
 held-position belief require a complete V2 or typed V3 carrier declaration; ordinary
 non-carrier forecasts are unaffected. Old, partial or unknown carrier versions
