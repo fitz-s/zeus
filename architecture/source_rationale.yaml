@@ -96,6 +96,10 @@ write_routes:
 # PRs independently added a `providers:` block to satisfy the same gate; this
 # resolution keeps every declared id under the single canonical map.
 providers:
+  station_temperature:
+    role: current_observation
+    client: src/data/station_temperature_adapters.py
+    why: Existing station clients and valid_station_print replay canonical observation_prints station_id, source_channel, raw_report, value_native, unit, publish_ts_utc and fetched_at_utc. This current-observation role neither certifies final daily settlement nor infers missing source-issued clocks.
   observation:
     role: settlement_capture_observation
     client: src/data/observation_client.py

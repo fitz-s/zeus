@@ -88,6 +88,22 @@ economic_objects:
         meaning: "Settlement source finality time."
 
 state_machines:
+  day0_original_metadata_bracket_diagnostics:
+    owner: src/data/day0_hourly_vectors.py
+    description: >
+      Original-provider metadata-bracket refusal reasons, not lifecycle states.
+      SCOPE is the exact city/model/vector original whose standard-endpoint
+      bracket is absent or whose immutable bytes disagree with its digest.
+      DRAIN is normal producer capture and canonical materialization of that
+      same source family. RESET is a lawful new capture or restoration of the
+      exact immutable body/bracket through the owning replay reader, never
+      clock renewal, label promotion or a venue action.
+    states:
+      - DAY0_ORIGINAL_METADATA_BRACKET_MISSING
+      - DAY0_ORIGINAL_METADATA_BRACKET_HASH_MISMATCH
+    invariant_tests:
+      - tests/test_bayes_precision_fusion_download.py
+      - tests/data/test_day0_capture_equivalence_endpoint_fallback.py
   reactor_runtime_config:
     owner: src/engine/event_reactor_adapter.py
     description: >

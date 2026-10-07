@@ -1899,7 +1899,7 @@ test_metadata:
     trust: trusted
     authority_docs:
     - docs/authority/zeus_current_architecture.md
-    notes: Controlled providers and non-production canonical checks; WRH source-reference persistence preserves native batch byte identity independently of temperature/current-reader authority. Actual JMA/IMGW parser boolean rejection preserves numeric zero, negatives, finite/sentinel rules and HIGH/LOW mixed-row controls. G5: every NOAA city carries one page route in its contract view; the degC batch is one request per minute separate from degF, a 403 stays typed per batch, a recorded metric-view payload reaches the Day0 settlement reduction, and the page route is the resolver comparator rather than a new fast-admission rival. No ground or routing promotion and no external venue claim.
+    notes: "Controlled providers and non-production canonical checks; WRH source-reference persistence preserves native batch byte identity independently of temperature/current-reader authority. Actual JMA/IMGW parser boolean rejection preserves numeric zero, negatives, finite/sentinel rules and HIGH/LOW mixed-row controls. G5: every NOAA city carries one page route in its contract view; the degC batch is one request per minute separate from degF, a 403 stays typed per batch, a recorded metric-view payload reaches the Day0 settlement reduction, and the page route is the resolver comparator rather than a new fast-admission rival. No ground or routing promotion and no external venue claim."
     created: '2026-09-29'
     last_reused_or_audited: '2026-10-07'
   tests/test_warm_materializer.py:

@@ -2869,7 +2869,7 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
             _on_acquired()
         paths = _paths or _resolve_opendata_paths()
         cache = paths.raw_root / "raw" / "ecmwf_open_ens" / "native_2t_scheduled" / f"{run_utc:%Y%m%dT%HZ}"
-        if time.monotonic() >= cycle_deadline_monotonic and any(
+        if cycle_deadline_monotonic is not None and time.monotonic() >= cycle_deadline_monotonic and any(
             not _path_present(cache / f"step{step:03d}-member{member:02d}.grib2")
             or not _path_present(cache / f"step{step:03d}-member{member:02d}.grib2.proof.json")
             for step in steps for member in range(51)
@@ -3109,7 +3109,7 @@ def collect_native_temperature_source(*, conn: sqlite3.Connection, run_utc: date
                 _native_mirror_attempt(cache, paths.raw_root, run_utc, configured,
                     {**attempt, "status": "FAILED", "reason": failure,
                      "attempt_finished_at": datetime.now(timezone.utc).isoformat()})
-                if time.monotonic() >= cycle_deadline_monotonic:
+                if cycle_deadline_monotonic is not None and time.monotonic() >= cycle_deadline_monotonic:
                     break
             except (OSError, ValueError) as exc:
                 _native_mirror_attempt(cache, paths.raw_root, run_utc, configured,

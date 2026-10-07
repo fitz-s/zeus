@@ -651,6 +651,38 @@ def configured_native_pool(tmp_path, monkeypatch):
         s.conn.close()
 
 
+@pytest.mark.parametrize("case", ("complete", "request_exception", "expired"))
+def test_normal_native_optional_deadline_preserves_capture_and_typed_failure(
+        configured_native_pool, monkeypatch, case):
+    s = configured_native_pool
+    s.mode = "healthy"
+    monkeypatch.setattr(s.module, "_DOWNLOAD_SOURCES", ("aws",))
+    calls = []
+    if case == "request_exception":
+        def failed_request(url, **kwargs):
+            calls.append(url)
+            raise s.module.requests.RequestException("PRIVATE_TRANSPORT_UNAVAILABLE")
+        s.session.get = failed_request
+    deadline = s.clock[0] if case == "expired" else None
+    result = s.module.collect_native_temperature_source(
+        **{**s.args, "cycle_deadline_monotonic": deadline})
+    assert result["qualification_status"] == "UNKNOWN", result
+    assert not s.module._native_temperature_source_lock.locked()
+    if case == "complete":
+        assert result["status"] == "AVAILABLE" and result["observed_count"] == 102, result
+        manifest = json.loads(Path(result["manifest_path"]).read_bytes())
+        assert len(manifest["messages"]) == 102
+        assert result["source_issued_at"] is result["available_at"] is None
+    elif case == "request_exception":
+        assert calls and result["status"] == "DEFERRED", result
+        assert result["reason"] == "PRIVATE_TRANSPORT_UNAVAILABLE", result
+        assert result["observed_count"] == 0
+    else:
+        assert result["status"] == "DEFERRED", result
+        assert result["reason"] == "STEP_DEADLINE_EXCEEDED" and not s.calls, result
+        assert result["observed_count"] == 0
+
+
 def test_normal_native_partial_cache_probe_and_same_turn_resume_keep_budget(tmp_path, monkeypatch):
     """An actual 509-part prefix must leave the original cut for missing parts."""
     s = _normal_native_http(tmp_path, monkeypatch, steps=tuple(range(0, 33, 3)))

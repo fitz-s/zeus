@@ -21506,3 +21506,29 @@ invalid may not BOOT; ready proceeds through the unchanged MAIN gates. A/B/C
 source hashes remain frozen; private money/coupled checks may proceed while
 the ordering slice and independent review finish. Final CLI/HEAD-secret wait
 for its final source/input freeze; no landing or loading is implied.
+
+BEFOREEDIT — merged A deadline compatibility and exact registry closure:
+33253231d actual private money251P/4E, coupled3P/1F and closure27P/1F
+all hit ecwmf collect's new expired-cache float>=None comparison before their
+semantic assertions. Preserve these XMLs in /tmp/zeus-ABC-final.DjKzeB;
+_remaining_step_timeout already defines None as the per-step timeout. ROOT
+authorizes parent single writer in src/data/ecmwf_open_data.py for only the
+expired-cache comparison and its same RequestException comparison twin, adding
+is-not-None guards without changing finite59s/4RPS/hash/PIT/qualification law.
+Add complete None-capture, actual RequestException(None) typed unavailable and
+finite-expired no-HTTP controls to existing collect-cycle tests. SCOPE is this
+deadline interface; DRAIN remains normal finite scheduled polling; RESET is
+lawful capture or a later live turn, not inventing a source clock.
+
+Governance surfaces additionally authorized: architecture/money_path_objects.yaml
+registers only C's existing metadata-bracket missing/hash diagnostics with their
+exact family SCOPE/normal-capture DRAIN/immutable-original RESET; existing
+architecture/source_rationale.yaml registers station_temperature as current
+observation adapter (src/data/station_temperature_adapters.py, canonical print
+station/channel/raw_report/value/unit/publish/fetched fields), not final daily
+or source-issued inference. architecture/test_topology.yaml only quotes the
+peer's existing G5 notes scalar: origin/live itself reproduces the YAML parse
+error at that unquoted colon. No validator, source routing, lifecycle, schema
+or provider authority changes are licensed by these registrations. Re-run
+actual full money and necessary coupled/closure nodes after the smallest fix;
+old failed XMLs remain failed, and final CLI/HEAD-secret wait for loader freeze.
