@@ -1637,6 +1637,66 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
             if emitter._global_fetch_executor is not None:
                 emitter._global_fetch_executor.shutdown(wait=True)
 
+    def test_conflicting_kma_group_withholds_only_its_own_reports(self):
+        """One conflicting RKSI KMA instant must not abort the whole merge:
+        the clean report from another station in the same tick still merges,
+        the conflicting group's other transports survive, and the conflict is
+        kept as a typed fact (2026-10-07 14:31Z production defect)."""
+        import src.data.day0_fast_obs as fast_obs
+
+        observed = datetime(2026, 10, 7, 14, 30, tzinfo=UTC)
+        kma_a = MetarReport(
+            station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=18.0,
+            metar_type="METAR", raw="METAR RKSI 071430Z 18/12",
+            transport_id=fast_obs.KMA_METAR_TRANSPORT_ID,
+        )
+        kma_b = MetarReport(
+            station_id="RKSI", obs_time=observed, receipt_time=None, temp_c=19.0,
+            metar_type="METAR", raw="METAR RKSI 071430Z 19/12",
+            transport_id=fast_obs.KMA_METAR_TRANSPORT_ID,
+        )
+        # A non-KMA transport for the same instant. The window merge keeps one
+        # copy per (station, instant, temperature), so the surviving AWC row
+        # here is the one whose temperature no KMA copy shares.
+        awc_rksi = _report("RKSI", observed, 17.0)
+        clean = _report("RJTT", observed, 20.0)
+
+        class _KmaCursor:
+            _last_successful_stations = frozenset({"RKSI"})
+            _last_conflicts: dict = {}
+
+            def poll(self, **_kwargs):
+                return [kma_a, kma_b], True
+
+            def close(self):
+                pass
+
+        class _StationCursor:
+            def poll(self, **_kwargs):
+                return [awc_rksi, clean], True
+
+        emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
+        emitter._kma_cursor = _KmaCursor()
+        emitter._station_cursor = _StationCursor()
+        emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
+        try:
+            reports, _status, _age = emitter._reports_with_status(
+                ["RKSI", "RJTT"], priority_stations=("RKSI", "RJTT"),
+            )
+        finally:
+            if emitter._global_fetch_future is not None:
+                emitter._global_fetch_future.result(timeout=1.0)
+            if emitter._global_fetch_executor is not None:
+                emitter._global_fetch_executor.shutdown(wait=True)
+
+        assert clean in reports
+        assert awc_rksi in reports
+        assert kma_a not in reports and kma_b not in reports
+        conflict = emitter._last_kma_conflicts.get("RKSI")
+        assert isinstance(conflict, fast_obs.KmaObservationConflict)
+        assert conflict.obs_time == observed
+
     def test_completed_global_cycle_is_harvested_on_next_priority_tick(self):
         import src.data.day0_fast_obs as fast_obs
 
