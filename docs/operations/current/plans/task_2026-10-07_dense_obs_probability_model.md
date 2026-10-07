@@ -70,9 +70,13 @@ Resume rule: a fresh session reads this section plus `git log origin/live..HEAD`
 - **Exact OU transitions over irregular gaps** replace the 5-min SMC stepping. The residual axis is a cell grid (0.05 C, +-6.5 sd), with banded sparse transitions. An optional static offset (Tokyo two-scale, tau_slow -> inf) uses Gauss-Hermite quadrature. Each node's evidence-weighted Bayes is exact per node. An optional dense-drift axis d runs when sd2 >= 0.1 s1^2 (Singapore). Below that, d folds into the fitted white mixture: Helsinki 0.044, Tokyo 0.03, Toronto 0.06 of core variance.
 - METAR integer: exact interval likelihood on `[M-1/2, M+1/2)`, averaged over the cell (uniform within the cell). Dense 0.1 C reading: P(r + d + w in [x+b-q/2, x+b+q/2)) with w a two-population Gaussian mixture, cell-averaged in closed form (psi integrals).
 - Extreme functional: the filter runs one column through admitted rows up to the METAR receipt cut gm. From the first pending instant (scheduled routine instant > gm) it carries K+1 threshold columns (K bin edges + an evidence column). At pending instants it kills cell fractions with R(m+r) > k (HIGH) or < k (LOW). A Poisson SPECI hazard (rate per station, 0 for EFHK/RJTT) is applied as a killing rate on 5-min steps. Then it propagates to day end.
-- Boundary: `H_s = max(B_A, B_P if scenario survives, Y_pending)`.
-  - B_A is settlement-channel facts only: the NOAA page rows, plus FA route rows **at proven METAR instants**. It is a semantic certificate; bins below it are structurally 0.
-  - B_P is the received provisional METAR integers (AWC/Ogimet). It takes the **caller's survival weight** `s = sum of non-None scenario weights`; the caller's boundary value is never used. Dense readings never set any B.
+- Boundary and rows (corrected 2026-10-07 after coordinator review; Lucknow 09-06 HIGH: METAR VILK 060730Z 37/27 in AWC, Ogimet and the IMD route; the NOAA page dropped it; settled 31):
+  - **B_A, semantic certificate** = received rows of the canonical settlement product only (`noaa_wrh_<icao>` page rows; for WU/HKO cities the existing settlement channels, which are not dense-qualified). Bins below B_A (HIGH) are structurally 0. A page row is also an exact interval likelihood at its instant.
+  - **Provisional rows** = received METAR integers at their instants from AWC, Ogimet and FA routes at proven METAR instants (a METAR-content mirror is not the settlement product). Each row enters the recursion as a mark with retention probability s: factor `s * 1{T in preimage(k)} * 1{k does not cross threshold} + (1 - s)`. This is exact for independent per-row retention, with no 2^n scenarios. The posterior Bayes factor emerges from it: an isolated gross row between page rows has tiny likelihood under retention, so its drop branch dominates. A provisional row never creates a semantic 0/1.
+  - s is P(page retains a METAR integer row at that instant with the same integer). It is measured per station, walk-forward, from WORLD (AWC/Ogimet instants vs `noaa_wrh_<icao>` rows, NOAA era) and stored in the params artifact (Jeffreys mean, with counts). It replaces the caller's survival weight inside the dense law, consistently for every caller. Rows are treated as independent; clustered drops (Singapore 09-20, 5 rows) make that optimistic, and this is reported.
+  - Resolution: a provisional instant is superseded when the page has a received row at that instant (the page row governs). It is resolved-dropped (no factor) when the page has a received row at a later instant but none at it.
+  - Pending = scheduled routine instants with no page row and no provisional row, past or future; R(T) is unknown.
+  - Dense readings are likelihood terms only and never set any boundary.
 - `samples`: 500 probability-vector rows drawn by (survival scenario, parameter-bootstrap variant), seeded by the identity. They are not terminal one-hot draws.
 - Identity: v7 envelope. It binds the operator, the params artifact hash, the city params hash, forecast vector ids and values, the admitted-evidence digest, the **effective clock state** (gm, the pending instants, the SPECI window), the survival weight, bins and settlement semantics. Clock-dependent math cannot alias, and identical inputs at a later clock do not mint a false revision.
 
@@ -95,15 +99,18 @@ Otherwise the legacy code runs with identical arguments and gives byte-identical
   - Toronto (ECCC SWOB) is an FA route at METAR instants with value identity, so its observation model is exact identity.
   - Moscow, Lucknow, Ankara and Istanbul have METAR-integer FA routes, so their observation is the METAR interval with an earlier receipt. Their latent parameters need forecast + METAR history; if it cannot be fetched they stay legacy (reported).
 
-### G1/G2/G8 (coordinator scope addition)
+### G1/G2/G8 (coordinator scope addition, corrected)
 - G2:
   - FA registry rows declare `metar_instant_minutes`, validated at load.
-  - `_latest_authorized_day0_fact(require_settlement_channel=True)` admits an FA row only at a proven METAR instant. Non-METAR rows stay physical facts and dense likelihood terms.
+  - `_latest_authorized_day0_fact(require_settlement_channel=True)` admits an FA row only at a proven METAR instant. Rows at non-METAR instants stay physical facts and dense likelihood terms only, so they never set a floor.
 - G1:
-  - `day0_evidence_finality` gives an FA route source at a proven METAR instant MONOTONE_SETTLEMENT_BOUND; at any other instant it gives PROVISIONAL_CURRENT_SNAPSHOT.
-  - `day0_conditioning_key` takes the observation time.
-  - Dense-qualified cities route into the carrier region, so the dense law prices them.
+  - `day0_evidence_finality` returns PROVISIONAL_CURRENT_SNAPSHOT for every FA/registry route source, at any instant. MONOTONE_SETTLEMENT_BOUND stays `noaa_wrh_*` only.
+  - FA sources count as preliminary carrier sources (same AWC/Ogimet report-survival likelihood as AWC), so they reach q through the carrier region instead of being dropped as UNKNOWN into `fused_normal_direct`. Dense-qualified cities then price them with the dense law.
 - G8: `fast_extreme_supersedes_settlement` compares settlement integers R(native) under the city's SettlementSemantics.
+- Regression tests:
+  - Tokyo 760918: q(bins <= 24) drops sharply, but nothing is structurally 0 from an FA row alone. A structural 0 comes only from a page row.
+  - Tokyo 10-04 LOW: a non-METAR-instant 18.4 sets no floor.
+  - Lucknow 09-06 HIGH: an FA/AWC row of 37 at 07:30Z with page rows <= 31 leaves no structural 0 below 37, and q(31) stays well above 0.
 
 ### Authority
 - The new Day0 semantics revision (v35, both survival and resolver) is bound in `src/events/day0_authority.py`. It is process-wide, because every q_version binder uses one constant; old certificates are parsed, never restamped.
@@ -111,7 +118,7 @@ Otherwise the legacy code runs with identical arguments and gives byte-identical
 - `docs/authority/replacement_final_form_2026_06_09.md` records the law. Root AGENTS.md gets a one-line reconciliation of the fitted-residual exclusion for this Day0 scope.
 
 ### Steps (each a commit)
-1. [ ] design (this section)
+1. [x] design (this section) 4f2446661; corrected (B_A page-only, per-row retention marks)
 2. [ ] operator module + unit tests (synthetic recovery, semantic zero, DST, reduction)
 3. [ ] fit module + refit script + params artifact
 4. [ ] evidence/dispatch + builder integration + revision + allow-lists + Helsinki carrier integration test
