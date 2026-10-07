@@ -21593,3 +21593,17 @@ row/old certificate/25-point series/run/clock/full-Y early return or assertion
 changes. SCOPE is the new fixture entity's current facts; DRAIN is normal
 capture/parse/write; RESET is a new decision on the actually coherent new
 daily/hourly body. Both HIGH and LOW must execute; retain all failed XMLs.
+
+Final scene-axis BEFOREEDIT: actual HIGH/LOW2F show the canonical same-run
+daily UNIQUE intentionally ignores a second same-key capture (3/5 new rows).
+ROOT rejects changing that grammar. Only no-full_y_ready/Day0 preparation now
+constructs its FIRST normal daily facts from the later unchanged25-point
+per-model series (London ICON11.5/UKMO12; HK20). Remove the redundant attempted
+INSERT; preserve the callback/full-Y original10/12 path and every assertion.
+Direct affected callers are normal_public H/L, normal_originals H/L,
+google_resume H/L, unavailable_old_Y H/L, HKO_X_only H/L and full_Y_rollover H/L
+(the latter raises at its unchanged pre-Day0 reader). Contained/straddle and
+money call full_y_ready and retain original inputs/early return. Test source
+is the only mutation; replay/clock/source gates stay unchanged. Validate both
+normal_public twins first and the narrowly affected caller set, not a whole
+matrix. This is coherent initial synthetic input, not an online source repair.
