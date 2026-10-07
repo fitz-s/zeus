@@ -101,6 +101,7 @@ def _day0_original_body_fixture(tmp_path, monkeypatch, *, wrong_point=False, hou
     run = datetime(2026, 10, 6, 0, tzinfo=UTC)
     moment = run + timedelta(hours=4)
     city = SimpleNamespace(name="Paris", lat=48.967, lon=2.428, timezone="Europe/Paris")
+    monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {"Paris": city})
     from src.data import openmeteo_model_surface as surface
     from tests.test_openmeteo_cell_selection_and_elevation_are_product_identity import _selected_test_cell
     monkeypatch.setattr(surface, "_now", lambda: moment - timedelta(seconds=1))
@@ -134,7 +135,7 @@ def _day0_original_body_fixture(tmp_path, monkeypatch, *, wrong_point=False, hou
     meta = hourly._day0_provider_run_meta(model="icon_global", model_api_id=params["models"],
         run=run, available_at=run+timedelta(hours=1), modified_at=run+timedelta(hours=1),
         authority="run_pinned_single_runs", endpoint_mode="single_runs",
-        request_params={**params, "endpoint": SINGLE_RUNS_FORECAST_URL}, request_hash="controlled-original-request",
+        request_params={**params, "city": city.name, "endpoint": SINGLE_RUNS_FORECAST_URL}, request_hash="controlled-original-request",
         fetch_started_at=moment, fetch_finished_at=moment)
     meta[dl._BATCH_PHYSICAL_RESPONSE_KEY] = payload[dl._BATCH_PHYSICAL_RESPONSE_KEY]
     return city, run, moment, payload, meta
@@ -223,7 +224,7 @@ def test_day0_normal_producer_canonical_consumer_replays_original(tmp_path, monk
         world.conn.close()
 
 
-def _original_snapshot(world):
+def _original_snapshot(world, *, model="icon_global", city="Paris"):
     from src.data import day0_hourly_vectors as hourly
     row = world.conn.execute("SELECT vector_id,provider,endpoint,request_hash,captured_at,source_run_meta_json FROM day0_hourly_vectors").fetchone()
     meta = json.loads(row[5])
@@ -236,8 +237,8 @@ def _original_snapshot(world):
         ("fetch_started_times_by_model_utc", "fetch_started_at"), ("fetch_finished_times_by_model_utc", "fetch_finished_at"),
         ("source_run_authority_by_model", "source_run_authority"), ("endpoint_mode_by_model", "endpoint_mode")):
         fields[field] = meta[key]
-    return hourly._day0_canonical_vector_row_snapshot(world.conn, vector_id=row[0], model="icon_global", city="Paris",
-        target_date="2026-10-06", timezone_name="Europe/Paris", witness={k: {"icon_global": v} for k,v in fields.items()},
+    return hourly._day0_canonical_vector_row_snapshot(world.conn, vector_id=row[0], model=model, city=city,
+        target_date="2026-10-06", timezone_name="Europe/Paris", witness={k: {model: v} for k,v in fields.items()},
         decision_bound_utc=world.moment+timedelta(seconds=1))
 
 
@@ -358,6 +359,66 @@ def test_day0_original_same_body_new_http_event_keeps_first_possession(tmp_path,
         hourly._day0_replay_vector_original(world.conn, canonical, decision_bound_utc=later+timedelta(seconds=1), request_hash=request_hash)
         assert world.conn.execute("SELECT artifact_id,captured_at,recorded_at FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_entity_body_v1'").fetchone() == first
         assert world.conn.execute("SELECT COUNT(*) FROM raw_forecast_artifacts WHERE data_version='openmeteo_single_model_http_capture_receipt_v1'").fetchone()[0] == 2
+    finally: world.conn.close()
+
+
+def test_day0_original_same_timezone_foreign_city_label_cannot_borrow_point(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    import src.config as config
+    from src.data import day0_hourly_vectors as hourly
+    world = _normal_day0_vector_world(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {
+            "Paris": world.city, "Lyon": SimpleNamespace(name="Lyon", lat=45.726, lon=5.090, timezone="Europe/Paris")})
+        world.conn.execute("UPDATE day0_hourly_vectors SET city='Lyon'")
+        world.conn.commit()
+        row = world.conn.execute("SELECT source_run_meta_json FROM day0_hourly_vectors").fetchone()
+        vector = replace(world.vectors[0], city="Lyon", target_date="2026-10-06", source_run_meta_json=row[0])
+        with pytest.raises(ValueError, match="CITY"):
+            hourly._day0_replay_vector_original(world.conn, vector, decision_bound_utc=world.moment+timedelta(seconds=1),
+                request_hash=world.request_hash)
+        with pytest.raises(ValueError, match="CITY"):
+            _original_snapshot(world, city="Lyon")
+        assert not hourly.read_freshest_day0_hourly_vectors(city="Lyon", target_date="2026-10-06", now=world.moment+timedelta(seconds=1),
+            conn=world.conn, expected_models=["icon_global"], require_expected=True)
+    finally: world.conn.close()
+
+
+@pytest.mark.parametrize("all_labels", (False, True))
+def test_day0_original_canonical_ens_relabel_cannot_bypass_deterministic_replay(tmp_path, monkeypatch, all_labels):
+    from dataclasses import replace
+    from src.data import day0_hourly_vectors as hourly
+    world = _normal_day0_vector_world(tmp_path, monkeypatch)
+    try:
+        meta = json.loads(world.bundle[0].source_run_meta_json)
+        meta.pop("__physical_response_capture_v1")
+        model = hourly.day0_source_clock_ensemble_member_models()[0]
+        meta["model"] = model
+        meta["model_api_id"] = hourly.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL
+        meta["provider_run_id"] = f"openmeteo:{hourly.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL}:{world.run.isoformat()}"
+        params = json.loads(meta["request_params_json"])
+        params["metadata_model"] = hourly.DAY0_SOURCE_CLOCK_ENSEMBLE_METADATA_MODEL
+        if all_labels:
+            meta.pop("__physical_response_reference_v1")
+            meta["endpoint"] = hourly.OPENMETEO_ENSEMBLE_URL
+            meta["endpoint_mode"] = "ensemble_meta_stamped"
+            meta["source_run_authority"] = "provider_meta_declared"
+            params["endpoint"] = hourly.OPENMETEO_ENSEMBLE_URL
+            params["models"] = hourly.DAY0_SOURCE_CLOCK_ENSEMBLE_MODEL
+            params["run"] = world.run.isoformat()
+        meta["request_params_json"] = json.dumps(params)
+        candidate = replace(world.bundle[0], model=model, source_run_meta_json=json.dumps(meta))
+        with pytest.raises(ValueError, match="PRODUCER_FAMILY"):
+            hourly._day0_replay_vector_original(world.conn, candidate, decision_bound_utc=world.moment+timedelta(seconds=1),
+                endpoint=meta["endpoint"], request_hash=world.request_hash)
+        world.conn.execute("UPDATE day0_hourly_vectors SET model=?,endpoint=?,source_run_meta_json=?",
+            (model, meta["endpoint"], json.dumps(meta)))
+        world.conn.commit()
+        with pytest.raises(ValueError, match="PRODUCER_FAMILY"):
+            _original_snapshot(world, model=model)
+        assert not hourly.read_freshest_day0_hourly_vectors(city="Paris", target_date="2026-10-06", now=world.moment+timedelta(seconds=1),
+            conn=world.conn, expected_models=[model], require_expected=True)
     finally: world.conn.close()
 
 

@@ -3839,7 +3839,7 @@ def fetch_day0_source_clock_ensemble_vectors(
         return [], ""
 
 
-def _day0_original_entity(vector: Day0HourlyVector, meta: Mapping[str, object]) -> dict:
+def _day0_original_entity(vector: Day0HourlyVector, meta: Mapping[str, object], *, city: Any = None) -> dict:
     """Replay one deterministic provider entity, not request-coordinate echoes.
 
     SCOPE: this vector's model/location/run and consumed projection. DRAIN: a
@@ -3893,6 +3893,15 @@ def _day0_original_entity(vector: Day0HourlyVector, meta: Mapping[str, object]) 
     if len(requests) != len(payloads):
         raise ValueError("DAY0_ORIGINAL_LOCATION_COUNT_MISMATCH")
     latitude, longitude, zone = requests[index]
+    if city is None:
+        from src.config import runtime_cities_by_name
+        city = runtime_cities_by_name().get(vector.city)
+    if (city is None or str(getattr(city, "name", "")) != vector.city
+            or scope.get("city") != vector.city
+            or float(getattr(city, "lat")) != float(latitude)
+            or float(getattr(city, "lon")) != float(longitude)
+            or str(getattr(city, "timezone")) != zone):
+        raise ValueError("DAY0_ORIGINAL_CITY_REQUEST_BINDING_MISMATCH")
     if (float(latitude) != float(scope["latitude"]) or float(longitude) != float(scope["longitude"])
             or float(point["requested_latitude"]) != float(latitude)
             or float(point["requested_longitude"]) != float(longitude)
@@ -4025,10 +4034,12 @@ def _day0_replay_vector_original(conn: sqlite3.Connection, vector: Day0HourlyVec
     meta = json.loads(str(vector.source_run_meta_json or ""))
     # The existing native ENS family is not a deterministic API vector. A retained
     # deterministic descriptor cannot be relabelled as an ENS member to bypass replay.
-    if vector.immutable_run_member and "__physical_response_capture_v1" not in meta:
-        if not _day0_source_clock_ensemble_metadata_is_current(vector):
-            raise ValueError("DAY0_ORIGINAL_PRODUCER_FAMILY_MISMATCH")
-        return {}  # separate ENS run/member closure; no new qualification here
+    if vector.immutable_run_member:
+        # The legacy OM Ensemble API rows have no retained original entity
+        # closure. Labels cannot confer authority or masquerade as deterministic
+        # evidence. Native ENS remains on read_native_measurement_role's independent
+        # GRIB/member/static proof path; its source cadence is the normal DRAIN.
+        raise ValueError("DAY0_ORIGINAL_PRODUCER_FAMILY_ENSEMBLE_UNAVAILABLE")
     original = _day0_original_entity(vector, meta)
     if (provider != "openmeteo" or (endpoint is not None and endpoint != meta["endpoint"])
             or (request_hash is not None and (request_hash != meta["request_hash"]
@@ -4134,7 +4145,7 @@ def parse_openmeteo_hourly_payload(
         )
         try:
             meta = json.loads(str(source_run_meta_json or ""))
-            _day0_original_entity(vector, meta)
+            _day0_original_entity(vector, meta, city=city)
         except (KeyError, TypeError, ValueError, OSError, IndexError):
             return None
         return vector
