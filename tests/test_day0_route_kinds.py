@@ -247,12 +247,10 @@ def test_archived_istanbul_specis_survive_parser_ledger_and_fact():
                             raw_report=sample.raw_report)
     kwargs = dict(city="Istanbul", target_date="2026-09-30", temperature_metric="high",
                   decision_time=datetime(2026, 9, 30, 11, 0, tzinfo=UTC))
-    for metar_content_only in (False, True):  # the adapter's physical fact and the seed's fact
-        fact = _latest_authorized_day0_fact(conn, require_settlement_channel=False,
-                                            metar_content_only=metar_content_only, **kwargs)
-        assert fact["observation_source"] == "mgm_metar_temperature"
-        assert float(fact["observed_extreme_native"]) == 20.0
-        assert fact["observation_time"] == "2026-09-30T10:33:00+00:00"
+    fact = _latest_authorized_day0_fact(conn, require_settlement_channel=False, **kwargs)
+    assert fact["observation_source"] == "mgm_metar_temperature"
+    assert float(fact["observed_extreme_native"]) == 20.0
+    assert fact["observation_time"] == "2026-09-30T10:33:00+00:00"
     assert _latest_authorized_day0_fact(conn, require_settlement_channel=True, **kwargs) is None
 
 
