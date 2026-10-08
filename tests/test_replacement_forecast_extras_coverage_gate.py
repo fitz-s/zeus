@@ -830,6 +830,116 @@ def test_raw_rows_without_a_coherent_cycle_skip_the_cohort_proof_read(
     assert cohort_reads == [1], "a coherent raw cycle still gets the full proof read"
 
 
+# --- new-listing cohort partner (2026-10-08: p50 2.5 h listing -> first posterior) ---------
+
+_LISTING_NOW = datetime(2026, 10, 8, 4, 30, tzinfo=UTC)
+_LISTING_TARGET = "2026-10-10"
+_LISTING_ENDS = datetime(2026, 10, 20, tzinfo=UTC)
+
+
+def _listing_scope(
+    tmp_path, monkeypatch, *, city: str, scheme: tuple[str, ...],
+    held: dict[str, datetime], published: dict[str, datetime],
+    ends: dict[str, datetime] | None = None,
+):
+    """A newly listed D+2 family: the scheme's providers' held runs sit hours apart."""
+    from src.strategy.live_inference import source_clock_city_weights as weights
+
+    _serve_rows_by_columns(monkeypatch)
+    monkeypatch.setattr(
+        weights, "scheme_for_city",
+        lambda _city, *, metric: SimpleNamespace(
+            weights={model: 1.0 / len(scheme) for model in scheme}),
+    )
+    db = _current_source_clock_db(tmp_path)
+    _current_source_clock_metadata(
+        monkeypatch, published,
+        ends={**{model: _LISTING_ENDS for model in published}, **(ends or {})},
+    )
+    for model, run in held.items():
+        _current_source_clock_row(db, model, run, city=city, target_date=_LISTING_TARGET)
+    candidates: dict = {}
+    missing = _current_source_clock_missing(
+        db, decision_time=_LISTING_NOW, city=city, target_date=_LISTING_TARGET,
+        cohort_backtrack_candidates=candidates,
+    )
+    return missing, candidates
+
+
+def test_listing_without_pair_requests_the_published_nbm_run_that_pairs_with_icon(
+    tmp_path, monkeypatch,
+) -> None:
+    """Chicago 10-08: icon 00Z + ukmo 12Z held, scheme icon+NBM, no ecmwf. NBM's 00Z
+    run is already published; waiting for 06Z cost ~3 h."""
+    icon = datetime(2026, 10, 8, 0, tzinfo=UTC)
+    ukmo = datetime(2026, 10, 7, 12, tzinfo=UTC)
+    missing, candidates = _listing_scope(
+        tmp_path, monkeypatch, city="Chicago",
+        scheme=("icon_global", "ncep_nbm_conus"),
+        held={"icon_global": icon, "ukmo_global_deterministic_10km": ukmo},
+        published={
+            "icon_global": icon, "ukmo_global_deterministic_10km": ukmo,
+            "ncep_nbm_conus": datetime(2026, 10, 8, 3, tzinfo=UTC),
+            "ecmwf_ifs": datetime(2026, 10, 7, 18, tzinfo=UTC),
+        },
+        # NBM's off-grid 03Z run ends before Chicago's 10-10 evening, so the
+        # ordinary fanout never requests it for this target.
+        ends={"ncep_nbm_conus": datetime(2026, 10, 9, 15, tzinfo=UTC)},
+    )
+    assert missing == {("Chicago", "high", _LISTING_TARGET)}
+    assert candidates == {("Chicago", "high", _LISTING_TARGET): ("ncep_nbm_conus", icon)}
+
+
+def test_listing_without_pair_requests_the_older_run_that_pairs_with_the_held_one(
+    tmp_path, monkeypatch,
+) -> None:
+    """Tokyo 10-08: icon 00Z + ukmo 12Z held, scheme icon+ukmo (no ecmwf, though ecmwf
+    18Z is published). ukmo 00Z is not out yet; icon's 12Z run pairs with ukmo 12Z."""
+    icon = datetime(2026, 10, 8, 0, tzinfo=UTC)
+    ukmo = datetime(2026, 10, 7, 12, tzinfo=UTC)
+    missing, candidates = _listing_scope(
+        tmp_path, monkeypatch, city="Tokyo",
+        scheme=("icon_global", "ukmo_global_deterministic_10km"),
+        held={"icon_global": icon, "ukmo_global_deterministic_10km": ukmo},
+        published={
+            "icon_global": icon, "ukmo_global_deterministic_10km": ukmo,
+            "ecmwf_ifs": datetime(2026, 10, 8, 0, tzinfo=UTC),
+        },
+    )
+    assert missing == {("Tokyo", "high", _LISTING_TARGET)}
+    assert candidates == {("Tokyo", "high", _LISTING_TARGET): ("icon_global", ukmo)}
+
+
+def test_listing_with_a_scheme_pair_in_window_requests_no_partner(
+    tmp_path, monkeypatch,
+) -> None:
+    icon = datetime(2026, 10, 8, 0, tzinfo=UTC)
+    missing, candidates = _listing_scope(
+        tmp_path, monkeypatch, city="Tokyo",
+        scheme=("icon_global", "ukmo_global_deterministic_10km"),
+        held={"icon_global": icon, "ukmo_global_deterministic_10km": icon},
+        published={"icon_global": icon, "ukmo_global_deterministic_10km": icon},
+    )
+    assert missing == set()
+    assert candidates == {}
+
+
+def test_partner_run_that_cannot_span_the_target_day_is_not_requested(
+    tmp_path, monkeypatch,
+) -> None:
+    """ukmo's 18Z run ends ~60 h out (probed 2026-10-08): Tokyo's 10-10 local day is
+    out of reach, so the request would buy an all-null tail."""
+    icon = datetime(2026, 10, 7, 18, tzinfo=UTC)
+    missing, candidates = _listing_scope(
+        tmp_path, monkeypatch, city="Tokyo",
+        scheme=("icon_global", "ukmo_global_deterministic_10km"),
+        held={"icon_global": icon},
+        published={"icon_global": icon, "ukmo_global_deterministic_10km": icon},
+    )
+    assert missing == {("Tokyo", "high", _LISTING_TARGET)}
+    assert candidates == {}
+
+
 def _held_physical_scan_db(tmp_path: Path) -> Path:
     from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
 

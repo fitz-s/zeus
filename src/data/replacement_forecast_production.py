@@ -3781,6 +3781,77 @@ _EXTRAS_FIXPOINT_HEALTH_JOB = "bayes_precision_fusion_capture"
 _COHORT_STANDARD_ARCHIVE_MODELS = frozenset({
     "ecmwf_ifs", "icon_global", "icon_eu", "ukmo_global_deterministic_10km",
 })
+# Models whose already-published 00/06/12/18Z run may be requested as the missing
+# cohort partner. ncep_nbm_conus is hourly, but its grid-hour archive answered HTTP
+# 200 with a 120 h horizon on 2026-10-08 while an off-grid hour (01Z) answered 400;
+# only grid hours are ever asked.
+_COHORT_PARTNER_ARCHIVE_MODELS = _COHORT_STANDARD_ARCHIVE_MODELS | {"ncep_nbm_conus"}
+# Probed 2026-10-08: the 06/18Z ukmo runs end 60 h out, every other run reaches 120 h.
+_SHORT_SYNOPTIC_HORIZON_H = {"ukmo_global_deterministic_10km": 60}
+
+
+def _cohort_partner_candidate(
+    *,
+    scheme_models: set[str],
+    held: Mapping[str, Sequence[datetime]],
+    published: Mapping[str, datetime],
+    now: datetime,
+    last_needed: datetime,
+    window_s: float,
+    family_of: Callable[[str], str],
+    eligible_at: Callable[[str, datetime], bool],
+) -> tuple[str, datetime] | None:
+    """Newest already-published scheme run that completes a two-family cohort.
+
+    ``held`` maps model -> single_runs cycles held for the scope, ``published``
+    model -> its latest publicly usable target run, ``eligible_at`` whether a model
+    may serve the lead a run of that cycle carries. Only ``scheme_models`` take part.
+    None when a scheme pair is already held (a fetch would be redundant) or no
+    published grid run lies within ``window_s`` of a held run of another family.
+    """
+    from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
+        _model_publishes_cycle,
+    )
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        cycle_age_outside_bound,
+    )
+
+    live = {
+        model: {run for run in runs if not cycle_age_outside_bound(now, run)}
+        for model, runs in held.items() if model in scheme_models
+    }
+    if any(
+        len({family_of(model) for model, runs in live.items()
+             if any(0.0 <= (anchor - run).total_seconds() <= window_s for run in runs)}) >= 2
+        for anchor in {run for runs in live.values() for run in runs}
+    ):
+        return None
+    best: tuple[tuple[datetime, datetime, str], tuple[str, datetime]] | None = None
+    for model, runs in live.items():
+        for run in runs:
+            grid = run.replace(hour=run.hour // 6 * 6, minute=0, second=0, microsecond=0)
+            for partner in scheme_models & _COHORT_PARTNER_ARCHIVE_MODELS & published.keys():
+                if family_of(partner) == family_of(model):
+                    continue
+                for cycle in (grid, grid + timedelta(hours=6)):
+                    horizon_h = (
+                        _SHORT_SYNOPTIC_HORIZON_H.get(partner, 120)
+                        if cycle.hour in (6, 18) else 120
+                    )
+                    if (
+                        abs((cycle - run).total_seconds()) > window_s
+                        or cycle > published[partner]
+                        or cycle in live.get(partner, ())
+                        or cycle_age_outside_bound(now, cycle)
+                        or not _model_publishes_cycle(partner, cycle.hour)
+                        or not eligible_at(partner, cycle)
+                        or cycle + timedelta(hours=horizon_h) < last_needed
+                    ):
+                        continue
+                    key = (max(cycle, run), cycle, partner)
+                    if best is None or key > best[0]:
+                        best = (key, (partner, cycle))
+    return None if best is None else best[1]
 
 
 def _extras_coverage_missing(
@@ -3844,6 +3915,9 @@ def _extras_coverage_missing_pass(
             current_value_serving_schema,
             read_freshest_coherent_instrument_values,
             physical_capture_debt_reason,
+        )
+        from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+            LOCALDAY_SPAN_LATE_HOUR,
         )
         from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
             cycle_age_outside_bound,
@@ -4049,10 +4123,65 @@ def _extras_coverage_missing_pass(
                         if model not in served_models),None)
                     if repair is not None:
                         physical_recovery_candidates.setdefault((city,target_date,metric),repair)
+                # Raw single_runs cycles held for this scope: a superset of what
+                # is served. They bound the coherent-cohort proof read below and
+                # name the held runs a cohort partner must pair with.
+                raw_cycles: dict[str, list[datetime]] = {}
+                raw_all: dict[str, list[datetime]] = {}
+                for raw_model, raw_cycle in conn.execute(
+                    "SELECT DISTINCT model, source_cycle_time FROM raw_model_forecasts"
+                    " WHERE endpoint='single_runs' AND city=? AND target_date=?"
+                    " AND metric=? AND coverage_status='COVERED'",
+                    (city, target_date, metric),
+                ):
+                    try:
+                        raw_run = datetime.fromisoformat(str(raw_cycle).replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if raw_run.utcoffset() is None:
+                        continue
+                    raw_all.setdefault(str(raw_model), []).append(raw_run)
+                    if raw_model in expected:
+                        raw_cycles.setdefault(str(raw_model), []).append(raw_run)
+                window_s = BETWEEN_COHORT_WINDOW_HOURS * 3600.0
+
+                def request_partner() -> None:
+                    # A scope that cannot pair would otherwise wait for the next
+                    # release (a new listing holds one run per provider, hours
+                    # apart). The scheme's own already-published run within the
+                    # window of a held run completes the cohort now.
+                    if cohort_backtrack_candidates is None or scheme is None:
+                        return
+                    partner = _cohort_partner_candidate(
+                        scheme_models=set(scheme.weights),
+                        held=raw_all,
+                        # Latest publicly usable run per model: the partner is a
+                        # grid-hour archive run at or before it, so the latest
+                        # run's own horizon (an off-grid hourly NBM run ends
+                        # early) does not gate it.
+                        published={model: req.run for model, req in requests.items()},
+                        now=now,
+                        last_needed=datetime.combine(
+                            _date.fromisoformat(target_date),
+                            datetime.min.time().replace(hour=LOCALDAY_SPAN_LATE_HOUR),
+                            tzinfo=ZoneInfo(str(city_cfg.timezone)),
+                        ),
+                        window_s=window_s,
+                        family_of=provider_family_for_source,
+                        # The stored row carries the lead from its own cycle date.
+                        eligible_at=lambda model, cycle: source_physically_eligible(
+                            model, lat=float(city_cfg.lat), lon=float(city_cfg.lon),
+                            lead_days=max(0, (_date.fromisoformat(target_date) - cycle.date()).days),
+                        ),
+                    )
+                    if partner is not None:
+                        cohort_backtrack_candidates[(city, metric, target_date)] = partner
+
                 # A physically possible, requestable preferred source remains
                 # capture debt even when a different family pair can fall back.
                 # An impossible preferred regional must not block the fallback.
                 if preferred - current_values.keys():
+                    request_partner()
                     continue
                 if len({provider_family_for_source(model) for model in preferred}) >= 2:
                     selected_models = preferred
@@ -4067,27 +4196,12 @@ def _extras_coverage_missing_pass(
                     for model in current_values if model in selected_models
                 }
                 if len(current_families) < 2:
+                    request_partner()
                     continue
-                # Necessary condition on the raw rows (a superset of what is
-                # served): some cycle holds every preferred source and two
-                # families within the cohort window. Without it no coherent
-                # cohort exists, so the second full proof read is skipped.
-                raw_cycles: dict[str, list[datetime]] = {}
-                for raw_model, raw_cycle in conn.execute(
-                    "SELECT DISTINCT model, source_cycle_time FROM raw_model_forecasts"
-                    " WHERE endpoint='single_runs' AND city=? AND target_date=?"
-                    " AND metric=? AND coverage_status='COVERED'",
-                    (city, target_date, metric),
-                ):
-                    if raw_model not in expected:
-                        continue
-                    try:
-                        raw_run = datetime.fromisoformat(str(raw_cycle).replace("Z", "+00:00"))
-                    except ValueError:
-                        continue
-                    if raw_run.utcoffset() is not None:
-                        raw_cycles.setdefault(str(raw_model), []).append(raw_run)
-                window_s = BETWEEN_COHORT_WINDOW_HOURS * 3600.0
+                # Necessary condition on the raw rows: some cycle holds every
+                # preferred source and two families within the cohort window.
+                # Without it no coherent cohort exists, so the second full proof
+                # read is skipped.
                 raw_coherent = any(
                     preferred <= (members := {
                         model for model, runs in raw_cycles.items()
@@ -4141,6 +4255,8 @@ def _extras_coverage_missing_pass(
                                 model, older
                             )
                             break
+                    else:
+                        request_partner()
         finally:
             conn.close()
         return (need - have, len(need))
