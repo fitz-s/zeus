@@ -216,3 +216,34 @@ Stopped before D1 per brief: the D2(i) law fork needs a coordinator decision (ho
 - **G9 (out of scope here):** the °F page swaps its tenth-°C conversion for the whole-°C conversion within about 20 min, 31 / 6,960 instants, and once moved a settled LOW (KAUS 10-02). Nothing in this branch changes noaa_wrh °F finality or the legacy boundary; the dense operator is °C only.
 - D2 implementation gets the refinements in the coordinator message: retention per station × report kind; a removal mixture of outage vs isolated (plausible vs gross); a shared-UTC-interval outage latent Z; a measured corrected branch; a posterior-predictive visibility a(lag) pooled over °C stations with exact 180-min fetch coverage.
 - Order: D1 → D3/D4 → D2 implementation → D5 → D6 → D7. Stop if D3 needs a protected-file seam.
+
+## D1 typed route kinds (2026-10-08; 5dc27c95b, f80a7b7dc)
+- `RouteKind` on every registry route (src/data/physical_current_sources.py):
+  - RESOLVER_PAGE: canonical_resolver rows (noaa_wrh, wu_station_history).
+  - NATIVE_REPORT: proven fast-admission mgm_metar (LTFM, LTAC), imd_olbs_metar (VILK), metaviatelecom_metar (UUWW).
+  - INSTRUMENT_PROXY: jma_amedas (RJTT), eccc_swob (CYYZ).
+  - PHYSICAL: everything else (FMI, DWD, IMGW, KNMI, WU current).
+- `metar_instant_minutes` and `settlement_instant` are gone. The kinds make them redundant: a native report counts at every report instant (routine or SPECI), and a proxy counts at none.
+- Day0 fact law (`_latest_authorized_day0_fact`):
+  - The settlement channel is the resolver page only.
+  - A native report is a physical channel under AWC's unit and margin law. Its value must be the report integer.
+  - A proxy is no fact at any instant: not the settlement fact, not the physical frontier.
+  - PHYSICAL rows stay physical facts, as on live.
+- Predicate membership: `day0_is_noaa_preliminary_source` gains native routes only, through `day0_is_native_report_source(source, station=...)` (registry kind check, station-bound). The proxy broadening is retracted.
+- Native value identity with AWC, same report (read-only WORLD): MGM 285/285 and 318/318, metaviatelecom 61/61, IMD 301/305. The 4 IMD differences each equal another AWC version of that report.
+- Named exceptions to legacy byte-identity (intentional corrections):
+  - G1: the seed's physical fact is METAR content only (`metar_content_only=True` in seed discovery). A physical-only station (FMI) never conditions a seed. Test: `test_g1_physical_only_dense_station_never_conditions_a_seed`.
+  - G8: `fast_extreme_supersedes_settlement(..., city=)` compares settlement integers. Test: `test_g8_supersession_compares_settlement_integers`.
+  - D1 itself: proxy rows leave the Day0 physical fact (live used them, e.g. Tokyo 10-04 LOW 18.4). Native rows take AWC's margin law (live took them raw). Test: `test_g2_instrument_proxy_is_never_a_day0_fact`.
+- Regressions (tests/test_day0_route_kinds.py): 15 tests; 10 fail on the pre-D1 head 523654b81.
+  - The consult's Tokyo case (JMA 24.6, page 24.6, AWC 25) binds at the real `_global_day0_execution_payload` for ENTRY and HELD.
+  - Six cities: the seed's conditioning binds at the adapter for ENTRY and HELD. A plateau clock advance binds HELD and refuses ENTRY, as for AWC.
+  - Archived LTFM SPECIs 300214Z/300302Z/301033Z go parser → ledger → fact = 20 at 10:33Z, for both seed and adapter.
+  - Materialization with no current-state print and no hourly vectors: native-sourced requests end exactly as AWC (`DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING`, carrier extreme 21.0). Proxy-sourced requests stay outside the carrier region (`..._SOURCE_INVALID`, as on live).
+- Failure-set diff, same whole modules (route_kinds, dense integration, dense state space, station adapters, current_target_plan, seed_discovery):
+  - head: 53 failed / 280 passed.
+  - base b452210d5 (current_target_plan + seed_discovery): 53 failed / 77 passed.
+  - Same 53 ids, pre-existing: `MODEL_SURFACE_UNSUPPORTED` fixtures, and HKO seed fixtures lacking `city.timezone`.
+- Residual:
+  - An ENTRY 15-min fast-observation staleness gate keys on the literal `aviationweather_metar` in the protected adapter (`_day0_replacement_conditioning`), so a native-sourced conditioning does not get that gate.
+  - A native report reaches entry only through the carrier/survival path. The protected file is unchanged.
