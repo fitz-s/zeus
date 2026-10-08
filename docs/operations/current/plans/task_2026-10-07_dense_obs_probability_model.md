@@ -247,3 +247,23 @@ Stopped before D1 per brief: the D2(i) law fork needs a coordinator decision (ho
 - Residual:
   - An ENTRY 15-min fast-observation staleness gate keys on the literal `aviationweather_metar` in the protected adapter (`_day0_replacement_conditioning`), so a native-sourced conditioning does not get that gate.
   - A native report reaches entry only through the carrier/survival path. The protected file is unchanged.
+
+## D3/D4 seam verification (2026-10-08) — STOPPED: protected-file seam
+D3 requires a new decision to evaluate at the carrier's sealed probability cutoff. Explicit V2/V3 must run legacy, and explicit DENSE must replay from sealed evidence. What the protected adapter (`src/engine/event_reactor_adapter.py`, read-only) actually passes:
+- Selection (new decision) and replay share one input set. Every adapter call reaches `build_day0_remaining_probability_carrier` with the clock and operator below, and no field says "select" or "replay":
+  - Strict replay `_day0_remaining_p_raw_vector` (~46826): reached from the held direct path at ~45919 and from `_snapshot_p_raw` at ~46752, both with the caller's `decision_time`. Identity inputs carry `decision_time_utc=decision_time` (47134). Operator is the persisted `_edli_day0_probability_operator` (47204). The persisted `_edli_day0_remaining_carrier_probability_cutoff_utc` is read only to check cutoff ≤ decision (47054–47066). It is never passed to the builder.
+  - Decision-time rebuild `_rebuild_decision_time_day0_carrier` (48728): `cutoff = decision_time` (48892). Operator is `None` only with resolver_terminal, else explicit V3/V2 (`final_values_native` decides). Callers are ENTRY current path (50540), held current bundle (50556), held shared current path (50573) and held A' (49051). The cutoff is written into the payload (49004).
+  - The materializer writer (`_day0_noaa_preliminary_carrier`, not protected) passes no operator and `decision_time_utc=computed_at`.
+- Consequences against D3:
+  1. "Dense dispatch only when operator is None or DENSE; explicit V2/V3 runs legacy." Every adapter rebuild passes explicit V2/V3. Under that rule the dense law would never serve a live adapter decision; it would serve the materializer posterior only. Strict replay of a dense certificate passes DENSE, which is fine. The adapter's own fresh ENTRY/held q, however, is always V2/V3: the protected file chooses the operator, and no typed input says "dense allowed".
+  2. "Evaluate at the carrier's sealed cutoff." The adapter rebuild sets the cutoff to its own decision_time. Strict replay passes decision_time and keeps the sealed cutoff private. The builder cannot tell a new decision (cutoff = now) from a replay (cutoff = sealed) without inferring purpose from the clock, which is the heuristic the brief forbids.
+  3. "Seal admitted evidence into the carrier so replay needs no DB read." The builder can return sealed evidence in the carrier (`dense_evidence`). But strict replay passes no persisted carrier fields to the builder: only future/final extremes, boundary, bins, identity_inputs and operator. So replay cannot consume sealed evidence without a new builder input from the protected caller.
+- What exists without a protected edit:
+  - The materializer can select dense (operator None) and seal evidence into `day0_preliminary_report_survival_likelihood.dense_evidence`.
+  - Strict replay of that certificate (operator = DENSE) still re-reads the DB, at the caller's decision_time.
+  - The adapter rebuild for ENTRY/held always overwrites q with V2/V3.
+- Minimal typed seam needed in the protected adapter. Either:
+  - (a) pass a typed evaluation purpose plus the sealed dense evidence into the builder on strict replay; or
+  - (b) pass `operator=None` (dense-eligible) on rebuild together with the sealed cutoff.
+  Both need an edit to `event_reactor_adapter.py`.
+- D4 (one prepared dense request deciding seed fast-tail suppression, lag detection and dispatch) does not need the protected file. It is held because its dispatch half depends on the D3 decision above.
