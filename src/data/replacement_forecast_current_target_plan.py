@@ -2017,6 +2017,18 @@ def _day0_observation_lag_reason(
         if served_at.tzinfo is None:
             served_at = served_at.replace(tzinfo=timezone.utc)
         served_at = served_at.astimezone(timezone.utc)
+    from src.events.day0_authority import day0_is_retired_fact_source
+
+    if isinstance(conditioning, Mapping) and day0_is_retired_fact_source(
+        conditioning.get("source")
+    ):
+        # The serving posterior names a source the fact law retired; no clock
+        # comparison can make it current again (no page row: page <= proxy).
+        return (
+            "basis=day0_retired_fact_source:"
+            f"posterior_source={str(conditioning.get('source') or '').strip().lower()}:"
+            f"posterior_observation_time={served_at.isoformat() if served_at else 'missing'}"
+        )
     fact = _latest_authorized_day0_fact(
         conn,
         city=city,

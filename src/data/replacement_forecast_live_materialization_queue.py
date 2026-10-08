@@ -2282,6 +2282,32 @@ def _settlement_seed_retires_fast_tail(
     )
 
 
+def _fact_seed_retires_retired_source(
+    seed: Mapping[str, object],
+    conditioning: Mapping[str, object] | None,
+) -> bool:
+    """Whether a Day0-fact seed replaces a posterior conditioned on a retired source.
+
+    The typed retirement witness: the incumbent's conditioning source is a route
+    the fact law excludes (``day0_is_retired_fact_source``) and the seed's source
+    is not.  The retired clock (JMA every 10 min) then ranks nothing: a canonical
+    METAR seed observed at 06:30 replaces JMA conditioning observed at 06:44.
+    Only the Day0 observation clock yields; the cycle checks around it and every
+    same-source or fact-to-fact ordering stand.
+    """
+    if not isinstance(conditioning, Mapping):
+        return False
+    from src.events.day0_authority import day0_is_retired_fact_source
+
+    return (
+        str(conditioning.get("metric") or "").strip().lower()
+        == str(seed.get("temperature_metric") or "").strip().lower()
+        and day0_is_retired_fact_source(conditioning.get("source"))
+        and bool(str(seed.get("day0_observed_extreme_source") or "").strip())
+        and not day0_is_retired_fact_source(seed.get("day0_observed_extreme_source"))
+    )
+
+
 def _seed_source_cycle_boundary(
     *,
     forecast_db: Path | str | None,
@@ -2425,6 +2451,7 @@ def _seed_source_cycle_boundary(
                     or same_clock_older_correction
                 )
                 and not _settlement_seed_retires_fast_tail(seed, conditioning)
+                and not _fact_seed_retires_retired_source(seed, conditioning)
             ):
                 return "current_day0_observation", current_observed_at.isoformat()
     if (
@@ -3015,6 +3042,9 @@ _REQUEST_EXPIRED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_EXPIRED"
 _REQUEST_TARGET_DAY_ENDED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TARGET_LOCAL_DAY_ENDED"
 )
+_REQUEST_DAY0_SOURCE_RETIRED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_DAY0_SOURCE_RETIRED"
+)
 
 
 def _retirement_has_current_consumer(scope: tuple[str, str, str]) -> bool:
@@ -3102,6 +3132,14 @@ def _request_contract_lapse_reason(
     scope = _request_family_scope(payload)
     if scope is None:
         return None
+    from src.events.day0_authority import day0_is_retired_fact_source
+
+    if day0_is_retired_fact_source(payload.get("day0_observed_extreme_source")):
+        # The request conditions on a source the Day0 fact law retired (JMA,
+        # SWOB, FMI, ...): materializing it writes a posterior every consumer
+        # refuses. Retired whatever the exposure; the seed producers re-read
+        # the fact law, so the family's next request carries METAR content.
+        return _REQUEST_DAY0_SOURCE_RETIRED_REASON
     expires_at = _parse_utc_iso(payload.get("expires_at"))
     reason = None
     if expires_at is not None and expires_at <= now_utc:
