@@ -3,9 +3,8 @@
 # Lifecycle: created=2026-10-07; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Pin the dense state-space dispatch inside build_day0_remaining_probability_carrier
 #   (Helsinki fixture rows), legacy byte-identity when dense is absent/stale/unqualified, receipt
-#   gating, the clock-bound identity, and the D1/G8 rules (native report routes are provisional METAR
-#   content, instrument proxies are no Day0 fact, neither is a semantic certificate; settlement-integer
-#   supersession).
+#   gating, the clock-bound identity and the page-only semantic certificate.  Route kinds and G1/G2/G8
+#   live in tests/test_day0_fast_route_corrections.py and tests/test_day0_route_kinds.py.
 # Reuse: Private SQLite fixtures and a temporary params artifact; no live DB.
 from __future__ import annotations
 
@@ -245,71 +244,7 @@ def test_page_row_is_the_semantic_certificate(artifact, conn, monkeypatch):
     assert all(q[b] == 0.0 for b in BINS if b[1] is not None and b[1] < 15)
 
 
-# ---------------------------------------------------------------- G1 / G2 / G8
-
-def test_d1_native_reports_are_provisional_proxies_are_not_metar_content():
-    """D1: native report routes join the AWC/Ogimet provisional family; instrument proxies never do."""
-    from src.events.day0_authority import (
-        DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_PROVISIONAL_CURRENT_SNAPSHOT, DAY0_UNKNOWN_FINALITY,
-        day0_evidence_finality, day0_is_carrier_source, day0_is_native_report_source,
-        day0_is_noaa_preliminary_source,
-    )
-
-    for channel, station in (("mgm_metar_temperature", "LTFM"), ("imd_olbs_metar_temperature", "VILK"),
-                             ("metaviatelecom_metar_temperature", "UUWW")):
-        assert day0_evidence_finality({"settlement_source": channel}) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
-        assert day0_evidence_finality({"settlement_source": channel,
-                                       "evidence_finality": DAY0_MONOTONE_SETTLEMENT_BOUND}) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
-        assert day0_is_noaa_preliminary_source(channel) and day0_is_carrier_source(channel)
-        assert day0_is_native_report_source(channel, station=station)
-        assert not day0_is_native_report_source(channel, station="RJTT")
-    for channel in ("jma_amedas_temperature", "eccc_swob_temperature", "fmi_airport_temperature"):
-        assert not day0_is_noaa_preliminary_source(channel) and not day0_is_carrier_source(channel)
-        assert not day0_is_native_report_source(channel)
-        assert day0_evidence_finality({"settlement_source": channel}) == DAY0_UNKNOWN_FINALITY
-    assert day0_evidence_finality({"settlement_source": "noaa_wrh_rjtt"}) == DAY0_MONOTONE_SETTLEMENT_BOUND
-
-
-def test_d1_route_kinds_are_typed_by_provider():
-    from src.data.physical_current_sources import RouteKind, load_physical_current_sources
-
-    kinds = {(s.provider, s.station_id): s.kind for s in load_physical_current_sources()[0]}
-    assert {k for k, v in kinds.items() if v is RouteKind.NATIVE_REPORT} == {
-        ("mgm_metar", "LTFM"), ("mgm_metar", "LTAC"), ("imd_olbs_metar", "VILK"), ("metaviatelecom_metar", "UUWW")}
-    assert {k for k, v in kinds.items() if v is RouteKind.INSTRUMENT_PROXY} == {
-        ("jma_amedas", "RJTT"), ("eccc_swob", "CYYZ")}
-    assert kinds[("fmi_wfs", "EFHK")] is RouteKind.PHYSICAL
-    assert kinds[("noaa_wrh", "RJTT")] is RouteKind.RESOLVER_PAGE
-
-
-def _tokyo_city():
-    return SimpleNamespace(name="Tokyo", timezone="Asia/Tokyo", wu_station="RJTT", settlement_source_type="noaa",
-                           settlement_unit="C")
-
-
-def _jma_raw(at: datetime, value: float) -> str:
-    return json.dumps({"observed_at": at.isoformat(), "provider_station": "44166", "source_channel": "jma_amedas_temperature",
-                       "station_id": "RJTT", "unit": "C", "value_native": value})
-
-
-def test_g1_physical_only_dense_station_never_conditions_a_seed(conn, monkeypatch):
-    """Helsinki: FMI 11.2 beat AWC 11.0 in the physical MAX and became an UNKNOWN-finality source
-    (11 fused_normal_direct posteriors).  G1 named exception to byte-identity: the seed's fact is METAR
-    content; the adapter's physical fact is unchanged from live."""
-    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
-
-    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Helsinki": CITY})
-    append_print(conn, city="Helsinki", station_id="EFHK", source_channel="fmi_airport_temperature",
-                 publish_ts_utc=local(12, 10).isoformat(), value_native=19.4, unit="C",
-                 fetched_at_utc=local(12, 12).isoformat(), raw_report=fmi_raw(local(12, 10), 19.4))
-    kwargs = dict(city="Helsinki", target_date="2026-10-07", temperature_metric="high",
-                  decision_time=local(12, 30))
-    physical = _latest_authorized_day0_fact(conn, require_settlement_channel=False, **kwargs)
-    assert physical["observation_source"] == "fmi_airport_temperature"
-    metar = _latest_authorized_day0_fact(conn, require_settlement_channel=False, metar_content_only=True, **kwargs)
-    assert metar["observation_source"] == "aviationweather_metar"
-    assert float(metar["observed_extreme_native"]) < 19.4
-
+# ---------------------------------------------------------------- fast tail
 
 def test_dense_served_family_skips_the_fast_tail(artifact, conn):
     assert evidence.dense_serves(conn, city="Helsinki", metric="high", target_date="2026-10-07", decision=local(13, 5))
@@ -317,43 +252,6 @@ def test_dense_served_family_skips_the_fast_tail(artifact, conn):
                                      decision=local(15, 0))  # FMI rows end 13:00: stale
     assert not evidence.dense_serves(conn, city="Helsinki", metric="high", target_date="2026-10-05",
                                      decision=local(13, 5))  # not after training
-
-
-def test_g2_instrument_proxy_is_never_a_day0_fact(monkeypatch):
-    """Tokyo 2026-10-04 LOW: JMA 18.4 at 20:40Z (settled 19).  A proxy row is no Day0 fact at any instant,
-    on- or off-METAR-minute: neither the settlement fact, the adapter's physical frontier, nor a seed."""
-    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
-
-    city = _tokyo_city()
-    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Tokyo": city})
-    monkeypatch.setattr("src.config.cities_by_name", {"Tokyo": city}, raising=False)
-    c = sqlite3.connect(":memory:")
-    c.row_factory = sqlite3.Row
-    ensure_table(c)
-    for at, v in ((datetime(2026, 10, 4, 20, 30, tzinfo=UTC), 18.9), (datetime(2026, 10, 4, 20, 40, tzinfo=UTC), 18.4)):
-        append_print(c, city="Tokyo", station_id="RJTT", source_channel="jma_amedas_temperature",
-                     publish_ts_utc=at.isoformat(), value_native=v, unit="C",
-                     fetched_at_utc=(at + timedelta(minutes=7)).isoformat(), raw_report=_jma_raw(at, v))
-    kwargs = dict(city="Tokyo", target_date="2026-10-05", temperature_metric="low",
-                  decision_time=datetime(2026, 10, 4, 21, 0, tzinfo=UTC))
-    assert _latest_authorized_day0_fact(c, require_settlement_channel=True, **kwargs) is None
-    assert _latest_authorized_day0_fact(c, require_settlement_channel=False, **kwargs) is None
-    assert _latest_authorized_day0_fact(c, require_settlement_channel=False, metar_content_only=True,
-                                        **kwargs) is None
-
-
-def test_g8_supersession_compares_settlement_integers():
-    from src.data.day0_fast_obs import fast_extreme_supersedes_settlement
-
-    tokyo = _tokyo_city()
-    # Tokyo 2026-10-07 05:00Z: route 24.6 vs AWC 25.0 at the same instant: both settle 25.
-    assert not fast_extreme_supersedes_settlement(metric="high", fast_extreme_c=25.0, settlement_extreme_c=24.6, city=tokyo)
-    assert fast_extreme_supersedes_settlement(metric="high", fast_extreme_c=26.0, settlement_extreme_c=24.6, city=tokyo)
-    # Toronto 05:00Z: SWOB 12.5 vs AWC 13.0: both settle 13 (half-up).
-    assert not fast_extreme_supersedes_settlement(metric="high", fast_extreme_c=13.0, settlement_extreme_c=12.5, city=tokyo)
-    assert not fast_extreme_supersedes_settlement(metric="low", fast_extreme_c=12.6, settlement_extreme_c=13.4, city=tokyo)
-    # Legacy raw comparison is unchanged without a city.
-    assert fast_extreme_supersedes_settlement(metric="high", fast_extreme_c=25.0, settlement_extreme_c=24.6)
 
 
 # ---------------------------------------------------------------- live-shaped regressions

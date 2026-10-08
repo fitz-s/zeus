@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-07 (G5 resolver rival; typed route kinds, D1)
+# Last reused/audited: 2026-10-08 (G5 resolver rival; typed route kinds)
 """Station-bound current observations and their settlement roles.
 
 Adapters own fixed endpoints. Configuration cannot inject URLs, SQL, or code.
@@ -97,7 +97,6 @@ class PhysicalCurrentSource:
     def current_path(self) -> str:
         """The comparator a fast admission must beat: a resolver route IS ``resolver``."""
         return "resolver" if self.role is SourceRole.CANONICAL_RESOLVER else self.provider
-
 
 
 def _counts_proven(proof: Any) -> bool:

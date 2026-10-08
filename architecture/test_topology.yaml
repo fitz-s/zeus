@@ -28,6 +28,8 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_day0_route_kinds.py: {created: "2026-10-07", last_used: "2026-10-08", note: "Typed fast-route kinds through the real seed, adapter binding (ENTRY/HELD, six cities, Tokyo JMA/AWC case), archived LTFM SPECIs and materializer routing parity."}
+    tests/test_day0_fast_route_corrections.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Route kinds by provider, native finality, proxies never a Day0 fact (G2), physical-only never seeds (G1), settlement-integer supersession (G8)."}
     tests/test_day0_dense_state_space.py: {created: "2026-10-07", last_used: "2026-10-07", note: "Dense state-space operator: resampling Monte Carlo oracle (HIGH/LOW), cell refinement, independent-instant closed form, page-only semantic zeros, provisional retention marks (Lucknow 09-06, Tokyo 760918 shapes), dense evidence-only, DST day lengths, negative half-up."}
     tests/test_day0_dense_carrier_integration.py: {created: "2026-10-07", last_used: "2026-10-07", note: "Carrier dispatch to the dense law on Helsinki fixture rows, byte-identical legacy when absent/stale/unqualified, receipt gating at the state print's first receipt, clock-bound identity, page certificate, G1 provisional FA finality, G2 METAR-instant settlement facts, G8 settlement-integer supersession."}
     tests/test_current_temperature_delivery.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}

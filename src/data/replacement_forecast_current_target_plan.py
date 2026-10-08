@@ -936,7 +936,6 @@ def _latest_authorized_day0_fact(
     temperature_metric: str,
     decision_time: datetime,
     require_settlement_channel: bool = False,
-    metar_content_only: bool = False,
     ) -> dict[str, object] | None:
     """Latest Day0 fact, optionally restricted to the settlement channel.
 
@@ -944,15 +943,16 @@ def _latest_authorized_day0_fact(
     prediction-market payoff is defined by the declared settlement channel.
     They may advance refresh/redecision; they cannot alone create exact
     absorbing certainty when ``require_settlement_channel`` is true.
-    Registry routes by kind (D1).  A resolver route is the settlement product.
-    A native report route (parsed METAR/SPECI, every report, routine or SPECI) is
-    AWC-equivalent content: a physical channel under AWC's unit and margin law.
-    An instrument proxy (JMA, SWOB 0.1 C) is no fact at any instant: as the
-    adapter's physical frontier it would bind in place of the METAR it is not
-    (Tokyo JMA 24.6 vs AWC 25); it reaches belief through the current state and
-    the dense likelihood.  A physical-only station (FMI) stays physical evidence,
-    never a settlement fact.  ``metar_content_only`` drops it as well, so it never
-    conditions a seed (G1, a named exception to byte-identity).
+    Day0 facts are METAR content.  A registry resolver route is the settlement
+    product.  A native report route (parsed METAR/SPECI, every report, routine or
+    SPECI) is AWC-equivalent content: a physical channel under AWC's unit and
+    margin law.  A station instrument (a 0.1 C proxy such as JMA or SWOB, or a
+    physical-only station such as FMI) is no fact at any instant: as the
+    adapter's physical frontier it binds in place of the METAR it is not (Tokyo
+    JMA 24.6 vs AWC 25), and a seed conditioned on it either loses the Day0
+    boundary or fails the adapter's binding (Helsinki FMI 11.2 vs AWC 11).  The
+    seed and the adapter read this one law.  Instruments reach belief through
+    the current-state path.
     """
 
     metric = str(temperature_metric or "").strip().lower()
@@ -1466,18 +1466,13 @@ def _latest_authorized_day0_fact(
                     # JSON envelope and carry raw METAR text. Their native unit,
                     # station and view were validated by the canonical writer.
                     if route.provider != "noaa_wrh"
-                    and route.kind is not RouteKind.INSTRUMENT_PROXY
+                    and route.kind in (RouteKind.RESOLVER_PAGE, RouteKind.NATIVE_REPORT)
                 }
             except Exception:
                 # Optional fast-source registry failure cannot remove the base
                 # settlement/physical channels or block a previously servable belief.
                 station_routes_by_channel = {}
-            metar_kinds = (RouteKind.RESOLVER_PAGE, RouteKind.NATIVE_REPORT)
-            physical_channels.update(
-                channel
-                for channel, route in station_routes_by_channel.items()
-                if route.kind in metar_kinds or not metar_content_only
-            )
+            physical_channels.update(station_routes_by_channel)
             settlement_channels.update(
                 channel
                 for channel, route in station_routes_by_channel.items()
@@ -2004,11 +1999,7 @@ def _day0_observation_lag_reason(
             settlement_unit = str(fact["unit"])
         except (KeyError, TypeError, ValueError):
             return None
-    from src.data.day0_dense_evidence import dense_serves
-
-    # A dense-served family never takes the fast tail (same rule as seed discovery).
-    fast = None if dense_serves(conn, city=city, metric=temperature_metric, target_date=target_date,
-                                decision=decision_time) else latest_fast_station_conditioning(
+    fast = latest_fast_station_conditioning(
         conn,
         city=city,
         target_date=target_date,
