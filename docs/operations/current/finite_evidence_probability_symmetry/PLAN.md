@@ -22542,3 +22542,13 @@ corrected-source entry eligibility. Full native alternate-token execution,
 real venue cash/fees, deployed scheduler performance and broad repository CI
 remain separate deployment-review evidence gaps. This is a tested offline
 candidate for the existing draft PR, not authority to merge, deploy or fund.
+
+Hosted candidate 84c956b2 exposed one additional cache-compatibility regression:
+the current-source wrapper copied an unchanged cached ineligible receipt.
+The exact existing test passes on untouched upstream843 and fails on bfbe1cd
+at object identity, while preparation still runs only once. Preserve the
+original receipt when the current-source reader leaves the trigger unchanged;
+converted native carriers still restore the durable trigger identity. The
+current-owner read remains before every preparation/cache decision. This
+bounded correction needs the existing cache-invalidation antibody and native
+current-WRH source/JIT controls before another draft-branch update.

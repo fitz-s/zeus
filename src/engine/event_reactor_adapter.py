@@ -9702,6 +9702,8 @@ def event_bound_live_adapter_from_trade_conn(
                     proof_accepted=False,
                 )
             receipt = _prepare_current_probability_scope_event(probability_event, at)
+            if probability_event is event:
+                return receipt
             # Queue/claim ownership stays with the caller's immutable event;
             # its probability witness independently binds the current product.
             return dataclass_replace(
