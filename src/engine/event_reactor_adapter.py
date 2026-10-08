@@ -2537,7 +2537,12 @@ def _global_book_receipt_token_pairs(
     *,
     condition_ids: Iterable[str],
 ) -> dict[str, tuple[str, str]]:
-    """Read a hash-verified complete receipt only as a last-seen token hint."""
+    """Read hash-verified complete receipts only as a last-seen token hint.
+
+    The newest receipt naming a condition wins; a newer receipt that does not
+    name it (a held-SELL completion carries one family) never hides an older
+    complete one.
+    """
 
     requested = {
         str(condition_id or "").strip()
@@ -2546,6 +2551,7 @@ def _global_book_receipt_token_pairs(
     }
     if not requested:
         return {}
+    found: dict[str, tuple[str, str]] = {}
     try:
         receipt_rows = trade_conn.execute(
             """
@@ -2679,8 +2685,7 @@ def _global_book_receipt_token_pairs(
         if not valid:
             continue
 
-        pairs: dict[str, tuple[str, str]] = {}
-        for condition_id in requested:
+        for condition_id in requested.difference(found):
             yes_token_id = side_tokens.get((condition_id, "YES"))
             no_token_id = side_tokens.get((condition_id, "NO"))
             if (
@@ -2688,9 +2693,10 @@ def _global_book_receipt_token_pairs(
                 and no_token_id
                 and yes_token_id != no_token_id
             ):
-                pairs[condition_id] = (yes_token_id, no_token_id)
-        return pairs
-    return {}
+                found[condition_id] = (yes_token_id, no_token_id)
+        if len(found) == len(requested):
+            break
+    return found
 
 
 def _global_book_epoch_cache_namespace(

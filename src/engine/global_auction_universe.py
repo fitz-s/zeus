@@ -1968,8 +1968,17 @@ def bind_current_global_probability_tokens(
     max_workers: int = 8,
     metadata_sink: dict[tuple[str, str], Mapping[str, object]] | None = None,
     required_token_ids: frozenset[str] | None = None,
+    persisted_token_pairs: Callable[
+        [Sequence[str]], Mapping[str, tuple[str, str]]
+    ]
+    | None = None,
 ) -> Mapping[str, FamilyPayoffWitness]:
-    """Bind tokens and, when requested, current Gamma tradeability metadata."""
+    """Bind tokens and, when requested, current Gamma tradeability metadata.
+
+    ``persisted_token_pairs`` serves identity-only binding (no metadata sink):
+    it names the pairs of conditions that have no executable snapshot yet, so
+    the bind never needs a Gamma reader for them.
+    """
 
     if required_token_ids is not None and metadata_sink is None:
         raise ValueError("GLOBAL_REQUIRED_TOKENS_NEED_METADATA_SINK")
@@ -2082,6 +2091,21 @@ def bind_current_global_probability_tokens(
             # alone takes the persisted pair (a disagreement raised above);
             # freshness and invalidation govern tradeability metadata only.
             local_tokens = static_tokens
+            if persisted_token_pairs is not None:
+                unsnapshotted = tuple(
+                    dict.fromkeys(
+                        binding.condition_id
+                        for witness in missing_by_family.values()
+                        for binding in witness.bindings
+                        if (not binding.yes_token_id or not binding.no_token_id)
+                        and binding.condition_id not in static_tokens
+                    )
+                )
+                if unsnapshotted:
+                    local_tokens = {
+                        **static_tokens,
+                        **persisted_token_pairs(unsnapshotted),
+                    }
 
     local_metadata_family_keys: set[str] = set()
     clob_attempted_family_keys: set[str] = set()

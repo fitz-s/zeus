@@ -1842,13 +1842,21 @@ def _capture_standing_entry_values(
                 try:
                     # Native token identity exactly as the selector's book
                     # epoch binds it before holdings, from persisted executable
-                    # snapshots only (no Gamma/CLOB call in this pass).
+                    # snapshots, and for a sibling not yet snapshotted from the
+                    # selector's own hash-verified receipt of the pair it bound
+                    # (no Gamma/CLOB call in this pass). A pair appearing in
+                    # neither stays unbound and cancels.
                     witness = prepared.probability_witness
                     bound_witness = universe.bind_current_global_probability_tokens(
                         forecasts_conn,
                         probability_witnesses={witness.family_key: witness},
                         trade_conn=trade_conn,
                         checked_at_utc=now,
+                        persisted_token_pairs=lambda condition_ids: (
+                            adapter._global_book_receipt_token_pairs(
+                                trade_conn, condition_ids=condition_ids
+                            )
+                        ),
                     )[witness.family_key]
                     prepared = runtime._rebind_prepared_probability(prepared, bound_witness)
                 except Exception as exc:  # noqa: BLE001 - unbound identity is no authority

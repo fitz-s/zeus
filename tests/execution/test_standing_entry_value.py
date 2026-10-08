@@ -539,6 +539,59 @@ def _seed_early_rest(conn):
     conn.commit()
 
 
+_UNSNAPSHOTTED_SIBLING = ("receipt", "unknown", "own_unbound")
+
+
+def _insert_selector_receipt(conn, bindings):
+    """The selector's hash-verified ``global_single_order_auction`` receipt naming
+    the YES/NO token of each binding, as the live book epoch persists it."""
+    import base64
+    import hashlib
+    import zlib
+
+    from src.engine import global_batch_runtime
+
+    fields = list(global_batch_runtime._BOOK_NATIVE_SIDE_STATE_FIELDS)
+    rows = [
+        [FAMILY_KEY, b.bin_id, b.condition_id, side, token, "EXECUTABLE", "book", "event", "gamma", "False"]
+        for b in bindings
+        for side, token in (("YES", b.yes_token_id), ("NO", b.no_token_id))
+    ]
+    encoded = json.dumps(
+        {"fields": fields, "rows": rows}, sort_keys=True, separators=(",", ":")
+    ).encode()
+    summary = {
+        "schema_version": 22,
+        "book_native_side_candidate_coverage_status": "COMPLETE",
+        "book_native_side_candidate_coverage_complete": True,
+        "book_native_side_encoding": "zlib+base64+canonical-json-v1",
+        "book_native_side_state_count": len(rows),
+        "book_native_side_states_sha256": hashlib.sha256(encoded).hexdigest(),
+        "book_native_side_states_zlib_b64": base64.b64encode(zlib.compress(encoded)).decode(),
+    }
+    conn.execute(
+        "INSERT INTO decision_log (mode, started_at, completed_at, artifact_json, timestamp) "
+        "VALUES ('global_single_order_auction', ?, ?, ?, ?)",
+        (NOW.isoformat(), NOW.isoformat(), json.dumps({"summary": summary}), NOW.isoformat()),
+    )
+
+
+def test_receipt_pairs_skip_a_newer_receipt_that_does_not_name_the_condition():
+    """A held-SELL completion writes a one-family receipt after the full one; it
+    must not hide the older complete receipt's pairs."""
+    from src.engine import event_reactor_adapter as adapter
+
+    conn = _trade_db()
+    full = _witness(q=0.75, posterior="p").bindings
+    _insert_selector_receipt(conn, list(full))
+    _insert_selector_receipt(conn, [full[0]])
+    pairs = adapter._global_book_receipt_token_pairs(
+        conn, condition_ids=[b.condition_id for b in full]
+    )
+    assert pairs == {b.condition_id: (b.yes_token_id, b.no_token_id) for b in full}
+    assert adapter._global_book_receipt_token_pairs(conn, condition_ids=["cond-absent"]) == {}
+
+
 class TestStandingEntryTrace:
     def _cycle(self, monkeypatch, *, q, posterior, identity=None):
         import src.risk_allocator as risk_allocator
@@ -577,7 +630,30 @@ class TestStandingEntryTrace:
             ),
             witness.bindings[1],
         ))
-        if identity is not None:
+        if identity in _UNSNAPSHOTTED_SIBLING:
+            # The sibling bin has no executable snapshot yet (a newly listed
+            # family): the prepared witness carries its YES token only.
+            sibling = witness.bindings[1]
+            if identity == "own_unbound":
+                conn.execute(
+                    "DELETE FROM executable_market_snapshot_latest WHERE condition_id = ?",
+                    (witness.bindings[0].condition_id,),
+                )
+            if identity in ("receipt", "own_unbound"):
+                _insert_selector_receipt(
+                    conn,
+                    [sibling] if identity == "own_unbound" else list(witness.bindings),
+                )
+            conn.commit()
+            witness = S.rebind_family_payoff_witness(witness, bindings=(
+                (
+                    replace(witness.bindings[0], no_token_id=None)
+                    if identity == "own_unbound"
+                    else witness.bindings[0]
+                ),
+                replace(sibling, no_token_id=None),
+            ))
+        elif identity is not None:
             for binding in witness.bindings:
                 for side, token in (("YES", binding.yes_token_id), ("NO", binding.no_token_id)):
                     insert_snapshot(conn, replace(
@@ -724,6 +800,36 @@ class TestStandingEntryTrace:
                 "WHERE command_id='cmd' AND event_type='CANCEL_REQUESTED'"
             ).fetchone()[0])
             assert payload["cancel_reason"] == valuation.reason
+
+    def test_unsnapshotted_sibling_binds_from_the_selectors_receipt_and_keeps(self, monkeypatch):
+        """A newly listed family: the rest's condition is snapshotted, a sibling's
+        is not yet. The selector bound the sibling's pair to select; its receipt
+        carries it, so the rest is valued instead of cancelled for a missing Gamma
+        reader."""
+        conn, venue, result = self._cycle(
+            monkeypatch, q=0.75, posterior="posterior-NEW", identity="receipt",
+        )
+        valuation, = result["valuations"]
+        assert valuation.action == "KEEP", valuation.reason
+        assert valuation.reason == "CURRENT_ENTRY_REST_VALUE_POSITIVE"
+        assert result["cancel_set_size"] == 0
+        assert venue.calls == []
+
+    @pytest.mark.parametrize("identity", ("unknown", "own_unbound"))
+    def test_identity_in_neither_snapshot_nor_receipt_still_cancels(self, monkeypatch, identity):
+        """No persisted source for a needed pair (an unreceipted sibling, or the
+        rest's own condition) is no identity: protective cancel, as before."""
+        conn, venue, result = self._cycle(
+            monkeypatch, q=0.75, posterior="posterior-NEW", identity=identity,
+        )
+        valuation, = result["valuations"]
+        assert valuation.action == "CANCEL"
+        assert valuation.reason == (
+            "ENTRY_REST_TOKEN_IDENTITY_UNAVAILABLE:ValueError:GLOBAL_GAMMA_EVENT_READER_MISSING"
+        )
+        assert valuation.evidence["authority_valid"] is False
+        assert result["cancel_set_size"] == 1
+        assert venue.calls == [(["venue-1"], "CANCEL_PENDING")]
 
     def test_same_rest_with_q_below_its_limit_value_cancels(self, monkeypatch):
         conn, venue, result = self._cycle(monkeypatch, q=0.45, posterior="posterior-NEW")
