@@ -278,6 +278,30 @@ def day0_is_native_report_source(source: object, *, station: str | None = None) 
     )
 
 
+def day0_is_retired_fact_source(source: object) -> bool:
+    """Whether a Day0 conditioning source is a station route the Day0 fact law excludes.
+
+    An INSTRUMENT_PROXY (JMA, SWOB) or PHYSICAL route (FMI, IMGW, DWD, KNMI, WU current) is
+    another measurement of the air, not METAR content, so it is no Day0 fact at any instant.
+    Posteriors and requests conditioned on one predate that law: the adapter binds their
+    value against METAR content, which agrees only by coincidence (Tokyo JMA 20.3 vs AWC 20).
+    A channel names exactly one route kind, so no station is needed.
+    """
+
+    normalized = str(source or "").strip().lower().removeprefix("observation_prints:")
+    try:
+        from src.data.physical_current_sources import RouteKind, load_physical_current_sources
+
+        routes = load_physical_current_sources()[0]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return False
+    return any(
+        r.source_channel == normalized
+        and r.kind in (RouteKind.INSTRUMENT_PROXY, RouteKind.PHYSICAL)
+        for r in routes
+    )
+
+
 def day0_is_carrier_source(source: object) -> bool:
     """Whether a Day0 conditioning source is priced by the remaining-path carrier.
 
