@@ -1,0 +1,1195 @@
+{
+ "cell": 0.1,
+ "cities": {
+  "Helsinki": {
+   "high": {
+    "A_minus_A0": {
+     "days": 11,
+     "decisions": 339,
+     "hi": 0.5288170683734854,
+     "lo": -0.056354227897733825,
+     "mean": 0.2556374293999372
+    },
+    "B_minus_A": {
+     "days": 11,
+     "decisions": 339,
+     "hi": -0.009064237161256504,
+     "lo": -0.021529343657061772,
+     "mean": -0.015667228972192252
+    },
+    "B_minus_A0": {
+     "days": 11,
+     "decisions": 339,
+     "hi": 0.5137017143836018,
+     "lo": -0.07087655695316991,
+     "mean": 0.23997020042774492
+    },
+    "brier": {
+     "A": 0.4056043165579128,
+     "A0": 0.31812533348938493,
+     "B": 0.3978849790352865
+    },
+    "calibration": {
+     "A": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.4199,
+       "mean_p": 0.3634,
+       "n": 181
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.8824,
+       "mean_p": 0.5932,
+       "n": 17
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.8025,
+       "n": 27
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9152,
+       "n": 25
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9708,
+       "n": 89
+      }
+     ],
+     "A0": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.4205,
+       "mean_p": 0.4199,
+       "n": 88
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.6271,
+       "mean_p": 0.5985,
+       "n": 59
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 0.8235,
+       "mean_p": 0.8011,
+       "n": 34
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 0.9286,
+       "mean_p": 0.9248,
+       "n": 14
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 0.9884,
+       "mean_p": 0.9793,
+       "n": 86
+      },
+      {
+       "bin": [
+        0.99,
+        1.0
+       ],
+       "hit_rate": 0.9655,
+       "mean_p": 0.991,
+       "n": 58
+      }
+     ],
+     "B": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.4157,
+       "mean_p": 0.3632,
+       "n": 178
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.8333,
+       "mean_p": 0.5659,
+       "n": 18
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.8316,
+       "n": 28
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9173,
+       "n": 23
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.971,
+       "n": 92
+      }
+     ]
+    },
+    "eligible": false,
+    "hc": {
+     "A": {
+      "decisions": 339,
+      "errors": 0,
+      "expected_errors": 2.6017,
+      "n": 89,
+      "poisson95": 5,
+      "within": true
+     },
+     "A0": {
+      "decisions": 339,
+      "errors": 3,
+      "expected_errors": 2.2997,
+      "n": 144,
+      "poisson95": 5,
+      "within": true
+     },
+     "B": {
+      "decisions": 339,
+      "errors": 0,
+      "expected_errors": 2.672,
+      "n": 92,
+      "poisson95": 6,
+      "within": true
+     }
+    },
+    "infinite_logscore": {
+     "A": 0,
+     "A0": 0,
+     "B": 0
+    },
+    "logscore": {
+     "A": 0.8626843174581176,
+     "A0": 0.6070468880581803,
+     "B": 0.8470170884859252
+    },
+    "n_days": 11,
+    "n_decisions": 396,
+    "n_served": 339,
+    "not_served": {
+     "DENSE_ABSENT_TODAY": 21,
+     "DENSE_STALE": 36
+    },
+    "semantic_violations": {
+     "A": 0,
+     "B": 0
+    }
+   },
+   "low": {
+    "A_minus_A0": {
+     "days": 11,
+     "decisions": 339,
+     "hi": 1.2058572001224048,
+     "lo": -3.887212312341695,
+     "mean": -0.8843328703989428
+    },
+    "B_minus_A": {
+     "days": 11,
+     "decisions": 339,
+     "hi": -0.0039958956794338,
+     "lo": -1.2592003740645528,
+     "mean": -0.39374527274618737
+    },
+    "B_minus_A0": {
+     "days": 11,
+     "decisions": 339,
+     "hi": 0.5020448842535766,
+     "lo": -4.177049724871602,
+     "mean": -1.2780781431451302
+    },
+    "brier": {
+     "A": 0.715533247346703,
+     "A0": 0.5889097394714337,
+     "B": 0.5554535233282559
+    },
+    "calibration": {
+     "A": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.1082,
+       "mean_p": 0.3495,
+       "n": 194
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.25,
+       "mean_p": 0.5719,
+       "n": 16
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 0.6,
+       "mean_p": 0.8292,
+       "n": 5
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 0.9091,
+       "mean_p": 0.9392,
+       "n": 33
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 0.7333,
+       "mean_p": 0.9683,
+       "n": 90
+      },
+      {
+       "bin": [
+        0.99,
+        1.0
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9918,
+       "n": 1
+      }
+     ],
+     "A0": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.4058,
+       "mean_p": 0.3527,
+       "n": 138
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.5,
+       "mean_p": 0.5938,
+       "n": 42
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 0.2917,
+       "mean_p": 0.8272,
+       "n": 48
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.93,
+       "n": 8
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9813,
+       "n": 56
+      },
+      {
+       "bin": [
+        0.99,
+        1.0
+       ],
+       "hit_rate": 0.9574,
+       "mean_p": 0.9904,
+       "n": 47
+      }
+     ],
+     "B": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.1192,
+       "mean_p": 0.3491,
+       "n": 193
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.1333,
+       "mean_p": 0.5473,
+       "n": 15
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.8102,
+       "n": 33
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9418,
+       "n": 30
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.97,
+       "n": 68
+      }
+     ]
+    },
+    "eligible": false,
+    "hc": {
+     "A": {
+      "decisions": 339,
+      "errors": 24,
+      "expected_errors": 2.8638,
+      "n": 91,
+      "poisson95": 6,
+      "within": false
+     },
+     "A0": {
+      "decisions": 339,
+      "errors": 2,
+      "expected_errors": 1.5022,
+      "n": 103,
+      "poisson95": 4,
+      "within": true
+     },
+     "B": {
+      "decisions": 339,
+      "errors": 0,
+      "expected_errors": 2.041,
+      "n": 68,
+      "poisson95": 5,
+      "within": true
+     }
+    },
+    "infinite_logscore": {
+     "A": 0,
+     "A0": 0,
+     "B": 0
+    },
+    "logscore": {
+     "A": 1.6909974393695788,
+     "A0": 2.5753303097685216,
+     "B": 1.2972521666233916
+    },
+    "n_days": 11,
+    "n_decisions": 396,
+    "n_served": 339,
+    "not_served": {
+     "DENSE_ABSENT_TODAY": 21,
+     "DENSE_STALE": 36
+    },
+    "semantic_violations": {
+     "A": 0,
+     "B": 0
+    }
+   }
+  },
+  "Singapore": {
+   "high": {
+    "A_minus_A0": {
+     "days": 0,
+     "decisions": 0,
+     "hi": null,
+     "lo": null,
+     "mean": null
+    },
+    "B_minus_A": {
+     "days": 0,
+     "decisions": 0,
+     "hi": null,
+     "lo": null,
+     "mean": null
+    },
+    "B_minus_A0": {
+     "days": 0,
+     "decisions": 0,
+     "hi": null,
+     "lo": null,
+     "mean": null
+    },
+    "brier": {
+     "A": null,
+     "A0": null,
+     "B": null
+    },
+    "calibration": {
+     "A": [],
+     "A0": [],
+     "B": []
+    },
+    "eligible": false,
+    "hc": {
+     "A": {
+      "decisions": 0,
+      "errors": 0,
+      "expected_errors": 0.0,
+      "n": 0,
+      "poisson95": 0,
+      "within": true
+     },
+     "A0": {
+      "decisions": 0,
+      "errors": 0,
+      "expected_errors": 0.0,
+      "n": 0,
+      "poisson95": 0,
+      "within": true
+     },
+     "B": {
+      "decisions": 0,
+      "errors": 0,
+      "expected_errors": 0.0,
+      "n": 0,
+      "poisson95": 0,
+      "within": true
+     }
+    },
+    "infinite_logscore": {
+     "A": 0,
+     "A0": 0,
+     "B": 0
+    },
+    "logscore": {
+     "A": null,
+     "A0": null,
+     "B": null
+    },
+    "n_days": 0,
+    "n_decisions": 396,
+    "n_served": 0,
+    "not_served": {
+     "DENSE_ROUTE_MISSING": 396
+    },
+    "semantic_violations": {
+     "A": 0,
+     "B": 0
+    }
+   },
+   "low": {
+    "A_minus_A0": {
+     "days": 0,
+     "decisions": 0,
+     "hi": null,
+     "lo": null,
+     "mean": null
+    },
+    "B_minus_A": {
+     "days": 0,
+     "decisions": 0,
+     "hi": null,
+     "lo": null,
+     "mean": null
+    },
+    "B_minus_A0": {
+     "days": 0,
+     "decisions": 0,
+     "hi": null,
+     "lo": null,
+     "mean": null
+    },
+    "brier": {
+     "A": null,
+     "A0": null,
+     "B": null
+    },
+    "calibration": {
+     "A": [],
+     "A0": [],
+     "B": []
+    },
+    "eligible": false,
+    "hc": {
+     "A": {
+      "decisions": 0,
+      "errors": 0,
+      "expected_errors": 0.0,
+      "n": 0,
+      "poisson95": 0,
+      "within": true
+     },
+     "A0": {
+      "decisions": 0,
+      "errors": 0,
+      "expected_errors": 0.0,
+      "n": 0,
+      "poisson95": 0,
+      "within": true
+     },
+     "B": {
+      "decisions": 0,
+      "errors": 0,
+      "expected_errors": 0.0,
+      "n": 0,
+      "poisson95": 0,
+      "within": true
+     }
+    },
+    "infinite_logscore": {
+     "A": 0,
+     "A0": 0,
+     "B": 0
+    },
+    "logscore": {
+     "A": null,
+     "A0": null,
+     "B": null
+    },
+    "n_days": 0,
+    "n_decisions": 0,
+    "n_served": 0,
+    "not_served": {},
+    "semantic_violations": {
+     "A": 0,
+     "B": 0
+    }
+   }
+  },
+  "Tokyo": {
+   "high": {
+    "A_minus_A0": {
+     "days": 7,
+     "decisions": 238,
+     "hi": -0.6051169381158901,
+     "lo": -0.9914804601845647,
+     "mean": -0.7776693898597145
+    },
+    "B_minus_A": {
+     "days": 7,
+     "decisions": 238,
+     "hi": -0.033155181332287786,
+     "lo": -0.08630307791068749,
+     "mean": -0.05726883640245927
+    },
+    "B_minus_A0": {
+     "days": 7,
+     "decisions": 238,
+     "hi": -0.6582219991978044,
+     "lo": -1.0338352786155733,
+     "mean": -0.8349382262621737
+    },
+    "brier": {
+     "A": 0.30993296540592313,
+     "A0": 0.7084197220574628,
+     "B": 0.2826372894721527
+    },
+    "calibration": {
+     "A": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.2093,
+       "mean_p": 0.3882,
+       "n": 86
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.4615,
+       "mean_p": 0.5633,
+       "n": 13
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.8333,
+       "n": 17
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9245,
+       "n": 11
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9721,
+       "n": 111
+      }
+     ],
+     "A0": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.2995,
+       "mean_p": 0.3219,
+       "n": 217
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.6364,
+       "mean_p": 0.5767,
+       "n": 11
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.8181,
+       "n": 3
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9809,
+       "n": 1
+      },
+      {
+       "bin": [
+        0.99,
+        1.0
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9917,
+       "n": 6
+      }
+     ],
+     "B": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.141,
+       "mean_p": 0.3951,
+       "n": 78
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.6923,
+       "mean_p": 0.5659,
+       "n": 13
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 0.9286,
+       "mean_p": 0.8267,
+       "n": 14
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9239,
+       "n": 7
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9715,
+       "n": 126
+      }
+     ]
+    },
+    "eligible": true,
+    "hc": {
+     "A": {
+      "decisions": 238,
+      "errors": 0,
+      "expected_errors": 3.101,
+      "n": 111,
+      "poisson95": 6,
+      "within": true
+     },
+     "A0": {
+      "decisions": 238,
+      "errors": 0,
+      "expected_errors": 0.0689,
+      "n": 7,
+      "poisson95": 1,
+      "within": true
+     },
+     "B": {
+      "decisions": 238,
+      "errors": 0,
+      "expected_errors": 3.5867,
+      "n": 126,
+      "poisson95": 7,
+      "within": true
+     }
+    },
+    "infinite_logscore": {
+     "A": 0,
+     "A0": 0,
+     "B": 0
+    },
+    "logscore": {
+     "A": 0.5806822995257435,
+     "A0": 1.3583516893854573,
+     "B": 0.5234134631232841
+    },
+    "n_days": 7,
+    "n_decisions": 396,
+    "n_served": 238,
+    "not_served": {
+     "A0_ABSENT": 69,
+     "DENSE_ABSENT_TODAY": 81,
+     "DENSE_STALE": 8
+    },
+    "semantic_violations": {
+     "A": 0,
+     "B": 0
+    }
+   },
+   "low": {
+    "A_minus_A0": {
+     "days": 7,
+     "decisions": 238,
+     "hi": -0.2624327197658029,
+     "lo": -1.0815152012304121,
+     "mean": -0.6833086816656504
+    },
+    "B_minus_A": {
+     "days": 7,
+     "decisions": 238,
+     "hi": 0.006900080204004187,
+     "lo": -0.036498490451076095,
+     "mean": -0.01392916384508795
+    },
+    "B_minus_A0": {
+     "days": 7,
+     "decisions": 238,
+     "hi": -0.27515962940099387,
+     "lo": -1.0845923036049077,
+     "mean": -0.6972378455107386
+    },
+    "brier": {
+     "A": 0.37328006143068587,
+     "A0": 0.6030512629953118,
+     "B": 0.36652499009318185
+    },
+    "calibration": {
+     "A": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.6435,
+       "mean_p": 0.3739,
+       "n": 115
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.9211,
+       "mean_p": 0.6078,
+       "n": 38
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 0.7879,
+       "mean_p": 0.8039,
+       "n": 33
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9262,
+       "n": 5
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9722,
+       "n": 47
+      }
+     ],
+     "A0": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.2754,
+       "mean_p": 0.2228,
+       "n": 167
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.5362,
+       "n": 31
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.89,
+       "n": 26
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9073,
+       "n": 1
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9747,
+       "n": 13
+      }
+     ],
+     "B": [
+      {
+       "bin": [
+        0.0,
+        0.5
+       ],
+       "hit_rate": 0.6204,
+       "mean_p": 0.3735,
+       "n": 108
+      },
+      {
+       "bin": [
+        0.5,
+        0.7
+       ],
+       "hit_rate": 0.9189,
+       "mean_p": 0.5925,
+       "n": 37
+      },
+      {
+       "bin": [
+        0.7,
+        0.9
+       ],
+       "hit_rate": 0.7647,
+       "mean_p": 0.799,
+       "n": 34
+      },
+      {
+       "bin": [
+        0.9,
+        0.95
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9267,
+       "n": 7
+      },
+      {
+       "bin": [
+        0.95,
+        0.99
+       ],
+       "hit_rate": 1.0,
+       "mean_p": 0.9725,
+       "n": 52
+      }
+     ]
+    },
+    "eligible": false,
+    "hc": {
+     "A": {
+      "decisions": 238,
+      "errors": 0,
+      "expected_errors": 1.3063,
+      "n": 47,
+      "poisson95": 3,
+      "within": true
+     },
+     "A0": {
+      "decisions": 238,
+      "errors": 0,
+      "expected_errors": 0.3287,
+      "n": 13,
+      "poisson95": 1,
+      "within": true
+     },
+     "B": {
+      "decisions": 238,
+      "errors": 0,
+      "expected_errors": 1.4292,
+      "n": 52,
+      "poisson95": 4,
+      "within": true
+     }
+    },
+    "infinite_logscore": {
+     "A": 0,
+     "A0": 0,
+     "B": 0
+    },
+    "logscore": {
+     "A": 0.6821329690944399,
+     "A0": 1.3654416507600902,
+     "B": 0.6682038052493519
+    },
+    "n_days": 7,
+    "n_decisions": 396,
+    "n_served": 238,
+    "not_served": {
+     "A0_ABSENT": 69,
+     "DENSE_ABSENT_TODAY": 81,
+     "DENSE_STALE": 8
+    },
+    "semantic_violations": {
+     "A": 0,
+     "B": 0
+    }
+   }
+  }
+ },
+ "generated_at": "2026-10-08T17:15:22.981348+00:00",
+ "law_hashes": {
+  "Helsinki": "5bd3ce3cee9bc9e1388d24d7a3c6467627b22131caa3171686b89ef3e7e15533",
+  "Singapore": "88f9303d0b5f380aafcee052001466853b6e86635cc2492b3b9eaf4548418fbb",
+  "Tokyo": "931005be583c9268a8abcfdbead877003ab3ed83bcf0cdad76b0a8e1c980a8cc"
+ },
+ "lifecycle_fit": {
+  "corrected": {
+   "routine": 0.0003147713615292165,
+   "speci": 0.0033333333333333335
+  },
+  "counts": {
+   "routine": {
+    "corrected": 5.0,
+    "gross": 3.0,
+    "kept": 17398.0,
+    "removed": 65.0
+   },
+   "speci": {
+    "corrected": 0.0,
+    "gross": 0.0,
+    "kept": 107.0,
+    "removed": 41.0
+   }
+  },
+  "delta": [
+   [
+    -2,
+    0.23076923076923078
+   ],
+   [
+    -1,
+    0.23076923076923078
+   ],
+   [
+    1,
+    0.5384615384615384
+   ]
+  ],
+  "gross": {
+   "routine": 0.00020030904824586504,
+   "speci": 0.0033333333333333335
+  },
+  "kept": {
+   "routine": 0.9957362788301951,
+   "speci": 0.7166666666666667
+  },
+  "n_fetch_checks": 0,
+  "n_outage_reports": 468,
+  "n_reports": 18087,
+  "outage_hours": [
+   "2026-09-20T02:00:00+00:00",
+   "2026-09-20T03:00:00+00:00",
+   "2026-09-20T04:00:00+00:00",
+   "2026-09-20T05:00:00+00:00",
+   "2026-09-20T06:00:00+00:00",
+   "2026-09-20T07:00:00+00:00",
+   "2026-09-22T10:00:00+00:00",
+   "2026-09-22T11:00:00+00:00"
+  ],
+  "outage_prior": 0.025901149933657674,
+  "removed": {
+   "routine": 0.00374864076002976,
+   "speci": 0.27666666666666667
+  },
+  "visibility": [
+   [
+    10.0,
+    0.5
+   ],
+   [
+    20.0,
+    0.5
+   ],
+   [
+    40.0,
+    0.5
+   ],
+   [
+    60.0,
+    0.5
+   ],
+   [
+    120.0,
+    0.5
+   ],
+   [
+    180.0,
+    0.5
+   ]
+  ],
+  "visibility_counts": {
+   "10.0": [
+    0.0,
+    0.0
+   ],
+   "120.0": [
+    0.0,
+    0.0
+   ],
+   "180.0": [
+    0.0,
+    0.0
+   ],
+   "20.0": [
+    0.0,
+    0.0
+   ],
+   "40.0": [
+    0.0,
+    0.0
+   ],
+   "60.0": [
+    0.0,
+    0.0
+   ]
+  }
+ },
+ "step_minutes": 30.0,
+ "test_last": "2026-10-07",
+ "train_last": "2026-09-26"
+}
