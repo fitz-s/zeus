@@ -306,22 +306,25 @@ def model_block(est: dict, order: str, with_noise: bool) -> dict:
 
 
 def archive_day(rec: dict, t0: float, metric: str, lc: dict, with_dense: bool, speci_rate: float) -> ds.DenseDay:
-    """The day at cut t0 from the archived tape (complete through t0: page rows), the routine schedule
+    """The day at cut t0 from the archive: in-day METAR reports through t0 are lifecycle marks (reports, not
+    page rows: the archive is no settlement certificate), pre-midnight reports context, the routine schedule
     after t0 pending with the lifecycle's kept/corrected weights."""
     d: fit.TrainingDay = rec["day"]
     sel = d.metar_t <= t0
-    page = {}
-    for t, k in zip(d.metar_t[sel], d.metar_k[sel]):
+    marks = {}
+    for t, k, routine in zip(d.metar_t[sel], d.metar_k[sel], d.metar_routine[sel]):
         if 0 <= t < d.day_minutes:
-            page[float(t)] = int(k)
+            kind = "routine" if routine else "speci"
+            marks[float(t)] = (int(k), lc["kept"][kind], lc["corrected"][kind], lc["removed"][kind], lc["gross"][kind])
     context = tuple((float(t), int(k)) for t, k in zip(d.metar_t[sel], d.metar_k[sel]) if t < 0)
     pending = tuple((float(t), lc["kept"]["routine"], lc["corrected"]["routine"]) for t in rec["schedule"]
-                    if t > t0 and float(t) not in page)
+                    if t > t0 and float(t) not in marks)
     dense = tuple((float(t), float(x)) for t, x in zip(d.dense_t, d.dense_x) if t <= t0) if with_dense else ()
     return ds.DenseDay(metric=metric, day_minutes=d.day_minutes, forecast=tuple(float(v) for v in d.forecast),
-                       hour=tuple(int(h) for h in d.hour), page=tuple(sorted(page.items())), pending=pending,
+                       hour=tuple(int(h) for h in d.hour),
+                       marks=tuple((t, *v) for t, v in sorted(marks.items())), pending=pending,
                        context=context, dense=dense, delta=tuple((int(a), float(b)) for a, b in lc["delta"]),
-                       speci_from=t0, speci_rate=speci_rate)
+                       speci_from=t0, speci_rate=speci_rate, outage_prior=lc["outage_prior"])
 
 
 def _score_job(args):
@@ -595,8 +598,11 @@ def fit_city(city: str, train_last: str, test_last: str, lc: dict, lc_last: str,
             finite = [v for v in lls if math.isfinite(v)]
             selection[order] = dict(mean_logscore=round(float(np.mean(finite)), 4) if finite else None,
                                     n=len(lls), infinite=len(lls) - len(finite), val_days=len(inner_val))
-    picked = min((k for k, v in selection.items() if v.get("mean_logscore") is not None and v["infinite"] == 0),
-                 key=lambda k: selection[k]["mean_logscore"])
+    scored = [k for k, v in selection.items() if v.get("mean_logscore") is not None]
+    if not scored:
+        raise ValueError(f"{city}: no model order scored in the inner split: {selection}")
+    # fewest impossible outcomes first, then the true mean log score
+    picked = min(scored, key=lambda k: (selection[k]["infinite"], selection[k]["mean_logscore"]))
     est = fit.estimate(days, step=meta["step"], cadence=cad, shrink=picked.endswith("shrunk"))
     blocks = []
     rng = np.random.default_rng(20261008)
