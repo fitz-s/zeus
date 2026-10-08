@@ -48,7 +48,10 @@ UTC = timezone.utc
 DAY0_DENSE_STATE_SPACE_OPERATOR = "dense_observation_state_space_extreme_v1"
 SEALED_SCHEMA = "day0_dense_sealed_evidence_v1"
 FORECAST_MODEL = "ecmwf_ifs"
-PAGE_FETCH_COVER_MINUTES = 180.0  # every WRH batch fetch requests recent=180
+# Every WRH batch fetch requests recent=180, and the intraday writer stores the rows observed in
+# [tick - 2 h, receipt] (ingest_main._day0_current_temperature_source_tick); the stored span is the
+# returned span, so a fetch is absence evidence for the instants in [receipt - 120 min, receipt].
+PAGE_FETCH_COVER_MINUTES = 120.0
 logger = logging.getLogger(__name__)
 
 
@@ -171,7 +174,7 @@ def _page_versions(conn, table, *, city, station, lo, hi, cut, semantics):
 
     Page rows are station- and unit-validated and read in receipt order, so a later received
     correction (16 -> 15) replaces the earlier version.  Only the intraday adapter's rows (JSON
-    envelope, ``recent=180`` request) date a fetch whose window is [receipt - 180 min, receipt];
+    envelope) date a fetch whose stored window is [receipt - PAGE_FETCH_COVER_MINUTES, receipt];
     the next-day daily product covers a past day and is no intraday absence evidence."""
     from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
 
@@ -276,7 +279,7 @@ def _schedule(params, start: datetime, end: datetime) -> list[datetime]:
 
 def _missed(lc, fetches: Sequence[datetime], t: datetime) -> float:
     """Visibility likelihood of absence: the product of (1 - a(lag)) over every page fetch whose
-    returned span [rec - 180 min, rec] covers t."""
+    stored span [rec - PAGE_FETCH_COVER_MINUTES, rec] covers t."""
     out = 1.0
     for rec in fetches:
         if rec - timedelta(minutes=PAGE_FETCH_COVER_MINUTES) <= t <= rec:

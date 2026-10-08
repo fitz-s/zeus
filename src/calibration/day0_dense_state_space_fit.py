@@ -356,7 +356,10 @@ def fit_lifecycle(reports: Sequence[dict], fetch_checks: Sequence[tuple[float, b
     Shared outage: UTC hours where at least OUTAGE_MIN_STATIONS stations lose reports.  A report in
     such an hour is an outage removal (still valid temperature evidence); the outage prior is the
     Jeffreys share of reports in outage hours.  Outside outages an absent report is gross when its
-    integer sits GROSS_DEVIATION or more from its kept neighbours (or has none), else a valid removal.
+    integer sits GROSS_DEVIATION or more from every kept page value within 60 min, else a valid
+    removal.  A report with no kept neighbour carries no deviation evidence and counts as a valid
+    removal.  (Measured 2026-10-08 over C stations: the kept rate is 0.984 / 0.987 / 0.985 for
+    reports 0 / 1 / >= 2 from their previous-hour reports, so deviation does not mark removal.)
     Branch probabilities per report kind are smoothed shares (half a count per branch).  Visibility
     a(lag) is the Jeffreys posterior predictive per lag bin, made non-decreasing by pooling adjacent
     violators."""
@@ -375,7 +378,7 @@ def fit_lifecycle(reports: Sequence[dict], fetch_checks: Sequence[tuple[float, b
         kind = "speci" if r["speci"] else "routine"
         if r["outcome"] == "absent":
             gap = r.get("neighbour_gap")
-            counts[kind]["gross" if gap is None or gap >= GROSS_DEVIATION else "removed"] += 1
+            counts[kind]["gross" if gap is not None and gap >= GROSS_DEVIATION else "removed"] += 1
         else:
             counts[kind][r["outcome"]] += 1
             if r["outcome"] == "corrected":

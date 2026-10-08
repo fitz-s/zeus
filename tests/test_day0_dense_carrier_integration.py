@@ -26,6 +26,7 @@ import pytest
 from src.calibration import day0_dense_state_space_params as params_mod
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data import day0_dense_evidence as evidence
+from src.data import day0_dense_state_space as ds
 from src.data.day0_hourly_vectors import (
     DAY0_REMAINING_CARRIER_OPERATOR_V2,
     DAY0_REMAINING_CARRIER_OPERATOR_V3,
@@ -378,3 +379,52 @@ def test_tokyo_760918_route_value_moves_mass_without_structural_zero(tmp_path, m
     assert paged["dense_evidence"]["semantic_boundary"] == 25
     assert all(not support[b] and pq[b] == 0.0 for b in TOKYO_BINS if b[1] is not None and b[1] <= 24)
     c.close()
+
+
+# ---------------------------------------------------------------- D2 named regressions
+
+LUCKNOW = SimpleNamespace(name="Lucknow", timezone="Asia/Kolkata", wu_station="VILK", settlement_source_type="noaa",
+                          settlement_unit="C")
+
+
+def test_lucknow_0906_mirror_37_is_a_retention_mark_not_a_boundary(tmp_path):
+    """Lucknow 2026-09-06 HIGH: AWC reported 37 at 07:30Z (later re-issued 27); the page kept rows <= 31 and
+    settled 31.  At 07:45Z the 37 is an unresolved mark through the production assembly: q(31) keeps mass and
+    no bin from the page's 31 up to 37 is zero."""
+    block = city_params_block(station="VILK", timezone="Asia/Kolkata", routine_minutes=[0, 30])
+    params = params_mod.parse_artifact(json.loads(write_artifact(tmp_path / "p.json", {"Lucknow": block}).read_text())
+                                       ).cities["Lucknow"]
+    tz = ZoneInfo("Asia/Kolkata")
+    start = datetime(2026, 9, 6, tzinfo=tz).astimezone(UTC)
+    end = datetime(2026, 9, 7, tzinfo=tz).astimezone(UTC)
+    grid = ds.grid_minutes((end - start).total_seconds() / 60)
+    local_hour = [(start + timedelta(minutes=float(m))).astimezone(tz) for m in grid]
+    forecast = [27.5 + 3.5 * math.sin(2 * math.pi * ((h.hour + h.minute / 60) / 24 - 0.375)) for h in local_hour]
+    page = {datetime(2026, 9, 6, 5, 0, tzinfo=UTC) + timedelta(minutes=30 * i): k
+            for i, k in enumerate((30, 30, 30, 31, 31))}
+    reports = {t: evidence.Report(k, t + timedelta(minutes=6), False) for t, k in page.items()}
+    reports[datetime(2026, 9, 6, 7, 30, tzinfo=UTC)] = evidence.Report(37, datetime(2026, 9, 6, 7, 36, tzinfo=UTC), False)
+    sealed = evidence.assemble_sealed(
+        params=params, artifact_hash="t", qualification_hash=None, city="Lucknow", metric="high",
+        target=date(2026, 9, 6), start=start, end=end, cut=datetime(2026, 9, 6, 7, 45, tzinfo=UTC),
+        forecast=forecast, hour=[h.hour for h in local_hour], vector_ids=["t"], page=page, fetches=[],
+        reports=reports, dense=[])
+    day = evidence._day_from_sealed(sealed)
+    bins = ((None, 28.0),) + tuple((float(k), float(k)) for k in range(29, 38)) + ((38.0, None),)
+    q = dict(zip(bins, ds.bin_probabilities(ds.DenseModel(params.model.latent, None, params.model.mean), day, bins)))
+    assert day.boundary_absorbing == 31 and [m[1] for m in sealed["marks"]] == [37]
+    assert all(p > 0.0 for b, p in q.items() if b[1] is not None and 31 <= b[1] < 37)
+    # Mass below 37 is the lifecycle's own no-tape share: gross (T unconstrained) plus removed (valid T near 37,
+    # so later reports run high).  Kept 0.97 / removed 0.012 / gross 0.015 / corrected 0.003.
+    below = sum(p for b, p in q.items() if b[1] is not None and b[1] < 36)
+    assert 0.005 < below < 0.03 and q[(31.0, 31.0)] > 0.001
+
+
+def test_helsinki_1007_partial_fetch_is_visibility_evidence(artifact):
+    """Helsinki 2026-10-07: the 15:20Z intraday fetch stored 14:20/14:50 only (writer window: 2 h).  A report
+    inside the stored span carries (1 - a(lag)); the morning reports outside it keep their full kept weight."""
+    lc = params_mod.load_dense_params(artifact).cities["Helsinki"].lifecycle
+    fetch = [datetime(2026, 10, 7, 15, 20, 37, tzinfo=UTC)]
+    inside = evidence._missed(lc, fetch, datetime(2026, 10, 7, 13, 50, tzinfo=UTC))
+    outside = evidence._missed(lc, fetch, datetime(2026, 10, 7, 10, 50, tzinfo=UTC))
+    assert 0.0 < inside < 1.0 and outside == 1.0
