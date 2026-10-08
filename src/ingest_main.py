@@ -2261,6 +2261,26 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
                             }, "ADVANCES_SOURCE_FRONTIER" if row_advanced else "BEHIND_SOURCE_FRONTIER"))
                         except Exception:  # noqa: BLE001 - telemetry never changes the write
                             pass
+                if route.provider == "noaa_wrh":
+                    # Evidence only: its failure must not cost the prints above.
+                    conn.execute("SAVEPOINT page_print_absence")
+                    try:
+                        from src.state.fact_revocation import record_page_print_absences
+
+                        absent = record_page_print_absences(
+                            conn, city=city.name, station_id=station_id,
+                            source_channel=source_channel,
+                            returned_clocks=[s.observed_at.isoformat() for s in prints],
+                            fetched_at_utc=max(s.fetched_at for s in prints).isoformat(),
+                        )
+                        if absent:
+                            logger.warning("PAGE_PRINT_ABSENT station=%s channel=%s count=%d",
+                                           station_id, source_channel, absent)
+                    except sqlite3.Error as exc:
+                        conn.execute("ROLLBACK TO page_print_absence")
+                        logger.warning("PAGE_PRINT_ABSENCE_UNRECORDED station=%s error=%s",
+                                       station_id, type(exc).__name__)
+                    conn.execute("RELEASE page_print_absence")
                 started = time.monotonic()
                 conn.commit()
                 world_committed_ns = time.monotonic_ns()

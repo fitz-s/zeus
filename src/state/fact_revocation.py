@@ -66,6 +66,57 @@ logger = logging.getLogger(__name__)
 REASON_NON_CONTRIBUTING = "REVOKED_NON_CONTRIBUTING_FORECAST_EXTREMA"
 REASON_INVALID_LIVE_ACTIONABLE = "REVOKED_INVALID_LIVE_ACTIONABLE_CERTIFICATE"
 REASON_INVALID_LIVE_PARENT_MODE = "REVOKED_INVALID_LIVE_MONEY_PARENT_MODE"
+# A NOAA page fetch whose returned clock span covers a held print omitted it.
+# Evidence only: no reader excludes the print on this tag (row_id = the print id).
+REASON_PAGE_PRINT_ABSENT = "PAGE_PRINT_ABSENT_FROM_COVERING_FETCH"
+OBSERVATION_PRINTS_TABLE = "observation_prints"
+
+
+def record_page_print_absences(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    station_id: str,
+    source_channel: str,
+    returned_clocks: list[str],
+    fetched_at_utc: str,
+) -> int:
+    """Tag each held page clock that a covering fetch omitted; return new tags.
+
+    ``returned_clocks`` are the UTC ISO publish clocks this fetch returned for
+    the route's view. A held clock strictly between the first and last of them
+    is covered; one absent from them is tagged on its newest row, once
+    (UNIQUE(table_name, row_id, reason_code)), so a clock absent from every
+    later fetch writes one row, not one per fetch. Writes only on absence.
+    """
+    if len(returned_clocks) < 2:
+        return 0
+    returned = set(returned_clocks)
+    first, last = min(returned_clocks), max(returned_clocks)
+    held = conn.execute(
+        """
+        SELECT publish_ts_utc, MAX(id) FROM observation_prints
+         WHERE city = ? AND station_id = ? AND source_channel = ?
+           AND publish_ts_utc > ? AND publish_ts_utc < ?
+         GROUP BY publish_ts_utc
+        """,
+        (city, station_id, source_channel, first, last),
+    ).fetchall()
+    tagged = 0
+    for clock, print_id in held:
+        if clock in returned:
+            continue
+        tagged += revoke_fact(
+            conn,
+            table_name=OBSERVATION_PRINTS_TABLE,
+            row_id=str(print_id),
+            reason_code=REASON_PAGE_PRINT_ABSENT,
+            meta={"city": city, "station_id": station_id, "source_channel": source_channel,
+                  "publish_ts_utc": clock, "fetch_first": first, "fetch_last": last,
+                  "fetched_at_utc": fetched_at_utc},
+            recorded_at=fetched_at_utc,
+        )
+    return tagged
 
 # Table name tagged in revocation rows for the original opportunity_fact function.
 TARGET_TABLE = "opportunity_fact"
