@@ -299,3 +299,50 @@ Test matrix for the adapter owner (all exist on this branch except the adapter-l
 | HELD redecision | V2/V3 | serves | rebuild | dense successor carrier; old certificate still replays * |
 | rollback to live code | DENSE + sealed | — | live strict replay | live builder rejects the unknown operator → `unsupported Day0 remaining carrier operator`; held family falls to its legacy rebuild (D7) * |
 | native-report ENTRY | AWC-equivalent | — | `_day0_replacement_conditioning` | 15-min age gate applies * |
+
+## R1/R2/D2–D7 (2026-10-08)
+Commits: b286c5a20 (R1 seam, operator rewrite, R2 live revert), edc78826b (sealed evidence, D4, params v2), 996f4d0e4 (pure sealed assembly), 22ce023b1 (D6 fit/qualification, D2 regressions), 44278e89a (refit artifact + D6 report), 6948b75ac/e5fdc490d (replay script), ab403ea1b (R3 seam spec).
+
+- R1: `build_day0_remaining_probability_carrier(evaluation=None)` is legacy for every operator; dense only via `Day0CarrierEvaluation.SELECT` with operator None, or `REPLAY` with the dense operator plus `sealed_dense`. Unknown operators are rejected on the typed path.
+- R2: no caller passes `evaluation`, so no dense certificate reaches the DB. The Day0 revision, coverage SQL, reader/policy allow-lists and seed/lag suppression are live content. Live behaviour is legacy plus D1/G1/G8.
+- D3: SELECT admits everything received by `probability_cutoff_utc`; the latest received version of each instant wins. Sealed evidence is ~6.8 KB per certificate (live replay, Tokyo high, 7 cuts: p50 6,786 B, max 6,836 B; compute p50 0.79 s, max 1.33 s; REPLAY byte-equal 7/7). At a 30-min decision cadence for one qualified family that is ~330 KB/day.
+- D4: `prepare_dense_request` is the one qualification and construction; `dense_serves` and SELECT both call it. Reasons: NOT_QUALIFIED, STATION_MISMATCH, NO_DENSE_CHANNEL, CUT_OUTSIDE_LOCAL_DAY, VECTOR_WINDOW_INCOMPLETE, DENSE_ROUTE_MISSING, DENSE_ABSENT_TODAY, DENSE_STALE. On any reason SELECT returns the legacy carrier byte for byte (tests for absent/stale/wrong-station/missing-forecast/unqualified).
+- D2 lifecycle (pooled C stations, train cut 2026-09-26, 18,087 reports):
+  - routine kept 0.9957, removed 0.0037, gross 0.0002;
+  - SPECI kept 0.717, removed 0.277, gross 0.003;
+  - outage prior 0.026 (468 reports in shared-outage hours: 09-20 02–07Z, 09-22 10–11Z);
+  - corrected deltas ±1/±2;
+  - a(lag) = 0.5 flat (Jeffreys): no intraday page fetch exists before the cut, since G5 polling began 10-07.
+  - Deviation does not mark removal (kept 0.984 / 0.987 / 0.985 at 0 / 1 / ≥2 from the previous hour), so gross = absent and ≥2 from every kept neighbour.
+  - Intraday page fetches store [receipt − 120 min, receipt] (writer window), so absence evidence covers that span only.
+  - Consult independent case gives [0.1, 0.9] exactly. Lucknow 09-06 37 stays a mark: no bin 31–36 is zero, and the mass below 36 is the lifecycle no-tape share. Helsinki 10-07: a fetch covers 13:50Z but not 10:50Z. Page correction 16→15 wins.
+- D5 numerics: joint closed-form integration of simultaneous factors per threshold column; complement-stable transition tails with unbounded end cells (3.2e-14 tail survives); exact report instants (59 vs 60 distinct); drift folding conserves both mixture variances; continuous SPECI exposure (1 − e^−0.1 with 1 min left); empty tape → lowest bracket (HIGH and LOW). The JMA dual role is gone (D1: JMA is no report).
+- Error contract: particle oracle |ΔG| < 0.01 (HIGH and LOW, marks + pending); cell halving < 2e-3; independent pending instants vs closed form < 2e-3.
+
+### D6 qualification (artifacts/fast_obs_audit/dense_station_model/d6/qualification_2026-10-08.json, sha256 b08a2ec4…)
+Train ≤ 2026-09-26; held-out receipt-frozen decisions 09-27..10-07 every 30 min from local 06:00. A0 = live legacy posterior computed by the cut, on its own bins. Log score is true (no floor). CIs are day-block 95 %.
+
+| city metric | days | served/decisions | log A0 / A / B | B−A [95 %] | B−A0 [95 %] | HC err/n (exp, P95) A0 · A · B | sem B | eligible |
+|---|---|---|---|---|---|---|---|---|
+| Tokyo high | 7 | 238/396 | 1.358 / 0.581 / 0.523 | −0.057 [−0.086, −0.033] | −0.835 [−1.034, −0.658] | 0/7 · 0/111 · 0/126 (3.59, 7) | 0 | **yes** |
+| Tokyo low | 7 | 238/396 | 1.365 / 0.682 / 0.668 | −0.014 [−0.037, +0.007] | −0.697 [−1.085, −0.275] | 0/13 · 0/47 · 0/52 (1.43, 4) | 0 | no (B−A) |
+| Helsinki high | 11 | 339/396 | 0.607 / 0.863 / 0.847 | −0.016 [−0.022, −0.009] | +0.240 [−0.071, +0.514] | 3/144 · 0/89 · 0/92 (2.67, 6) | 0 | no (B−A0) |
+| Helsinki low | 11 | 339/396 | 2.575 / 1.691 / 1.297 | −0.394 [−1.259, −0.004] | −1.278 [−4.177, +0.502] | 2/103 · 24/91 · 0/68 (2.04, 5) | 0 | no (B−A0) |
+| Singapore high/low | 0 | 0/396 | — | — | — | — | — | no (no NEA writer: DENSE_ROUTE_MISSING) |
+
+Not-served decisions: Tokyo A0_ABSENT 69, DENSE_ABSENT_TODAY 81 (ledger JMA from 09-30), DENSE_STALE 8; Helsinki DENSE_ABSENT_TODAY 21, DENSE_STALE 36. Singapore stays legacy.
+
+### D7 migration
+- Census of positive-held families (TRADE read-only, 2026-10-08 16:00Z): Austin, Busan, Dallas, Denver, Hong Kong, London, Madrid, Miami ×2, Paris, Sao Paulo ×2, Shanghai, Taipei. None is a dense-qualified city.
+- Each family's latest live posterior goes through `read_pinned_replacement_forecast_bundle` (HELD_REDECISION, raw-input HWM conn). Head and origin/live give identical status/reason for all 14: 13 `REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE`, Paris `REPLACEMENT_PINNED_POSTERIOR_NOT_COMPLETE`. The read-only replay at the posterior's own clock reflects readiness having moved since; head and live agree byte for byte.
+- Held V2 carriers rebuilt through the shipped builder (evaluation=None): London 774822 and Shanghai 774676, plus 8 earlier V2 posteriors. The sha256 is identical on head and origin/live, and identity and q equal the persisted values for all 10.
+- No revision bump is needed: no dense certificate is written (R2), and every persisted V2/V3 replays unchanged. The refresh path for a future dense revision is the seam's REPLAY/SELECT split.
+- Rollback: a DENSE certificate reaching the live tree is rejected lawfully on all three consumers. Builder: `unsupported Day0 remaining carrier operator`. Center-policy authority: False. Bundle reader: `REPLACEMENT_DAY0_REMAINING_CENTER_POLICY_NOT_CURRENT`. Same on head without `evaluation`. None exist today.
+
+### Residuals
+- a(lag) has no intraday-fetch evidence before 10-07 (flat 0.5). It sharpens on the next refit.
+- Tokyo high is the only eligible family. It needs the R3 adapter seam before it can serve live.
+- Held-out windows are short: 7–11 days.
+- Forecast path is the previous-day1 proxy (archive) offline vs the freshest stitched capture live.
+- G9 (°F page revisions) is out of scope.
+- Deletion-after-appearance of °C page rows is assumed zero (G10 measures it).
