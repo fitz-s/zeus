@@ -82,41 +82,94 @@ def test_g2_instrument_proxy_is_never_a_day0_fact(monkeypatch):
                   decision_time=datetime(2026, 10, 4, 21, 0, tzinfo=UTC))
     assert _latest_authorized_day0_fact(c, require_settlement_channel=True, **kwargs) is None
     assert _latest_authorized_day0_fact(c, require_settlement_channel=False, **kwargs) is None
-    assert _latest_authorized_day0_fact(c, require_settlement_channel=False, metar_content_only=True,
-                                        **kwargs) is None
 
 
-def test_g1_physical_only_dense_station_never_conditions_a_seed(monkeypatch):
-    """Helsinki 2026-10-07: FMI 11.2 beat AWC 11.0 in the physical MAX and became an UNKNOWN-finality seed
-    source (11 fused_normal_direct posteriors).  Named exception to byte-identity: the seed's fact is METAR
-    content; the adapter's physical fact is unchanged."""
-    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+class _KeepOpen(sqlite3.Connection):
+    """The seed closes its world connection; the adapter reads the same private ledger next."""
 
-    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Helsinki": HELSINKI})
-    c = sqlite3.connect(":memory:")
+    def close(self):
+        pass
+
+
+def _helsinki_world(*, page: bool) -> sqlite3.Connection:
+    """EFHK 2026-10-07: page 10 at 11:20 local (optional), AWC 11 at 11:50, FMI 11.2 at 12:10."""
+    hel = ZoneInfo("Europe/Helsinki")
+    at = lambda h, m: datetime(2026, 10, 7, h, m, tzinfo=hel).astimezone(UTC)  # noqa: E731
+    c = sqlite3.connect(":memory:", factory=_KeepOpen)
     c.row_factory = sqlite3.Row
     ensure_table(c)
-    hel = ZoneInfo("Europe/Helsinki")
-    metar_at = datetime(2026, 10, 7, 11, 50, tzinfo=hel).astimezone(UTC)
-    fmi_at = datetime(2026, 10, 7, 12, 10, tzinfo=hel).astimezone(UTC)
+    c.execute("CREATE TABLE observation_instants (city TEXT, target_date TEXT, source TEXT, station_id TEXT, "
+              "local_timestamp TEXT, utc_timestamp TEXT, imported_at TEXT, temp_unit TEXT, running_max REAL, "
+              "running_min REAL, authority TEXT, training_allowed INTEGER, causality_status TEXT, "
+              "source_role TEXT, raw_response TEXT)")
+    if page:
+        append_print(c, city="Helsinki", station_id="EFHK", source_channel="noaa_wrh_efhk",
+                     publish_ts_utc=at(11, 20).isoformat(), value_native=10.0, unit="C",
+                     fetched_at_utc=(at(11, 20) + timedelta(minutes=15)).isoformat(),
+                     raw_report=f"EFHK {at(11, 20):%d%H%M}Z 27012KT 9999 SCT025 10/06 Q1009")
     append_print(c, city="Helsinki", station_id="EFHK", source_channel="aviationweather_metar",
-                 publish_ts_utc=(metar_at + timedelta(minutes=1)).isoformat(), value_native=11, unit="C",
-                 fetched_at_utc=(metar_at + timedelta(minutes=2)).isoformat(),
-                 raw_report=f"METAR EFHK {metar_at:%d%H%M}Z 27012KT 9999 SCT025 11/06 Q1009")
-    fmi_raw = json.dumps({"fmisid": "100968", "wmo": "2974", "station": "Vantaa Helsinki-Vantaan lentoasema",
-                          "property": "https://opendata.fmi.fi/meta?observableProperty=observation&param=temperature&language=eng",
-                          "unit": "degC", "availability": "local_fetch_only", "observed_at": fmi_at.isoformat(),
-                          "value": 11.2})
+                 publish_ts_utc=(at(11, 50) + timedelta(minutes=1)).isoformat(), value_native=11, unit="C",
+                 fetched_at_utc=(at(11, 50) + timedelta(minutes=2)).isoformat(),
+                 raw_report=f"METAR EFHK {at(11, 50):%d%H%M}Z 27012KT 9999 SCT025 11/06 Q1009")
+    fmi = {"fmisid": "100968", "wmo": "2974", "station": "Vantaa Helsinki-Vantaan lentoasema",
+           "property": "https://opendata.fmi.fi/meta?observableProperty=observation&param=temperature&language=eng",
+           "unit": "degC", "availability": "local_fetch_only", "observed_at": at(12, 10).isoformat(), "value": 11.2}
     append_print(c, city="Helsinki", station_id="EFHK", source_channel="fmi_airport_temperature",
-                 publish_ts_utc=fmi_at.isoformat(), value_native=11.2, unit="C",
-                 fetched_at_utc=(fmi_at + timedelta(minutes=2)).isoformat(), raw_report=fmi_raw)
-    kwargs = dict(city="Helsinki", target_date="2026-10-07", temperature_metric="high",
-                  decision_time=fmi_at + timedelta(minutes=10))
+                 publish_ts_utc=at(12, 10).isoformat(), value_native=11.2, unit="C",
+                 fetched_at_utc=(at(12, 10) + timedelta(minutes=2)).isoformat(), raw_report=json.dumps(fmi))
+    return c
+
+
+@pytest.mark.parametrize("page", (False, True))
+def test_g1_physical_only_station_never_conditions_and_the_seed_binds(monkeypatch, page):
+    """Helsinki 2026-10-07: FMI 11.2 beat AWC 11.0 in the physical MAX and seeded an UNKNOWN-finality
+    source (11 fused_normal_direct posteriors).  One law for seed and adapter: the Day0 fact is METAR
+    content, and the seed's conditioning binds at the real adapter for ENTRY and HELD.  On live, the FMI
+    seed fails the binding whenever a page row exists (GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH)."""
+    from src.data import replacement_forecast_seed_discovery as seed
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.engine import event_reactor_adapter as era
+    from tests.integration.test_w3_solve_seam_g3 import make_opportunity_event
+
+    c = _helsinki_world(page=page)
+    decision = datetime(2026, 10, 7, 9, 18, tzinfo=UTC)
+    kwargs = dict(city="Helsinki", target_date="2026-10-07", temperature_metric="high", decision_time=decision)
     physical = _latest_authorized_day0_fact(c, require_settlement_channel=False, **kwargs)
-    assert physical["observation_source"] == "fmi_airport_temperature"
-    metar = _latest_authorized_day0_fact(c, require_settlement_channel=False, metar_content_only=True, **kwargs)
-    assert metar["observation_source"] == "aviationweather_metar"
-    assert float(metar["observed_extreme_native"]) == 11.0
+    assert physical["observation_source"] == "aviationweather_metar"
+    assert float(physical["observed_extreme_native"]) == 11.0
+    monkeypatch.setattr(seed, "get_world_connection_read_only", lambda: c)
+    payload = seed._day0_observed_extreme_seed_payload(city="Helsinki", target_date="2026-10-07", metric="high",
+                                                       computed_at=decision)
+    assert payload["day0_observed_extreme_source"] == "aviationweather_metar"
+    assert payload["day0_observed_extreme_c"] == 11.0
+    page_at = datetime(2026, 10, 7, 8, 20, tzinfo=UTC)
+    carrier = {
+        "city": "Helsinki", "target_date": "2026-10-07", "metric": "high", "temperature_metric": "high",
+        "station_id": "EFHK", "configured_station_id": "EFHK", "settlement_source": "noaa_wrh_efhk",
+        "settlement_unit": "C", "observation_time": page_at.isoformat(),
+        "observation_available_at": (page_at + timedelta(minutes=15)).isoformat(),
+        "raw_value": 10.0, "rounded_value": 10, "high_so_far": 10.0,
+        "source_match_status": "MATCH", "local_date_status": "MATCH", "station_match_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS", "metric_match_status": "MATCH", "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED", "live_authority_status": "live", "raw_payload_sha256": "cd" * 32,
+    }
+    event = make_opportunity_event(event_type="DAY0_EXTREME_UPDATED", entity_key="Helsinki|2026-10-07|high|EFHK",
+                                   source="test", observed_at=page_at.isoformat(),
+                                   available_at=(page_at + timedelta(minutes=15)).isoformat(),
+                                   received_at=(page_at + timedelta(minutes=15)).isoformat(), payload=carrier,
+                                   causal_snapshot_id="hel-g1")
+    conditioning = {"active": True, "metric": "high", "observed_extreme_c": payload["day0_observed_extreme_c"],
+                    "observation_time": payload["day0_observed_extreme_observation_time"],
+                    "sample_count": payload["day0_observed_extreme_sample_count"],
+                    "source": payload["day0_observed_extreme_source"], "unit": "C"}
+    for held in (False, True):
+        bound = era._global_day0_execution_payload(
+            event, family=SimpleNamespace(city="Helsinki", target_date="2026-10-07", metric="high"),
+            resolution=SimpleNamespace(measurement_unit="C", station_id="EFHK"), conditioning=conditioning,
+            observation_conn=c, decision_time=decision, posterior_id=1,
+            allow_equivalent_conditioning_clock_advance=held)
+        assert bound["_edli_global_day0_binding"]["probability_conditioning_identity"]["source"] == (
+            "aviationweather_metar")
 
 
 def test_g8_supersession_compares_settlement_integers():
