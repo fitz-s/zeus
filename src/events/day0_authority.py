@@ -256,26 +256,32 @@ def day0_is_noaa_preliminary_source(source: object) -> bool:
             "observation_prints:aviationweather_metar",
             "observation_prints:ogimet_metar_",
         )
-    ) or day0_is_fast_admission_route_source(normalized)
+    ) or day0_is_native_report_source(normalized)
 
 
-def day0_is_fast_admission_route_source(source: object) -> bool:
-    """Whether a source is a fast-admission METAR-content route (registry ``fast_admission``).
+def day0_is_native_report_source(source: object, *, station: str | None = None) -> bool:
+    """Whether a source is a registered native METAR-report route (RouteKind.NATIVE_REPORT).
 
-    Its rows mirror the station's METAR at METAR instants, so it belongs to the
-    same provisional family as AWC/Ogimet: statistical evidence weighted by the
-    page's report-survival likelihood, never the settlement product itself
-    (Lucknow 2026-09-06: a 37 C METAR that the page dropped; settled 31).
+    Its rows are parsed METAR/SPECI bodies: each value is the report's integer, equal to the
+    AWC integer for the same report (D1 audit: MGM 603/603, metaviatelecom 61/61, IMD 301/305
+    with the 4 matching another AWC version of that report).  It therefore joins the AWC/Ogimet
+    provisional family above.  An INSTRUMENT_PROXY (JMA, SWOB) never does: its 0.1 C reading is
+    another measurement of the air, not the report (consult 2026-10-07, Tokyo 24.6 vs AWC 25).
+    ``station`` binds the route to one ICAO station.
     """
 
-    from src.data.station_temperature_adapters import CHANNELS
-
     normalized = str(source or "").strip().lower().removeprefix("observation_prints:")
-    route_channels = {
-        CHANNELS[provider]
-        for provider in ("jma_amedas", "eccc_swob", "mgm_metar", "imd_olbs_metar", "metaviatelecom_metar")
-    }
-    return normalized in route_channels
+    try:
+        from src.data.physical_current_sources import RouteKind, load_physical_current_sources
+
+        routes = load_physical_current_sources()[0]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return False
+    return any(
+        r.source_channel == normalized and r.kind is RouteKind.NATIVE_REPORT
+        and (station is None or r.station_id == str(station).strip().upper())
+        for r in routes
+    )
 
 
 def day0_is_carrier_source(source: object) -> bool:
@@ -334,7 +340,7 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     # Raw station reports and mirrors can contain prints omitted by the
     # resolver's NOAA WRH page product. Publication maturity or a calibrated
     # station margin cannot establish membership in that settlement product.
-    # Fast-admission routes are mirrors too: provisional at every instant,
+    # Native METAR-report routes carry the same report content as AWC: provisional,
     # never MONOTONE_SETTLEMENT_BOUND (that is the noaa_wrh page alone).
     if day0_is_noaa_preliminary_source(source) or source.startswith(
         ("same_station_fast_tail", "observation_prints:same_station_fast_tail")

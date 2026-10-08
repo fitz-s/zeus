@@ -1656,9 +1656,9 @@ def _day0_noaa_preliminary_carrier(
             "awc": "aviationweather_metar",
             "ogimet": f"ogimet_metar_{station.lower()}",
         }
-        from src.events.day0_authority import day0_is_fast_admission_route_source
+        from src.events.day0_authority import day0_is_native_report_source
 
-        if source not in expected_source_pair.values() and not day0_is_fast_admission_route_source(source):
+        if source not in expected_source_pair.values() and not day0_is_native_report_source(source, station=station):
             raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_SOURCE_CHANNEL_INVALID")
         identity_fields = (
             "semantics",

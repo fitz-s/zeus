@@ -204,14 +204,15 @@ def gather_day(conn, *, params, city_obj, metric: str, target: date, decision: d
     to_min = lambda moment: (moment - start).total_seconds() / 60.0  # noqa: E731
     routine = set(params.routine_minutes)
     page, provisional, pre = [], [], []
-    routes = {c: _route(city_obj, c) for c in params.provisional_route_channels}
+    from src.data.physical_current_sources import RouteKind
+
+    routes = {c: r for c in params.provisional_route_channels
+              if (r := _route(city_obj, c)) is not None and r.kind is RouteKind.NATIVE_REPORT}
     for (channel, obs), (value, _rec) in sorted(rows.items(), key=lambda kv: (kv[0][1], kv[0][0])):
         k = int(semantics.round_single(float(value)))
         t = to_min(obs)
-        if channel in routes:
-            # A fast route is METAR content only at its proven METAR instants (G2).
-            if routes[channel] is None or not routes[channel].settlement_instant(obs):
-                continue
+        if channel in params.provisional_route_channels and channel not in routes:
+            continue  # an instrument proxy is dense evidence only, never a provisional report
         if t < 0:
             pre.append((t, k))
         elif channel == page_channel:

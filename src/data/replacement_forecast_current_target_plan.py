@@ -944,9 +944,15 @@ def _latest_authorized_day0_fact(
     prediction-market payoff is defined by the declared settlement channel.
     They may advance refresh/redecision; they cannot alone create exact
     absorbing certainty when ``require_settlement_channel`` is true.
-    ``metar_content_only`` drops physical-only routes (a national dense station
-    such as FMI 100968) from the physical set: they are likelihood evidence
-    inside the Day0 laws, never a conditioning source (G1).
+    Registry routes by kind (D1).  A resolver route is the settlement product.
+    A native report route (parsed METAR/SPECI, every report, routine or SPECI) is
+    AWC-equivalent content: a physical channel under AWC's unit and margin law.
+    An instrument proxy (JMA, SWOB 0.1 C) is no fact at any instant: as the
+    adapter's physical frontier it would bind in place of the METAR it is not
+    (Tokyo JMA 24.6 vs AWC 25); it reaches belief through the current state and
+    the dense likelihood.  A physical-only station (FMI) stays physical evidence,
+    never a settlement fact.  ``metar_content_only`` drops it as well, so it never
+    conditions a seed (G1, a named exception to byte-identity).
     """
 
     metric = str(temperature_metric or "").strip().lower()
@@ -1447,6 +1453,8 @@ def _latest_authorized_day0_fact(
             else:
                 settlement_channels = set()
                 physical_channels = set()
+            from src.data.physical_current_sources import RouteKind
+
             station_routes_by_channel = {}
             try:
                 from src.data.physical_current_sources import physical_current_sources_for_city
@@ -1458,22 +1466,23 @@ def _latest_authorized_day0_fact(
                     # JSON envelope and carry raw METAR text. Their native unit,
                     # station and view were validated by the canonical writer.
                     if route.provider != "noaa_wrh"
+                    and route.kind is not RouteKind.INSTRUMENT_PROXY
                 }
             except Exception:
                 # Optional fast-source registry failure cannot remove the base
                 # settlement/physical channels or block a previously servable belief.
                 station_routes_by_channel = {}
+            metar_kinds = (RouteKind.RESOLVER_PAGE, RouteKind.NATIVE_REPORT)
             physical_channels.update(
                 channel
                 for channel, route in station_routes_by_channel.items()
-                if route.settlement_authorized or not metar_content_only
+                if route.kind in metar_kinds or not metar_content_only
             )
             settlement_channels.update(
                 channel
                 for channel, route in station_routes_by_channel.items()
-                # Canonical resolver products and proven fast admissions only;
-                # physical-only routes advance belief but never authorize.
-                if route.settlement_authorized
+                # The resolver product only; a native report is mirror content.
+                if route.kind is RouteKind.RESOLVER_PAGE
             )
             allowed_channels = (
                 settlement_channels if require_settlement_channel else physical_channels
@@ -1541,21 +1550,25 @@ def _latest_authorized_day0_fact(
                         if (
                             route_observed_at is None
                             or print_unit != expected_unit
+                            # A native report row is the report's integer, the
+                            # value AWC carries for the same report.
+                            or (
+                                station_route.kind is RouteKind.NATIVE_REPORT
+                                and not float(value).is_integer()
+                            )
                             or not valid_station_print(
                                 station_route,
                                 str(print_row["raw_report"] or ""),
                                 observed_at=route_observed_at,
                                 value=value,
                             )
-                            # G2: a fast admission is METAR content only at its proven
-                            # METAR instants; other rows stay physical evidence.
-                            or (
-                                (require_settlement_channel or metar_content_only)
-                                and not station_route.settlement_instant(route_observed_at)
-                            )
                         ):
                             continue
-                    if channel == "aviationweather_metar":
+                    if channel == "aviationweather_metar" or station_route is not None and (
+                        station_route.kind is RouteKind.NATIVE_REPORT
+                    ):
+                        # A native report route carries the same METAR content
+                        # as AWC, so it takes AWC's unit and margin law.
                         # Always stored raw Celsius on the wire (day0_fast_obs
                         # writer) — apply the SAME unit law
                         # settlement_temp_for_report does (F-settled cities

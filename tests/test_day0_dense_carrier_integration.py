@@ -3,8 +3,9 @@
 # Lifecycle: created=2026-10-07; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Pin the dense state-space dispatch inside build_day0_remaining_probability_carrier
 #   (Helsinki fixture rows), legacy byte-identity when dense is absent/stale/unqualified, receipt
-#   gating, the clock-bound identity, and the G1/G2/G8 rules (fast-admission routes are provisional
-#   METAR-instant evidence, never a semantic certificate; settlement-integer supersession).
+#   gating, the clock-bound identity, and the D1/G8 rules (native report routes are provisional METAR
+#   content, instrument proxies are no Day0 fact, neither is a semantic certificate; settlement-integer
+#   supersession).
 # Reuse: Private SQLite fixtures and a temporary params artifact; no live DB.
 from __future__ import annotations
 
@@ -246,20 +247,39 @@ def test_page_row_is_the_semantic_certificate(artifact, conn, monkeypatch):
 
 # ---------------------------------------------------------------- G1 / G2 / G8
 
-def test_g1_fast_admission_route_is_provisional_never_monotone():
+def test_d1_native_reports_are_provisional_proxies_are_not_metar_content():
+    """D1: native report routes join the AWC/Ogimet provisional family; instrument proxies never do."""
     from src.events.day0_authority import (
-        DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
-        day0_evidence_finality, day0_is_carrier_source,
+        DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_PROVISIONAL_CURRENT_SNAPSHOT, DAY0_UNKNOWN_FINALITY,
+        day0_evidence_finality, day0_is_carrier_source, day0_is_native_report_source,
+        day0_is_noaa_preliminary_source,
     )
 
-    for channel in ("jma_amedas_temperature", "eccc_swob_temperature", "mgm_metar_temperature",
-                    "imd_olbs_metar_temperature", "metaviatelecom_metar_temperature"):
+    for channel, station in (("mgm_metar_temperature", "LTFM"), ("imd_olbs_metar_temperature", "VILK"),
+                             ("metaviatelecom_metar_temperature", "UUWW")):
         assert day0_evidence_finality({"settlement_source": channel}) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
         assert day0_evidence_finality({"settlement_source": channel,
                                        "evidence_finality": DAY0_MONOTONE_SETTLEMENT_BOUND}) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
-        assert day0_is_carrier_source(channel)
+        assert day0_is_noaa_preliminary_source(channel) and day0_is_carrier_source(channel)
+        assert day0_is_native_report_source(channel, station=station)
+        assert not day0_is_native_report_source(channel, station="RJTT")
+    for channel in ("jma_amedas_temperature", "eccc_swob_temperature", "fmi_airport_temperature"):
+        assert not day0_is_noaa_preliminary_source(channel) and not day0_is_carrier_source(channel)
+        assert not day0_is_native_report_source(channel)
+        assert day0_evidence_finality({"settlement_source": channel}) == DAY0_UNKNOWN_FINALITY
     assert day0_evidence_finality({"settlement_source": "noaa_wrh_rjtt"}) == DAY0_MONOTONE_SETTLEMENT_BOUND
-    assert not day0_is_carrier_source("fmi_airport_temperature")
+
+
+def test_d1_route_kinds_are_typed_by_provider():
+    from src.data.physical_current_sources import RouteKind, load_physical_current_sources
+
+    kinds = {(s.provider, s.station_id): s.kind for s in load_physical_current_sources()[0]}
+    assert {k for k, v in kinds.items() if v is RouteKind.NATIVE_REPORT} == {
+        ("mgm_metar", "LTFM"), ("mgm_metar", "LTAC"), ("imd_olbs_metar", "VILK"), ("metaviatelecom_metar", "UUWW")}
+    assert {k for k, v in kinds.items() if v is RouteKind.INSTRUMENT_PROXY} == {
+        ("jma_amedas", "RJTT"), ("eccc_swob", "CYYZ")}
+    assert kinds[("fmi_wfs", "EFHK")] is RouteKind.PHYSICAL
+    assert kinds[("noaa_wrh", "RJTT")] is RouteKind.RESOLVER_PAGE
 
 
 def _tokyo_city():
@@ -274,7 +294,8 @@ def _jma_raw(at: datetime, value: float) -> str:
 
 def test_g1_physical_only_dense_station_never_conditions_a_seed(conn, monkeypatch):
     """Helsinki: FMI 11.2 beat AWC 11.0 in the physical MAX and became an UNKNOWN-finality source
-    (11 fused_normal_direct posteriors). With metar_content_only the physical fact is METAR content."""
+    (11 fused_normal_direct posteriors).  G1 named exception to byte-identity: the seed's fact is METAR
+    content; the adapter's physical fact is unchanged from live."""
     from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
 
     monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Helsinki": CITY})
@@ -298,8 +319,9 @@ def test_dense_served_family_skips_the_fast_tail(artifact, conn):
                                      decision=local(13, 5))  # not after training
 
 
-def test_g2_non_metar_instant_route_row_sets_no_settlement_fact(monkeypatch):
-    """Tokyo 2026-10-04 LOW: JMA 18.4 at 20:40Z (a non-METAR instant) must not be a settlement fact."""
+def test_g2_instrument_proxy_is_never_a_day0_fact(monkeypatch):
+    """Tokyo 2026-10-04 LOW: JMA 18.4 at 20:40Z (settled 19).  A proxy row is no Day0 fact at any instant,
+    on- or off-METAR-minute: neither the settlement fact, the adapter's physical frontier, nor a seed."""
     from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
 
     city = _tokyo_city()
@@ -312,14 +334,12 @@ def test_g2_non_metar_instant_route_row_sets_no_settlement_fact(monkeypatch):
         append_print(c, city="Tokyo", station_id="RJTT", source_channel="jma_amedas_temperature",
                      publish_ts_utc=at.isoformat(), value_native=v, unit="C",
                      fetched_at_utc=(at + timedelta(minutes=7)).isoformat(), raw_report=_jma_raw(at, v))
-    fact = _latest_authorized_day0_fact(c, city="Tokyo", target_date="2026-10-05", temperature_metric="low",
-                                        decision_time=datetime(2026, 10, 4, 21, 0, tzinfo=UTC),
-                                        require_settlement_channel=True)
-    assert fact is not None and float(fact["observed_extreme_native"]) == pytest.approx(18.9)
-    physical = _latest_authorized_day0_fact(c, city="Tokyo", target_date="2026-10-05", temperature_metric="low",
-                                            decision_time=datetime(2026, 10, 4, 21, 0, tzinfo=UTC),
-                                            require_settlement_channel=False)
-    assert physical is not None and float(physical["observed_extreme_native"]) == pytest.approx(18.4)
+    kwargs = dict(city="Tokyo", target_date="2026-10-05", temperature_metric="low",
+                  decision_time=datetime(2026, 10, 4, 21, 0, tzinfo=UTC))
+    assert _latest_authorized_day0_fact(c, require_settlement_channel=True, **kwargs) is None
+    assert _latest_authorized_day0_fact(c, require_settlement_channel=False, **kwargs) is None
+    assert _latest_authorized_day0_fact(c, require_settlement_channel=False, metar_content_only=True,
+                                        **kwargs) is None
 
 
 def test_g8_supersession_compares_settlement_integers():
@@ -334,17 +354,6 @@ def test_g8_supersession_compares_settlement_integers():
     assert not fast_extreme_supersedes_settlement(metric="low", fast_extreme_c=12.6, settlement_extreme_c=13.4, city=tokyo)
     # Legacy raw comparison is unchanged without a city.
     assert fast_extreme_supersedes_settlement(metric="high", fast_extreme_c=25.0, settlement_extreme_c=24.6)
-
-
-def test_route_declares_metar_instants_and_rejects_others():
-    from src.data.physical_current_sources import load_physical_current_sources
-
-    sources, _ = load_physical_current_sources()
-    jma = next(s for s in sources if s.source_channel == "jma_amedas_temperature")
-    assert jma.settlement_instant(datetime(2026, 10, 7, 6, 0, tzinfo=UTC))
-    assert not jma.settlement_instant(datetime(2026, 10, 7, 6, 10, tzinfo=UTC))
-    fmi = next(s for s in sources if s.source_channel == "fmi_airport_temperature")
-    assert not fmi.settlement_instant(datetime(2026, 10, 7, 6, 20, tzinfo=UTC))
 
 
 # ---------------------------------------------------------------- live-shaped regressions

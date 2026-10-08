@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-07 (G5 resolver rival; fast admissions declare METAR-instant minutes, G2)
+# Last reused/audited: 2026-10-07 (G5 resolver rival; typed route kinds, D1)
 """Station-bound current observations and their settlement roles.
 
 Adapters own fixed endpoints. Configuration cannot inject URLs, SQL, or code.
@@ -36,6 +36,27 @@ class SourceRole(str, Enum):
     PHYSICAL_ONLY = "physical_only"
 
 
+class RouteKind(str, Enum):
+    """What one stored row of a route measures (independent of its settlement role).
+
+    NATIVE_REPORT: a proven fast-admission parsed METAR/SPECI body; integer value at the report's
+      own issued clock, the same content AWC carries for that report (routine or SPECI, no cadence
+      gate).
+    INSTRUMENT_PROXY: a 0.1 C national-instrument value; never a settlement fact, boundary or
+      frontier substitute at any instant.
+    RESOLVER_PAGE: the settlement product's own rows.
+    PHYSICAL: any other station instrument."""
+
+    NATIVE_REPORT = "native_report"
+    INSTRUMENT_PROXY = "instrument_proxy"
+    RESOLVER_PAGE = "resolver_page"
+    PHYSICAL = "physical"
+
+
+NATIVE_REPORT_PROVIDERS = frozenset({"mgm_metar", "imd_olbs_metar", "metaviatelecom_metar"})
+INSTRUMENT_PROXY_PROVIDERS = frozenset({"jma_amedas", "eccc_swob"})
+
+
 # Resolver products by settlement source type; nothing else may claim the role.
 _CANONICAL = {"noaa_wrh": "noaa", "wu_station_history": "wu_icao"}
 # Current paths every fast admission must beat, besides other registry routes
@@ -56,27 +77,27 @@ class PhysicalCurrentSource:
     station: FmiStation | None
     identity: dict[str, Any] = field(default_factory=dict)
     role: SourceRole = SourceRole.PHYSICAL_ONLY
-    metar_instant_minutes: frozenset[int] = frozenset()
 
     @property
     def settlement_authorized(self) -> bool:
         return self.role is not SourceRole.PHYSICAL_ONLY
 
     @property
+    def kind(self) -> RouteKind:
+        if self.role is SourceRole.CANONICAL_RESOLVER:
+            return RouteKind.RESOLVER_PAGE
+        if self.provider in NATIVE_REPORT_PROVIDERS and self.role is SourceRole.FAST_ADMISSION:
+            # Proof-bound: the loader admits the route only on exact value identity.
+            return RouteKind.NATIVE_REPORT
+        if self.provider in INSTRUMENT_PROXY_PROVIDERS:
+            return RouteKind.INSTRUMENT_PROXY
+        return RouteKind.PHYSICAL
+
+    @property
     def current_path(self) -> str:
         """The comparator a fast admission must beat: a resolver route IS ``resolver``."""
         return "resolver" if self.role is SourceRole.CANONICAL_RESOLVER else self.provider
 
-    def settlement_instant(self, observed_at: Any) -> bool:
-        """Whether a row at ``observed_at`` may stand as settlement-channel content.
-
-        A fast admission's value identity is proven at the station's METAR instants only.
-        Its readings between them (JMA's 10-min cadence) are physical evidence, never a
-        settlement fact (G2, Tokyo 2026-10-04 LOW: 18.4 at 20:40Z, settled 19)."""
-        if self.role is not SourceRole.FAST_ADMISSION:
-            return self.settlement_authorized
-        return (getattr(observed_at, "second", 1) == 0 and getattr(observed_at, "microsecond", 1) == 0
-                and getattr(observed_at, "minute", -1) in self.metar_instant_minutes)
 
 
 def _counts_proven(proof: Any) -> bool:
@@ -166,20 +187,8 @@ def fast_admission_defect(row: dict[str, Any], rivals: frozenset[str] = frozense
     return "LEAD_NOT_FASTER:" + ",".join(sorted(missing)) if missing else None
 
 
-def _metar_instant_minutes(row: dict[str, Any], role: SourceRole) -> frozenset[int]:
-    """A fast admission must declare the METAR minutes its identity proof covers."""
-    if role is not SourceRole.FAST_ADMISSION:
-        return frozenset()
-    minutes = row["metar_instant_minutes"]
-    if (not isinstance(minutes, list) or not minutes
-            or any(type(m) is not int or not 0 <= m < 60 for m in minutes)):
-        raise ValueError("PHYSICAL_CURRENT_METAR_MINUTES_INVALID")
-    return frozenset(minutes)
-
-
 def _source(row: dict[str, Any], role: SourceRole, seen: set) -> PhysicalCurrentSource:
     """Validate one registry row into its adapter source; raise on invalid."""
-    instants = _metar_instant_minutes(row, role)
     if row["provider"] != "fmi_wfs":
         from src.data.station_temperature_adapters import CHANNELS
         identity = row["identity"]
@@ -204,7 +213,7 @@ def _source(row: dict[str, Any], role: SourceRole, seen: set) -> PhysicalCurrent
             raise ValueError("PHYSICAL_CURRENT_ADAPTER_INVALID")
         seen.add(key)
         return PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
-                                     kinds, unit, seconds, None, dict(identity), role, instants)
+                                     kinds, unit, seconds, None, dict(identity), role)
     if row["provider"] != "fmi_wfs" or row["source_channel"] != SOURCE_CHANNEL or row["unit"] != "C":
         raise ValueError("PHYSICAL_CURRENT_ADAPTER_UNKNOWN")
     key = (row["station_id"], row["source_channel"])
@@ -222,7 +231,7 @@ def _source(row: dict[str, Any], role: SourceRole, seen: set) -> PhysicalCurrent
     station = FmiStation(row["station_id"], str(identity["fmisid"]), str(identity["wmo"]),
                          identity["name"], latitude, longitude)
     return PhysicalCurrentSource(row["provider"], row["source_channel"], row["station_id"],
-                                 types, row["unit"], seconds, station, dict(identity), role, instants)
+                                 types, row["unit"], seconds, station, dict(identity), role)
 
 
 @lru_cache(maxsize=4)

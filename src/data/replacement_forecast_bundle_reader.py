@@ -695,7 +695,7 @@ def _held_pinned_provenance_reason(
         return "REPLACEMENT_PINNED_DAY0_UNIT_MISMATCH"
     source = str(provisional.get("source") or "").strip().lower()
     from src.events.day0_authority import (
-        day0_is_fast_admission_route_source,
+        day0_is_native_report_source,
         day0_is_noaa_preliminary_source,
     )
     settlement_source_type = str(
@@ -749,7 +749,7 @@ def _held_pinned_provenance_reason(
             or not day0_is_noaa_preliminary_source(source)
             or not expected_station
             or (source not in expected_source_pair.values()
-                and not day0_is_fast_admission_route_source(source))
+                and not day0_is_native_report_source(source, station=expected_station))
         ):
             return "REPLACEMENT_PINNED_DAY0_SOURCE_STATION_MISMATCH"
         if str(likelihood.get("semantics") or "").strip() not in {
