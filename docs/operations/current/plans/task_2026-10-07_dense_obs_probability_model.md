@@ -228,11 +228,11 @@ Stopped before D1 per brief: the D2(i) law fork needs a coordinator decision (ho
   - The settlement channel is the resolver page only.
   - A native report is a physical channel under AWC's unit and margin law. Its value must be the report integer.
   - A proxy is no fact at any instant: not the settlement fact, not the physical frontier.
-  - PHYSICAL rows stay physical facts, as on live.
+  - Physical-only instruments (FMI and similar) are no Day0 fact either (superseded 2026-10-08, 75fe5dd53 / f5aebd0ed). The seed and the adapter read one law: a seed-only filter made the seed's AWC conditioning fail the adapter's binding, and on live the FMI seed failed it whenever a page row existed (`GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH`, probe Helsinki 10-07).
 - Predicate membership: `day0_is_noaa_preliminary_source` gains native routes only, through `day0_is_native_report_source(source, station=...)` (registry kind check, station-bound). The proxy broadening is retracted.
 - Native value identity with AWC, same report (read-only WORLD): MGM 285/285 and 318/318, metaviatelecom 61/61, IMD 301/305. The 4 IMD differences each equal another AWC version of that report.
 - Named exceptions to legacy byte-identity (intentional corrections):
-  - G1: the seed's physical fact is METAR content only (`metar_content_only=True` in seed discovery). A physical-only station (FMI) never conditions a seed. Test: `test_g1_physical_only_dense_station_never_conditions_a_seed`.
+  - G1: the Day0 physical fact is METAR content only, for the seed and the adapter alike. A physical-only station (FMI) never conditions a seed, and the seed's conditioning binds at the adapter for ENTRY and HELD. Test: `test_g1_physical_only_station_never_conditions_and_the_seed_binds` (with and without a page row).
   - G8: `fast_extreme_supersedes_settlement(..., city=)` compares settlement integers. Test: `test_g8_supersession_compares_settlement_integers`.
   - D1 itself: proxy rows leave the Day0 physical fact (live used them, e.g. Tokyo 10-04 LOW 18.4). Native rows take AWC's margin law (live took them raw). Test: `test_g2_instrument_proxy_is_never_a_day0_fact`.
 - Regressions (tests/test_day0_route_kinds.py): 15 tests; 10 fail on the pre-D1 head 523654b81.
