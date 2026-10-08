@@ -65,7 +65,10 @@ from src.data.metar_temperature import (
     metar_t_group_temperature_c,
     metar_temperature_c,
 )
-from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+from src.events.day0_authority import (
+    DAY0_WU_FAST_RESIDUAL_SOURCE,
+    noaa_page_absorbing_value_f,
+)
 from src.state.schema.observation_prints_schema import (
     RECEIPT_US_SQL,
     receipt_us,
@@ -806,6 +809,10 @@ def build_fast_station_residual_likelihood(
 
     settlement_rows: list[tuple[datetime, float]] = []
     fast_rows: list[tuple[datetime, float]] = []
+    # The settlement extreme below truncates every scenario, so it reads each
+    # clock's latest version (rows arrive in clock, id order) and, on a degF page,
+    # only what both endings of a grid-clock cell share (noaa_page_absorbing_value_f).
+    settlement_bounds: dict[datetime, float] = {}
     for row in rows:
         channel = str(row[1] or "")
         published = _fast_residual_utc(row[2])
@@ -832,6 +839,13 @@ def build_fast_station_residual_likelihood(
             continue
         target = settlement_rows if channel == settlement_channel else fast_rows
         target.append((observed_at_instant, value_c))
+        if channel == settlement_channel:
+            bound_c = value_c
+            if channel.startswith("noaa_wrh_") and str(row[4] or "").strip().upper() == "F":
+                bound_c = (noaa_page_absorbing_value_f(
+                    float(row[3]), observed_at=published, metric=normalized_metric,
+                ) - 32.0) * 5.0 / 9.0
+            settlement_bounds[observed_at_instant] = bound_c
     if not settlement_rows or not fast_rows:
         return None
 
@@ -870,7 +884,7 @@ def build_fast_station_residual_likelihood(
     # mirror republishes it after local midnight belongs to the day it measured.
     settlement_values = [
         value
-        for observed_at_instant, value in settlement_rows
+        for observed_at_instant, value in settlement_bounds.items()
         if local_start <= observed_at_instant < local_end
     ]
     settlement_extreme = (

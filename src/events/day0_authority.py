@@ -323,6 +323,28 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     return DAY0_MONOTONE_SETTLEMENT_BOUND
 
 
+def noaa_page_absorbing_value_f(value_f: float, *, observed_at: datetime, metric: str) -> float:
+    """The degF value one NOAA page print certifies in the absorbing direction.
+
+    The degF page can rewrite a cell once: at a 5-minute-grid clock it first
+    serves the SPECI's T-group tenths, then the ASOS 5-minute whole degree C
+    when that record merges (31/31 revisions 2026-10-01..05, 1-19 min after
+    first receipt; the live page shows the whole degree for all 31). The merge
+    is not certain (KSEA 2026-10-07 10:20/10:25 kept tenths), so the final cell
+    is the tenths value or its half-up whole degree. HIGH takes the smaller and
+    LOW the larger: true under either ending, so a later revision can only move
+    the boundary in its absorbing direction. Off-grid clocks and whole-degree
+    values are final as published.
+    """
+    if observed_at.minute % 5 or observed_at.second or observed_at.microsecond:
+        return value_f
+    tenths_c = round((value_f - 32.0) / 1.8 * 10)
+    if tenths_c % 10 == 0 or abs(round(tenths_c * 0.18 + 32.0, 2) - value_f) > 0.006:
+        return value_f
+    whole_f = round((tenths_c + 5) // 10 * 1.8 + 32.0, 2)
+    return min(value_f, whole_f) if metric == "high" else max(value_f, whole_f)
+
+
 DAY0_ABSORBING_CONDITIONING_KEY = "day0_conditioning"
 DAY0_PROVISIONAL_CONDITIONING_KEY = "day0_provisional_observation"
 

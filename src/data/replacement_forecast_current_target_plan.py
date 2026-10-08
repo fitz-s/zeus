@@ -35,6 +35,7 @@ from src.data.replacement_forecast_source_run_identity import (
     register_native_coordinate_compatibility_sql,
 )
 from src.engine.time_context import has_city_local_day_ended, has_city_local_day_started
+from src.events.day0_authority import noaa_page_absorbing_value_f
 from src.state.db import _connect_read_only
 from src.state.schema.observation_prints_schema import RECEIPT_US_SQL, receipt_us
 
@@ -1622,6 +1623,10 @@ def _latest_authorized_day0_fact(
                     ):
                         continue
                     source_clock = source_clock_utc.isoformat()
+                    if channel.startswith("noaa_wrh_") and expected_unit == "F":
+                        value = noaa_page_absorbing_value_f(
+                            value, observed_at=source_clock_utc, metric=metric
+                        )
                     print_streams.setdefault((channel, source_clock), []).append(
                         (
                             publish_ts,

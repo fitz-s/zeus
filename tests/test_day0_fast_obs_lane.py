@@ -349,7 +349,12 @@ def test_fast_residual_uses_native_product_not_raw_t_group(monkeypatch, city_nam
         assert likelihood.window_start == (cutoff - timedelta(days=7)).isoformat()
         assert likelihood.residual_weights_c == ((round(product_c - 14.4, 6), 1.0 - expected_unknown),)
         assert likelihood.unknown_weight == expected_unknown
-        assert likelihood.settlement_extreme_c == pytest.approx(product_c)
+        # The fixture's page rows sit on whole hours (5-minute-grid clocks). A degF
+        # grid-clock tenths cell may be rewritten to its half-up whole degree C, so
+        # LOW truncates at the side both endings share (G9, 2026-10-08).
+        grid_tenths_low = city.settlement_unit == "F" and metric == "low" and product_c % 1
+        assert likelihood.settlement_extreme_c == pytest.approx(
+            15.0 if grid_tenths_low else product_c)
         assert likelihood.settlement_channel == f"noaa_wrh_{city.wu_station.lower()}"
         assert conn.execute("SELECT * FROM observation_prints ORDER BY id").fetchall() == original_rows
         if city.settlement_unit == "F" and product_c == 14.0:
