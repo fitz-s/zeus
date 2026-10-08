@@ -925,6 +925,7 @@ test_trust_policy:
     tests/test_day0_hourly_vectors_prune_index.py: {created: "2026-09-05", last_used: "2026-09-05", note: "src/data/day0_hourly_vectors.py::_ensure_schema coverage: the retention prune DELETE in persist_day0_hourly_vectors (captured_at < cutoff) is served by idx_day0_hourly_vectors_captured_at, never a full table scan under the forecasts LIVE flock (2026-09-05 forecasts write-lock hog)."}
     tests/test_day0_hourly_vectors_quota_root_cause.py: {created: "2026-09-05", last_used: "2026-09-30", note: "Audited current normal ENS acquisition/persistence entry points; actual parent52 module nodes pass. Private SQLite and canonical metadata pin bind exact city/date usable new ensemble run; successTTL recovery uses causal old run identity, not old q freshness/fullness. Failed retry-not-before, healthy new51 throttle, quota/deadline and deterministic no-refetch remain obligations; normal held/public RESET is separate from module acceptance."}
     tests/test_posterior_starvation_alert.py: {created: "2026-07-17", last_used: "2026-07-28", note: "P1 observability antibody (2026-07-13/14 CONUS 30-37h dark-posterior incident): a live-tradeable (city,target_date,metric) family with no fresh runtime_layer='live' forecast_posteriors emits one ZEUS_POSTERIOR_STARVATION ERROR log per scope per watchdog pass; local-day-complete eastern families are excluded while UTC-yesterday western families remain checked. Log-only alert, not a new gate: locks deliberate absence from event_reactor_adapter."}
+    tests/test_posterior_commit_rate_alarm.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Fleet commit-rate alarm (2026-10-06/07 outages, ~zero live posteriors for 1-5 h with posterior_starvation silent): fewer than 40 runtime_layer=live forecast_posteriors rows with computed_at in the trailing 30 min -> ZEUS_POSTERIOR_COMMIT_RATE_COLLAPSE ERROR naming queued request files and top-3 decline/failure reason codes; missing table is evaluated=False ok=True; probe flag posterior_commit_rate_collapse=<n>. Log-only, not an entry gate."}
 
 categories:
   core_law_antibody:
@@ -1209,6 +1210,8 @@ categories:
     - tests/test_run_mode_failure_surfaces.py
     # P1 observability fix (2026-07-17) — composite live-health alerts on live-market posterior starvation.
     - tests/test_posterior_starvation_alert.py
+    # Fleet commit-rate alarm (2026-10-08) — composite live-health alerts when live-posterior commits collapse fleet-wide.
+    - tests/test_posterior_commit_rate_alarm.py
     # codereview-may19-2 P1-1: ACK facts durable post-SDK-submit (unconditional commit in _live_order).
     - tests/test_live_order_ack_durability.py
     # EDLI e2e gate-unblock W0-W3 (2026-06-03) — RED->GREEN relationship antibodies.

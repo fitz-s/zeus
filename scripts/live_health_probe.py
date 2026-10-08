@@ -78,6 +78,7 @@ DIRECT_HEAD_LIVE_HEALTH_SURFACES = (
     "forecast_event_bridge",
     "pending_exit_release_loop",
     "monitor_probability_freshness",
+    "posterior_commit_rate",
 )
 SETTLEMENT_TRUTH_STALE_SECONDS = int(os.environ.get("ZEUS_SETTLEMENT_TRUTH_STALE_SECONDS", str(48 * 3600)))
 PROCESS_CODE_STALE_TOLERANCE_SECONDS = 2
@@ -984,6 +985,7 @@ def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
             _main_daemon_surface,
             _monitor_probability_freshness_surface,
             _pending_exit_release_loop_surface,
+            _posterior_commit_rate_surface,
             _runtime_code_surface,
             _venue_heartbeat_surface,
         )
@@ -1007,7 +1009,8 @@ def _direct_head_live_health_surfaces(root, *, status_summary, heartbeat):
             state_dir,
             now_dt,
             main_daemon_surface=main_daemon,
-        )
+        ),
+        "posterior_commit_rate": _posterior_commit_rate_surface(state_dir, now_dt),
     }
     if not trade_db.exists():
         skipped = {
@@ -1081,12 +1084,17 @@ def _classify_alerts(report, ss_age):
             or "ENTRY_PROBABILITY_EVIDENCE_UNHEALTHY"
         )
     for surface in DIRECT_HEAD_LIVE_HEALTH_SURFACES:
+        if surface == "posterior_commit_rate":
+            continue  # emitted below as its own flag
         direct_surface = report.get(surface, {})
         if direct_surface.get("ok") is False:
             alerts.append(
                 f"LIVE_HEALTH_{surface.upper()}="
                 f"{direct_surface.get('issue') or 'DEGRADED'}"
             )
+    commit_rate = report.get("posterior_commit_rate", {})
+    if commit_rate.get("ok") is False:
+        alerts.append(f"posterior_commit_rate_collapse={commit_rate.get('count')}")
     status_process = report.get("status_process", {})
     if status_process.get("ok") is False:
         alerts.append(status_process.get("issue") or "STATUS_SUMMARY_PROCESS_CONTRACT")
