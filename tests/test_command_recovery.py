@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-10-04; last_reused=2026-10-04
+# Lifecycle: created=2026-04-26; last_reviewed=2026-10-08; last_reused=2026-10-08
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-10-04
+# Last reused/audited: 2026-10-08
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -21,6 +21,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests.test_exit_safety import _prepared_reauction_requester_for_test
 
 from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
@@ -6137,12 +6139,12 @@ def _record_reauction_monitor_after_release(conn, position, tmp_path):
 
 
 @pytest.mark.parametrize("later_change", (
-    "none", "publish_retry", "second_generation", "generation", "family", "token",
+    "none", "prepare_retry", "publish_failure", "second_generation", "generation", "family", "token",
     "command_state", "order_identity", "cancel_pending_command",
     "new_exit_command", "positive_fill",
 ))
 def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(
-    conn, tmp_path, later_change,
+    conn, tmp_path, monkeypatch, later_change,
 ):
     from src.execution import command_recovery, exit_lifecycle
     from src.state.portfolio import _position_from_projection_row
@@ -6320,7 +6322,7 @@ def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(
     requests = []
     assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position, conn=conn,
-        requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: requests.append((released.trade_id, force_new)) or True),
     )
     assert requests == []
     _record_reauction_monitor_after_release(conn, position, tmp_path)
@@ -6382,29 +6384,53 @@ def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(
             trade_id="late-maker-fill", state="CONFIRMED", filled_size="1", fill_price="0.06",
         )
     conn.commit()
-    if later_change not in {"none", "publish_retry", "second_generation"}:
+    if later_change not in {"none", "prepare_retry", "publish_failure", "second_generation"}:
         assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
             position, conn=conn,
-            requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+            requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: requests.append((released.trade_id, force_new)) or True),
         )
         assert requests == []
         return
-    if later_change == "publish_retry":
-        failed_publications = []
+    if later_change == "prepare_retry":
+        failed_preparations = []
+        before = conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0]
+        def refuse_preparation(released, force_new, *, prepare_only, obligation):
+            assert prepare_only and force_new and not conn.in_transaction
+            failed_preparations.append(released.trade_id)
+            return False, None
         assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
-            position, conn=conn,
-            requester=lambda released, force_new: failed_publications.append(released.trade_id) or False,
+            position, conn=conn, requester=refuse_preparation,
         )
-        assert failed_publications == [position.trade_id]
+        assert failed_preparations == [position.trade_id]
+        assert conn.execute("SELECT COUNT(*) FROM position_events").fetchone()[0] == before
         assert exit_lifecycle._canonical_global_sell_command_ownership(
             conn, position, require_pending_exit=False,
         ) == "GLOBAL_NO_COMMAND"
+    elif later_change == "publish_failure":
+        from src.execution.exit_safety import global_sell_reauction_publish_claim_blocks_exit_command
+        failed_publications = []
+        requester = _prepared_reauction_requester_for_test(
+            conn, monkeypatch,
+            lambda released, force_new: failed_publications.append(released.trade_id) or False,
+        )
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn, requester=requester,
+        )
+        assert failed_publications == [position.trade_id]
+        assert global_sell_reauction_publish_claim_blocks_exit_command(conn, position.trade_id)
+        assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position, conn=conn,
+            requester=lambda *_args, **_kwargs: pytest.fail('failed publisher was borrowed'),
+        )
+        assert failed_publications == [position.trade_id]
+        assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+        return
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
-        requester=lambda released, force_new: (
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: (
             requests.append((released.trade_id, force_new)) or True
-        ),
+        )),
     )
     assert requests == [("pos-global-maker", True)]
     if later_change == "second_generation":
@@ -6447,13 +6473,13 @@ def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(
         _record_reauction_monitor_after_release(conn, position, tmp_path)
         assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
             position, conn=conn,
-            requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+            requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: requests.append((released.trade_id, force_new)) or True),
         )
         assert requests == [("pos-global-maker", True)] * 2
     assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
     assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position, conn=conn,
-        requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: requests.append((released.trade_id, force_new)) or True),
     )
     assert requests == [("pos-global-maker", True)] * (2 if later_change == "second_generation" else 1)
 
@@ -36789,21 +36815,21 @@ class TestRecoveryResolutionTable:
         requests = []
         assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
             position, conn=conn,
-            requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+            requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: requests.append((released.trade_id, force_new)) or True),
         )
         assert requests == []
         _record_reauction_monitor_after_release(conn, position, tmp_path)
         assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
             position,
             conn=conn,
-            requester=lambda released, force_new: (
+            requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: (
                 requests.append((released.trade_id, force_new)) or True
-            ),
+            )),
         )
         assert requests == [("pos-001", True)]
         assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
             position, conn=conn,
-            requester=lambda released, force_new: requests.append((released.trade_id, force_new)) or True,
+            requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: requests.append((released.trade_id, force_new)) or True),
         )
         assert requests == [("pos-001", True)]
 

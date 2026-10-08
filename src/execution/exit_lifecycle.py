@@ -25,7 +25,7 @@ import threading
 import time as _time_module
 from collections.abc import Collection, Mapping
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from enum import Enum
@@ -2919,6 +2919,11 @@ class MonitorRiskAuthority:
         }
 
 
+# Exact zero posterior support: cash strictly dominates a zero-payoff token, so
+# the SELL is direct reduce-only authority and crosses the fresh top bid.
+_ZERO_SUPPORT_SELL = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+
+
 @dataclass(frozen=True)
 class ProtectiveSellExecutionAuthority:
     """Immutable protective authority for one fresh FAK reduce-only SELL."""
@@ -2939,7 +2944,7 @@ class ProtectiveSellExecutionAuthority:
         if self.kind not in {
             "RED_FORCE_EXIT",
             "DAY0_HARD_FACT_BIN_DEAD",
-            "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
+            _ZERO_SUPPORT_SELL,
         }:
             raise ValueError("protective sell kind invalid")
         if not all((
@@ -3413,7 +3418,7 @@ def _protective_sell_semantic_receipt(
             conn, position_id=position_id, receipt=receipt, deadline_utc=source_deadline_utc,
         ):
             raise _ProtectiveSourceUnavailable("protective_source_redecision_required")
-    elif kind == "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES":
+    elif kind == _ZERO_SUPPORT_SELL:
         receipt = payload.get("exit_intent_probability_receipt")
         if (
             reason != kind
@@ -8665,10 +8670,13 @@ def _execute_live_exit(
         if is_red_force_exit
         else "DAY0_HARD_FACT_BIN_DEAD"
         if hard_fact_authorized
-        else "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+        else _ZERO_SUPPORT_SELL
         if branchwise_authorized
         else ""
     )
+    # The branchwise proof binds the unrounded held quantity, which the
+    # protective block below rewrites to the 0.01-floored canonical one.
+    branchwise_intent = exit_intent
     protective_bid = _positive_decimal(
         snapshot_context.get("executable_snapshot_orderbook_top_bid")
     )
@@ -8764,13 +8772,22 @@ def _execute_live_exit(
                 snapshot_context=snapshot_context,
                 now=_utcnow(),
             )
-        elif branchwise_authorized and not protective_bid_unavailable:
+        elif branchwise_authorized:
             authority_error = _branchwise_dominant_sell_authority_error(
                 position,
-                exit_intent,
+                branchwise_intent,
                 branchwise_sell_authority,
                 snapshot_context=snapshot_context,
             )
+            if (
+                authority_error == "branchwise_dominant_sell_submit_bid_not_executable"
+                and conn is not None
+                and protective_bid_unavailable
+            ):
+                # Missing or out-of-band bids are liquidity facts: the same
+                # protective predicate blocks them below. Every other
+                # branchwise proof check stands.
+                authority_error = None
         elif (
             protective_sell_authority is not None
             or continuing_existing_exit
@@ -11793,12 +11810,14 @@ def _last_exit_order_id(
     return fallback if order_status.startswith("sell_") else ""
 
 
-def _canonical_exit_trade_fact_cte(cte_name: str = "canonical_exit_trade_fact") -> str:
+def _canonical_exit_trade_fact_cte(
+    cte_name: str = "canonical_exit_trade_fact", *, source_clause_sql: str = "",
+) -> str:
     """Use the state-owned stable revision identity for every EXIT reader."""
 
     from src.state.fill_dedup import canonical_trade_fact_cte
 
-    return canonical_trade_fact_cte(cte_name)
+    return canonical_trade_fact_cte(cte_name, source_clause_sql=source_clause_sql)
 
 
 def _economic_exit_trade_fact_cte(
@@ -11888,7 +11907,10 @@ def _exit_trade_fact_close_candidate(
     try:
         row = conn.execute(
             "WITH "
-            + _canonical_exit_trade_fact_cte()
+            + _canonical_exit_trade_fact_cte(source_clause_sql=(
+                "WHERE fact.command_id IN (SELECT command_id FROM venue_commands "
+                "WHERE position_id = ?)"
+            ))
             + ", "
             + _economic_exit_trade_fact_cte()
             + f"""
@@ -11920,9 +11942,13 @@ def _exit_trade_fact_close_candidate(
              ORDER BY datetime(observed_at) DESC, cmd.updated_at DESC, cmd.command_id DESC
              LIMIT 1
             """,
-            tuple(params),
+            (position_id, *params),
         ).fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        if "UNAVAILABLE_EXIT_ORDER_FACT_PROXY:" in str(exc):
+            from src.state.fill_dedup import PartialExitEconomicDebtError
+
+            raise PartialExitEconomicDebtError(str(exc)) from exc
         return None
     if row is None:
         return None
@@ -12022,7 +12048,10 @@ def _exit_trade_fact_confirmation_pending_candidate(
     try:
         row = conn.execute(
             "WITH "
-            + _canonical_exit_trade_fact_cte()
+            + _canonical_exit_trade_fact_cte(source_clause_sql=(
+                "WHERE fact.command_id IN (SELECT command_id FROM venue_commands "
+                "WHERE position_id = ?)"
+            ))
             + ", "
             + _economic_exit_trade_fact_cte()
             + f"""
@@ -12053,9 +12082,13 @@ def _exit_trade_fact_confirmation_pending_candidate(
              ORDER BY datetime(observed_at) DESC, cmd.updated_at DESC, cmd.command_id DESC
              LIMIT 1
             """,
-            tuple(params),
+            (position_id, *params),
         ).fetchone()
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
+        if "UNAVAILABLE_EXIT_ORDER_FACT_PROXY:" in str(exc):
+            from src.state.fill_dedup import PartialExitEconomicDebtError
+
+            raise PartialExitEconomicDebtError(str(exc)) from exc
         return None
     if row is None:
         return None
@@ -12146,7 +12179,7 @@ def check_pending_exits(
     max_positions: int | None = None,
     cycle_budget_seconds: float | None = None,
     deadline_monotonic: float | None = None,
-    global_sell_reauction_requester: Callable[[Position, bool], bool] | None = None,
+    global_sell_reauction_requester: Callable[..., bool | tuple[bool, object | None]] | None = None,
     recover_retry_pending: bool = True,
 ) -> dict:
     """Check fill status for positions with pending sell orders.
@@ -12167,6 +12200,8 @@ def check_pending_exits(
         )
 
     stats = {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
+    from src.state.fill_dedup import PartialExitEconomicDebtError
+
     max_scan_positions = (
         _pending_exit_status_max_positions()
         if max_positions is None
@@ -12213,7 +12248,14 @@ def check_pending_exits(
             break
         raw_exit_state = getattr(pos, "exit_state", "")
         exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
-        fill = _exit_trade_fact_close_candidate(conn, pos)
+        try:
+            fill = _exit_trade_fact_close_candidate(conn, pos)
+        except PartialExitEconomicDebtError as exc:
+            stats["unchanged"] += 1
+            stats.setdefault("pending_exit_economic_authority_unavailable", []).append({
+                "position_id": pos.trade_id, "reason": str(exc),
+            })
+            continue
         if fill is not None:
             if fill.get("closes_position") is False:
                 try:
@@ -12272,7 +12314,14 @@ def check_pending_exits(
                 stats["filled"] += 1
                 stats["filled_from_trade_fact"] = stats.get("filled_from_trade_fact", 0) + 1
                 continue
-        confirmation_pending = _exit_trade_fact_confirmation_pending_candidate(conn, pos)
+        try:
+            confirmation_pending = _exit_trade_fact_confirmation_pending_candidate(conn, pos)
+        except PartialExitEconomicDebtError as exc:
+            stats["unchanged"] += 1
+            stats.setdefault("pending_exit_economic_authority_unavailable", []).append({
+                "position_id": pos.trade_id, "reason": str(exc),
+            })
+            continue
         if confirmation_pending is not None:
             stats["unchanged"] += 1
             stats["exit_confirmation_pending"] = stats.get("exit_confirmation_pending", 0) + 1
@@ -12385,7 +12434,14 @@ def check_pending_exits(
                 log_exit_retry_event(conn, pos, reason="SELL_NO_ORDER_ID", error="no_order_id")
             stats["retried"] += 1
             continue
-        fill = _exit_trade_fact_close_candidate(conn, pos, exit_order_id=exit_order_id)
+        try:
+            fill = _exit_trade_fact_close_candidate(conn, pos, exit_order_id=exit_order_id)
+        except PartialExitEconomicDebtError as exc:
+            stats["unchanged"] += 1
+            stats.setdefault("pending_exit_economic_authority_unavailable", []).append({
+                "position_id": pos.trade_id, "reason": str(exc),
+            })
+            continue
         if fill is not None:
             if fill.get("closes_position") is False:
                 try:
@@ -12998,7 +13054,7 @@ def check_pending_retries(
     position: Position,
     conn: sqlite3.Connection | None = None,
     *,
-    global_sell_reauction_requester: Callable[[Position, bool], bool] | None = None,
+    global_sell_reauction_requester: Callable[..., bool | tuple[bool, object | None]] | None = None,
     current_min_order_size: Decimal | None = None,
 ) -> bool:
     """Check if a retry-pending position's cooldown has expired.
@@ -13429,6 +13485,9 @@ def _dual_write_exit_retry_released_if_available(
 def record_global_sell_reauction_reserved(
     conn: sqlite3.Connection | None,
     position: Position,
+    *,
+    expected_claim_event_id: str = "",
+    expected_obligation: Mapping[str, object] | None = None,
 ) -> bool:
     """Acknowledge that a fresh wake generation now owns the released debt."""
 
@@ -13437,9 +13496,63 @@ def record_global_sell_reauction_reserved(
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
         return False
+    if not conn.in_transaction:
+        from src.execution.executor import (
+            _EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+            _EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+            _canonical_trade_write_lease,
+        )
+        from src.state.write_coordinator import WritePriority
+
+        try:
+            with _canonical_trade_write_lease(
+                conn,
+                owner="global_sell_reauction_reserved_ack",
+                deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+                max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+                priority=WritePriority.MONITOR,
+            ):
+                conn.execute("BEGIN IMMEDIATE")
+                reserved = record_global_sell_reauction_reserved(
+                    conn, position, expected_claim_event_id=expected_claim_event_id,
+                    expected_obligation=expected_obligation,
+                )
+                if reserved:
+                    conn.commit()
+                else:
+                    conn.rollback()
+                return reserved
+        except Exception as exc:  # noqa: BLE001 - retain debt on failed atomic ACK.
+            conn.rollback()
+            logger.warning("GLOBAL_SELL_REAUCTION_RESERVED transaction failed: %s", exc)
+            return False
     try:
         from src.state.db import append_many_and_project
 
+        if not expected_claim_event_id:
+            from src.execution.exit_safety import (
+                global_sell_reauction_publish_claim_blocks_exit_command,
+            )
+
+            if global_sell_reauction_publish_claim_blocks_exit_command(conn, trade_id):
+                return False
+        if expected_claim_event_id:
+            claim = conn.execute(
+                "SELECT event_id, payload_json FROM position_events "
+                "WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED' "
+                "ORDER BY sequence_no DESC LIMIT 1",
+                (trade_id,),
+            ).fetchone()
+            payload = json.loads(str(claim[1] or "{}")) if claim else {}
+            if (
+                claim is None
+                or claim[0] != expected_claim_event_id
+                or not isinstance(payload, dict)
+                or payload.get("global_sell_reauction_status") != "publish_claimed"
+                or json.dumps(payload.get("held_sell_reauction_obligation"), sort_keys=True)
+                != json.dumps(expected_obligation, sort_keys=True)
+            ):
+                return False
         cursor = conn.execute(
             "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
             (trade_id,),
@@ -13452,10 +13565,27 @@ def record_global_sell_reauction_reserved(
             if isinstance(current, sqlite3.Row)
             else dict(zip((item[0] for item in cursor.description), current))
         )
+        if expected_obligation is not None:
+            direction = projection.get("direction")
+            canonical_token = str(
+                (projection.get("no_token_id") or "") if direction == "buy_no"
+                else (projection.get("token_id") or "") if direction == "buy_yes" else ""
+            )
+            if (
+                direction != getattr(position, "direction", None)
+                or canonical_token != expected_obligation.get("held_token_id")
+                or expected_obligation.get("position_id") != trade_id
+            ):
+                return False
         canonical_obligation = latest_held_sell_reauction_obligation(
             conn,
             position,
         )
+        if expected_obligation is not None and (
+            json.dumps(canonical_obligation, sort_keys=True)
+            != json.dumps(expected_obligation, sort_keys=True)
+        ):
+            return False
         if canonical_obligation:
             # The EXIT_RETRY_RELEASED row is the durable debt owner. Reload its
             # exact lineage before writing the reserve acknowledgement so a
@@ -13541,6 +13671,23 @@ def record_global_sell_reauction_reserved(
         return False
 
 
+def _global_sell_publication_deadline(
+    obligation: Mapping[str, object],
+) -> datetime | None:
+    """Read the exact aware V4 attempt deadline without normalizing bad proof."""
+
+    value = obligation.get("completion_deadline_at")
+    if not isinstance(value, str) or not value or value != value.strip():
+        return None
+    try:
+        deadline = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if deadline.tzinfo is None or deadline.utcoffset() is None:
+            return None
+        return deadline.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
+        return None
+
+
 def _record_global_sell_reauction_publish_claim(
     conn: sqlite3.Connection,
     position: Position,
@@ -13550,7 +13697,8 @@ def _record_global_sell_reauction_publish_claim(
 
     trade_id = str(getattr(position, "trade_id", "") or "").strip()
     generation = str(obligation.get("generation") or "").strip()
-    if not trade_id or not generation:
+    deadline = _global_sell_publication_deadline(obligation)
+    if not trade_id or not generation or deadline is None or deadline <= _utcnow():
         return False
     from src.execution.exit_safety import global_sell_reauction_publish_claim_lineage
 
@@ -13597,23 +13745,28 @@ def _record_global_sell_reauction_publish_claim(
             (trade_id,),
         ).fetchone()
         latest_payload = json.loads(str(latest[0] or "{}")) if latest else {}
-        latest_obligation = (
-            latest_payload.get("held_sell_reauction_obligation")
-            if isinstance(latest_payload, dict)
-            else None
-        )
-        if (
-            isinstance(latest_payload, dict)
-            and latest_payload.get("global_sell_reauction_status") == "publish_claimed"
-            and isinstance(latest_obligation, dict)
-            and str(latest_obligation.get("generation") or "") == generation
-            and global_sell_reauction_publish_claim_lineage(
+        if not isinstance(latest_payload, dict):
+            return False
+        latest_obligation = latest_payload.get("held_sell_reauction_obligation")
+        if latest_payload.get("global_sell_reauction_status") == "publish_claimed":
+            existing_lineage = global_sell_reauction_publish_claim_lineage(
                 latest_payload,
                 position_id=trade_id,
                 held_token_id=canonical_token,
-            ) == "complete"
-        ):
-            return True
+            )
+            if existing_lineage == "invalid":
+                return False
+        else:
+            existing_lineage = "pending"
+        if existing_lineage == "complete":
+            # One live publication attempt owns the slot. Generation alone
+            # cannot make a different q/book/deadline attempt idempotent.
+            # Existing ambiguous/expired claims remain fenced: elapsed time
+            # is not proof that their publisher has stopped.
+            return deadline > _utcnow() and (
+                json.dumps(latest_obligation, sort_keys=True, allow_nan=False)
+                == json.dumps(dict(obligation), sort_keys=True, allow_nan=False)
+            )
         phase = str(projection.get("phase") or "")
         if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
             return False
@@ -13631,7 +13784,10 @@ def _record_global_sell_reauction_publish_claim(
         from src.state.db import append_many_and_project
 
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
-        occurred_at = datetime.now(timezone.utc).isoformat()
+        now = _utcnow()
+        if deadline <= now:
+            return False
+        occurred_at = now.isoformat()
         projection["updated_at"] = occurred_at
         event_type = "EXIT_RETRY_RELEASED"
         event = {
@@ -13838,7 +13994,7 @@ def recover_global_sell_snapshot_reauction_debt(
     position: Position,
     *,
     conn: sqlite3.Connection | None,
-    requester: Callable[[Position, bool], bool],
+    requester: Callable[..., bool | tuple[bool, object | None]],
     deadline_monotonic: float | None = None,
 ) -> bool:
     """Publish and acknowledge one already-committed canonical release debt."""
@@ -13863,7 +14019,7 @@ def _recover_global_sell_snapshot_reauction_debt(
     position: Position,
     *,
     conn: sqlite3.Connection | None,
-    requester: Callable[[Position, bool], bool],
+    requester: Callable[..., bool | tuple[bool, object | None]],
     deadline_monotonic: float | None = None,
 ) -> str | None:
     """Return None once recovered, else the typed refusal reason."""
@@ -13883,6 +14039,30 @@ def _recover_global_sell_snapshot_reauction_debt(
         return "NO_DEBT"
     if conn is None or conn.in_transaction:
         return "CONNECTION_UNAVAILABLE_OR_IN_TRANSACTION"
+    trade_id = str(getattr(position, "trade_id", "") or "").strip()
+
+    from src.execution.exit_safety import (
+        global_sell_reauction_publish_claim_blocks_exit_command,
+    )
+
+    # A committed publisher can be paused anywhere outside the lease. Even
+    # the exact same attempt cannot authorize a second recovery publisher.
+    if global_sell_reauction_publish_claim_blocks_exit_command(conn, trade_id):
+        return "PUBLICATION_ALREADY_CLAIMED"
+
+    def latest_release_id() -> str:
+        row = conn.execute(
+            "SELECT event_id FROM position_events WHERE position_id = ? "
+            "AND event_type = 'EXIT_RETRY_RELEASED' "
+            "ORDER BY sequence_no DESC LIMIT 1",
+            (trade_id,),
+        ).fetchone()
+        return str(row[0] or "") if row else ""
+
+    try:
+        release_id = latest_release_id()
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        return f"CANONICAL_DEBT_UNREADABLE:{exc}"
     obligation = latest_held_sell_reauction_obligation(
         conn,
         position,
@@ -13890,9 +14070,31 @@ def _recover_global_sell_snapshot_reauction_debt(
     )
     if not obligation:
         return "OBLIGATION_UNAVAILABLE"
+    canonical_obligation = copy.deepcopy(obligation)
     if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
         return "AWAITING_IN_BAND_LIQUIDITY"
-    trade_id = str(getattr(position, "trade_id", "") or "").strip()
+    # SCOPE: this V4 publication attempt only. DRAIN: normal current-family
+    # preparation and monitor/auction redecision supply a fresh attempt.
+    # RESET: an aware, still-live deadline at the claim writer. Never clear
+    # an existing publisher fence from time or a receipt read alone.
+    publication_deadline = _global_sell_publication_deadline(obligation)
+    unarmed_debt = (
+        obligation.get("schema_version") == 4
+        and obligation.get("state", "UNARMED") == "UNARMED"
+        and obligation.get("book_state") == "UNKNOWN"
+        and not any(obligation.get(key) for key in (
+            "request_id", "material_identity", "attempt_identity",
+            "completion_deadline_at", "armed_at",
+        ))
+    )
+    if publication_deadline is None and not unarmed_debt:
+        return "PUBLICATION_DEADLINE_INVALID"
+    if publication_deadline is not None and publication_deadline <= _utcnow():
+        from src.engine.cycle_runtime import _request_current_global_family_preparation
+
+        if not _request_current_global_family_preparation(position):
+            return "PUBLICATION_DEADLINE_EXPIRED_FAMILY_PREPARATION_FAILED"
+        return "PUBLICATION_DEADLINE_EXPIRED_FAMILY_PREPARATION_REQUESTED"
     retire_monitor_event_id = ""
     bound_monitor_event_id = ""
     if obligation.get("schema_version") == 4 and not all(
@@ -13974,6 +14176,42 @@ def _recover_global_sell_snapshot_reauction_debt(
                 pass
             return f"LINEAGE_PENDING_RETIREMENT_FAILED:{exc}"
         return f"RETIRED:{GLOBAL_SELL_DEBT_LINEAGE_UNBINDABLE_HOLD}"
+    from src.runtime.reactor_wake import HeldSellReauctionRequest
+    from src.events.reactor import publish_prepared_global_auction_completion
+    # Preparation may read current q/book and the wake queue, but must never
+    # publish or retain a canonical write lease. Recheck this exact debt after
+    # that I/O, so a concurrent release cannot lend its slot to an old attempt.
+    try:
+        ensure_live()
+        ownership = _canonical_global_sell_command_ownership(
+            conn, position, require_pending_exit=False,
+        )
+        if ownership != "GLOBAL_NO_COMMAND":
+            return f"COMMAND_OWNERSHIP:{ownership}"
+        prepared = requester(
+            position, True, prepare_only=True, obligation=copy.deepcopy(obligation),
+        )
+        if not isinstance(prepared, tuple) or len(prepared) != 2 or not prepared[0]:
+            return "PREPARATION_REJECTED"
+        prepared_request = prepared[1]
+        if not isinstance(prepared_request, HeldSellReauctionRequest):
+            return "PREPARED_REQUEST_INVALID"
+        if any(
+            getattr(prepared_request, key) != obligation.get(key)
+            for key in ("position_id", "held_token_id", "scope_identity", "debt_event_id")
+        ):
+            return "PREPARED_DEBT_MISMATCH"
+        obligation = {
+            **obligation,
+            **asdict(prepared_request),
+            "state": "ARMED",
+            "armed_at": _utcnow().isoformat(),
+        }
+        publication_deadline = _global_sell_publication_deadline(obligation)
+        if publication_deadline is None or publication_deadline <= _utcnow():
+            return "PREPARED_PUBLICATION_DEADLINE_INVALID"
+    except Exception as exc:  # noqa: BLE001 - preparation owns no publication fence.
+        return f"PREPARATION_FAILED:{exc}"
     try:
         ensure_live()
         with _canonical_trade_write_lease(
@@ -14000,6 +14238,13 @@ def _recover_global_sell_snapshot_reauction_debt(
                 ):
                     conn.rollback()
                     return "LINEAGE_PENDING_BINDING_SUPERSEDED"
+            if (
+                latest_release_id() != release_id
+                or latest_held_sell_reauction_obligation(conn, position)
+                != canonical_obligation
+            ):
+                conn.rollback()
+                return "CANONICAL_DEBT_SUPERSEDED"
             ownership = _canonical_global_sell_command_ownership(
                 conn,
                 position,
@@ -14015,6 +14260,7 @@ def _recover_global_sell_snapshot_reauction_debt(
             ):
                 conn.rollback()
                 return "PUBLISH_CLAIM_REFUSED"
+            claim_event_id = latest_release_id()
             ensure_live()
             conn.commit()
             ensure_live()
@@ -14029,37 +14275,31 @@ def _recover_global_sell_snapshot_reauction_debt(
         ensure_live()
     except TimeoutError:
         return "DEADLINE_EXPIRED_AFTER_CLAIM"
-    if not requester(position, True):
+    if _global_sell_publication_deadline(obligation) <= _utcnow():
+        return "PUBLICATION_DEADLINE_EXPIRED_AFTER_CLAIM"
+    if not publish_prepared_global_auction_completion(
+        reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+        prepared_request=prepared_request,
+    ):
         return "REQUESTER_REJECTED"
-    refreshed_obligation = getattr(
-        position,
-        "_held_sell_reauction_obligation",
-        obligation,
-    )
-    if not isinstance(refreshed_obligation, dict):
-        refreshed_obligation = dict(obligation)
-    if refreshed_obligation == obligation:
-        # Crash recovery may republish the still-live exact attempt, but a
-        # callback that did not bind fresh q/book cannot slide an expired one.
-        deadline_text = str(
-            obligation.get("completion_deadline_at") or ""
-        ).strip()
-        if deadline_text:
-            try:
-                original_deadline = datetime.fromisoformat(
-                    deadline_text.replace("Z", "+00:00")
-                ).astimezone(timezone.utc)
-            except (ValueError, AttributeError):
-                return "COMPLETION_DEADLINE_UNREADABLE"
-            if _utcnow().astimezone(timezone.utc) >= original_deadline:
-                return "COMPLETION_DEADLINE_EXPIRED_WITHOUT_FRESH_BINDING"
-    if not record_global_sell_reauction_reserved(conn, position):
-        conn.rollback()
-        return "RESERVED_ACK_REFUSED"
     try:
         # The wake is already externally visible. Always durably acknowledge it;
         # a deadline overrun here must not turn one publication into replay debt.
-        conn.commit()
+        with _canonical_trade_write_lease(
+            conn,
+            owner="global_sell_reauction_reserved_ack",
+            deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+            priority=WritePriority.MONITOR,
+        ):
+            conn.execute("BEGIN IMMEDIATE")
+            if not record_global_sell_reauction_reserved(
+                conn, position, expected_claim_event_id=claim_event_id,
+                expected_obligation=obligation,
+            ):
+                conn.rollback()
+                return "RESERVED_ACK_REFUSED"
+            conn.commit()
     except Exception as exc:  # noqa: BLE001 - an uncommitted ack is not durable.
         try:
             conn.rollback()
@@ -14074,7 +14314,7 @@ def _drain_same_turn_global_sell_reauction_after_no_fill(
     position: Position,
     *,
     conn: sqlite3.Connection | None,
-    requester: Callable[[Position, bool], bool] | None,
+    requester: Callable[..., bool | tuple[bool, object | None]] | None,
     deadline_monotonic: float | None = None,
 ) -> bool:
     """Commit a no-side-effect rejection, then publish its exact fresh reauction."""

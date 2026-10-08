@@ -71,6 +71,7 @@ from src.contracts.payoff_q_correction import (
     PayoffQCorrection,
     PayoffQCorrectionUnavailable,
     SourceIdentityBaseline,
+    ExactPayoffEntryPolicy,
 )
 
 # One fit serves this long before a refit is attempted. Six hours matches the
@@ -1801,7 +1802,10 @@ def load_canonical_fit_corpus(
     fact_scope = "WHERE julianday(fact.observed_at)<julianday(?) AND julianday(fact.ingested_at)<julianday(?)"
     source_scope = "AND julianday(source_fact.observed_at)<julianday(?) AND julianday(source_fact.ingested_at)<julianday(?)"
     canonical = canonical_trade_fact_cte(source_schema=trade_schema, source_clause_sql=fact_scope)
-    economic = economic_trade_fact_cte(source_schema=trade_schema, source_clause_sql=source_scope)
+    economic = economic_trade_fact_cte(
+        source_schema=trade_schema, source_clause_sql=source_scope,
+        proxy_provenance_available={"venue_commands", "venue_order_facts", "venue_submission_envelopes"}.issubset(trade_tables),
+    )
     fills: dict[str, list[dict]] = defaultdict(list)
     for row in records(trade_conn, f"""WITH {canonical}, {economic}
         SELECT * FROM economic_trade_fact WHERE UPPER(state)='CONFIRMED'
@@ -3872,65 +3876,173 @@ class HeldSourceIdentityBinding:
     ) -> SourceIdentityBaseline:
         """Seal the held candidate to the exact current source witness."""
 
-        decision_at = self.decision_at
-        captured_at = getattr(witness, "captured_at_utc", None)
-        max_age = getattr(witness, "max_age", None)
-        if (
-            not isinstance(raw_revision, str)
-            or not raw_revision.strip()
-            or decision_at is None
-            or not isinstance(captured_at, datetime)
-            or captured_at.tzinfo is None
-            or captured_at.utcoffset() is None
-            or not isinstance(max_age, timedelta)
-            or max_age <= timedelta(0)
-        ):
+        return _bind_current_source_identity(
+            self.baseline, decision_at=self.decision_at, witness=witness,
+            raw_revision=raw_revision, raw_q=raw_q, p0=p0,
+        )
+
+
+def _bind_current_source_identity(
+    identity: SourceIdentityBaseline | ExactPayoffEntryPolicy, *,
+    decision_at: datetime | None, witness: object, raw_revision: str,
+    raw_q: float, p0: float,
+) -> SourceIdentityBaseline:
+    """Bind fresh source evidence only after the caller proved its policy."""
+    captured_at = getattr(witness, "captured_at_utc", None)
+    max_age = getattr(witness, "max_age", None)
+    if (
+        not isinstance(raw_revision, str)
+        or not raw_revision.strip()
+        or decision_at is None
+        or not isinstance(captured_at, datetime)
+        or captured_at.tzinfo is None
+        or captured_at.utcoffset() is None
+        or not isinstance(max_age, timedelta)
+        or max_age <= timedelta(0)
+    ):
+        raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_UNAVAILABLE")
+    age = decision_at - captured_at.astimezone(timezone.utc)
+    if age < timedelta(0) or age > max_age:
+        raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_EXPIRED")
+    try:
+        current = SourceIdentityBaseline(
+            family_key=identity.family_key,
+            bin_id=identity.bin_id,
+            side=identity.side,
+            token_id=identity.token_id,
+            raw_q=raw_q,
+            p0=p0,
+            raw_probability_revision=raw_revision,
+            q_version=str(getattr(witness, "q_version", "") or ""),
+            probability_witness_identity=str(
+                getattr(witness, "witness_identity", "") or ""
+            ),
+            probability_content_identity=str(
+                getattr(witness, "probability_content_identity", "") or ""
+            ),
+            source_truth_identity=str(
+                getattr(witness, "source_truth_identity", "") or ""
+            ),
+            sample_matrix_identity=str(
+                getattr(witness, "sample_matrix_identity", "") or ""
+            ),
+        )
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_UNAVAILABLE") from exc
+    if not current.matches_witness(witness):
+        raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_MISMATCH")
+    bindings = tuple(getattr(witness, "bindings", ()) or ())
+    matching = [
+        binding for binding in bindings
+        if str(getattr(binding, "bin_id", "") or "") == current.bin_id
+    ]
+    expected_token = None
+    if len(matching) == 1:
+        expected_token = (
+            getattr(matching[0], "yes_token_id", None)
+            if current.side == "YES"
+            else getattr(matching[0], "no_token_id", None)
+        )
+    if str(expected_token or "") != current.token_id:
+        raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_MISMATCH")
+    return current
+
+
+@dataclass(frozen=True)
+class HeldExactPayoffEntryBinding:
+    """Historical exact proof with separately selected current statistical law."""
+
+    entry_policy: ExactPayoffEntryPolicy
+    position_id: str
+    decision_log_id: int
+    decision_certificate_hash: str
+    decision_at: datetime | None = None
+    current_scope: CalibrationFitScope | None = None
+    artifact: ResidualCalibratorArtifact | None = None
+    source_only: bool = False
+    adaptive_authority: bool = True
+
+    @property
+    def fit_scope(self) -> CalibrationFitScope:
+        if self.current_scope is None:
+            raise _held_correction_unavailable("CURRENT_POLICY_UNAVAILABLE")
+        return self.current_scope
+
+    @property
+    def calibration_policy(self) -> CalibrationPolicySpec:
+        return self.entry_policy.calibration_policy
+
+    @property
+    def family_key(self) -> str:
+        return self.entry_policy.family_key
+
+    @property
+    def bin_id(self) -> str:
+        return self.entry_policy.bin_id
+
+    def at_decision(
+        self, provider: CanonicalMarketAnchoredFitProvider | None, *,
+        decision_at: datetime, current_raw_revision: str | None,
+        deadline_monotonic: float | None = None,
+    ) -> "HeldExactPayoffEntryBinding":
+        if provider is None or provider.calibration_policy != self.calibration_policy:
+            raise _held_correction_unavailable("CURRENT_POLICY_MISMATCH")
+        entry_at = _parse_ts(self.entry_policy.decision_at_utc)
+        if (not isinstance(decision_at, datetime) or decision_at.tzinfo is None
+                or decision_at.utcoffset() is None or entry_at is None
+                or decision_at < entry_at or not isinstance(current_raw_revision, str)
+                or not current_raw_revision.strip()
+                or CanonicalMarketAnchoredFitProvider._expired(deadline_monotonic)):
             raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_UNAVAILABLE")
-        age = decision_at - captured_at.astimezone(timezone.utc)
-        if age < timedelta(0) or age > max_age:
-            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_EXPIRED")
-        try:
-            current = SourceIdentityBaseline(
-                family_key=self.baseline.family_key,
-                bin_id=self.baseline.bin_id,
-                side=self.baseline.side,
-                token_id=self.baseline.token_id,
-                raw_q=raw_q,
-                p0=p0,
-                raw_probability_revision=raw_revision,
-                q_version=str(getattr(witness, "q_version", "") or ""),
-                probability_witness_identity=str(
-                    getattr(witness, "witness_identity", "") or ""
-                ),
-                probability_content_identity=str(
-                    getattr(witness, "probability_content_identity", "") or ""
-                ),
-                source_truth_identity=str(
-                    getattr(witness, "source_truth_identity", "") or ""
-                ),
-                sample_matrix_identity=str(
-                    getattr(witness, "sample_matrix_identity", "") or ""
-                ),
+        # The explicit exact-entry contract permits a NEW current-revision
+        # scope. It never transports a fit or q across raw revisions.
+        scope = replace(self.entry_policy.fit_scope, raw_probability_revision=current_raw_revision)
+        artifact = provider.artifact(
+            scope=scope, now=decision_at, deadline_monotonic=deadline_monotonic,
+        )
+        insufficient = False
+        if artifact is None:
+            insufficient = provider.insufficient_support(
+                scope=scope, now=decision_at, deadline_monotonic=deadline_monotonic,
             )
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_UNAVAILABLE") from exc
-        if not current.matches_witness(witness):
-            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_MISMATCH")
-        bindings = tuple(getattr(witness, "bindings", ()) or ())
-        matching = [
-            binding for binding in bindings
-            if str(getattr(binding, "bin_id", "") or "") == current.bin_id
-        ]
-        expected_token = None
-        if len(matching) == 1:
-            expected_token = (
-                getattr(matching[0], "yes_token_id", None)
-                if current.side == "YES"
-                else getattr(matching[0], "no_token_id", None)
-            )
-        if str(expected_token or "") != current.token_id:
-            raise _held_correction_unavailable("CURRENT_SOURCE_IDENTITY_MISMATCH")
-        return current
+            if not insufficient:
+                # SCOPE: this exact-entry holding's statistical action. DRAIN:
+                # refresh the causal corpus on its normal cadence. RESET: an
+                # exact current fit or verified current insufficient support.
+                raise _held_correction_unavailable("CURRENT_FIT_UNAVAILABLE")
+        else:
+            cutoff = _parse_ts(artifact.training_cutoff)
+            manifest = artifact.training_manifest
+            if (cutoff is None
+                    or not 0 <= (decision_at - cutoff).total_seconds() < self.calibration_policy.refit_seconds
+                    or manifest is None
+                    or manifest.scope_hash != scope.as_payload()["scope_hash"]
+                    or manifest.corpus_revision != CANONICAL_CORPUS_REVISION):
+                raise _held_correction_unavailable("CURRENT_FIT_UNAVAILABLE")
+        return replace(self, decision_at=decision_at.astimezone(timezone.utc),
+                       current_scope=scope, artifact=artifact, source_only=insufficient)
+
+    def bind_current(self, *, witness: object, raw_revision: str, raw_q: float,
+                     p0: float) -> SourceIdentityBaseline:
+        if not self.source_only or self.fit_scope.raw_probability_revision != raw_revision:
+            raise _held_correction_unavailable("CURRENT_POLICY_UNAVAILABLE")
+        return _bind_current_source_identity(
+            self.entry_policy, decision_at=self.decision_at, witness=witness,
+            raw_revision=raw_revision, raw_q=raw_q, p0=p0,
+        )
+
+    def corrected_probability(self, **kwargs) -> PayoffQCorrection:
+        if self.artifact is None or self.source_only:
+            raise _held_correction_unavailable("CURRENT_FIT_UNAVAILABLE")
+        return HeldEntryCalibrationBinding(
+            artifact=self.artifact, fit_scope=self.fit_scope,
+            calibration_policy=self.calibration_policy, position_id=self.position_id,
+            decision_log_id=self.decision_log_id,
+            decision_certificate_hash=self.decision_certificate_hash,
+            family_key=self.family_key, bin_id=self.bin_id,
+            token_id=self.entry_policy.token_id, side=self.entry_policy.side,
+            adaptive_authority=True,
+        ).corrected_probability(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -4021,7 +4133,7 @@ def load_held_entry_calibration(
     side: str,
     world_conn: sqlite3.Connection | None = None,
     world_schema_alias: str = "world",
-) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldSourceIdentityCohortBinding:
+) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldSourceIdentityCohortBinding | HeldExactPayoffEntryBinding:
     """Load one position's immutable ENTRY calibration or source cohort."""
 
     binding = _load_held_entry_calibration_impl(
@@ -4071,7 +4183,7 @@ def _load_held_entry_calibration_impl(
     world_schema_alias: str = "world",
     _cohort_command_ids: tuple[str, ...] | None = None,
     _expected_certificate_hash: str | None = None,
-) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | _MultiEntryPendingBinding:
+) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldExactPayoffEntryBinding | _MultiEntryPendingBinding:
     """Load one position's immutable ENTRY calibration without fitting or opening DBs."""
 
     if (
@@ -4450,6 +4562,76 @@ def _load_held_entry_calibration_impl(
     ):
         raise _held_correction_unavailable("TOKEN_OR_SIDE_MISMATCH")
     correction = certificate_value("market_anchored_correction")
+    if isinstance(correction, Mapping) and correction.get("policy") == ExactPayoffEntryPolicy._POLICY:
+        try:
+            exact_policy = ExactPayoffEntryPolicy.from_payload(dict(correction))
+            raw_input = certificate_value("raw_calibration_input")
+            if (not exact_policy.matches(
+                    family_key=str(certificate_value("global_family_key")),
+                    bin_id=str(certificate_value("global_bin_id")), token_id=token_id, side=side,
+                ) or not isinstance(raw_input, Mapping)
+                or raw_input.get("probability_input_kind") != "TYPED_EXACT_PAYOFF"
+                or raw_input.get("correction_applied") is not False
+                or raw_input.get("p0_basis") != "GROSS_NATIVE_TOKEN_PRICE"
+                or raw_input.get("schema_version") != 1
+                or raw_input.get("capture_basis") != "GLOBAL_CERTIFICATE_INPUT"
+                or raw_input.get("exact_payoff") != exact_policy.raw_q
+                or raw_input.get("raw_q_held") != exact_policy.raw_q
+                or raw_input.get("p0_held") != exact_policy.p0
+                or any(raw_input.get(field) != getattr(exact_policy, field) for field in (
+                    "family_key", "bin_id", "side", "token_id", "probability_witness_identity",
+                    "exact_payoff_witness_identity", "exact_payoff_content_identity",
+                ))
+                or raw_input.get("sample_hash") != exact_policy.sample_matrix_identity
+                or raw_input.get("execution_mode") != exact_policy.fit_scope.execution_mode
+                or certificate_value("global_execution_mode") != exact_policy.fit_scope.execution_mode
+                or certificate_value("q_version") != exact_policy.q_version
+                or certificate_value("payoff_q_point") != exact_policy.raw_q
+                or certificate_value("payoff_q_action") != exact_policy.raw_q
+                or certificate_value("global_probability_witness_identity") != exact_policy.probability_witness_identity
+                or certificate_value("probability_semantics_revision") != exact_policy.fit_scope.raw_probability_revision
+                or certificate_value("temperature_metric") != exact_policy.fit_scope.metric
+                or _parse_ts(certificate_value("global_selection_decision_at")) != _parse_ts(exact_policy.decision_at_utc)
+                or exact_policy.calibration_policy.input_revision != CANONICAL_CALIBRATION_INPUT_REVISION
+                or exact_policy.calibration_policy.metric_pooling != CANONICAL_CALIBRATION_METRIC_POOLING):
+                raise ValueError
+            summary = _receipt_summary(
+                trade_conn, decision_log_id=decision_log_id,
+                expected_mode=receipt_ref.decision_log_mode,
+                expected_receipt_hash=receipt_ref.receipt_hash,
+            )
+            for field in ("winner_candidate_id", "winner_event_id", "winner_actuation_identity",
+                          "selection_epoch_identity", "execution_binding_hash", "artifact_summary_hash"):
+                if summary.get(field) != getattr(receipt_ref, field):
+                    raise ValueError
+            if raw_input.get("candidate_id") != receipt_ref.winner_candidate_id:
+                raise ValueError
+            audit_context = _load_held_audit_context(
+                trade_conn, decision_log_id=decision_log_id,
+                expected_mode=receipt_ref.decision_log_mode,
+                expected_receipt_hash=receipt_ref.receipt_hash,
+            )
+            audit = audit_context.get("market_anchored_fit_artifact_audit")
+            if (not isinstance(audit, Mapping)
+                    or audit.get("revision") != "canonical_entry_fit_artifact_audit_v1"
+                    or not isinstance(audit.get("exact_entry_policies"), Mapping)
+                    or audit["exact_entry_policies"].get(receipt_ref.winner_candidate_id) != exact_policy.as_cert_fields()
+                    or [exact_policy.family_key, exact_policy.probability_witness_identity]
+                    not in audit_context.get("probability_manifest", ())):
+                raise ValueError
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise _held_correction_unavailable("EXACT_ENTRY_POLICY_INVALID") from exc
+        return HeldExactPayoffEntryBinding(
+            entry_policy=exact_policy, position_id=position_id,
+            decision_log_id=decision_log_id, decision_certificate_hash=certificate_hash,
+        )
+    raw_input = certificate_value("raw_calibration_input")
+    if (isinstance(raw_input, Mapping)
+            and raw_input.get("probability_input_kind") == "TYPED_EXACT_PAYOFF"):
+        # A historical exact payoff proves no statistical policy/configuration.
+        # SCOPE: this legacy holding; DRAIN: explicit provenance remediation;
+        # RESET: authenticated policy proof. Never rewrite the entry certificate.
+        raise _held_correction_unavailable("EXACT_ENTRY_POLICY_MISSING")
     if isinstance(correction, Mapping) and correction.get("applied") is False:
         try:
             baseline = SourceIdentityBaseline.from_payload(dict(correction))
@@ -4609,7 +4791,7 @@ class HeldEntryCalibrationProvider:
     def load(
         self, *, position_id: str, token_id: str, side: str, decision_at: datetime,
         current_raw_revision: str | None,
-    ) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldSourceIdentityCohortBinding:
+    ) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldSourceIdentityCohortBinding | HeldExactPayoffEntryBinding:
         binding = load_held_entry_calibration(
             self._trade_conn,
             position_id=position_id,
@@ -4627,5 +4809,5 @@ class HeldEntryCalibrationProvider:
 class UnavailableHeldEntryCalibrationProvider:
     """Explicit live-monitor sentinel; required ENTRY proof cannot become raw q."""
 
-    def load(self, **_kwargs) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldSourceIdentityCohortBinding:
+    def load(self, **_kwargs) -> HeldEntryCalibrationBinding | HeldSourceIdentityBinding | HeldSourceIdentityCohortBinding | HeldExactPayoffEntryBinding:
         raise _held_correction_unavailable("READER_UNAVAILABLE")

@@ -28,6 +28,9 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/execution/test_global_sell_publication_deadline.py: {created: "2026-10-08", last_used: "2026-10-08", note: "V4 publication admission preserves aware live deadlines, exact prepared attempt identity and existing active or ambiguous owner fences. Unarmed debt must reach normal preparation; expiry is never publisher-inactivity proof."}
+    tests/state/test_unidentified_exit_order_proxy.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Anonymous order-proxy prevention, strict producer-provenance refusal, real partial/full fill conservation, scoped and attached-schema reader parity, and pending-position no-retry on ambiguity. Raw facts remain append-only; historical projections are not rewritten."}
+    tests/calibration/test_exact_payoff_entry_policy.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Typed exact ENTRY metadata, authenticated held policy binding, current causal fit or genuine insufficient-support selection, original ENTRY price-feature semantics, and malformed/legacy/refuted-source refusal. No fitting of exact payoff or inferred historical policy."}
     tests/engine/test_current_wrh_probability_handoff.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Native current WRH provisional source authority across monitor, auction and final JIT; full registered positive-q SELL and canonical closure plus source/correction/custody controls. Synthetic transport and deterministic clocks remain explicit."}
     tests/engine/test_scheduled_statistical_exit_replay.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Normal current-source acquisition, statistical entry and held redecision through signed synthetic venue transport and canonical fill recovery. Readiness, cash, stale-source and reentry observations retain separately stated acceptance limits; no injected posterior, selected action or fill projection."}
     tests/engine/test_confirmed_exit_partial_recovery.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Authenticated partial EXIT command-fold controls, native selected-leg identity/economics, duplicate REST/WS delivery, atomic race and rollback; initial command/state fixtures are explicit, full scheduling is separately tested."}
@@ -603,7 +606,7 @@ test_trust_policy:
     tests/test_order_state_predicates.py: {created: "2026-07-02", last_used: "2026-10-02", note: "SCH-W1.2-ORDER-STATE: is_delayed truth table; the entry_rest_disposition truth table for an existing remainder against the selector fresh target holding (lot floor only for a new order, no RESIZE action, verdict monotone in filled size); fresh_buy_target_holding (fractional target, exactly one lot under the small-capital rule, no order when none fits, capital envelope); antibody that the age/identity predicates stay deleted."}
     tests/test_ddl_copies_normalized_identical.py: {created: "2026-07-02", last_used: "2026-07-02", note: "SCH-W1.2-ORDER-STATE critic ruling 1: normalized (not byte-equal) DDL lockstep guard over venue_order_facts and collateral pairs, closing the _TRADE_CLASS_DDL fingerprint blind spot."}
     tests/execution/test_staleness_cancel.py: {created: "2026-07-03", last_used: "2026-10-01", note: "C3 standing ENTRY valuation plumbing: find_open_entry_rests, snapshot-bound resolve_order_families (HIGH/LOW alias is ambiguous), append-only KEEP authority journal keyed by clock-independent economics (one row across advancing ticks, no journal scan under the write lease), CANCEL journaled with its reason before the batch SDK call, a raising journal or capture still sends protective cancels, family-scoped wake passes, wake dispatch gated on loaded authority with a family queue (boot replay coalesced, lock-held wakes not lost, dispatch faults isolated), rate-budget defer, family-level redecision gate, pending-cancel retry, Day0 lane merge, and the scheduler and wake glue."}
-    tests/execution/test_standing_entry_value.py: {created: "2026-10-01", last_used: "2026-10-02", note: "Standing ENTRY keep-by-value: the rest is valued as the order it is on the selector own metric/growth laws (called, not reimplemented), partial fills never flip the verdict (reviewer q/fill matrix), the keep target is what the selector own sizer posts fresh (parity grid; small-capital band keeps one lot, not up to full Kelly; capital limit bounds it), own remainder released by the terminal conversion law and a partial fill on native holdings counted once, the selector BUY refutation and capital-horizon binding, posterior identity alone never changes the disposition, an unreadable order cancels only itself, the end-to-end trace, the real wealth witness and allocator lifecycle (bounded DEFER, then ENTRY_REST_AUTHORITY_NOT_LOADED_TIMEOUT), dominance as released optimum vs held optimum plus the rest, the fresh-entry gate and pass-local Day0 ask evidence; the keep verdict is invariant in the fill split under a binding allocator cap (reviewer D1 $4/13 sh, cap x price x split, own fill in the allocator lots as CONFIRMED, OPTIMISTIC or not yet published); restored allocator headroom never exceeds the true pre-fill headroom across older own lots, own-fill publish states and other same-token positions (FIX cases fail behaviourally on the earlier commits, PIN cases pin what they already did)."}
+    tests/execution/test_standing_entry_value.py: {created: "2026-10-01", last_used: "2026-10-08", note: "Standing ENTRY keep-by-value: the rest is valued as the order it is on the selector own metric/growth laws (called, not reimplemented), partial fills never flip the verdict (reviewer q/fill matrix), the keep target is what the selector own sizer posts fresh (parity grid; small-capital band keeps one lot, not up to full Kelly; capital limit bounds it), own remainder released by the terminal conversion law and a partial fill on native holdings counted once, the selector BUY refutation and capital-horizon binding, posterior identity alone never changes the disposition, an unreadable order cancels only itself, the end-to-end trace, the real wealth witness and allocator lifecycle (bounded DEFER, then ENTRY_REST_AUTHORITY_NOT_LOADED_TIMEOUT), dominance as released optimum vs held optimum plus the rest, the fresh-entry gate and pass-local Day0 ask evidence; the keep verdict is invariant in the fill split under a binding allocator cap (reviewer D1 $4/13 sh, cap x price x split, own fill in the allocator lots as CONFIRMED, OPTIMISTIC or not yet published); restored allocator headroom never exceeds the true pre-fill headroom across older own lots, own-fill publish states and other same-token positions (FIX cases fail behaviourally on the earlier commits, PIN cases pin what they already did). Newly listed family: a sibling bin with no executable snapshot binds from the selector's own hash-verified receipt pair and the rest is valued; a pair in neither snapshot nor receipt (a sibling or the rest's own condition) still cancels."}
     tests/execution/test_standing_entry_e2e.py: {created: "2026-10-02", last_used: "2026-10-02", note: "C3 end to end on the real probability path (KORD seed, real scope scan and family prep, real ledger, wealth witness, allocator and selector): a validated rest is kept, then cancelled protectively when its consumed anchor artifact no longer verifies (intrinsic invalidity, not a newer cycle); a better sibling the selector funds anyway keeps the rest; a partly filled one-lot rest is kept against a worse sibling at every fill; a materially better sibling cash cannot fund beside the rest cancels it (FAMILY_OPTIMUM_DOMINATES); the same sibling refused by the live selector global suppression or family block keeps the rest."}
     tests/execution/test_venue_cancel_journal.py: {created: "2026-07-03", last_used: "2026-08-27", note: "W4.2: relocated persisted-cancel command-journal executor (run_persisted_cancels_for_expired_rests) out of the deleted maker_rest_escalation.py — retains its terminal-state, lock-retry, and cancel-unknown journaling coverage for the module's other callers (boot authority cancel, redecision-screen rest-pull, C3 staleness invalid-authority lane), including the scheduled screen-cancel debt bypass of monitor yield before venue dispatch."}
     tests/test_settlement_commands.py: {created: "2026-04-27", last_used: "2026-05-24"}
@@ -934,6 +937,7 @@ test_trust_policy:
     tests/test_day0_hourly_vectors_prune_index.py: {created: "2026-09-05", last_used: "2026-09-05", note: "src/data/day0_hourly_vectors.py::_ensure_schema coverage: the retention prune DELETE in persist_day0_hourly_vectors (captured_at < cutoff) is served by idx_day0_hourly_vectors_captured_at, never a full table scan under the forecasts LIVE flock (2026-09-05 forecasts write-lock hog)."}
     tests/test_day0_hourly_vectors_quota_root_cause.py: {created: "2026-09-05", last_used: "2026-09-30", note: "Audited current normal ENS acquisition/persistence entry points; actual parent52 module nodes pass. Private SQLite and canonical metadata pin bind exact city/date usable new ensemble run; successTTL recovery uses causal old run identity, not old q freshness/fullness. Failed retry-not-before, healthy new51 throttle, quota/deadline and deterministic no-refetch remain obligations; normal held/public RESET is separate from module acceptance."}
     tests/test_posterior_starvation_alert.py: {created: "2026-07-17", last_used: "2026-07-28", note: "P1 observability antibody (2026-07-13/14 CONUS 30-37h dark-posterior incident): a live-tradeable (city,target_date,metric) family with no fresh runtime_layer='live' forecast_posteriors emits one ZEUS_POSTERIOR_STARVATION ERROR log per scope per watchdog pass; local-day-complete eastern families are excluded while UTC-yesterday western families remain checked. Log-only alert, not a new gate: locks deliberate absence from event_reactor_adapter."}
+    tests/test_posterior_commit_rate_alarm.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Fleet commit-rate alarm (2026-10-06/07 outages, ~zero live posteriors for 1-5 h with posterior_starvation silent): fewer than 40 runtime_layer=live forecast_posteriors rows with computed_at in the trailing 30 min -> ZEUS_POSTERIOR_COMMIT_RATE_COLLAPSE ERROR naming queued request files and top-3 decline/failure reason codes; missing table is evaluated=False ok=True; probe flag posterior_commit_rate_collapse=<n>. Log-only, not an entry gate."}
 
 categories:
   core_law_antibody:
@@ -1219,6 +1223,8 @@ categories:
     - tests/test_run_mode_failure_surfaces.py
     # P1 observability fix (2026-07-17) — composite live-health alerts on live-market posterior starvation.
     - tests/test_posterior_starvation_alert.py
+    # Fleet commit-rate alarm (2026-10-08) — composite live-health alerts when live-posterior commits collapse fleet-wide.
+    - tests/test_posterior_commit_rate_alarm.py
     # codereview-may19-2 P1-1: ACK facts durable post-SDK-submit (unconditional commit in _live_order).
     - tests/test_live_order_ack_durability.py
     # EDLI e2e gate-unblock W0-W3 (2026-06-03) — RED->GREEN relationship antibodies.
@@ -1872,6 +1878,33 @@ relationship_test_manifests:
       - tests/test_runtime_guards.py
 
 test_metadata:
+  tests/execution/test_global_sell_publication_deadline.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+    - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+    - docs/authority/zeus_current_architecture.md
+    notes: Publication admission and same-attempt idempotence bind exact canonical holding/debt and a fresh aware deadline. Invalid or expired armed proof and ambiguous previous owners remain fenced. Normal unarmed debt requires genuine preparation before claim; prepared-object publication and exact delayed acknowledgement must preserve successor ownership. No expiration-only legacy drain or venue-execution proof is implied.
+    created: '2026-10-08'
+    last_reused_or_audited: '2026-10-08'
+  tests/state/test_unidentified_exit_order_proxy.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+    - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+    - docs/authority/zeus_current_architecture.md
+    notes: A producer-specific anonymous order aggregate cannot invent native economic identity or double count later real trades. Full provenance and native economics distinguish valid provisional rows from ambiguous evidence, preserving two real partials and same-command/order scope across both readers. Pending recovery must defer ambiguity instead of treating it as no fill. Synthetic preserved snapshots and transaction tests do not prove production or historical-projection repair.
+    created: '2026-10-08'
+    last_reused_or_audited: '2026-10-08'
+  tests/calibration/test_exact_payoff_entry_policy.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+    - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+    - docs/authority/zeus_current_architecture.md
+    notes: Typed exact-entry policy seals canonical calibration config and original ENTRY metric, mode and contract without fitting certainty. Authenticated held consumption permits a current causal fit or genuinely verified current insufficiency after qualified correction; unknown policy, receipt or scope mismatch, unavailable source and legacy bare markers remain unavailable. Native multi-token command and fill evidence is separately required.
+    created: '2026-10-08'
+    last_reused_or_audited: '2026-10-08'
   tests/engine/test_current_wrh_probability_handoff.py:
     cohort: law_antibody
     trust: trusted

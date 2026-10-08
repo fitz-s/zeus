@@ -961,48 +961,15 @@ def _economic_trade_fact_cte(
     *,
     canonical_cte_name: str = "canonical_trade_fact",
     cte_name: str = "economic_trade_fact",
+    proxy_provenance_available: bool = True,
 ) -> str:
-    """Return one row per economic fill, excluding derived aliases."""
+    """Use the shared economic identity law, including provisional proxies."""
+    from src.state.fill_dedup import economic_trade_fact_cte
 
-    return f"""
-        {cte_name} AS (
-            SELECT fact.*
-              FROM {canonical_cte_name} fact
-             WHERE NOT (
-                    TRIM(COALESCE(fact.tx_hash, '')) != ''
-                AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
-                    = LOWER(TRIM(fact.tx_hash))
-                AND EXISTS (
-                        SELECT 1
-                          FROM {canonical_cte_name} exact
-                         WHERE exact.command_id = fact.command_id
-                           AND LOWER(TRIM(COALESCE(exact.tx_hash, '')))
-                               = LOWER(TRIM(fact.tx_hash))
-                           AND LOWER(TRIM(COALESCE(exact.trade_id, '')))
-                               != LOWER(TRIM(COALESCE(fact.trade_id, '')))
-                           AND UPPER(COALESCE(exact.state, ''))
-                               IN ('MATCHED', 'MINED', 'CONFIRMED')
-                           AND CAST(COALESCE(exact.filled_size, '0') AS REAL) > 0
-                    )
-                )
-               AND NOT EXISTS (
-                       SELECT 1
-                         FROM venue_trade_facts source_fact
-                        WHERE source_fact.trade_fact_id = CASE
-                                  WHEN json_valid(fact.raw_payload_json)
-                                  THEN CAST(json_extract(
-                                      fact.raw_payload_json,
-                                      '$.raw_fill_payload.source_trade_fact_id'
-                                  ) AS INTEGER)
-                              END
-                          AND source_fact.command_id = fact.command_id
-                          AND source_fact.venue_order_id = fact.venue_order_id
-                          AND UPPER(COALESCE(source_fact.state, ''))
-                              IN ('MATCHED', 'MINED', 'CONFIRMED')
-                          AND CAST(COALESCE(source_fact.filled_size, '0') AS REAL) > 0
-                    )
-        )
-    """
+    return economic_trade_fact_cte(
+        canonical_cte_name=canonical_cte_name, cte_name=cte_name,
+        proxy_provenance_available=proxy_provenance_available,
+    )
 
 
 class MissingPositionCurrentForTerminalOrder(ValueError):
@@ -3973,7 +3940,9 @@ def _positive_fill_trade_fact_summary(
     if str(venue_order_id or "").strip():
         order_filter = " AND fact.venue_order_id = ?"
         params = (command_id, str(venue_order_id))
-    sql = "WITH " + _canonical_trade_fact_cte() + ", " + _economic_trade_fact_cte() + """
+    sql = "WITH " + _canonical_trade_fact_cte(
+        source_clause_sql="WHERE fact.command_id = ?" + order_filter,
+    ) + ", " + _economic_trade_fact_cte() + """
         SELECT fact.filled_size,
                fact.fill_price,
                fact.source,
@@ -3986,7 +3955,7 @@ def _positive_fill_trade_fact_summary(
         """ + order_filter
     rows = conn.execute(
         sql,
-        params,
+        (*params, *params),
     ).fetchall()
     count = 0
     filled = Decimal("0")
@@ -9902,7 +9871,7 @@ def _missing_filled_entry_execution_fact_repair_candidates(
         "WITH "
         + _canonical_trade_fact_cte()
         + ",\n"
-        + _economic_trade_fact_cte()
+        + _economic_trade_fact_cte(proxy_provenance_available=False)
         + """,
         entry_fill AS (
             SELECT fact.command_id,
@@ -14021,11 +13990,94 @@ def _append_missing_exit_trade_fact_from_order_fact(
             venue_order_id=venue_order_id,
         )
     tx_hash = next(iter(tx_hashes), "")
-    if _fill_trade_fact_count(conn, command_id) > 0:
+    if _positive_fill_trade_fact_summary(
+        conn, command_id, venue_order_id=venue_order_id,
+    ).get("count", 0) > 0:
         return
-    trade_id = next(iter(trade_ids), "")
-    if not trade_id:
-        trade_id = tx_hash or f"order_fact:{candidate.get('order_fact_id') or command_id}"
+    # SCOPE: this EXIT command/order, whose MATCHED response remains an order
+    # observation. DRAIN: ordinary native trade/transaction recovery. RESET:
+    # a bound provider fill identity and actual reported fill economics.
+    # Amounts alone do not identify a fill; an order_fact:<id> placeholder can
+    # never be added to later native trade IDs as a second economic execution.
+    making = _positive_decimal_or_none(_first_present(point_order, "makingAmount", "making_amount"))
+    taking = _positive_decimal_or_none(_first_present(point_order, "takingAmount", "taking_amount"))
+    reported_price = _positive_decimal_or_none(
+        _first_present(point_order, "avgPrice", "avg_price", "fillPrice", "fill_price")
+    )
+    envelope = point_order.get("_venue_submission_envelope")
+    envelope = envelope if isinstance(envelope, Mapping) else {}
+    bound = conn.execute(
+        "SELECT command.token_id, command.side, command.venue_order_id, "
+        "envelope.condition_id, envelope.selected_outcome_token_id, envelope.side, "
+        "envelope.captured_at, envelope.canonical_pre_sign_payload_hash, command.size "
+        "FROM venue_commands command JOIN venue_submission_envelopes envelope "
+        "ON envelope.envelope_id = command.envelope_id WHERE command.command_id = ? "
+        "AND command.intent_kind = 'EXIT'",
+        (command_id,),
+    ).fetchone()
+    if (bound is None or str(bound[1] or "").upper() != "SELL"
+            or str(bound[2] or "").lower() != venue_order_id.lower()
+            or not str(bound[3] or "").strip() or str(bound[0] or "") != str(bound[4] or "")
+            or str(bound[5] or "").upper() != "SELL"):
+        return
+    presign_at, observed = _parse_ts(bound[6]), _parse_ts(observed_at)
+    if (presign_at is None or observed is None or presign_at > observed
+            or not str(bound[7] or "").strip()
+            or (envelope.get("canonical_pre_sign_payload_hash") not in (None, "")
+                and envelope["canonical_pre_sign_payload_hash"] != bound[7])):
+        return
+    if envelope.get("captured_at") not in (None, ""):
+        response_at = _parse_ts(envelope["captured_at"])
+        if response_at is None or not presign_at <= response_at <= observed:
+            return
+    quantity, order_size = _positive_decimal_or_none(matched_size), _positive_decimal_or_none(bound[8])
+    if quantity is None or order_size is None or quantity > order_size:
+        return
+    token_id, condition_id = str(bound[0]), str(bound[3])
+    if any(
+        str(value) != token_id
+        for value in (
+            *(point_order.get(key) for key in ("asset_id", "token_id", "tokenId")),
+            envelope.get("selected_outcome_token_id"), candidate.get("token_id"),
+        ) if value not in (None, "")
+    ) or any(
+        str(value) != condition_id
+        for value in (
+            *(point_order.get(key) for key in ("market", "condition_id", "conditionId")),
+            envelope.get("condition_id"),
+        ) if value not in (None, "")
+    ):
+        return
+    if any(
+        str(value).lower() != venue_order_id.lower()
+        for value in (
+            *(point_order.get(key) for key in ("id", "orderID", "orderId", "order_id")),
+            envelope.get("order_id"),
+        ) if value not in (None, "")
+    ) or any(
+        str(value).upper() != "SELL"
+        for value in (point_order.get("side"), envelope.get("side"))
+        if value not in (None, "")
+    ) or (
+        envelope.get("selected_outcome_token_id") not in (None, "")
+        and str(envelope["selected_outcome_token_id"]) != str(candidate.get("token_id") or "")
+    ):
+        return
+    if (not trade_ids and not tx_hashes) or len(tx_hashes) > 1 or (
+        (making is None or taking is None) and reported_price is None
+    ):
+        logger.warning("recovery: EXIT_ORDER_FILL_IDENTITY_UNAVAILABLE command=%s order=%s", command_id, venue_order_id)
+        return
+    if len(trade_ids) > 1 and not tx_hash:
+        return
+    if making is not None and taking is not None and (
+        _positive_decimal_or_none(matched_size) != making
+        or _positive_decimal_or_none(fill_price) != taking / making
+    ):
+        return
+    # Multiple child IDs name an aggregate, not the first child. A single
+    # transaction identity lets the existing exact-child alias rule own it.
+    trade_id = trade_ids[0] if len(trade_ids) == 1 else tx_hash
     payload = {
         "reason": "exit_order_fact_matched_missing_trade_fact_repair",
         "proof_class": "matched_exit_order_fact_with_fill_economics",

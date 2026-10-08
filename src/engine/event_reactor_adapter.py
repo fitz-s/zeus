@@ -2538,7 +2538,12 @@ def _global_book_receipt_token_pairs(
     *,
     condition_ids: Iterable[str],
 ) -> dict[str, tuple[str, str]]:
-    """Read a hash-verified complete receipt only as a last-seen token hint."""
+    """Read hash-verified complete receipts only as a last-seen token hint.
+
+    The newest receipt naming a condition wins; a newer receipt that does not
+    name it (a held-SELL completion carries one family) never hides an older
+    complete one.
+    """
 
     requested = {
         str(condition_id or "").strip()
@@ -2547,6 +2552,7 @@ def _global_book_receipt_token_pairs(
     }
     if not requested:
         return {}
+    found: dict[str, tuple[str, str]] = {}
     try:
         receipt_rows = trade_conn.execute(
             """
@@ -2680,8 +2686,7 @@ def _global_book_receipt_token_pairs(
         if not valid:
             continue
 
-        pairs: dict[str, tuple[str, str]] = {}
-        for condition_id in requested:
+        for condition_id in requested.difference(found):
             yes_token_id = side_tokens.get((condition_id, "YES"))
             no_token_id = side_tokens.get((condition_id, "NO"))
             if (
@@ -2689,9 +2694,10 @@ def _global_book_receipt_token_pairs(
                 and no_token_id
                 and yes_token_id != no_token_id
             ):
-                pairs[condition_id] = (yes_token_id, no_token_id)
-        return pairs
-    return {}
+                found[condition_id] = (yes_token_id, no_token_id)
+        if len(found) == len(requested):
+            break
+    return found
 
 
 def _global_book_epoch_cache_namespace(
@@ -14781,6 +14787,7 @@ def _revalidate_global_sell_calibration(
         CanonicalMarketAnchoredFitProvider,
         HeldSourceIdentityBinding,
         HeldSourceIdentityCohortBinding,
+        HeldExactPayoffEntryBinding,
         load_held_entry_calibration,
     )
     from src.solve.solver import family_payoff_point_q
@@ -14797,6 +14804,28 @@ def _revalidate_global_sell_calibration(
         side=candidate.side,
         world_conn=world_conn,
     )
+    exact_entry = isinstance(binding, HeldExactPayoffEntryBinding)
+    if exact_entry:
+        provider = CanonicalMarketAnchoredFitProvider(
+            lambda: (world_conn, trade_conn, forecast_conn),
+            city_timezones={city: config.timezone for city, config in runtime_cities_by_name().items()},
+        )
+        binding = binding.at_decision(
+            provider, decision_at=actuation.decision_at_utc,
+            current_raw_revision=current_raw_revision,
+            deadline_monotonic=deadline_monotonic,
+        )
+    if exact_entry and binding.source_only:
+        reproduced = binding.bind_current(
+            witness=actuation.probability_witness,
+            raw_revision=current_raw_revision, raw_q=raw_q, p0=correction.p0,
+        )
+        terminal = decision.expected_terminal_wealth
+        if (reproduced != correction or terminal is None or not math.isclose(
+            terminal.held_probability_mean, raw_q, rel_tol=0.0, abs_tol=1e-12,
+        )):
+            raise ValueError("GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED")
+        return
     if isinstance(binding, (HeldSourceIdentityBinding, HeldSourceIdentityCohortBinding)):
         binding = binding.at_decision(
             None, decision_at=actuation.decision_at_utc,
@@ -14823,10 +14852,11 @@ def _revalidate_global_sell_calibration(
             lambda: (world_conn, trade_conn, forecast_conn),
             city_timezones={city: config.timezone for city, config in runtime_cities_by_name().items()},
         )
-    binding = binding.at_decision(
-        provider, decision_at=actuation.decision_at_utc, current_raw_revision=current_raw_revision,
-        deadline_monotonic=deadline_monotonic,
-    )
+    if not exact_entry:
+        binding = binding.at_decision(
+            provider, decision_at=actuation.decision_at_utc, current_raw_revision=current_raw_revision,
+            deadline_monotonic=deadline_monotonic,
+        )
     reproduced = binding.corrected_probability(
         family_key=candidate.family_key,
         bin_id=candidate.bin_id,
@@ -17147,9 +17177,9 @@ def _global_current_state_execution_economics(
     # check below on the raw value — the correction cannot mask a stale q.
     q_correction = getattr(decision, "payoff_q_correction", None)
     if q_correction is not None:
-        from src.contracts.payoff_q_correction import SourceIdentityBaseline
+        from src.contracts.payoff_q_correction import SourceIdentityBaseline, ExactPayoffEntryPolicy
 
-        if isinstance(q_correction, SourceIdentityBaseline) and not q_correction.matches_witness(witness):
+        if isinstance(q_correction, (SourceIdentityBaseline, ExactPayoffEntryPolicy)) and not q_correction.matches_witness(witness):
             raise ValueError("GLOBAL_CURRENT_STATE_SOURCE_IDENTITY_SUPERSEDED")
         if not math.isclose(
             float(q_correction.raw_q),

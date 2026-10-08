@@ -7411,7 +7411,9 @@ def execute_monitoring_phase(
         force_new_generation: bool = False,
         *,
         deadline_monotonic: float | None = None,
-    ) -> bool:
+        prepare_only: bool = False,
+        obligation: dict[str, object] | None = None,
+    ) -> bool | tuple[bool, object | None]:
         """Reserve a durable global cut for a canonical reauction debt."""
 
         request_deadline = (
@@ -7427,7 +7429,8 @@ def execute_monitoring_phase(
                 )
             from src.events.reactor import request_global_auction_completion
 
-            obligation = latest_held_sell_reauction_obligation(read_conn, position)
+            if obligation is None:
+                obligation = latest_held_sell_reauction_obligation(read_conn, position)
             if not isinstance(obligation, dict) or not obligation:
                 obligation = getattr(
                     position,
@@ -7537,6 +7540,18 @@ def execute_monitoring_phase(
                 )
                 try:
                     refresh_position(read_conn, clob, position, quote_conn=conn)
+                    # refresh_position persists the quote only after its I/O.
+                    # Release that transaction before reading the wake queue
+                    # or letting recovery start its separate claim transaction.
+                    if conn is not None and conn.in_transaction:
+                        if not _release_monitor_write_lock_boundary(
+                            conn, summary, deps,
+                            boundary="global_sell_reauction_preparation_quote",
+                            deadline_monotonic=request_deadline,
+                        ):
+                            raise RuntimeError(
+                                "GLOBAL_SELL_REAUCTION_QUOTE_COMMIT_FAILED"
+                            )
                 finally:
                     if previous_deadline is None:
                         try:
@@ -7771,6 +7786,7 @@ def execute_monitoring_phase(
                 schema_version=int(obligation.get("schema_version") or 4),
                 force_new_generation=force_new_generation,
                 return_request=True,
+                prepare_only=prepare_only,
             )
             if not isinstance(request_result, tuple) or len(request_result) != 2:
                 raise ValueError(
@@ -7782,6 +7798,10 @@ def execute_monitoring_phase(
                 raise ValueError(
                     "GLOBAL_SELL_REAUCTION_PREPARED_REQUEST_UNAVAILABLE"
                 )
+            if prepare_only:
+                # Recovery commits a claim for this exact object before its
+                # publisher makes a wake visible. Preparation owns no fence.
+                return durable_request_accepted, prepared_request
             if durable_request_accepted:
                 setattr(
                     position,
@@ -7789,6 +7809,8 @@ def execute_monitoring_phase(
                     arm_global_sell_reauction_obligation(position, prepared_request),
                 )
         except Exception as exc:  # noqa: BLE001 - failed reservation keeps retry pending.
+            if prepare_only and conn is not None and conn.in_transaction:
+                conn.rollback()
             summary["global_sell_snapshot_reauction_request_failed"] = (
                 summary.get(
                     "global_sell_snapshot_reauction_request_failed",
@@ -11042,7 +11064,9 @@ def execute_monitoring_phase(
                     prepared_request=completion_request,
                 )
                 if published:
-                    reserved = record_global_sell_reauction_reserved(conn, pos)
+                    reserved = record_global_sell_reauction_reserved(
+                        conn, pos, expected_obligation=armed_obligation,
+                    )
                     if reserved:
                         try:
                             conn.commit()
@@ -11200,11 +11224,12 @@ def execute_monitoring_phase(
                 ) and _drain_same_turn_global_sell_reauction_after_no_fill(
                     pos,
                     conn=conn,
-                    requester=lambda position, force_new: (
+                    requester=lambda position, force_new, **request_options: (
                         request_global_sell_snapshot_reauction(
                             position,
                             force_new,
                             deadline_monotonic=monitor_deadline,
+                            **request_options,
                         )
                     ),
                     deadline_monotonic=monitor_deadline,

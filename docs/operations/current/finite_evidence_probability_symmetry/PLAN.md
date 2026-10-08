@@ -22552,3 +22552,207 @@ converted native carriers still restore the durable trigger identity. The
 current-owner read remains before every preparation/cache decision. This
 bounded correction needs the existing cache-invalidation antibody and native
 current-WRH source/JIT controls before another draft-branch update.
+
+## Bounded exact ENTRY to corrected statistical HELD transition
+
+The original multi-token no-churn acceptance continues offline from published
+source9ada873. The public PR/CI snapshot at6ab2d5c remains frozen. Test-only
+05d88d05 removes the synthetic venue's token1003-only restriction while
+preserving all six original books, prices, fees, depth, windows and normal
+source/decision/signature/fill owners. Six original controls pass; the full
+reentry run now fails at a genuine entry-policy handoff, independently
+reproduced. No production database or accounting mutation is part of this work.
+
+Token1001 is bought as a typed exact structural winner (q1,
+SETTLEMENT_LOCKED_BUY), then reaches native CONFIRMED/FILLED and canonical
+attribution. Before correction it receives WIN-HOLD monitoring. A qualified
+current-product retraction invalidates the exact bound; a fresh statistical
+posterior subsequently exists, but held redecision rejects the certificate's
+bare market_anchored_correction={applied:false} as
+HELD_ENTRY_CALIBRATION_BASELINE_BINDING_INVALID. The exact-payoff calibration
+skip itself is lawful. It does not justify fabricating an insufficient-fit
+SourceIdentityBaseline or treating this as a generic Day0 ENTRY failure.
+
+Admitted scope is a minimal explicit exact-entry policy/provenance contract,
+its normal certificate/audit production, and authenticated HELD consumption.
+Establish the existing policy semantics before runtime edits. Preserve
+immutable exact ENTRY evidence and distinguish it from the current statistical
+witness after correction. No policy may be inferred from a scalar q1 or a
+bare applied:false marker; unknown/malformed policy and unavailable/refuted
+current source remain non-authorizing. Existing fitted and insufficient-fit
+policies keep their own meaning. No historical calibration, training support,
+source receipt, readiness flag or canonical fill may be invented.
+
+This slice protects source/certificate identity and causal probability
+authority (INV-12/14), authority-loss behavior (INV-20), lifecycle/confirmed
+facts (INV-01) and single-owner write boundaries (INV-37), with the existing
+inclusive0.05–0.95 price law. It adds no price stop, cooldown, forced winner,
+new probability threshold or settlement/accounting rule. Scope is the exact
+entry holding and its authenticated family/token/side. Drain/reset must use
+normal qualified current evidence and lawful redecision, not an unscoped
+incident bypass. Schema/truth rewrites are outside the proposed scope.
+
+Acceptance requires pre-correction WIN-HOLD; causal refusal while current
+evidence/posterior is unavailable; then fresh statistical q and the normal
+economic decision after qualified correction, including confirmed exit when
+selected. Preserve the original position and command lineage across lawful
+other-token entry and possible corrected reentry. Unknown-policy, mismatched
+identity, stale/refuted source, duplicate/late confirmation and receive-handler
+restart controls must remain meaningful. Report chain-mirror and native cash
+limits separately. Independent review covers the actual transition and its
+policy provenance; it is not permission to weaken the existing held reader.
+
+Semantic reconciliation before implementation: EXACT_PAYOFF_ENTRY_V1 will
+seal the canonical statistical CalibrationPolicySpec/config and original
+metric/execution mode/contract alongside authenticated exact-entry evidence.
+Constructing it reads policy metadata only and must not fit a proved payoff.
+After loss of exact authority, keep the sealed policy/config and ENTRY feature
+semantics while selecting a causal current fit for the qualified current raw
+revision; current raw q is permitted only after genuine current-scope
+insufficient-support proof. Numeric p0 comes from the current book under those
+ENTRY feature semantics, never from SELL proceeds or a frozen old fill price.
+Policy/config mismatch and unavailable/refuted evidence remain blocked.
+Legacy bare applied:false receipts did not seal this contingent policy: they
+remain explicitly EXACT_ENTRY_POLICY_MISSING, with historical fill attribution
+preserved and no database mutation or invented recovery. New-entry transition
+coverage must not be reported as legacy-holding recovery.
+
+### Native order recovery conservation continuation
+
+Composing the production post-trade daemon's existing two-minute chain read
+with the registered replay exposed an inherited recovery path before the
+multi-token correction could finish. The order recovery
+retains native submit making/taking amounts, but neither provider trade IDs nor
+transaction identity; it then creates an anonymous order_fact trade aggregate.
+The unsupported boundary is missing economic identity, not missing amount fields. When the delayed real CONFIRMED
+trade arrives, the economic reader counts both under the same command/order:
+25 shares for one 12.5-share SELL. Independent immutable-database reproduction
+confirms the conservation failure. This is synthetic replay evidence, not a
+claim about production occurrences. Stronger authenticated MATCHED economics
+already have their own supported recovery contract and are not categorically
+forbidden or relabeled as native CONFIRMED settlement.
+
+The admitted continuation is narrow: prevent that unsupported anonymous order
+fallback from minting economic trade/confirmed-command authority, and make
+positively identified already-persisted no-native-ID/transaction recovery
+aggregates remain provisional and non-economic through the consumed readers,
+both before and after genuinely bound native trade facts arrive. Real native
+partial quantities, rather than a guessed aggregate remainder, own economics. Authenticate structured
+producer provenance, command, order, token, side and native economics; neither
+a name prefix nor equal quantity alone establishes an alias. Preserve raw
+append-only facts, distinguish economic projection from native confirmation,
+and leave ambiguous identities non-authorizing. No database rewrite, balance
+adjustment, broad status policy or unrelated reconciliation redesign is in
+scope. This protects INV-01 confirmed lifecycle facts, INV-12/14 identity and
+causality, and INV-37 transaction ownership.
+
+Acceptance includes the exact delayed-confirmation RED, one economic quantity
+per execution, two distinct legitimate partial fills, truthful partial/full
+residual closure, distinct order/token/side and malformed provenance negatives,
+both reader parity, duplicate/concurrent delivery and receive-handler restart.
+The existing authenticated transaction-backed MATCHED recovery stays covered.
+After the narrow owner fix, rerun the full declared-window multi-token replay
+without injecting chain shares, probability, selected action or fill projection.
+Legacy economic-reader normalization is not permission to rewrite historical
+position events or claim every historical projection repaired.
+
+### Expired publication-claim continuation
+
+The native reentry run with the first proxy repair now clears the original
+SELL's native confirmation and exact quantity, and normal chain synchronization
+covers the new alternate holding. Qualified correction produces a fresh
+statistical SELL and its EXIT_INTENT, but no command: a complete publish_claimed
+row is written after its own completion deadline and then fences later fresh
+attempts. Its position/generation is distinct from the original closed holding.
+This preserved replay refusal is not yet proof that expiration alone permits
+releasing a publisher, and no timer-only ownership bypass is admitted.
+
+The bounded continuation covers this holding's publication-claim lifecycle:
+prove the existing request, wake, receipt and command ownership; prevent an
+already-expired attempt from acquiring unsupported ownership; and use exact
+canonical generation/attempt CAS for any safe drain. Preserve active or
+ambiguous publisher fences, live/unknown command exclusion, fresh probability
+and executable book reproof, immutable earlier evidence and normal idempotency.
+Concurrent publishers, delayed acknowledgement, duplicate wake and restart
+must not release another owner's claim or create duplicate commands. Do not
+redesign general leases, relax action law or treat expiry as a fill/closure.
+This extends the same INV-01/12/14/37/47 early-exit liveness scope. The proxy
+identity/clock review and this ownership proof remain separate acceptance
+obligations, followed by the unchanged-window multi-token native replay.
+
+The terminal-receipt drain proposal is withheld: actual V4 publication routes
+can republish after an outside-lease receipt read and canonical CAS. A terminal
+answer does not prove publisher inactivity. Existing active or ambiguous claims
+remain fenced; a bounded same-owner publication protocol requires a separate
+reviewed proposal. No timeout-only drain or historical projection rewrite is
+part of the prevention slice.
+
+The first prevention candidate proves the full fresh multi-token scenario but
+introduces ten genuine recovery regressions relative to the 52-pass baseline.
+Canonical post-only-cross and FAK zero-fill producers intentionally create
+unarmed V4 debt without a request, attempt or completion deadline. Requiring
+that deadline before the normal requester prepares it blocks lawful drainage.
+The admitted correction uses existing prepare_only support: prepare current
+q/book/request outside the writer lease; then recheck canonical debt event,
+generation, attempt, token and command ownership before claiming; after commit,
+publish that exact prepared object. Never rebuild or renew its time authority
+after claiming. Tests must preserve unarmed debt and exercise real preparation,
+not add future deadlines to old debt fixtures. Malformed armed authority,
+expired attempts and ambiguous previous owners remain refused. Restore the
+paired 52 controls and five ambiguous-owner cases, verify paused/concurrent
+publication and delayed acknowledgement, and rerun the full native seven-case
+matrix on the integrated candidate. Fresh-scenario success does not establish
+legacy-claim repair or mixed-version publication safety.
+
+The bounded preparation source is independently accepted at 47d4b1672866:
+69 admission/preparation/identity/concurrency controls and 42 caller-migration
+controls pass. It closes the actual forced-refresh quote transaction through
+its existing owner boundary before queue I/O; claim and acknowledgement retain
+exact canonical identity, and default acknowledgement is atomic and bound to
+the obligation actually published. Cold restart remains explicit: normal family
+preparation is requested while unarmed debt stays unowned, then current canonical
+monitor evidence enables genuine typed preparation. Failed or ambiguous actual
+publication retains its fence; no legacy or in-flight expiry drain is claimed.
+
+The full native composition is green at bcbcac1d5754 (production source47d4,
+byte-identical source/tests in integrated d868870f93): standalone strong case
+1 passed in252.48 wall seconds, the full seven-case module passed in498.58 wall
+seconds, and eight runtime controls passed. The actual two-minute chain reader
+and immediate/thirty-second collateral owner run from their literal registered
+schedules over declared raw synthetic transports. Initial immediate collateral
+capture precedes native confirmation. BUY follows its existing visible asks;
+finite liquidity windows constrain SELL bids. Later confirmations follow actual
+posts at the existing cadence; original delayed first-exit confirmation remains.
+No source, price, depth, allocation, action-law or bid-window input was tuned.
+
+The original holding and alternate holding both reach real synthetic native
+CONFIRMED fills and canonical economic closure; corrected original-token entry
+has a distinct position/command/certificate. Corrected alternate SELL uses fresh
+nonzero q0.025012941714596226 and the same selected-cut source/probability/receipt
+through native submission, with expected EV +0.9249741166. Exact first alternate
+BUY cut is identified by immutable certificate event identity, not a neighboring
+same-candidate cut. Per-run action times are retained separately. The unchanged
+evidence tail reaches18:10 with exact per-token native/canonical inventory and
+no duplicate command/event/POST after repeated or restarted-handler delivery.
+These are synthetic event-clock, transport and inventory facts, not wall-clock
+production latency, real fills or OS-restart proof. Native cash remains UNKNOWN
+and canonical fee remains NULL. Legacy absent policy, unsupported statistical
+multi-certificate cohorts and ambiguous publishers remain explicit limits.
+
+Current upstream reconciliation is separately pinned to e865afcff96e after five
+commits beyond843b4589061d. Preserve upstream independent fixes, strengthen its
+zero-support FAK path with the existing private canonical source proof, retain
+original proof quantity before conservative command quantization, and respect
+the unchanged mode-specific snapshot/envelope/final-SDK size laws. Those laws
+allow legal non-post-only FAK share quantities below the resting-order floor;
+no price-band or actual venue/risk gate is waived. Publication and current-base
+validation follow the reconciled tree, not this predecessor native result.
+
+Final changed-surface semantic classification identified three unregistered
+tokens. Register the two existing prepare/ack refusal diagnostics and the
+existing V2 human-amount serialization contract in money_path_objects.yaml,
+with their actual owners and behavioral tests. This harmonizes descriptive
+registry coverage with the reviewed source, without adding lifecycle states,
+economic authority or a runtime migration (INV-01/12/14/37/47). Re-run semantic
+classification, invariant coverage and test-quality gates; independently review
+the registry delta while the frozen source/test native matrix completes.

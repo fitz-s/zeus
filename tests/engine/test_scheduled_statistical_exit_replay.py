@@ -113,6 +113,17 @@ class StatisticalVenue(ScheduledExitVenue):
             market_end=datetime.combine(case.request.target_date+timedelta(days=1), datetime.min.time(),
                 tzinfo=ZoneInfo(case.city.timezone)).astimezone(UTC))
         self.sdk.post_order = self.post_order
+        self.sdk.get_balance_allowance = self.get_balance_allowance
+        # All six books existed before the first probability. Extend account
+        # transport to that same declared universe, without changing its law.
+        self.inventory = {token: Decimal(0) for token in self.tokens}
+        self.entry_prices = {token: Decimal(0) for token in self.tokens}
+        self.token_books = {token: {
+            'bid': self.bid if token == self.held_token else Decimal('.50'),
+            'ask': self.bid + Decimal('.01') if token == self.held_token else Decimal('.51'),
+            'bid_depth': Decimal(100), 'ask_depth': Decimal(100),
+            'window_end': self.window_end, 'restored_window': self.restored_window,
+        } for token in self.tokens}
 
     def post_order(self, order, order_type=None, post_only=False, defer_exec=False):
         from src.venue.polymarket_v2_adapter import _deterministic_v2_order_id, _signed_order_bytes
@@ -121,7 +132,9 @@ class StatisticalVenue(ScheduledExitVenue):
         signed = _signed_order_bytes(order)
         signed_hash = hashlib.sha256(signed).hexdigest()
         with sqlite3.connect(self.trade_db_path.as_uri()+'?mode=ro', uri=True) as conn:
-            command = conn.execute('SELECT command_id,state,envelope_id FROM venue_commands WHERE venue_order_id=?',(order_id,)).fetchone()
+            commands = conn.execute('SELECT command_id,state,envelope_id,token_id,side FROM venue_commands WHERE venue_order_id=?',(order_id,)).fetchall()
+            assert len(commands)==1, 'POST requires one durable command identity'
+            command=commands[0]
             assert command and command[1]=='SUBMITTING'
             persisted = conn.execute('SELECT signed_order_blob,canonical_pre_sign_payload_hash,raw_request_hash FROM venue_submission_envelopes WHERE order_id=? AND signed_order_hash=?',
                 (order_id,signed_hash)).fetchone()
@@ -132,26 +145,36 @@ class StatisticalVenue(ScheduledExitVenue):
         size = Decimal(order.makerAmount if side=='SELL' else order.takerAmount)/1_000_000
         price = Decimal(order.takerAmount if side=='SELL' else order.makerAmount)/1_000_000/size
         assert Decimal('.05')<=price<=Decimal('.95')
-        assert str(order.tokenId)==self.held_token, 'Actual winner differs from predeclared middle-bin NO'
+        token=str(order.tokenId)
+        self.check_token(token)
+        assert command[3:]==(token,side), 'signed order must match its durable token and side'
+        book=self.book(token)
+        levels=book['asks' if side=='BUY' else 'bids']
+        assert levels, 'the native executable side has no liquidity at POST'
+        # The declared finite window removes bids only; asks are continuously
+        # advertised by book(). A BUY must follow those same executable asks.
+        if side=='SELL':
+            assert self.window_open(token), 'executable bid window expired before POST'
+        executable=Decimal(levels[0]['price'])
+        assert Decimal('.05')<=executable<=Decimal('.95')
         if side=='BUY':
-            assert size*price<=self.cash
-            crossing=price>=Decimal(self.book(self.held_token)['asks'][0]['price'])
+            fee=size*Decimal(self.fee_rate_bps)/10_000*price*(1-price)
+            assert size*price+fee<=self.cash
+            crossing=price>=executable
         else:
-            assert size<=self.held_shares
-            crossing=price<=self.bid
+            assert size<=self.inventory[token]
+            crossing=price<=executable
         assert not post_only or not crossing
-        assert self.window_open()
-        assert size<=self.liquidity
+        assert size<=Decimal(levels[0]['size'])
         assert crossing or str(order_type)=='GTC'
         self.orders[order_id]={'id':order_id,'orderID':order_id,'status':'MATCHED' if crossing else 'LIVE',
             'created_at':self.now().isoformat(),
-            'market':self.condition_id,'asset_id':self.held_token,'side':side,'price':str(price),
+            'market':self.tokens[token],'asset_id':token,'side':side,'price':str(price),
             'original_size':str(size),'size_matched':str(size if crossing else 0),'associate_trades':[]}
-        fill_price=(Decimal(self.book(self.held_token)['asks'][0]['price']) if side=='BUY' and crossing
-            else self.bid if side=='SELL' and crossing else price)
+        fill_price=executable if crossing else price
         self.fill_prices[order_id]=fill_price
         self.record('post_order',order_id=order_id,command_id=command[0],signed_order_hash=signed_hash,
-            side=side,size=str(size),filled_size=str(size if crossing else 0),price=str(price),
+            token_id=token,condition_id=self.tokens[token],side=side,size=str(size),filled_size=str(size if crossing else 0),price=str(price),
             maker_amount_micro=str(order.makerAmount),taker_amount_micro=str(order.takerAmount),
             fill_price=str(fill_price),order_type=str(order_type),post_only=post_only,durable_before_post=True)
         return {'success':True,'orderID':order_id,'status':'MATCHED' if crossing else 'LIVE',
@@ -160,6 +183,31 @@ class StatisticalVenue(ScheduledExitVenue):
 
     def check_token(self, token_id):
         assert str(token_id) in self.tokens
+
+    def window_open(self, token_id=None):
+        if token_id is None or not hasattr(self,'token_books'):
+            return super().window_open()
+        self.check_token(token_id)
+        book=self.token_books[str(token_id)]
+        restored=book['restored_window']
+        return (self.now()<book['window_end']
+            or restored is not None and restored[0]<=self.now()<restored[1])
+
+    def get_balance_allowance(self, params):
+        token=str(getattr(params,'token_id','') or '')
+        if token:self.check_token(token)
+        balance=int((self.inventory[token] if token else self.cash)*1_000_000)
+        self.record('get_balance_allowance',token_id=token,balance=str(balance))
+        return {'balance':str(balance),'allowance':str(balance)}
+
+    def positions_payload(self):
+        self.record('positions',inventory={token:str(size) for token,size in self.inventory.items()})
+        return [{'asset':token,'size':str(size),'conditionId':self.tokens[token],
+            'avgPrice':str(self.entry_prices[token]),'initialValue':str(size*self.entry_prices[token]),
+            'currentValue':str(size*self.token_books[token]['bid']),
+            'curPrice':str(self.token_books[token]['bid']),'redeemable':False,
+            'outcome':'Yes' if int(token)%2==0 else 'No'}
+            for token,size in self.inventory.items() if size>=Decimal('.01')]
 
     def account_rpc(self,url,method,params):
         from src.venue.polymarket_v2_adapter import ERC1155_BALANCE_OF_SELECTOR, ERC1155_IS_APPROVED_FOR_ALL_SELECTOR
@@ -175,7 +223,7 @@ class StatisticalVenue(ScheduledExitVenue):
         elif selector==ERC1155_BALANCE_OF_SELECTOR:
             token=str(int(data[-64:],16))
             self.check_token(token)
-            value=int(self.held_shares*1_000_000) if token==self.held_token else 0
+            value=int(self.inventory[token]*1_000_000)
         else:
             raise AssertionError(f'unexpected offline RPC selector: {selector}')
         return '0x'+format(value,'064x')
@@ -193,7 +241,12 @@ class StatisticalVenue(ScheduledExitVenue):
                 Decimal('0.00001'),rounding=ROUND_HALF_UP)
         modeled_fee_micro=int(modeled_fee*1_000_000)
         order=self.orders[payload['taker_order_id']]
+        token=order['asset_id']
+        assert Decimal(order['size_matched'])>0, 'only an actual matched order can confirm'
+        payload['market']=order['market']
+        payload['asset_id']=token
         payload['side']=order['side']
+        payload['maker_orders'][0]['asset_id']=token
         payload['maker_orders'][0]['side']='SELL' if order['side']=='BUY' else 'BUY'
         self.confirmed_trades.append(deepcopy(payload))
         order['status']='MATCHED'
@@ -203,24 +256,30 @@ class StatisticalVenue(ScheduledExitVenue):
         assert payload['id'] not in self._applied_trade_ids
         self._applied_trade_ids.add(payload['id'])
         if payload['side']=='BUY':
-            self.held_shares+=quantity
+            previous=self.inventory[token]
+            self.inventory[token]+=quantity
             self.cash-=gross+fee
-            self.average_entry_price=Decimal(payload['price'])
+            self.entry_prices[token]=(previous*self.entry_prices[token]+gross)/self.inventory[token]
         else:
-            self.held_shares-=quantity
+            self.inventory[token]-=quantity
             self.cash+=gross-fee
-        assert self.cash>=0 and self.held_shares>=0
-        self.record('native_confirmed',side=payload['side'],size=payload['size'],price=payload['price'],
-            modeled_fee_micro=modeled_fee_micro,cash=str(self.cash),held_shares=str(self.held_shares))
+        self.held_shares=self.inventory[self.held_token]
+        self.average_entry_price=self.entry_prices[self.held_token]
+        assert self.cash>=0 and all(size>=0 for size in self.inventory.values())
+        self.record('native_confirmed',order_id=payload['taker_order_id'],trade_id=payload['id'],
+            token_id=token,condition_id=order['market'],side=payload['side'],size=payload['size'],price=payload['price'],
+            modeled_fee_micro=modeled_fee_micro,cash=str(self.cash),
+            inventory={token:str(size) for token,size in self.inventory.items()})
         return payload
 
     def book(self, token_id):
         self.check_token(token_id)
         self.record('book', token_id=str(token_id))
-        bid = self.bid if str(token_id)==self.held_token else Decimal('.50')
+        declared=self.token_books[str(token_id)]
         book={'asset_id':str(token_id), 'market':self.tokens[str(token_id)],
             'timestamp':str(int(self.now().timestamp()*1000)),
-            'bids':[{'price':str(bid),'size':'100'}] if self.window_open() else [], 'asks':[{'price':str(bid+Decimal('.01')),'size':'100'}],
+            'bids':[{'price':str(declared['bid']),'size':str(declared['bid_depth'])}] if self.window_open(token_id) else [],
+            'asks':[{'price':str(declared['ask']),'size':str(declared['ask_depth'])}],
             'tick_size':'0.01', 'min_order_size':'1', 'neg_risk':False}
         import hashlib
         book['hash']=hashlib.sha256(json.dumps(book,sort_keys=True).encode()).hexdigest()
@@ -282,6 +341,9 @@ class StatisticalVenue(ScheduledExitVenue):
         self.http_handler=handler
 
     def install_chain_transports(self, monkeypatch):
+        from src.state import db
+        from src.venue import polymarket_v2_adapter
+
         super().install_chain_transports(monkeypatch)
         positions_get=httpx.get
         def get(url,**kwargs):
@@ -290,6 +352,22 @@ class StatisticalVenue(ScheduledExitVenue):
             with HTTP_CLIENT(transport=httpx.MockTransport(self.http_handler)) as client:
                 return client.get(url,**kwargs)
         monkeypatch.setattr(httpx,'get',get)
+        # The capital sidecar uses the same declared eth_call facts in one
+        # native batch. Keep the adapter's decoding and pUSD-only scope real.
+        def batch(url,calls,*,timeout_seconds):
+            assert timeout_seconds>0
+            observing=getattr(self.case,'collateral_read_active',False)
+            if observing:
+                # Fresh collateral acquisition must not retain a canonical
+                # TRADE/WORLD writer lease across its transport boundary.
+                with db.trade_connection_with_world_flocked(write_class='live',blocking=False):pass
+            results=[self.account_rpc(url,method,params) for method,params in calls]
+            if observing:
+                self.case.collateral_rpc_reads.append({'at':self.now().isoformat(),
+                    'selectors':[params[0]['data'][:10] for _,params in calls],
+                    'results':results,'writer_leases_available':True})
+            return results
+        monkeypatch.setattr(polymarket_v2_adapter,'_json_rpc_batch_call',batch)
 
 
 def _bind_clock(case, monkeypatch):
@@ -301,7 +379,8 @@ def _bind_clock(case, monkeypatch):
         'src.events.event_store','src.engine.monitor_refresh','src.engine.cycle_runner','src.engine.cycle_runtime',
         'src.execution.exit_lifecycle','src.state.portfolio','src.riskguard.riskguard','src.state.db',
         'src.ingest.fill_synchronizer','src.ingest.price_channel_daemon','src.ingest.fill_cash_observer',
-        'src.execution.command_recovery','src.state.chain_mirror_reconciler','src.ingest.price_channel_ingest',
+        'src.execution.command_recovery','src.state.chain_mirror_reconciler','src.state.chain_reconciliation',
+        'src.execution.post_trade_capital','src.ingest.post_trade_capital_daemon','src.ingest.price_channel_ingest',
         'src.data.market_scanner','src.data.substrate_observer','src.state.snapshot_repo')
     for name in names:
         module=importlib.import_module(name)
@@ -365,6 +444,8 @@ def test_pre_day0_normal_entry_with_declared_account_cash(scheduled_source,monke
     assert case.trade.execute('SELECT COUNT(*) FROM position_current').fetchone()[0]==0
     assert case.trade.execute('SELECT COUNT(*) FROM venue_commands').fetchone()[0]==0
     venue=StatisticalVenue(case=case)
+    record_property('declared_token_transport',json.dumps({'books':venue.token_books,
+        'initial_inventory':venue.inventory,'cash':venue.cash,'fee_rate_bps':venue.fee_rate_bps},default=str))
     venue.install_httpx_transport(monkeypatch)
     venue.install_chain_transports(monkeypatch)
     monkeypatch.setattr(riskguard,'RISK_DB_PATH',case.tmp_path/'risk_state.db')
@@ -458,10 +539,15 @@ def test_pre_day0_normal_entry_with_declared_account_cash(scheduled_source,monke
     if case.params['cash']==20:
         assert venue.posts, {'reasons':[receipt.reason for receipt in result.receipts.values()],'scoring_inputs':scoring_inputs}
         assert len(venue.posts)==1 and venue.posts[0]['side']=='BUY'
+        assert venue.posts[0]['token_id']==venue.held_token
         record_property('sdk_signed_entry',json.dumps(venue.posts))
         stream=_confirm_entry_through_registered_owners(case,monkeypatch,venue,controls,record_property)
-        if case.params.get('full_day0'):
-            _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
+        try:
+            if case.params.get('full_day0'):
+                _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
+        finally:
+            record_property('native_collateral_snapshot_refresh',json.dumps({
+                'calls':case.collateral_snapshot_calls,'rpc_reads':case.collateral_rpc_reads}))
         return
     assert not venue.posts
     assert result.economic_cut_completed
@@ -494,11 +580,17 @@ def _confirm_entry_through_registered_owners(case,monkeypatch,venue,controls,rec
     from src.state import db,portfolio
     from src.ingest import polymarket_user_channel as user_channel
     monkeypatch.setattr(user_channel,'datetime',case.pump.clock_type)
-    stream=user_channel.PolymarketUserChannelIngestor(venue.adapter,[venue.condition_id],
+    stream=user_channel.PolymarketUserChannelIngestor(venue.adapter,sorted(set(venue.tokens.values())),
         auth=user_channel.WSAuth('synthetic-key','synthetic-secret','synthetic-pass'),
         conn_factory=db.get_trade_connection_with_world)
     case.pump.register_fill_job()
     case.pump.register_main_monitor_jobs(reconcile=True)
+    _register_chain_sync_read(case,record_property)
+    _register_collateral_snapshot_refresh(case,record_property)
+    # The literal sidecar registration is immediately due. Dispatch it before
+    # delivering the next native confirmation, so no read is stamped earlier
+    # than the external account change it observes.
+    case.pump.advance()
     case.clock[0]+=timedelta(seconds=1)
     confirmed=venue.confirm_trade()
     assert 'fee_paid_micro' not in confirmed
@@ -533,6 +625,87 @@ def _confirm_entry_through_registered_owners(case,monkeypatch,venue,controls,rec
     record_property('entry_calibration_lineage',json.dumps({'binding_type':type(binding).__name__,
         'attribution':dict(attribution),'certificate_types':sorted(certificate_types)}))
     return stream
+
+
+def _register_chain_sync_read(case,record_property):
+    """Compose the actual capital daemon's two-minute native read owner.
+
+    A subprocess cannot inherit synthetic transport. Its unchanged child body
+    runs in-process, retaining the literal registration/cadence and all native
+    parsers, CTF reads, reconciliation, transactions and projection owners.
+    This does not test OS-process isolation or manually warm chain authority.
+    """
+    import ast
+    import inspect
+    from src.execution import post_trade_capital
+    from src.ingest import post_trade_capital_daemon
+    case.chain_sync_calls=[]
+    def observe_chain_sync():
+        call={'at':case.clock[0].isoformat()}
+        def positions():
+            return [dict(row) for row in case.trade.execute('SELECT position_id,phase,shares,chain_shares,chain_state,chain_seen_at FROM position_current')]
+        call['before']=positions()
+        try:
+            return post_trade_capital.chain_sync_read_cycle()
+        except Exception as exc:
+            call['error']=f'{type(exc).__name__}:{exc}'
+            raise
+        finally:
+            call['after']=positions()
+            case.chain_sync_calls.append(call)
+    registration=next(node for node in ast.walk(ast.parse(inspect.getsource(post_trade_capital_daemon.main)))
+        if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute) and node.func.attr=='add_job'
+        and any(arg.arg=='id' and isinstance(arg.value,ast.Constant) and arg.value.value=='chain_sync_read' for arg in node.keywords))
+    code=ast.fix_missing_locations(ast.Module(body=[ast.Expr(value=registration)],type_ignores=[]))
+    exec(compile(code,post_trade_capital_daemon.__file__,'exec'),{
+        **vars(post_trade_capital_daemon),'_scheduler':case.pump.scheduler,
+        '_chain_sync_read_isolated':observe_chain_sync})
+    job=case.pump.scheduler.get_job('chain_sync_read')
+    assert job.trigger.interval==timedelta(minutes=2)
+    record_property('native_chain_sync_registration',json.dumps({'registered_at':case.clock[0].isoformat(),
+        'next_run_time':job.next_run_time.isoformat(),'interval_seconds':job.trigger.interval.total_seconds(),
+        'owner':'post_trade_capital.chain_sync_read_cycle','process_isolation':'excluded; unchanged child body composed over fake transport'}))
+
+
+def _register_collateral_snapshot_refresh(case,record_property):
+    """Compose the actual thirty-second pUSD owner over the same raw RPC."""
+    import ast
+    import inspect
+    from src.execution import post_trade_capital
+    from src.ingest import post_trade_capital_daemon
+
+    case.collateral_snapshot_calls=[]
+    case.collateral_rpc_reads=[]
+    case.collateral_read_active=False
+    def latest():
+        row=case.trade.execute('SELECT id,captured_at,authority_tier,pusd_balance_micro,ctf_token_balances_json FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1').fetchone()
+        return dict(row) if row else None
+    def observe_refresh():
+        call={'at':case.clock[0].isoformat(),'before':latest()}
+        case.collateral_read_active=True
+        try:
+            return post_trade_capital.collateral_snapshot_refresh_cycle()
+        except Exception as exc:
+            call['error']=f'{type(exc).__name__}:{exc}'
+            raise
+        finally:
+            case.collateral_read_active=False
+            call['after']=latest()
+            case.collateral_snapshot_calls.append(call)
+    registration=next(node for node in ast.walk(ast.parse(inspect.getsource(post_trade_capital_daemon.main)))
+        if isinstance(node,ast.Call) and isinstance(node.func,ast.Attribute) and node.func.attr=='add_job'
+        and any(arg.arg=='id' and isinstance(arg.value,ast.Constant) and arg.value.value=='collateral_snapshot_refresh' for arg in node.keywords))
+    code=ast.fix_missing_locations(ast.Module(body=[ast.Expr(value=registration)],type_ignores=[]))
+    exec(compile(code,post_trade_capital_daemon.__file__,'exec'),{
+        **vars(post_trade_capital_daemon),'_scheduler':case.pump.scheduler,
+        '_collateral_snapshot_refresh_isolated':observe_refresh})
+    job=case.pump.scheduler.get_job('collateral_snapshot_refresh')
+    assert job.trigger.interval==timedelta(seconds=30)
+    record_property('native_collateral_refresh_registration',json.dumps({
+        'registered_at':case.clock[0].isoformat(),'next_run_time':job.next_run_time.isoformat(),
+        'interval_seconds':job.trigger.interval.total_seconds(),
+        'owner':'post_trade_capital.collateral_snapshot_refresh_cycle',
+        'process_isolation':'excluded; unchanged child body composed over fake transport'}))
 
 
 
@@ -761,8 +934,13 @@ def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
         case.pump.run_until(day0+timedelta(seconds=120))
         record_property('day0_scheduled_posts',json.dumps(venue.posts))
         record_property('reactor_constructor_deferrals',json.dumps(constructor_deferrals))
-        current=portfolio.load_runtime_open_portfolio(case.trade).positions[0]
-        assert current.last_monitor_prob_is_fresh is True
+        # Native chain authority can let the scheduled SELL and its MATCHED
+        # order-fact projection complete before this observation checkpoint.
+        # Read the original canonical history even when it is already closed.
+        current=SimpleNamespace(**dict(case.trade.execute(
+            'SELECT last_monitor_prob,last_monitor_prob_is_fresh,phase FROM position_current WHERE position_id=?',
+            (case.position.trade_id,)).fetchone()))
+        assert current.last_monitor_prob_is_fresh==1
         assert 0<current.last_monitor_prob<prior.last_monitor_prob
         latest=observed_snapshots[-1]
         bundle=(latest['binding']or{}).get('day0_causal_evidence_bundle') or latest['bundle']
@@ -780,12 +958,52 @@ def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
             'constructor_deferrals':constructor_deferrals,'reactor_invocations':reactor_invocations}))
         assert len(venue.posts)==2 and venue.posts[-1]['side']=='SELL',venue.posts
         assert datetime.fromisoformat(venue.posts[-1]['at'])<venue.window_end
-        case.clock[0]+=timedelta(seconds=1)
+        # Preserve the declared late native-confirmation delivery even if
+        # additional normal upstream owners enable an earlier legal match.
+        case.pump.run_until(day0+timedelta(seconds=152))
+        pre_confirmation_position=dict(case.trade.execute(
+            'SELECT phase,shares,chain_shares FROM position_current WHERE position_id=?',
+            (case.position.trade_id,)).fetchone())
+        pre_confirmation_facts=[dict(row) for row in case.trade.execute(
+            'SELECT trade_id,state,source,filled_size FROM venue_trade_facts WHERE venue_order_id=?',
+            (venue.posts[1]['order_id'],))]
+        pre_confirmation_command=case.trade.execute('SELECT state FROM venue_commands WHERE command_id=?',
+            (venue.posts[1]['command_id'],)).fetchone()[0]
+        record_property('anonymous_matched_before_native_confirmation',json.dumps({
+            'at':case.clock[0].isoformat(),'raw_order':venue.orders[venue.posts[1]['order_id']],
+            'command_state':pre_confirmation_command,'position':pre_confirmation_position,
+            'trade_facts':pre_confirmation_facts}))
+        assert not venue.orders[venue.posts[1]['order_id']]['associate_trades']
+        assert pre_confirmation_facts==[], 'anonymous order amounts cannot manufacture an economic trade identity'
+        assert pre_confirmation_command!='FILLED'
+        assert pre_confirmation_position['phase']!='economically_closed'
         confirmed=venue.confirm_trade()
         assert 'fee_paid_micro' not in confirmed
         record_property('native_exit_confirmation',json.dumps({'trade':confirmed,
             'modeled_external_cash':str(venue.cash),'modeled_external_ctf_shares':str(venue.held_shares)}))
         asyncio.run(stream.handle_raw_message(json.dumps(confirmed)))
+        if case.params.get('reentry_control'):
+            # Preserve the original SELL's explicitly delayed confirmation.
+            # Thereafter deliver every actual native match at the declared
+            # two-second lag, including lawfully selected earlier BUYs.
+            delivered=set()
+            confirmations=[]
+            def deliver_native_matches():
+                for post in venue.posts[2:]:
+                    if post['order_id'] in delivered or Decimal(post['filled_size'])<=0:
+                        continue
+                    if case.clock[0]<datetime.fromisoformat(post['at'])+timedelta(seconds=2):
+                        continue
+                    payload=venue.confirm_trade(order_id=post['order_id'])
+                    assert payload['asset_id']==post['token_id']
+                    assert payload['market']==post['condition_id']
+                    assert payload['side']==post['side']
+                    assert 'fee_paid_micro' not in payload
+                    result=asyncio.run(stream.handle_raw_message(json.dumps(payload)))
+                    confirmations.append({'at':case.clock[0].isoformat(),'payload':payload,'result':result})
+                    delivered.add(post['order_id'])
+            case.pump.transport_ticks.append([case.clock[0]+timedelta(seconds=1),
+                timedelta(seconds=1),deliver_native_matches])
         case.pump.run_until(case.clock[0]+timedelta(seconds=90))
         row=case.trade.execute('SELECT shares,chain_shares,phase FROM position_current WHERE position_id=?',(case.position.trade_id,)).fetchone()
         record_property('canonical_exit_position',json.dumps(dict(row)))
@@ -852,9 +1070,41 @@ def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
                 'source_revision':replayed.response_sha256,'window':[stamp.isoformat() for stamp in venue.restored_window],
                 'at':case.clock[0].isoformat(),'posts':venue.posts,'commands':reentry_commands,
                 'scope':'same held-token no-repurchase observation; other outcome BUY is allowed by the action law'}))
+            from src.control.live_health import _current_global_auction_candidate_payload
+            # Bind the first actual later BUY to its immutable certificate and
+            # winning cut, without assuming it waits for bid restoration.
+            first_buy=next(post for post in venue.posts[2:] if post['side']=='BUY' and Decimal(post['filled_size'])>0)
+            attribution=case.trade.execute('SELECT decision_certificate_hash FROM position_decision_attribution WHERE command_id=?',
+                (first_buy['command_id'],)).fetchone()
+            assert attribution is not None
+            with db.get_world_connection_read_only() as world:
+                certificate=json.loads(world.execute('SELECT payload_json FROM decision_certificates WHERE certificate_hash=?',
+                    (attribution[0],)).fetchone()[0])
+            cuts=[dict(row) for row in case.trade.execute("SELECT id,started_at,artifact_json FROM decision_log WHERE mode IN ('global_single_order_auction','global_single_order_auction_delta') ORDER BY id")]
+            eligible=[row for row in cuts if json.loads(row['artifact_json'])['summary'].get('winner_candidate_id')==certificate['candidate_id']]
+            assert eligible, {'first_buy':first_buy,'candidate_id':certificate['candidate_id']}
+            selected=eligible[0]
+            assert datetime.fromisoformat(selected['started_at'])<=datetime.fromisoformat(first_buy['at'])
+            summary=json.loads(selected['artifact_json'])['summary']
+            candidates=_current_global_auction_candidate_payload(case.trade,summary)
+            index=[dict(zip(candidates['buy_candidate_index_fields'],values)) for values in candidates['buy_candidate_index']]
+            winner=next(row for row in index if row['candidate_id']==summary['winner_candidate_id'])
+            same_token_indexes={i for i,row in enumerate(index) if row['token_id']==venue.held_token}
+            same_token_rejections=[row for row in candidates['rejected_groups'] if same_token_indexes.intersection(row['candidate_indexes'])]
+            record_property('reentry_first_eligible_selection',json.dumps({'decision_log_id':selected['id'],
+                'at':selected['started_at'],'winner':winner,'same_token_rejections':same_token_rejections,
+                'summary':summary,'source_revision':replayed.response_sha256,
+                'actual_post':first_buy,'decision_certificate_hash':attribution[0]}))
+            assert venue.posts[2]['token_id']==winner['token_id']
+            assert winner['token_id']!=venue.held_token
+            assert any(row['reason']=='FAMILY_JOINT_NO_POSITIVE_TARGET' for row in same_token_rejections),same_token_rejections
             case.values[0]=(26.,25.)
             corrected_book=refresh_account_and_book()
-            case.pump.run_until(day0+timedelta(seconds=540))
+            record_property('reentry_observation_endpoint',json.dumps({
+                'prior_observation_until':(day0+timedelta(seconds=540)).isoformat(),
+                'observation_until':venue.restored_window[1].isoformat(),
+                'reason':'cover the already-declared unchanged-evidence tail; no liquidity or source window extension'}))
+            case.pump.run_until(venue.restored_window[1])
             _,corrected=read_current_noaa_wrh_snapshot(case.forecasts,city=case.city,
                 target_date=str(case.request.target_date),as_of=case.clock[0])
             assert corrected.response_sha256!=replayed.response_sha256
@@ -872,35 +1122,209 @@ def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
                 (venue.posts[1]['at'],))]
             record_property('reentry_terminal_commands',json.dumps(terminal_commands))
             unknown=[row for row in terminal_commands if row['state']=='SUBMIT_UNKNOWN_SIDE_EFFECT']
-            if unknown:
-                assert len(unknown)==1,unknown
-                command=unknown[0]
-                cause=json.loads(case.trade.execute("SELECT payload_json FROM venue_command_events WHERE command_id=? AND event_type='SUBMIT_TIMEOUT_UNKNOWN' ORDER BY sequence_no DESC LIMIT 1",
-                    (command['command_id'],)).fetchone()[0])
-                record_property('reentry_native_unknown_cause',json.dumps(cause))
-                assert command['token_id']=='1001' and command['side']=='BUY',command
-                assert cause['reason']=='post_submit_exception_possible_side_effect',cause
-                assert cause['exception_type']=='AmbiguousSubmitError',cause
-                assert cause['final_submission_envelope_stage']=='post_sign_pre_ack_exception',cause
-                assert cause['exception_message'].startswith('Actual winner differs from predeclared middle-bin NO'),cause
-                assert "assert '1001' == '1003'" in cause['exception_message'],cause
-                from src.control.live_health import _current_global_auction_candidate_payload
-                cuts=[dict(row) for row in case.trade.execute("SELECT id,started_at,artifact_json FROM decision_log WHERE mode IN ('global_single_order_auction','global_single_order_auction_delta') ORDER BY id")
-                    if day0+timedelta(seconds=300)<=datetime.fromisoformat(row['started_at'])<=datetime.fromisoformat(command['created_at'])]
-                assert cuts
-                selected=cuts[-1]
-                summary=json.loads(selected['artifact_json'])['summary']
-                candidates=_current_global_auction_candidate_payload(case.trade,summary)
-                index=[dict(zip(candidates['buy_candidate_index_fields'],values)) for values in candidates['buy_candidate_index']]
-                winner=next(row for row in index if row['candidate_id']==summary['winner_candidate_id'])
-                same_token_indexes={i for i,row in enumerate(index) if row['token_id']==venue.held_token}
-                same_token_rejections=[row for row in candidates['rejected_groups'] if same_token_indexes.intersection(row['candidate_indexes'])]
-                record_property('reentry_pre_unknown_selection',json.dumps({'decision_log_id':selected['id'],
-                    'at':selected['started_at'],'winner':winner,'same_token_rejections':same_token_rejections,
-                    'later_admission':'contaminated after unsupported native attempt'}))
-                assert winner['token_id']=='1001',winner
-                assert any(row['reason']=='FAMILY_JOINT_NO_POSITIVE_TARGET' for row in same_token_rejections),same_token_rejections
-                record_property('reentry_acceptance_limit',json.dumps({'status':'UNPROVED',
-                    'reason':'native transport supports only initial held token; alternative winner is unsupported',
-                    'commands':unknown,'corrected_source_eligibility':'unproved after unknown side effect'}))
-                pytest.xfail('Unsupported alternative native winner; corrected-source entry eligibility is unproved')
+            record_property('reentry_native_confirmations',json.dumps(confirmations))
+            record_property('reentry_native_chain_sync',json.dumps(case.chain_sync_calls))
+            record_property('reentry_external_account',json.dumps({'inventory':venue.inventory,
+                'cash':venue.cash,'confirmations':[row for row in venue.calls if row['operation']=='native_confirmed']},default=str))
+            assert not unknown,unknown
+            lineage=[]
+            for post in venue.posts[2:]:
+                command=dict(case.trade.execute('SELECT * FROM venue_commands WHERE command_id=?',(post['command_id'],)).fetchone())
+                facts=[dict(row) for row in case.trade.execute('SELECT * FROM venue_trade_facts WHERE venue_order_id=?',(post['order_id'],))]
+                attribution=case.trade.execute('SELECT * FROM position_decision_attribution WHERE command_id=?',(post['command_id'],)).fetchone()
+                assert command['token_id']==post['token_id'] and command['side']==post['side']
+                assert Decimal(post['filled_size'])==0 or command['state']=='FILLED',command
+                for fact in facts:
+                    payload=json.loads(fact['raw_payload_json'])
+                    assert payload['asset_id']==post['token_id'] and payload['market']==post['condition_id']
+                    assert payload['side']==post['side'] and fact['command_id']==post['command_id']
+                    assert fact['fee_paid_micro'] is None
+                if post['side']=='BUY' and Decimal(post['filled_size'])>0:
+                    assert attribution and attribution['resolution']=='ATTRIBUTED'
+                lineage.append({'post':post,'command':command,'facts':facts,
+                    'attribution':dict(attribution) if attribution else None})
+            record_property('reentry_actual_lineage',json.dumps(lineage))
+            positions=[dict(row) for row in case.trade.execute('SELECT position_id,token_id,no_token_id,direction,phase,shares,chain_shares FROM position_current')]
+            record_property('reentry_terminal_positions',json.dumps(positions))
+            original=next(row for row in positions if row['position_id']==case.position.trade_id)
+            assert original['phase']=='economically_closed' and original['chain_shares']==0
+            # A late old fill and receive-handler restart must not reopen the
+            # original position or attribute it to any new token/command.
+            from src.ingest import polymarket_user_channel as user_channel
+            before=[tuple(row) for row in case.trade.execute('SELECT * FROM venue_trade_facts ORDER BY trade_fact_id')]
+            commands_before=[tuple(row) for row in case.trade.execute('SELECT * FROM venue_commands ORDER BY command_id')]
+            command_events_before=case.trade.execute('SELECT COUNT(*) FROM venue_command_events').fetchone()[0]
+            position_events_before=case.trade.execute('SELECT COUNT(*) FROM position_events').fetchone()[0]
+            posts_before=len(venue.posts)
+            restarted=user_channel.PolymarketUserChannelIngestor(venue.adapter,sorted(set(venue.tokens.values())),
+                auth=stream.auth,conn_factory=db.get_trade_connection_with_world)
+            for payload in venue.confirmed_trades:
+                late={**payload,'timestamp':str(int(case.clock[0].timestamp()))}
+                assert asyncio.run(stream.handle_raw_message(json.dumps(late)))['reason']=='duplicate_trade_fact'
+                assert asyncio.run(restarted.handle_raw_message(json.dumps(late)))['reason']=='duplicate_trade_fact'
+            assert before==[tuple(row) for row in case.trade.execute('SELECT * FROM venue_trade_facts ORDER BY trade_fact_id')]
+            assert commands_before==[tuple(row) for row in case.trade.execute('SELECT * FROM venue_commands ORDER BY command_id')]
+            assert command_events_before==case.trade.execute('SELECT COUNT(*) FROM venue_command_events').fetchone()[0]
+            assert position_events_before==case.trade.execute('SELECT COUNT(*) FROM position_events').fetchone()[0]
+            assert posts_before==len(venue.posts)
+            assert positions==[dict(row) for row in case.trade.execute('SELECT position_id,token_id,no_token_id,direction,phase,shares,chain_shares FROM position_current')]
+            cash_facts=[dict(row) for row in case.trade.execute('SELECT status,reason FROM venue_fill_cash_facts')]
+            assert cash_facts and all(row['status']=='UNKNOWN' for row in cash_facts)
+            record_property('reentry_duplicate_restart',json.dumps({'all_confirmed_trades_replayed':len(venue.confirmed_trades),
+                'trade_facts_unchanged':True,'positions_unchanged':True,'commands_unchanged':True,
+                'command_event_count_unchanged':True,'position_event_count_unchanged':True,
+                'post_count_unchanged':True,'cash_facts':cash_facts,
+                'scope':'receive-handler memory restart; no daemon restart claimed'}))
+            # A filled ENTRY must hand its immutable probability authority to
+            # held monitoring. An unavailable binding is a runtime defect, not
+            # a lawful economic reason to report corrected-evidence no-trade.
+            from src.calibration.market_anchored_live_fit import load_held_entry_calibration
+            binding_results=[]
+            with db.get_world_connection_read_only() as world:
+                for row in lineage:
+                    if row['post']['side']!='BUY' or Decimal(row['post']['filled_size'])<=0:
+                        continue
+                    attributed=row['attribution']
+                    position=next(item for item in positions if item['position_id']==attributed['position_id'])
+                    side='YES' if position['direction']=='buy_yes' else 'NO'
+                    assert position['token_id' if side=='YES' else 'no_token_id']==row['post']['token_id']
+                    certificate=dict(world.execute('SELECT certificate_hash,payload_json FROM decision_certificates WHERE certificate_hash=?',
+                        (attributed['decision_certificate_hash'],)).fetchone())
+                    result={'position_id':position['position_id'],'token_id':row['post']['token_id'],
+                        'command_id':row['post']['command_id'],'certificate':certificate}
+                    try:
+                        binding=load_held_entry_calibration(case.trade,position_id=position['position_id'],
+                            token_id=row['post']['token_id'],side=side,world_conn=world)
+                        result['binding_type']=type(binding).__name__
+                    except ValueError as exc:
+                        result['error']=str(exc)
+                    binding_results.append(result)
+            record_property('reentry_held_probability_handoff',json.dumps(binding_results))
+            corrected_cuts=[]
+            for row in outcomes:
+                artifact=json.loads(row['artifact_json'])
+                if row['mode'] not in {'global_single_order_auction','global_single_order_auction_delta'}:
+                    continue
+                if datetime.fromisoformat(artifact['started_at'])<corrected.received_at:
+                    continue
+                summary=artifact['summary']
+                corrected_cuts.append({'decision_log_id':row['id'],'at':artifact['started_at'],
+                    'winner_candidate_id':summary.get('winner_candidate_id'),
+                    'no_trade_reason':summary.get('no_trade_reason'),
+                    'candidates':_current_global_auction_candidate_payload(case.trade,summary)})
+            record_property('reentry_corrected_disposition',json.dumps(corrected_cuts))
+            assert corrected_cuts, 'changed native source must reach a normal decision cut'
+            assert binding_results and all('error' not in row for row in binding_results),binding_results
+            _assert_reentry_finality(case,venue,lineage,positions,outcomes,corrected,
+                corrected_cuts,record_property)
+
+
+def _assert_reentry_finality(case,venue,lineage,positions,outcomes,corrected,corrected_cuts,record_property):
+    """Trace the naturally selected actions through their exact native fills."""
+    from src.control.live_health import _current_global_auction_candidate_payload
+    from src.state.fill_dedup import economic_exit_fills_for_position
+    first_buy=lineage[0]
+    assert first_buy['post']['side']=='BUY'
+    alternate=first_buy['post']['token_id']
+    alternate_position=first_buy['attribution']['position_id']
+    assert alternate!=venue.held_token
+    monitors=[]
+    for row in outcomes:
+        if row['mode']!='exit_monitor':continue
+        artifact=json.loads(row['artifact_json'])
+        monitors.extend({'at':artifact['started_at'],**result} for result in artifact.get('monitor_results',[])
+            if result['position_id']==alternate_position)
+    before=[row for row in monitors if datetime.fromisoformat(row['at'])<corrected.received_at]
+    assert any(row['fresh_prob']==1 and not row['should_exit']
+        and row['exit_reason'].startswith('DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD') for row in before),before
+    selected_sells=[candidate for cut in corrected_cuts for candidate in cut['candidates']['detailed']
+        if candidate['action']=='SELL' and candidate['status']=='SELECTED'
+        and candidate['position_id']==alternate_position]
+    assert selected_sells, 'the corrected lawful SELL must reach its normal global selection'
+    exits=[row for row in lineage if row['post']['side']=='SELL'
+        and row['command']['position_id']==alternate_position]
+    assert exits, 'selected corrected SELL must persist and submit, not stop at preflight'
+    exit_proofs=[]
+    for row in exits:
+        post,command=row['post'],row['command']
+        intent_row=case.trade.execute("SELECT payload_json FROM position_events WHERE position_id=? AND event_type='EXIT_INTENT' AND occurred_at<=? ORDER BY sequence_no DESC LIMIT 1",
+            (alternate_position,post['at'])).fetchone()
+        assert intent_row is not None
+        intent=json.loads(intent_row[0])
+        capital=intent['exit_intent_capital_certificate']
+        probability=intent['exit_intent_probability_receipt']
+        receipt=capital['global_auction_receipt']
+        artifact=json.loads(case.trade.execute('SELECT artifact_json FROM decision_log WHERE id=?',
+            (receipt['decision_log_id'],)).fetchone()[0])
+        summary=artifact['summary']
+        candidates=_current_global_auction_candidate_payload(case.trade,summary)
+        selected=next(candidate for candidate in candidates['detailed']
+            if candidate['candidate_id']==receipt['winner_candidate_id'])
+        assert selected['status']=='SELECTED' and selected['action']=='SELL'
+        assert selected['token_id']==capital['token_id']==post['token_id']==alternate
+        assert selected['position_id']==capital['position_id']==command['position_id']==alternate_position
+        assert capital['condition_id']==post['condition_id']==venue.tokens[alternate]
+        assert capital['candidate_id']==receipt['winner_candidate_id']==summary['winner_candidate_id']
+        assert capital['actuation_identity']==receipt['winner_actuation_identity']==summary['winner_actuation_identity']
+        assert receipt['receipt_hash']==summary['receipt_hash']
+        assert receipt['execution_binding_hash']==summary['execution_binding_hash']
+        assert Decimal(capital['selected_shares'])==Decimal(post['size'])==Decimal(str(command['size']))
+        assert Decimal(capital['exact_limit_price'])==Decimal(post['price'])
+        assert capital['expected_sell_delta_log_wealth']>0 and capital['expected_sell_ev_usd']>0
+        assert intent['exit_intent_fresh_prob_is_fresh'] is True
+        q=probability['held_side_probability']
+        assert 0<q<1
+        assert q==capital['held_probability_mean']==capital['held_probability_point']==selected['q_served']
+        assert q==intent['exit_intent_fresh_prob']
+        assert probability['probability_functional']==capital['sell_probability_functional']=='POSTERIOR_PREDICTIVE_MEAN'
+        for key in ('probability_witness_identity','probability_content_identity','source_truth_identity','q_version'):
+            assert probability[key] and probability[key]==capital[key]
+        assert selected['probability_witness_identity']==probability['probability_witness_identity']
+        correction=probability['payoff_q_correction']
+        assert correction['q_corrected']==q
+        for key in ('probability_witness_identity','probability_content_identity','source_truth_identity','q_version'):
+            assert correction[key]==probability[key]
+        assert probability['q_version'].startswith('day0-semrev:')
+        native=[fact for fact in row['facts'] if fact['state']=='CONFIRMED' and fact['source']=='WS_USER']
+        assert len(native)==1 and Decimal(native[0]['filled_size'])==Decimal(post['filled_size'])
+        fills=economic_exit_fills_for_position(case.trade,alternate_position,venue_order_id=post['order_id'])
+        assert len(fills)==1 and fills[0].trade_id==native[0]['trade_id']
+        assert fills[0].quantity==Decimal(post['filled_size'])
+        assert fills[0].notional==Decimal(post['filled_size'])*Decimal(post['fill_price'])
+        exit_proofs.append({'post':post,'intent':intent,'selection':selected,'native_fact':native[0]})
+    alternate_final=next(row for row in positions if row['position_id']==alternate_position)
+    bought=sum(Decimal(row['post']['filled_size']) for row in lineage
+        if row['post']['side']=='BUY' and row['command']['position_id']==alternate_position)
+    sold=sum(Decimal(row['post']['filled_size']) for row in exits)
+    assert sold==bought, 'this naturally selected full exit must leave no canonical residual'
+    assert alternate_final['phase']=='economically_closed' and alternate_final['chain_shares']==0
+    assert venue.inventory[alternate]==0
+    assert not [row for row in lineage if row['post']['side']=='BUY' and row['post']['token_id']==alternate
+        and datetime.fromisoformat(row['post']['at'])>=corrected.received_at], 'no stale alternate-token rebuy after corrected source'
+    reentries=[row for row in lineage if row['post']['side']=='BUY' and row['post']['token_id']==venue.held_token]
+    assert reentries, 'the corrected original-token winner must complete native reentry'
+    for row in reentries:
+        assert datetime.fromisoformat(row['post']['at'])>=corrected.received_at
+        assert row['attribution']['position_id']!=case.position.trade_id
+        assert row['command']['position_id']==row['attribution']['position_id']
+        assert row['post']['command_id'] not in {venue.posts[0]['command_id'],venue.posts[1]['command_id']}
+        assert len([fact for fact in row['facts'] if fact['state']=='CONFIRMED' and fact['source']=='WS_USER'])==1
+    original=next(row for row in positions if row['position_id']==case.position.trade_id)
+    assert original['phase']=='economically_closed' and original['shares']==float(venue.posts[0]['filled_size'])
+    assert original['chain_shares']==0
+    initial_attribution=case.trade.execute('SELECT position_id FROM position_decision_attribution WHERE command_id=?',
+        (venue.posts[0]['command_id'],)).fetchone()[0]
+    assert initial_attribution==case.position.trade_id
+    active_inventory={token:Decimal(0) for token in venue.tokens}
+    for row in positions:
+        if row['phase'] in {'economically_closed','settled','voided','admin_closed'}:continue
+        token=row['token_id'] if row['direction']=='buy_yes' else row['no_token_id']
+        active_inventory[token]+=Decimal(str(row['shares']))
+    assert active_inventory==venue.inventory
+    assert len({post['order_id'] for post in venue.posts})==len(venue.posts)
+    assert len({post['command_id'] for post in venue.posts})==len(venue.posts)
+    assert case.trade.execute('SELECT COUNT(*) FROM venue_commands').fetchone()[0]==len(venue.posts)
+    record_property('reentry_final_native_acceptance',json.dumps({'alternate_position':alternate_position,
+        'monitors':monitors,'exit_proofs':exit_proofs,'corrected_reentries':reentries,
+        'old_position':original,'active_inventory':active_inventory,
+        'observed_until':case.clock[0].isoformat(),'restored_window_end':venue.restored_window[1].isoformat()},default=str))

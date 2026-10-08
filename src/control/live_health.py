@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 import zlib
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -104,6 +105,27 @@ POSTERIOR_STALENESS_ALERT_HOURS_DEFAULT = 12.0
 # 20:15 under this threshold, instead of running dark until the silent TTL
 # expiry at 2026-07-14T06:00+.
 POSTERIOR_STARVATION_REASON_MAX_CHARS = 300
+# Fleet commit-rate alarm: 30 min of normal operation commits 150-280 live
+# posteriors. Minute-by-minute backtest 2026-09-25..10-08 (rows visible at each
+# evaluation): threshold 30 catches every outage with 1 suspected false episode;
+# 40 adds 7 short false episodes (normal-operation minimum 41).
+POSTERIOR_COMMIT_RATE_WINDOW_MINUTES = 30
+POSTERIOR_COMMIT_RATE_MIN_COUNT = 30
+# A row's computed_at never exceeds the time it was inserted, so every row
+# computed inside the window is among the rows inserted inside it. Observed peak
+# insert volume is 568 rows / 30 min; this tail leaves 3.5x headroom, and a burst
+# past it leaves the tail all-recent, which reads as healthy, not as a collapse.
+POSTERIOR_COMMIT_RATE_TAIL_ROWS = 2000
+POSTERIOR_COMMIT_RATE_REASON_FILE_CAP = 200
+POSTERIOR_COMMIT_RATE_REASON_SCAN_CAP = 5000
+POSTERIOR_COMMIT_RATE_TOP_REASONS = 3
+# Wrapper codes present on every blocked receipt; they name the lane, not the branch.
+_POSTERIOR_COMMIT_RATE_GENERIC_CODES = frozenset(
+    {
+        "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_BLOCKED_INPUT",
+        "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET",
+    }
+)
 _POSTERIOR_FAILED_RECEIPT_NAME = re.compile(
     r"^(?P<city>.+)\.(?P<target>\d{4}-\d{2}-\d{2})\."
     r"(?P<metric>high|low)\..+\.receipt\.json$"
@@ -7591,6 +7613,182 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
     return {"ok": True, "issue": None, **detail}
 
 
+# Receipt directories under state/replacement_forecast_live that durably record why
+# a request did not commit a posterior: blocked_latest/superseded_latest carry
+# ``reason_codes``, seed_failed receipts carry ``error``, blocked_attempts carries
+# ``blocked_evidence.reason``.
+_POSTERIOR_COMMIT_RATE_REASON_SOURCES = (
+    "blocked_latest",
+    "superseded_latest",
+    "seed_failed",
+    "blocked_attempts",
+)
+
+
+def _posterior_commit_rate_receipt_reasons(source: str, payload: dict) -> list[str]:
+    if source == "seed_failed":
+        error = payload.get("error")
+        if not isinstance(error, str) or not error.strip():
+            return []
+        slug = re.sub(r"\W+", "_", error.strip())[:60]
+        return [f"SEED_FAILED:{slug}"]
+    if source == "blocked_attempts":
+        evidence = payload.get("blocked_evidence")
+        reason = evidence.get("reason") if isinstance(evidence, dict) else None
+        return [str(reason)] if reason else []
+    codes = payload.get("reason_codes")
+    if not isinstance(codes, list):
+        return []
+    return [
+        code
+        for code in codes
+        if isinstance(code, str) and code not in _POSTERIOR_COMMIT_RATE_GENERIC_CODES
+    ]
+
+
+def _posterior_commit_rate_top_reasons(
+    state_dir: Path,
+    since_epoch: float,
+) -> list[tuple[str, int]]:
+    """Top decline/failure reason codes among receipts modified since ``since_epoch``.
+
+    Best-effort and bounded (entries scanned and files read are capped per
+    directory); enrichment for the alarm, never able to block it.
+    """
+
+    try:
+        base = state_dir / "replacement_forecast_live"
+        counts: Counter[str] = Counter()
+        for source in _POSTERIOR_COMMIT_RATE_REASON_SOURCES:
+            recent: list[tuple[float, str]] = []
+            try:
+                with os.scandir(base / source) as entries:
+                    for index, entry in enumerate(entries):
+                        if index >= POSTERIOR_COMMIT_RATE_REASON_SCAN_CAP:
+                            break
+                        if not entry.name.endswith(".json") or entry.name.startswith("."):
+                            continue
+                        try:
+                            mtime = entry.stat().st_mtime
+                        except OSError:
+                            continue
+                        if mtime >= since_epoch:
+                            recent.append((mtime, entry.path))
+            except OSError:
+                continue
+            recent.sort(reverse=True)
+            for _, path in recent[:POSTERIOR_COMMIT_RATE_REASON_FILE_CAP]:
+                payload = _read_json(Path(path))
+                if payload is not None:
+                    counts.update(_posterior_commit_rate_receipt_reasons(source, payload))
+        ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        return ranked[:POSTERIOR_COMMIT_RATE_TOP_REASONS]
+    except Exception:  # noqa: BLE001 - enrichment; the alarm never blocks on it.
+        return []
+
+
+def _posterior_commit_rate_queued_requests(state_dir: Path) -> int | None:
+    """Materialization requests waiting in the live queue (None when unreadable)."""
+
+    try:
+        with os.scandir(state_dir / "replacement_forecast_live" / "requests") as entries:
+            return sum(
+                1
+                for entry in entries
+                if entry.name.endswith(".json") and not entry.name.startswith(".")
+            )
+    except OSError:
+        return None
+
+
+def _posterior_commit_rate_surface(state_dir: Path, now: datetime) -> dict:
+    """Alert when the fleet-wide live-posterior commit rate collapses.
+
+    Incident (2026-10-06/07): four outages committed ~zero live posteriors for
+    1-5 h each while ``posterior_starvation`` (12 h per-family staleness) stayed
+    silent because a few families kept committing.  The signal that separates an
+    outage from normal operation is the fleet RATE: normal is 150-280 live
+    posteriors per 30 min with a rolling minimum of 41 over 2026-09-25..10-08,
+    every outage window was <=33.  Alarms when fewer than
+    ``POSTERIOR_COMMIT_RATE_MIN_COUNT`` live rows have ``computed_at`` inside the
+    trailing ``POSTERIOR_COMMIT_RATE_WINDOW_MINUTES``.
+
+    The alarm names its branch: queued request files plus the top decline/failure
+    reason codes from receipts modified inside the window.  Log-only, not a gate.
+    """
+
+    forecast_db = state_dir / "zeus-forecasts.db"
+    columns, err = _sqlite_ro_table_columns(forecast_db, "forecast_posteriors")
+    if err or not {"runtime_layer", "computed_at"}.issubset(columns):
+        return {
+            "ok": True,
+            "issue": None,
+            "evaluated": False,
+            "skip_reason": err or "FORECAST_POSTERIORS_COLUMNS_MISSING",
+        }
+
+    now_utc = now.astimezone(timezone.utc)
+    window_start = now_utc - timedelta(minutes=POSTERIOR_COMMIT_RATE_WINDOW_MINUTES)
+    # forecast_posteriors has no index on computed_at alone, and its rows carry
+    # up to ~150 KB of provenance_json: a runtime_layer filter ahead of the
+    # computed_at terms forces an overflow-page read per candidate row (36 s
+    # measured).  Bound candidates by the rowid tail instead, test the cheap
+    # computed_at terms first, and touch runtime_layer last (``+`` bars the
+    # planner from the covering index scan).
+    rows, read_err = _sqlite_ro_rows(
+        forecast_db,
+        """
+        SELECT COUNT(*) AS n
+          FROM forecast_posteriors
+         WHERE rowid > (SELECT MAX(rowid) FROM forecast_posteriors) - ?
+           AND computed_at >= ?
+           AND computed_at <= ?
+           AND +runtime_layer = 'live'
+        """,
+        (
+            POSTERIOR_COMMIT_RATE_TAIL_ROWS,
+            window_start.isoformat(timespec="microseconds"),
+            now_utc.isoformat(timespec="microseconds"),
+        ),
+    )
+    if read_err or not rows:
+        return {
+            "ok": True,
+            "issue": None,
+            "evaluated": False,
+            "skip_reason": f"POSTERIOR_COMMIT_RATE_READ_UNAVAILABLE:{read_err}",
+        }
+
+    count = int(rows[0]["n"])
+    detail = {
+        "evaluated": True,
+        "count": count,
+        "window_min": POSTERIOR_COMMIT_RATE_WINDOW_MINUTES,
+        "threshold": POSTERIOR_COMMIT_RATE_MIN_COUNT,
+    }
+    if count >= POSTERIOR_COMMIT_RATE_MIN_COUNT:
+        return {"ok": True, "issue": None, **detail}
+
+    queued = _posterior_commit_rate_queued_requests(state_dir)
+    top_reasons = _posterior_commit_rate_top_reasons(state_dir, window_start.timestamp())
+    logger.error(
+        "ZEUS_POSTERIOR_COMMIT_RATE_COLLAPSE count=%d window_min=%d threshold=%d "
+        "queued=%s top_reasons=%s",
+        count,
+        POSTERIOR_COMMIT_RATE_WINDOW_MINUTES,
+        POSTERIOR_COMMIT_RATE_MIN_COUNT,
+        "unknown" if queued is None else queued,
+        ",".join(f"{reason}:{n}" for reason, n in top_reasons) or "none",
+    )
+    return {
+        "ok": False,
+        "issue": f"POSTERIOR_COMMIT_RATE_COLLAPSE:count={count}",
+        **detail,
+        "queued": queued,
+        "top_reasons": [{"reason": reason, "count": n} for reason, n in top_reasons],
+    }
+
+
 def compute_composite_live_health(
     *,
     state_dir: Optional[Path] = None,
@@ -7598,7 +7796,7 @@ def compute_composite_live_health(
 ) -> dict:
     """Compute and persist composite live-health status.
 
-    Consults twenty surfaces:
+    Consults twenty-one surfaces:
       1. heartbeat — daemon-heartbeat.json (alive + fresh timestamp)
       2. venue_heartbeat — external CLOB heartbeat/order-safety keeper
       3. runtime_code — loaded_sha.json vs current git HEAD
@@ -7620,6 +7818,8 @@ def compute_composite_live_health(
       19. execution_capability — entry/exit side-effect gate
       20. posterior_starvation — live-tradeable family with no fresh live posterior
           (log-only alert, not a gate; see _posterior_starvation_surface)
+      21. posterior_commit_rate — fleet live-posterior commit rate collapse
+          (log-only alert, not a gate; see _posterior_commit_rate_surface)
 
     Writes state/live_health_composite.json atomically.
 
@@ -7964,6 +8164,16 @@ def compute_composite_live_health(
             "live_health_composite DEGRADED: failing_surface=%s reason=%s",
             "posterior_starvation",
             posterior_starvation_surface["issue"],
+        )
+
+    posterior_commit_rate_surface = _posterior_commit_rate_surface(sd, now)
+    surfaces["posterior_commit_rate"] = posterior_commit_rate_surface
+    if not posterior_commit_rate_surface["ok"]:
+        failing.append("posterior_commit_rate")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "posterior_commit_rate",
+            posterior_commit_rate_surface["issue"],
         )
 
     # ------------------------------------------------------------------ #

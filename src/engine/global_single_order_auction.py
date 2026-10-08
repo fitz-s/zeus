@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
-from src.contracts.payoff_q_correction import PayoffQCorrection, SourceIdentityBaseline
+from src.contracts.payoff_q_correction import PayoffQCorrection, SourceIdentityBaseline, ExactPayoffEntryPolicy
 from src.engine.global_auction_universe import (
     CurrentGlobalBookEpoch,
     CurrentGlobalAuctionScope,
@@ -332,7 +332,7 @@ def _global_decision_economics_identity(
         raise ValueError("global decision lacks action economics")
     source_policy_identity = ()
     source_policy = getattr(decision, "payoff_q_correction", None)
-    if isinstance(source_policy, SourceIdentityBaseline):
+    if isinstance(source_policy, (SourceIdentityBaseline, ExactPayoffEntryPolicy)):
         from src.decision_kernel.canonicalization import stable_hash
 
         source_policy_identity = (stable_hash(source_policy.as_cert_fields()),)
@@ -932,7 +932,7 @@ def select_prepared_global_auction(
     | None = None,
     payoff_q_correction_resolver: Callable[
         [GlobalSingleOrderCandidate, float, float, datetime],
-        PayoffQCorrection | SourceIdentityBaseline | None,
+        PayoffQCorrection | SourceIdentityBaseline | ExactPayoffEntryPolicy | None,
     ]
     | None = None,
     cancelled: Callable[[], bool] | None = None,

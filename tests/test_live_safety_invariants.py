@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Lifecycle: created=2026-03-31; last_reviewed=2026-10-08; last_reused=2026-10-08
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-10-06
+# Last reused/audited: 2026-10-08
 # Authority basis: held-monitor canonical append liveness and atomicity incidents
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -8169,9 +8169,14 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         )[-1],
     )
     if request_accepted:
+        def reserve_published_obligation(_conn, position, *, expected_obligation):
+            assert expected_obligation == position._held_sell_reauction_obligation
+            reserved_requests.append(position.trade_id)
+            return True
+
         monkeypatch.setattr(
             "src.execution.exit_lifecycle.record_global_sell_reauction_reserved",
-            lambda _conn, position: reserved_requests.append(position.trade_id) or True,
+            reserve_published_obligation,
         )
 
     def request_global_completion(**kwargs):

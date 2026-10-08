@@ -29,7 +29,7 @@ name the shape without either depending on ``src/calibration``.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -469,6 +469,107 @@ class CalibrationPolicySpec:
         )
         if candidate.as_payload()["policy_hash"] != policy_hash:
             raise ValueError("calibration policy payload is not canonically encoded")
+        return candidate
+
+
+@dataclass(frozen=True)
+class ExactPayoffEntryPolicy:
+    """Exact ENTRY proof and the policy for a later statistical redecision.
+
+    No fit was applied or claimed at entry. If exact support is subsequently
+    withdrawn by current source authority, the sealed calibration policy is
+    evaluated on the current raw revision, retaining the entry scope's metric
+    and execution-price feature. Insufficient support must be proved anew.
+    """
+
+    family_key: str
+    bin_id: str
+    side: str
+    token_id: str
+    raw_q: float
+    p0: float
+    fit_scope: CalibrationFitScope
+    calibration_policy: CalibrationPolicySpec
+    q_version: str
+    probability_witness_identity: str
+    probability_content_identity: str
+    source_truth_identity: str
+    sample_matrix_identity: str
+    exact_payoff_witness_identity: str
+    exact_payoff_content_identity: str
+    decision_at_utc: str
+
+    _TYPE = "ExactPayoffEntryPolicy"
+    _POLICY = "EXACT_PAYOFF_ENTRY_V1"
+    _REDECISION = "CURRENT_REVISION_UNDER_SEALED_ENTRY_CALIBRATION_V1"
+
+    def __post_init__(self) -> None:
+        if self.side not in {"YES", "NO"} or not all(
+            isinstance(getattr(self, field), str) and getattr(self, field).strip()
+            for field in (
+                "family_key", "bin_id", "token_id", "q_version",
+                "probability_witness_identity", "probability_content_identity",
+                "source_truth_identity", "sample_matrix_identity",
+                "exact_payoff_witness_identity", "exact_payoff_content_identity",
+            )
+        ):
+            raise ValueError("exact entry policy identity is incomplete")
+        if (not _finite_number(self.raw_q) or self.raw_q not in (0, 1)
+                or not _finite_number(self.p0) or not 0 < self.p0 < 1
+                or not isinstance(self.fit_scope, CalibrationFitScope)
+                or not isinstance(self.calibration_policy, CalibrationPolicySpec)):
+            raise ValueError("exact entry policy payoff or calibration policy is invalid")
+        clock = datetime.fromisoformat(self.decision_at_utc.replace("Z", "+00:00"))
+        if clock.tzinfo is None or clock.utcoffset() is None:
+            raise ValueError("exact entry policy clock is not aware")
+        object.__setattr__(self, "raw_q", float(self.raw_q))
+        object.__setattr__(self, "p0", float(self.p0))
+        object.__setattr__(self, "decision_at_utc", clock.astimezone(timezone.utc).isoformat())
+
+    @property
+    def corrected_q(self) -> float:
+        return self.raw_q
+
+    def matches(self, *, family_key: str, bin_id: str, side: str, token_id: str) -> bool:
+        return (self.family_key, self.bin_id, self.side, self.token_id) == (
+            family_key, bin_id, side, token_id,
+        )
+
+    def matches_witness(self, witness: object) -> bool:
+        exact = getattr(witness, "exact_payoff_witness", None) or witness
+        return all(getattr(witness, name, None) == expected for name, expected in (
+            ("family_key", self.family_key), ("q_version", self.q_version),
+            ("witness_identity", self.probability_witness_identity),
+            ("probability_content_identity", self.probability_content_identity),
+            ("source_truth_identity", self.source_truth_identity),
+            ("sample_matrix_identity", self.sample_matrix_identity),
+        )) and (
+            getattr(exact, "witness_identity", None) == self.exact_payoff_witness_identity
+            and getattr(exact, "probability_content_identity", None) == self.exact_payoff_content_identity
+        )
+
+    def as_cert_fields(self) -> dict[str, object]:
+        payload = {field.name: getattr(self, field.name) for field in fields(self)}
+        payload["fit_scope"] = self.fit_scope.as_payload()
+        payload["calibration_policy"] = self.calibration_policy.as_payload()
+        payload.update(type=self._TYPE, version=1, policy=self._POLICY, applied=False,
+                       statistical_redecision=self._REDECISION)
+        payload["policy_hash"] = SourceIdentityBaseline._hash_payload(payload)
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "ExactPayoffEntryPolicy":
+        if not isinstance(payload, dict):
+            raise ValueError("exact entry policy payload is not an object")
+        try:
+            values = {field.name: payload[field.name] for field in fields(cls)}
+            values["fit_scope"] = CalibrationFitScope.from_payload(values["fit_scope"])
+            values["calibration_policy"] = CalibrationPolicySpec.from_payload(values["calibration_policy"])
+            candidate = cls(**values)
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("exact entry policy payload is invalid") from exc
+        if type(payload.get("version")) is not int or candidate.as_cert_fields() != payload:
+            raise ValueError("exact entry policy payload is not canonical")
         return candidate
 
 

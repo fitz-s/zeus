@@ -84,6 +84,7 @@ from src.contracts.payoff_q_correction import (
     CalibrationFitScope,
     PayoffQCorrection,
     SourceIdentityBaseline,
+    ExactPayoffEntryPolicy,
     PayoffQCorrectionUnavailable,
 )
 from src.contracts.strategy_capital_allocation import (
@@ -4270,7 +4271,7 @@ class GlobalSingleOrderDecision:
     # actuation certificate acts on the same scalar rather than re-deriving it
     # from a fit that may have refitted since. None means the candidate kept its
     # raw witness probability. SourceIdentityBaseline seals that policy explicitly.
-    payoff_q_correction: PayoffQCorrection | SourceIdentityBaseline | None = None
+    payoff_q_correction: PayoffQCorrection | SourceIdentityBaseline | ExactPayoffEntryPolicy | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -4668,6 +4669,8 @@ def _global_candidate_q_provenance(
     """
 
     correction = score.payoff_q_correction if score is not None else None
+    if isinstance(correction, ExactPayoffEntryPolicy):
+        return correction.raw_q, correction.corrected_q, correction.fit_scope.raw_probability_revision
     if isinstance(correction, SourceIdentityBaseline):
         return correction.raw_q, correction.corrected_q, correction.raw_probability_revision
     if isinstance(correction, PayoffQCorrection):
@@ -8035,11 +8038,11 @@ def resolve_candidate_payoff_q_correction(
     witness: FamilyPayoffWitness,
     resolver: Callable[
         [GlobalSingleOrderCandidate, float, float, datetime],
-        PayoffQCorrection | SourceIdentityBaseline | None,
+        PayoffQCorrection | SourceIdentityBaseline | ExactPayoffEntryPolicy | None,
     ]
     | None,
     decision_at_utc: datetime,
-) -> PayoffQCorrection | SourceIdentityBaseline | None:
+) -> PayoffQCorrection | SourceIdentityBaseline | ExactPayoffEntryPolicy | None:
     """Market-anchored correction for one BUY or SELL leg, or raw q.
 
     Canonical SELL resolves its inherited ENTRY price feature inside the
@@ -8049,14 +8052,20 @@ def resolve_candidate_payoff_q_correction(
     verified insufficient residual support; invalid evidence still raises.
     """
 
+    exact_payoff = family_exact_yes_payoff(witness, bin_id=str(getattr(candidate, "bin_id", "")))
+    if exact_payoff is not None:
+        # Exact payoff never enters a residual fit. The canonical resolver may
+        # separately seal policy metadata for a later statistical redecision.
+        resolver = getattr(resolver, "exact_entry_policy", None) if isinstance(
+            candidate, GlobalSingleOrderCandidate
+        ) else None
     if (
         resolver is None
         or not isinstance(
             candidate,
             (GlobalSingleOrderCandidate, GlobalSingleOrderSellCandidate),
         )
-        or family_exact_yes_payoff(witness, bin_id=candidate.bin_id) is not None
-        or getattr(candidate, "settlement_locked_exact_payoff", False)
+        or (exact_payoff is None and getattr(candidate, "settlement_locked_exact_payoff", False))
     ):
         return None
     # p0 is the decision-time gross unit fill price of THIS token: the
@@ -8082,8 +8091,12 @@ def resolve_candidate_payoff_q_correction(
             f"{action} correction resolver failed: {exc}"
         ) from exc
     if correction is None:
+        if exact_payoff is not None:
+            raise PayoffQCorrectionUnavailable(f"{action} exact entry policy unavailable")
         return None
-    if not isinstance(correction, (PayoffQCorrection, SourceIdentityBaseline)):
+    if exact_payoff is not None and not isinstance(correction, ExactPayoffEntryPolicy):
+        raise PayoffQCorrectionUnavailable(f"{action} exact payoff cannot use calibration")
+    if not isinstance(correction, (PayoffQCorrection, SourceIdentityBaseline, ExactPayoffEntryPolicy)):
         raise PayoffQCorrectionUnavailable(
             f"{action} correction result has invalid type"
         )
@@ -8101,8 +8114,14 @@ def resolve_candidate_payoff_q_correction(
         raise PayoffQCorrectionUnavailable(
             f"{action} correction identity or raw q mismatch"
         )
-    if isinstance(correction, SourceIdentityBaseline) and not correction.matches_witness(witness):
+    if isinstance(correction, (SourceIdentityBaseline, ExactPayoffEntryPolicy)) and not correction.matches_witness(witness):
         raise PayoffQCorrectionUnavailable(f"{action} source identity superseded")
+    if isinstance(correction, ExactPayoffEntryPolicy) and (
+        exact_payoff is None or correction.raw_q != (
+            exact_payoff if candidate.side == "YES" else 1 - exact_payoff
+        )
+    ):
+        raise PayoffQCorrectionUnavailable(f"{action} exact entry payoff unproved")
     if isinstance(candidate, GlobalSingleOrderSellCandidate) and correction.fit_scope is not None:
         p0 = candidate.entry_calibration_price_anchor(correction.fit_scope)
     if not math.isclose(
@@ -8239,7 +8258,7 @@ def select_global_single_order(
     | None = None,
     payoff_q_correction_resolver: Callable[
         [GlobalSingleOrderCandidate, float, float, datetime],
-        PayoffQCorrection | SourceIdentityBaseline | None,
+        PayoffQCorrection | SourceIdentityBaseline | ExactPayoffEntryPolicy | None,
     ]
     | None = None,
     buy_probability_rejection_resolver: Callable[
@@ -8366,7 +8385,7 @@ def select_global_single_order(
     ] = {}
     buy_capital_limits: dict[str, Decimal] = {}
     buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
-    buy_corrections: dict[str, PayoffQCorrection | SourceIdentityBaseline | None] = {}
+    buy_corrections: dict[str, PayoffQCorrection | SourceIdentityBaseline | ExactPayoffEntryPolicy | None] = {}
     joint_buy_candidates_by_family: dict[
         str, list[GlobalSingleOrderCandidate]
     ] = {}
@@ -8465,7 +8484,7 @@ def select_global_single_order(
         *,
         raw_q: float,
         witness: FamilyPayoffWitness,
-    ) -> PayoffQCorrection | SourceIdentityBaseline | None:
+    ) -> PayoffQCorrection | SourceIdentityBaseline | ExactPayoffEntryPolicy | None:
         return resolve_candidate_payoff_q_correction(
             candidate,
             raw_q=raw_q,

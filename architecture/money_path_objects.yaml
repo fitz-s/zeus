@@ -88,6 +88,41 @@ economic_objects:
         meaning: "Settlement source finality time."
 
 state_machines:
+  held_sell_reauction_publication_diagnostics:
+    owner: src/execution/exit_lifecycle.py
+    description: >
+      Refusal results from the existing prepare, exact claim, same-object
+      publication and acknowledgement path, not position or venue states.
+      PREPARATION_REJECTED retains unclaimed debt for normal fresh preparation.
+      RESERVED_ACK_REFUSED retains the current exact owner when a delayed or
+      mismatched acknowledgement cannot prove that it published that owner.
+      SCOPE is the canonical holding, debt event and publication attempt.
+      DRAIN is fresh normal preparation for unclaimed debt, or the existing
+      exact publisher/recovery path for a claimed attempt. RESET requires the
+      actual current request/claim identity; time alone never clears an
+      ambiguous publisher and these labels never prove a fill.
+    states:
+      - PREPARATION_REJECTED
+      - RESERVED_ACK_REFUSED
+    invariant_tests:
+      - tests/execution/test_global_sell_publication_deadline.py
+      - tests/test_exit_safety.py
+      - tests/test_runtime_guards.py
+  venue_submit_amount_serialization_contract:
+    owner: src/venue/polymarket_v2_adapter.py
+    description: >
+      Existing native V2 response serialization marker for human-unit submit
+      amounts, not a venue state or trade identity. The shared fill reader
+      uses the marker only with authenticated original command, envelope,
+      order, token, side, quantity and source clocks to classify a legacy
+      anonymous order observation. The marker alone cannot establish an
+      economic fill or supersede an identified native trade.
+    states:
+      - POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS
+    invariant_tests:
+      - tests/state/test_unidentified_exit_order_proxy.py
+      - tests/test_executor_command_split.py
+      - tests/test_v2_adapter.py
   day0_original_metadata_bracket_diagnostics:
     owner: src/data/day0_hourly_vectors.py
     description: >
