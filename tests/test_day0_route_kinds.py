@@ -222,6 +222,46 @@ def test_seed_conditioning_binds_at_the_adapter_for_entry_and_held(monkeypatch, 
     assert day0_is_noaa_preliminary_source(channel) is (kind == "native")
 
 
+# ---------------------------------------------------------------- one report, two renderings (A4)
+
+@pytest.mark.parametrize("city", ["Ankara", "Istanbul", "Moscow"])  # Lucknow's 7.0 margin sinks both copies
+@pytest.mark.parametrize("native_first", [True, False])
+def test_native_report_and_its_awc_copy_are_one_report(monkeypatch, city, native_first):
+    """Native row for the 06:20 report, AWC's copy of the same report published 06:25 (live: Ankara mgm
+    16:20:00 = 17, AWC LTAC 081620Z = 17 published 16:25:13).  The copy received first owns the report;
+    the other cannot advance its clock.  A seed taken before the second copy arrives binds for ENTRY and
+    HELD at +10 min, and a reseed then names the same report."""
+    station, channel, _kind = ROUTES[city]
+    route = _route(channel, station)
+    report = datetime(2026, 10, 7, 6, 20, tzinfo=UTC)
+    conn = _world()
+    _page(conn, city, station, T_PAGE, 20.0)
+    append_print(conn, city=city, station_id=station, source_channel=channel,
+                 publish_ts_utc=report.isoformat(), value_native=22.0, unit="C",
+                 fetched_at_utc=(report + timedelta(minutes=2 if native_first else 7)).isoformat(),
+                 raw_report=_route_raw(route, report, 22.0))
+    _awc(conn, city, station, report, 22)  # published 06:25:00, received 06:25:04
+    first_seen = report + (timedelta(minutes=3) if native_first else timedelta(minutes=5, seconds=30))
+    from src.data import replacement_forecast_seed_discovery as seed
+
+    monkeypatch.setattr(seed, "get_world_connection_read_only", lambda: conn)
+
+    def seed_at(at):
+        return seed._day0_observed_extreme_seed_payload(city=city, target_date=TARGET, metric="high",
+                                                        computed_at=at)
+
+    early = seed_at(first_seen)
+    owner = (channel, report) if native_first else ("aviationweather_metar", report + timedelta(minutes=5))
+    assert (early["day0_observed_extreme_source"], early["day0_observed_extreme_observation_time"]) == (
+        owner[0], owner[1].isoformat())
+    decision = report + timedelta(minutes=10)
+    assert seed_at(decision) == early
+    conditioning = _conditioning(early)
+    for held in (False, True):
+        binding = _bind(conn, city, station, conditioning, held=held, decision=decision)["_edli_global_day0_binding"]
+        assert binding["probability_conditioning_identity"]["source"] == owner[0]
+
+
 # ---------------------------------------------------------------- native SPECIs survive (consult (f))
 
 def test_archived_istanbul_specis_survive_parser_ledger_and_fact():

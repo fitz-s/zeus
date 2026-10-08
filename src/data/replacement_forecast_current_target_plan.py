@@ -1689,6 +1689,36 @@ def _latest_authorized_day0_fact(
                     if ordered:
                         canonical_prints[identity] = ordered[-1]
 
+                # One METAR report is one identity: station + issued instant +
+                # value.  A native report route and AWC carry the same report;
+                # the rendering received first owns it.  The later copy is the
+                # same observation under another clock (AWC stamps its
+                # publication), so it cannot advance the frontier clock that a
+                # posterior conditioned on the first copy carries (Ankara mgm
+                # 16:20:00 = 17 vs AWC LTAC 081620Z = 17 published 16:25:13).
+                native_channels = {
+                    channel
+                    for channel, route in station_routes_by_channel.items()
+                    if route.kind is RouteKind.NATIVE_REPORT
+                }
+
+                def first_receipt(identity: tuple[str, str]) -> datetime:
+                    return min(
+                        _utc_instant(version[1]) or datetime.max.replace(tzinfo=timezone.utc)
+                        for version in print_streams[identity]
+                    )
+
+                for identity, native in sorted(canonical_prints.items()):
+                    awc_identity = (FAST_OBS_SOURCE_ID, identity[1])
+                    awc = canonical_prints.get(awc_identity)
+                    if identity[0] not in native_channels or awc is None or awc[2] != native[2]:
+                        continue
+                    canonical_prints.pop(
+                        identity
+                        if first_receipt(awc_identity) <= first_receipt(identity)
+                        else awc_identity
+                    )
+
                 ledger_facts: list[dict[str, object]] = []
                 for channel in sorted({key[0] for key in canonical_prints}):
                     channel_prints = [
@@ -1731,10 +1761,9 @@ def _latest_authorized_day0_fact(
                     )
 
                 if ledger_facts:
-                    ledger_channels = {
-                        str(fact["observation_source"]).strip().lower()
-                        for fact in ledger_facts
-                    }
+                    # A channel whose every report was owned by its twin is
+                    # still a ledger channel: its projections stay replaced.
+                    ledger_channels = {channel for channel, _clock in print_streams}
                     # observation_instants and DAY0 events are projections of
                     # these exact publication channels.  Once the raw ledger
                     # is present, letting a stale projection vote alongside it
