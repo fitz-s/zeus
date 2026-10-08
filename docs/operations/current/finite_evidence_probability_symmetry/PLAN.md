@@ -22756,3 +22756,38 @@ registry coverage with the reviewed source, without adding lifecycle states,
 economic authority or a runtime migration (INV-01/12/14/37/47). Re-run semantic
 classification, invariant coverage and test-quality gates; independently review
 the registry delta while the frozen source/test native matrix completes.
+
+Admitted current-page hard-fact compatibility repair (2026-10-08): independent
+native-owner probes on frozen ad8de950 reproduce false exact-zero exits from
+degF grid-clock rows: HIGH 75.92 can revise to 75.2, and LOW 80.06 to 80.6.
+The provisional statistical carrier correctly preserves the raw current page,
+but the shared hard-fact owner had rounded that raw value into an absorbing
+boundary without applying upstream's common-ending bound (INV-06/14/17).
+
+In the existing hard-fact owner only, transform every eligible current-page
+row through noaa_page_absorbing_value_f before reducing HIGH/LOW. Preserve
+native raw extrema, membership, original-body identity and correction clocks;
+record the derived bound and its contributing raw row/value/clock separately.
+Monitor receipts and final submit reproof retain their existing exact evidence
+comparison. A legacy scalar page witness can prove its own weaker directional
+bound without inventing missing membership. complete_day=True stays a separate
+exact-value read with the existing validated post-day acquisition/coverage
+requirements; a conservative directional bound is never a final settlement.
+
+Scope: day0_hard_fact_exit.py, its source-rationale entry, the existing page
+revision tests and registry, and this plan. Add HIGH/LOW YES/NO false-death and
+structural-win twins, real owner/receipt/submit reproof, competing-row/view/date
+reduction, correction and unavailable-owner controls, off-grid/Celsius controls
+and qualified/incomplete final-day tests. Keep the raw statistical carrier and
+inclusive .05-.95 band unchanged. No source promotion, new threshold, live data,
+external acquisition, deployment or trade is authorized by this offline slice.
+
+The bounded hard-fact repair proves all eight new HIGH/LOW, finite/shoulder,
+YES/NO false-payoff cases RED on unchanged ad8 source and GREEN on the repaired
+owner. The 78 page/absence checks pass; four competing-row cases also pass
+with added real verdict/receipt assertions after the initial green run.
+The existing hard-fact consumer selection remains 26 passed / 2 failed on
+both ad8 and the repair: its bare-fast-tail and WU synthetic receipt fixtures
+are rejected by the unchanged exact-source receipt gate. These failures are
+not suppressed or claimed green. Map and freshness checks pass. Independent
+review and the lead-owned native acceptance remain required before publication.

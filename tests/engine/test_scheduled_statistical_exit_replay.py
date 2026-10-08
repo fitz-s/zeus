@@ -19,6 +19,106 @@ UTC = timezone.utc
 HTTP_CLIENT = httpx.Client
 
 
+class StatisticalScheduledPump(source.ScheduledPump):
+    """Keep the capital sidecar's declared SQLite retry on its native cadence."""
+
+    def __init__(self, monkeypatch, clock):
+        super().__init__(monkeypatch, clock)
+        self.collateral_write_deferrals = []
+
+    def advance(self, seconds=0):
+        from apscheduler.schedulers.base import STATE_RUNNING, STATE_PAUSED
+        from src.state.write_coordinator import WriteLeaseTimeout
+
+        self.clock[0] += timedelta(seconds=seconds)
+        offset = len(self.events)
+        self.scheduler.state = STATE_RUNNING
+        try:
+            self.scheduler._process_jobs()
+        finally:
+            self.scheduler.state = STATE_PAUSED
+        fired = self.events[offset:]
+        for event in fired:
+            error = getattr(event, 'exception', None)
+            if error is None:
+                continue
+            # The production wrapper records FAILED and APScheduler retries
+            # next tick. Match only its actual immediate SQLite BEGIN refusal;
+            # every other scheduler error still fails this replay immediately.
+            assert (
+                event.job_id == 'collateral_snapshot_refresh'
+                and isinstance(error, WriteLeaseTimeout)
+                and str(error) == 'SQLite write deferred at BEGIN for '
+                    'owner=collateral_snapshot_persist sqlite_errorname=SQLITE_BUSY'
+                and isinstance(error.__cause__, sqlite3.OperationalError)
+                and getattr(error.__cause__, 'sqlite_errorcode', None) == sqlite3.SQLITE_BUSY
+            ), fired
+            self.collateral_write_deferrals.append({
+                'job_id': event.job_id,
+                'scheduled_run_time': event.scheduled_run_time.isoformat(),
+                'observed_at': self.clock[0].isoformat(),
+                'exception_type': type(error).__name__,
+                'exception': str(error),
+                'sqlite_errorname': error.__cause__.sqlite_errorname,
+            })
+        return fired
+
+
+@pytest.mark.parametrize('mismatch',[
+    'job','type','message','missing_cause','non_sqlite_cause','sqlite_code','unrelated_error',
+])
+def test_statistical_scheduler_rejects_other_job_errors(tmp_path,monkeypatch,mismatch):
+    """A capital retry exception cannot conceal another scheduler failure."""
+    from apscheduler.executors.debug import DebugExecutor
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    path=tmp_path/'contention.db'
+    holder=sqlite3.connect(path)
+    contender=sqlite3.connect(path,timeout=0)
+    try:
+        holder.execute('BEGIN IMMEDIATE')
+        with pytest.raises(sqlite3.OperationalError) as busy:
+            contender.execute('BEGIN IMMEDIATE')
+        holder.rollback()
+        with pytest.raises(sqlite3.OperationalError) as invalid:
+            contender.execute('SELECT * FROM table_that_does_not_exist')
+    finally:
+        contender.close()
+        holder.close()
+    cause=busy.value
+    message=('SQLite write deferred at BEGIN for '
+        'owner=collateral_snapshot_persist sqlite_errorname=SQLITE_BUSY')
+    error_type=WriteLeaseTimeout
+    job_id='collateral_snapshot_refresh'
+    if mismatch=='job':job_id='another_job'
+    elif mismatch=='type':error_type=ValueError
+    elif mismatch=='message':message='SQLite write deferred at COMMIT'
+    elif mismatch=='missing_cause':cause=None
+    elif mismatch=='non_sqlite_cause':cause=RuntimeError('database is locked')
+    elif mismatch=='sqlite_code':cause=invalid.value
+    elif mismatch=='unrelated_error':
+        error_type=RuntimeError
+        message='unrelated scheduler failure'
+        cause=None
+    error=error_type(message)
+    def fail():
+        raise error from cause
+    clock=[datetime(2026,10,1,18,tzinfo=UTC)]
+    pump=StatisticalScheduledPump(monkeypatch,clock)
+    try:
+        # The complete replay obtains this synchronous executor from its main
+        # monitor registration; this isolated error-contract test has no main.
+        pump.scheduler.remove_executor('default',shutdown=True)
+        pump.scheduler.add_executor(DebugExecutor(),alias='default')
+        pump.scheduler.add_job(fail,'date',run_date=clock[0],id=job_id)
+        with pytest.raises(AssertionError):
+            pump.advance()
+        assert pump.events[-1].exception is error
+        assert pump.collateral_write_deferrals==[]
+    finally:
+        pump.close()
+
+
 def _empty_market_owner(conn, request, tmp_path, monkeypatch, *, direction, held_bin, **kwargs):
     """External market identities only. The canonical trading ledger is empty."""
     from src.state import db
@@ -50,6 +150,7 @@ def scheduled_source(tmp_path, monkeypatch, request):
     monkeypatch.setattr(inputs, '_shanghai_current_owner_request', lambda *args, **kwargs:
         original(*args, computed_at=datetime(2026,10,1,15,tzinfo=UTC), **kwargs))
     monkeypatch.setattr(source, '_seed_market_and_holding', _empty_market_owner)
+    monkeypatch.setattr(source, 'ScheduledPump', StatisticalScheduledPump)
     generator=source.scheduled_source.__wrapped__(tmp_path, monkeypatch, request)
     case=next(generator)
     cleanup=_manage_replay_threads(case,monkeypatch)
@@ -430,7 +531,8 @@ def _capture_existing_anchor_as_raw_provider(case,monkeypatch):
     {'forecast_inputs':True,'cash':20,'full_day0':True},
     {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True},
     {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True,'reentry_control':True},
-],indirect=True,ids=('cash10_control','cash20_entry','cash20_stale_hourly_control','cash20_probability_handoff','cash20_full_day0','cash20_registered_reactor','cash20_reentry_control'))
+    {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True,'collateral_contention':True},
+],indirect=True,ids=('cash10_control','cash20_entry','cash20_stale_hourly_control','cash20_probability_handoff','cash20_full_day0','cash20_registered_reactor','cash20_reentry_control','cash20_collateral_contention'))
 def test_pre_day0_normal_entry_with_declared_account_cash(scheduled_source,monkeypatch,record_property):
     from src.state import db
     from src.riskguard import riskguard
@@ -545,9 +647,12 @@ def test_pre_day0_normal_entry_with_declared_account_cash(scheduled_source,monke
         try:
             if case.params.get('full_day0'):
                 _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
+            _assert_collateral_scheduler_recovery(case,record_property)
         finally:
             record_property('native_collateral_snapshot_refresh',json.dumps({
                 'calls':case.collateral_snapshot_calls,'rpc_reads':case.collateral_rpc_reads}))
+            record_property('retryable_collateral_scheduler_events',json.dumps(
+                case.pump.collateral_write_deferrals))
         return
     assert not venue.posts
     assert result.economic_cut_completed
@@ -677,18 +782,32 @@ def _register_collateral_snapshot_refresh(case,record_property):
     case.collateral_snapshot_calls=[]
     case.collateral_rpc_reads=[]
     case.collateral_read_active=False
+    case.collateral_contention_injected=False
     def latest():
         row=case.trade.execute('SELECT id,captured_at,authority_tier,pusd_balance_micro,ctf_token_balances_json FROM collateral_ledger_snapshots ORDER BY id DESC LIMIT 1').fetchone()
         return dict(row) if row else None
     def observe_refresh():
         call={'at':case.clock[0].isoformat(),'before':latest()}
         case.collateral_read_active=True
+        blocker=None
         try:
+            if (case.params.get('collateral_contention')
+                    and not case.collateral_contention_injected
+                    and case.clock[0]>=datetime(2026,10,1,18,tzinfo=UTC)):
+                # A real raw writer holds SQLite's RESERVED lock across this
+                # one callback. No owner, probability or outcome is replaced.
+                blocker=sqlite3.connect(case.tmp_path/'zeus_trades.db',timeout=0)
+                blocker.execute('BEGIN IMMEDIATE')
+                case.collateral_contention_injected=True
+                call['real_sqlite_contention']=True
             return post_trade_capital.collateral_snapshot_refresh_cycle()
         except Exception as exc:
             call['error']=f'{type(exc).__name__}:{exc}'
             raise
         finally:
+            if blocker is not None:
+                blocker.rollback()
+                blocker.close()
             case.collateral_read_active=False
             call['after']=latest()
             case.collateral_snapshot_calls.append(call)
@@ -706,6 +825,29 @@ def _register_collateral_snapshot_refresh(case,record_property):
         'interval_seconds':job.trigger.interval.total_seconds(),
         'owner':'post_trade_capital.collateral_snapshot_refresh_cycle',
         'process_isolation':'excluded; unchanged child body composed over fake transport'}))
+
+
+def _assert_collateral_scheduler_recovery(case,record_property):
+    """A recorded deferral must drain at the next real thirty-second callback."""
+    recoveries=[]
+    for event in case.pump.collateral_write_deferrals:
+        failed_at=datetime.fromisoformat(event['scheduled_run_time'])
+        failed=next(call for call in case.collateral_snapshot_calls
+            if call['at']==event['observed_at'])
+        assert failed.get('error') and failed['after']==failed['before'],failed
+        retry_at=failed_at+timedelta(seconds=30)
+        retry=next((call for call in case.collateral_snapshot_calls
+            if datetime.fromisoformat(call['at'])==retry_at),None)
+        assert retry is not None and 'error' not in retry,{'failure':event,'retry':retry}
+        assert retry['after']['id']>retry['before']['id'],retry
+        assert datetime.fromisoformat(retry['after']['captured_at'])==retry_at,retry
+        assert retry['after']['authority_tier']=='CHAIN',retry
+        recoveries.append({'failure':event,'retry':retry})
+    if case.params.get('collateral_contention'):
+        assert case.collateral_contention_injected
+        assert len(recoveries)==1,recoveries
+        assert datetime.fromisoformat(recoveries[0]['failure']['scheduled_run_time'])==datetime(2026,10,1,18,0,2,tzinfo=UTC)
+    record_property('native_collateral_scheduler_recovery',json.dumps(recoveries))
 
 
 

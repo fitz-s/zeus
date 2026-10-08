@@ -2565,6 +2565,13 @@ files:
       Final daily decimal evidence must pass the existing publication classifier;
       an UNKNOWN HKO publication cannot become exact held q or survive protective
       SELL reproof merely because its row is VERIFIED or its capture has a digest.
+      Current NOAA page hard facts reduce per-row conservative grid-clock bounds
+      after native view/date filtering. Raw page extrema and their clocks remain
+      distinct from the derived bound's winning raw row, clock and basis in the
+      monitor/submit evidence. Qualified completed-day reads retain exact raw
+      settlement values; neither an intraday snapshot nor a directional bound
+      creates final daily authority. Legacy scalar page evidence proves only
+      its own weaker bound under its existing source and VERIFIED gates.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:

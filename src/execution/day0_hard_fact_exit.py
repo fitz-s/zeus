@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-10-08
 # Authority basis: adversarial review /tmp/day0_adversarial_review.md MUST-FIX
 #   #1 (hard-fact bin-death exit lane) + #3-wiring (resting-order cancel on bin
 #   death) — operator requirement "新高出现时能否立即drop". Calibration artifact:
@@ -68,6 +68,7 @@ _CURRENT_SOURCE_FETCH_INTERVAL_S = 600.0
 _CURRENT_SOURCE_FAILURE_RETRY_S = 120.0
 SAME_STATION_FAST_TAIL_SOURCE = "same_station_fast_tail"
 COMBINED_WU_FAST_TAIL_SOURCE = f"wu_api+{SAME_STATION_FAST_TAIL_SOURCE}"
+_NOAA_PAGE_BOUND_BASIS = "noaa_page_grid_clock_common_ending_v1"
 _CURRENT_SOURCE_MEMO: dict[
     tuple[str, str, str],
     tuple[
@@ -101,6 +102,10 @@ class HardFactEvidence:
     payload_identity: str
     source_identity: str
     contributor_payload_identities: tuple[str, ...] = ()
+    bound_value: float | None = None
+    bound_raw_value: float | None = None
+    bound_observed_at: str | None = None
+    bound_basis: str | None = None
 
     def is_complete_for(self, city: Any) -> bool:
         expected_station = str(getattr(city, "wu_station", "") or "").strip().upper()
@@ -112,6 +117,18 @@ class HardFactEvidence:
             )
         except (TypeError, ValueError):
             finite_extrema = False
+        bound_fields = (self.bound_value, self.bound_raw_value, self.bound_observed_at, self.bound_basis)
+        try:
+            valid_bound = all(value is None for value in bound_fields) or (
+                all(value is not None for value in bound_fields)
+                and self.bound_basis == _NOAA_PAGE_BOUND_BASIS
+                and self.source.startswith("noaa_wrh_")
+                and math.isfinite(float(self.bound_value))
+                and math.isfinite(float(self.bound_raw_value))
+                and _timestamps_are_ordered(self.bound_observed_at, self.issued_at)
+            )
+        except (TypeError, ValueError):
+            valid_bound = False
         payload_identity = _strict_sha256_digest(self.payload_identity)
         contributor_identities = (
             self.contributor_payload_identities or (self.payload_identity,)
@@ -131,10 +148,11 @@ class HardFactEvidence:
             and payload_identity in normalized_contributor_identities
             and str(self.source_identity or "").strip()
             and finite_extrema
+            and valid_bound
         )
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "source": self.source,
             "station_id": self.station_id,
             "observed_at": self.observed_at,
@@ -147,6 +165,14 @@ class HardFactEvidence:
                 self.contributor_payload_identities
             ),
         }
+        if self.bound_value is not None:
+            result["absorbing_bound"] = {
+                "value": self.bound_value,
+                "raw_value": self.bound_raw_value,
+                "observed_at": self.bound_observed_at,
+                "basis": self.bound_basis,
+            }
+        return result
 
 
 _SHA256_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -454,7 +480,7 @@ def _noaa_wrh_hard_fact_evidence(
     *, city: Any, target_date: str, metric: str, now: datetime,
     world_conn: Any, complete_day: bool = False,
 ) -> HardFactEvidence | None:
-    """Read the resolver page's current, provenance-bound daily extreme.
+    """Read a page-derived absorbing bound or a qualified final daily value.
 
     Raw station feeds and complete hourly mirrors are different products.
     A past-day exact payoff additionally requires a page fetch after day end.
@@ -476,7 +502,13 @@ def _noaa_wrh_hard_fact_evidence(
     except (TypeError, ValueError):
         return None
     source = f"noaa_wrh_{station.lower()}"
+    from src.contracts.settlement_semantics import SettlementSemantics
     from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.events.day0_authority import noaa_page_absorbing_value_f
+
+    def page_bound(raw: float, observed: datetime) -> float:
+        return (noaa_page_absorbing_value_f(raw, observed_at=observed, metric=metric)
+                if unit == "F" else raw)
 
     owned, snapshot = read_current_noaa_wrh_snapshot(
         world_conn, city=city, target_date=target_date, as_of=now,
@@ -487,17 +519,39 @@ def _noaa_wrh_hard_fact_evidence(
         extreme = snapshot.extreme(metric)
         if extreme is None:
             return None
-        from src.contracts.settlement_semantics import SettlementSemantics
+        effective = extreme.value
+        bound_fields = {}
+        if not complete_day:
+            # Transform before reducing: the strongest lawful bound may come
+            # from a different row than the raw extreme. Preserve both clocks.
+            candidates = [
+                (row, page_bound(row.air_temp, row.utc)) for row in snapshot.rows
+                if row.local_date == target_date
+                and (snapshot.view == "all" or row.is_official_report)
+            ]
+            if not candidates:
+                return None
+            selected, effective = (max if metric == "high" else min)(
+                candidates, key=lambda item: item[1],
+            )
+            bound_fields = {
+                "bound_value": effective, "bound_raw_value": selected.air_temp,
+                "bound_observed_at": selected.utc.isoformat(),
+                "bound_basis": _NOAA_PAGE_BOUND_BASIS,
+            }
+        # A qualified complete-day read returns the page's actual final value,
+        # never a directional bound substituted for that settlement value.
         evidence = HardFactEvidence(
             source=source, station_id=station,
             observed_at=datetime.fromisoformat(extreme.local_timestamp).isoformat(),
             # Legacy field name: this is possessed-at, never a provider-issued
             # measurement. The current product explicitly preserves UNKNOWN.
             issued_at=snapshot.received_at.isoformat(), raw_extreme=extreme.value,
-            rounded_extreme=float(SettlementSemantics.for_city(city).round_single(extreme.value)),
+            rounded_extreme=float(SettlementSemantics.for_city(city).round_single(effective)),
             payload_identity=snapshot.response_sha256,
             source_identity=f"{source}:{station}:{view}:{target_date}:{metric}",
             contributor_payload_identities=(snapshot.response_sha256,),
+            **bound_fields,
         )
         return evidence if evidence.is_complete_for(city) else None
     try:
@@ -547,9 +601,10 @@ def _noaa_wrh_hard_fact_evidence(
                 or digest is None or not math.isfinite(raw)
             ):
                 return None
-            from src.contracts.settlement_semantics import SettlementSemantics
-
-            rounded = SettlementSemantics.for_city(city).round_single(raw)
+            # A legacy scalar proves this one page print, not unseen members.
+            # Its possibly weaker bound is sufficient only in that direction.
+            effective = raw if complete_day else page_bound(raw, observed)
+            rounded = SettlementSemantics.for_city(city).round_single(effective)
         except (TypeError, ValueError, AttributeError):
             return None
         evidence = HardFactEvidence(
@@ -559,6 +614,11 @@ def _noaa_wrh_hard_fact_evidence(
             payload_identity=digest,
             source_identity=f"{source}:{station}:{view}:{target_date}:{metric}",
             contributor_payload_identities=(digest,),
+            **({} if complete_day else {
+                "bound_value": effective, "bound_raw_value": raw,
+                "bound_observed_at": observed.isoformat(),
+                "bound_basis": _NOAA_PAGE_BOUND_BASIS,
+            }),
         )
         return evidence if evidence.is_complete_for(city) else None
     return None
