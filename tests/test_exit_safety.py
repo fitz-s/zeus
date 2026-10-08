@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-10-04
+# Last reused/audited: 2026-10-08
 # Lifecycle: created=2026-04-27; last_reviewed=2026-09-30; last_reused=2026-09-30
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
@@ -9742,6 +9742,302 @@ def test_hard_fact_exit_uses_fresh_bid_protective_fak(
     assert authority.kind == "DAY0_HARD_FACT_BIN_DEAD"
     assert authority.token_id == expected_token
     assert authority.best_bid == "0.18"
+
+
+_ZERO_SUPPORT_REASON = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+
+
+def _zero_support_sell_fixture(*, direction="buy_yes", shares=5.0):
+    """Miami 10-07 shape: exact zero support, bid 0.06, ask 0.10, hold value 0."""
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-zero-support-sell",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Miami",
+        cluster="southeast",
+        target_date="2026-10-07",
+        bin_label="88-89F",
+        direction=direction,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.30,
+        size_usd=shares * 0.30,
+        shares=shares,
+        chain_shares=shares,
+        cost_basis_usd=shares * 0.30,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    position.last_monitor_at = "2026-10-07T14:58:05+00:00"
+    position._current_global_held_probability_samples = (0.0, 0.0)
+    context = ExitContext(
+        exit_reason=_ZERO_SUPPORT_REASON,
+        fresh_prob=0.0,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.06,
+        current_market_price_is_fresh=True,
+        best_bid=0.06,
+        best_ask=0.10,
+        probability_receipt={
+            "probability_authority": "day0_deterministic_bin_payoff_v1",
+            "probability_content_identity": "zero-support-content",
+            "probability_witness_identity": "zero-support-witness",
+        },
+        hours_to_settlement=2.0,
+        position_state="day0_window",
+        day0_active=True,
+    )
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(
+        position, context
+    )
+    return position, PortfolioState(positions=[position]), context, authority
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected_token"),
+    (("buy_yes", YES_TOKEN), ("buy_no", NO_TOKEN)),
+)
+def test_zero_support_branchwise_sell_crosses_fresh_bid_with_fak(
+    conn, monkeypatch, direction, expected_token
+):
+    """Zero support sells at the fresh top bid, never rests above it as GTC."""
+    from src.execution import exit_lifecycle
+
+    # 5.009 held: the submitted quantity is the 0.01-floored canonical 5.00.
+    position, portfolio, context, authority = _zero_support_sell_fixture(
+        direction=direction, shares=5.009
+    )
+    snapshot_id = _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=expected_token,
+        snapshot_id="snap-zero-support-sell",
+        freshness_deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
+        orderbook_top_bid=Decimal("0.06"),
+        orderbook_top_ask=Decimal("0.10"),
+    )
+    snapshot_hash = _snapshot_hash(conn, snapshot_id)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": snapshot_id,
+            "executable_snapshot_hash": snapshot_hash,
+            "executable_snapshot_orderbook_top_bid": 0.06,
+            "executable_snapshot_orderbook_top_ask": 0.10,
+            "executable_snapshot_min_order_size": 5.0,
+        },
+    )
+    submitted = {}
+
+    def return_pending(**kwargs):
+        submitted.update(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=position.trade_id,
+            status="pending",
+            order_id="ord-zero-support-fak",
+            external_order_id="ord-zero-support-fak",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", return_pending)
+
+    class Clob:
+        @staticmethod
+        def get_order_status(_order_id):
+            return {"status": "OPEN"}
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        context,
+        clob=Clob(),
+        conn=conn,
+        exit_intent=exit_lifecycle.build_exit_intent(position, context),
+        branchwise_sell_authority=authority,
+    )
+
+    assert outcome.startswith("sell_pending: order=ord-zero-support-fak"), outcome
+    assert submitted["submit_order_type"] == "FAK"
+    assert submitted["exact_limit_price"] == 0.06
+    assert submitted["best_bid"] == 0.06
+    assert submitted["current_price"] == 0.06
+    assert submitted["shares"] == pytest.approx(5.0)
+    protective = submitted["protective_sell_execution_authority"]
+    assert protective.kind == _ZERO_SUPPORT_REASON
+    assert protective.token_id == expected_token
+    assert protective.best_bid == "0.06"
+    assert Decimal(protective.shares) == Decimal("5.00")
+    # The executor re-derives the same authority at the final submit seam.
+    assert exit_lifecycle._protective_sell_execution_authority_error(
+        protective,
+        conn=conn,
+        trade_id=position.trade_id,
+        token_id=expected_token,
+        shares=submitted["shares"],
+        limit_price=submitted["exact_limit_price"],
+        snapshot_id=snapshot_id,
+        snapshot_hash=snapshot_hash,
+    ) is None
+
+
+def test_zero_support_branchwise_sell_without_bid_falls_to_liquidity_wait(
+    conn, monkeypatch
+):
+    """No executable bid is a liquidity fact, not a capital-authority failure."""
+    from src.execution import exit_lifecycle
+
+    position, portfolio, context, authority = _zero_support_sell_fixture()
+    fresh_now = datetime.now(timezone.utc)
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=YES_TOKEN,
+        outcome_label="YES",
+        snapshot_id="snap-zero-support-no-bid",
+        captured_at=fresh_now,
+        freshness_deadline=fresh_now + timedelta(minutes=5),
+        orderbook_top_bid=None,
+        orderbook_top_ask=Decimal("0.10"),
+    )
+    for name in ("place_sell_order", "execute_exit_order"):
+        monkeypatch.setattr(
+            exit_lifecycle,
+            name,
+            lambda *_args, **_kwargs: pytest.fail("no-bid zero-support SELL reached venue"),
+        )
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        context,
+        clob=None,
+        conn=conn,
+        exit_intent=exit_lifecycle.build_exit_intent(position, context),
+        branchwise_sell_authority=authority,
+    )
+
+    assert outcome == "exit_blocked: no_executable_bid"
+    assert position.exit_state == "retry_pending"
+    assert position.exit_retry_count == 0
+    assert position.last_exit_error == "exit_no_executable_bid"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL"},
+        {"exit_intent_fresh_prob": 0.01},
+        {"exit_intent_fresh_prob_is_fresh": False},
+        {"exit_intent_probability_receipt": {"probability_authority": "day0_remaining_day_global_probability_v1"}},
+    ),
+)
+def test_zero_support_protective_receipt_requires_exact_zero_support_evidence(
+    conn, overrides
+):
+    """Only a persisted zero-support, fresh, exact-payoff EXIT_INTENT mints the kind."""
+    from src.execution import exit_lifecycle
+
+    _seed_canonical_position_identity(
+        conn, position_id="pos-zero-receipt", token_id=YES_TOKEN, shares=5.0
+    )
+    conn.execute(
+        "UPDATE position_current SET chain_shares = 5.0 WHERE position_id = ?",
+        ("pos-zero-receipt",),
+    )
+    payload = {
+        "exit_intent_reason": _ZERO_SUPPORT_REASON,
+        "exit_intent_token_id": YES_TOKEN,
+        "exit_intent_shares": 5.0,
+        "exit_intent_decision_id": "decision-zero-receipt",
+        "exit_intent_fresh_prob": 0.0,
+        "exit_intent_fresh_prob_is_fresh": True,
+        "exit_intent_probability_receipt": {
+            "probability_authority": "day0_deterministic_bin_payoff_v1"
+        },
+    }
+
+    def receipt():
+        return exit_lifecycle._protective_sell_semantic_receipt(
+            conn,
+            position_id="pos-zero-receipt",
+            token_id=YES_TOKEN,
+            shares=5.0,
+            kind=_ZERO_SUPPORT_REASON,
+        )
+
+    def seed(sequence_no, body):
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                decision_id, source_module, payload_json, env
+            ) VALUES (?, 'pos-zero-receipt', 1, ?, 'EXIT_INTENT', ?,
+                      'day0_window', 'pending_exit', 'center_buy',
+                      'decision-zero-receipt', 'src.execution.exit_lifecycle',
+                      ?, 'live')
+            """,
+            (
+                f"pos-zero-receipt:{sequence_no}",
+                sequence_no,
+                _NOW.isoformat(),
+                json.dumps(body, sort_keys=True),
+            ),
+        )
+
+    seed(1, payload)
+    assert receipt() is not None
+    seed(2, {**payload, **overrides})
+    assert receipt() is None
+
+
+def test_branchwise_sell_with_changed_support_stays_blocked_without_protective_authority(
+    conn, monkeypatch
+):
+    """Support that is no longer exactly zero is never promoted to a FAK."""
+    from src.execution import exit_lifecycle
+
+    position, portfolio, context, authority = _zero_support_sell_fixture()
+    position._current_global_held_probability_samples = (0.0, 1e-6)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "snap-zero-support-changed",
+            "executable_snapshot_hash": "hash-zero-support-changed",
+            "executable_snapshot_orderbook_top_bid": 0.06,
+            "executable_snapshot_min_order_size": 0.01,
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_build_protective_sell_execution_authority",
+        lambda **_kwargs: pytest.fail("changed support minted protective authority"),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: pytest.fail("changed support reached venue"),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio,
+        position,
+        context,
+        clob=None,
+        conn=conn,
+        exit_intent=exit_lifecycle.build_exit_intent(position, context),
+        branchwise_sell_authority=authority,
+    )
+
+    assert outcome == "exit_blocked: branchwise_dominant_sell_authority_invalid"
 
 
 @pytest.mark.parametrize(

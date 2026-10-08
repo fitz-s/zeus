@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-10-06; last_reused=2026-10-06
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-10-06
+# Last reused/audited: 2026-10-08
 # Authority basis: held-monitor canonical append liveness and atomicity incidents
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -20373,6 +20373,18 @@ def test_zero_support_direct_sell_reaches_venue_with_typed_authority(monkeypatch
         "_record_exit_intent_before_execution_gates",
         lambda *_args, **_kwargs: True,
     )
+    # Canonical inventory and semantic-receipt binding are covered against a
+    # real schema in test_exit_safety; this test pins the lifecycle wiring.
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_canonical_protective_sellable_shares",
+        lambda *_args, **_kwargs: Decimal("70.10"),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_build_protective_sell_execution_authority",
+        lambda **kwargs: SimpleNamespace(kind=kwargs["kind"]),
+    )
 
     def place(**kwargs):
         submitted.append(kwargs)
@@ -20396,6 +20408,12 @@ def test_zero_support_direct_sell_reaches_venue_with_typed_authority(monkeypatch
     assert submitted
     assert submitted[0]["best_bid"] == pytest.approx(0.08)
     assert submitted[0]["current_price"] == pytest.approx(0.08)
+    assert submitted[0]["exact_limit_price"] == pytest.approx(0.08)
+    assert submitted[0]["submit_order_type"] == "FAK"
+    assert (
+        submitted[0]["protective_sell_execution_authority"].kind
+        == "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+    )
     assert outcome == "sell_error: venue_no_fill"
 
 

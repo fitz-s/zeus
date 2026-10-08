@@ -2918,6 +2918,11 @@ class MonitorRiskAuthority:
         }
 
 
+# Exact zero posterior support: cash strictly dominates a zero-payoff token, so
+# the SELL is direct reduce-only authority and crosses the fresh top bid.
+_ZERO_SUPPORT_SELL = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+
+
 @dataclass(frozen=True)
 class ProtectiveSellExecutionAuthority:
     """Immutable protective authority for one fresh FAK reduce-only SELL."""
@@ -2937,6 +2942,7 @@ class ProtectiveSellExecutionAuthority:
         if self.kind not in {
             "RED_FORCE_EXIT",
             "DAY0_HARD_FACT_BIN_DEAD",
+            _ZERO_SUPPORT_SELL,
         }:
             raise ValueError("protective sell kind invalid")
         if not all((
@@ -3210,6 +3216,20 @@ def _protective_sell_semantic_receipt(
             or not isinstance(receipt, Mapping)
             or receipt.get("probability_authority") != "day0_absorbing_hard_fact"
             or not isinstance(receipt.get("hard_fact_evidence"), Mapping)
+        ):
+            return None
+    elif kind == _ZERO_SUPPORT_SELL:
+        try:
+            zero_prob = 0.0 <= float(payload.get("exit_intent_fresh_prob")) <= 1e-12
+        except (TypeError, ValueError):
+            zero_prob = False
+        if (
+            reason.strip() != _ZERO_SUPPORT_SELL
+            or not zero_prob
+            or payload.get("exit_intent_fresh_prob_is_fresh") is not True
+            or not BranchwiseDominantSellAuthority.has_exact_payoff_receipt(
+                payload.get("exit_intent_probability_receipt")
+            )
         ):
             return None
     else:
@@ -8385,8 +8405,13 @@ def _execute_live_exit(
         if is_red_force_exit
         else "DAY0_HARD_FACT_BIN_DEAD"
         if hard_fact_authorized
+        else _ZERO_SUPPORT_SELL
+        if branchwise_authorized
         else ""
     )
+    # The branchwise proof binds the unrounded held quantity, which the
+    # protective block below rewrites to the 0.01-floored canonical one.
+    branchwise_intent = exit_intent
     protective_bid = _positive_decimal(
         snapshot_context.get("executable_snapshot_orderbook_top_bid")
     )
@@ -8479,10 +8504,19 @@ def _execute_live_exit(
         elif branchwise_authorized:
             authority_error = _branchwise_dominant_sell_authority_error(
                 position,
-                exit_intent,
+                branchwise_intent,
                 branchwise_sell_authority,
                 snapshot_context=snapshot_context,
             )
+            if (
+                authority_error == "branchwise_dominant_sell_submit_bid_not_executable"
+                and conn is not None
+                and _exit_sell_liquidity_error(exit_intent, snapshot_context)
+            ):
+                # No executable bid is a liquidity fact: the same predicate
+                # blocks it below, as for every protective kind. Every other
+                # branchwise proof check stands.
+                authority_error = None
         elif (
             protective_sell_authority is not None
             or continuing_existing_exit
@@ -8547,6 +8581,7 @@ def _execute_live_exit(
         if global_taker_fak_min_order_floor_bypass or (
             isinstance(protective_sell_authority, ProtectiveSellExecutionAuthority)
             and exit_intent.submit_order_type == "FAK"
+            and not branchwise_authorized
         )
         else _below_snapshot_min_order_error(
             position,
