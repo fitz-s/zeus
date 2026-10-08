@@ -9406,7 +9406,9 @@ def event_bound_live_adapter_from_trade_conn(
             # yields to pending monitor work, while a quiet cut gets enough
             # time for the observed ~26s selected-family JIT revalidation after
             # the global scope/book/solve stages.  Do not borrow the 180s book
-            # TTL as whole-batch authority.
+            # TTL as whole-batch authority.  This budget bounds the stages that
+            # build the cut; once the book epoch is fenced, the receipt, winner
+            # preflight and actuation run on that epoch's own deadline.
             deadline_monotonic=global_batch_started + _GLOBAL_AUCTION_WORK_CUT_SECONDS,
             cancel_requested=_day0_selection_cancelled,
             monotonic=_time.monotonic,
@@ -9686,6 +9688,28 @@ def event_bound_live_adapter_from_trade_conn(
             return _held_point_traces_for_cut(_probabilities, selection_at)
 
         def _prepare_current_scope_event(event, at):
+            from src.engine.current_day0_observation import current_wrh_probability_event
+            from src.contracts.exceptions import ObservationUnavailableError
+
+            try:
+                probability_event = current_wrh_probability_event(
+                    calibration_conn, event, decision_time=at,
+                )
+            except ObservationUnavailableError as exc:
+                return EventSubmissionReceipt(
+                    False, event.event_id, event.causal_snapshot_id,
+                    reason=f"GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:{type(exc).__name__}:{exc}",
+                    proof_accepted=False,
+                )
+            receipt = _prepare_current_probability_scope_event(probability_event, at)
+            # Queue/claim ownership stays with the caller's immutable event;
+            # its probability witness independently binds the current product.
+            return dataclass_replace(
+                receipt, event_id=event.event_id,
+                causal_snapshot_id=event.causal_snapshot_id,
+            )
+
+        def _prepare_current_probability_scope_event(event, at):
             payload = _payload(event)
             if event.event_type in _FORECAST_DECISION_EVENT_TYPES:
                 phase_evidence = _edli_forecast_lane_phase_evidence(
@@ -9724,11 +9748,13 @@ def event_bound_live_adapter_from_trade_conn(
             except (TypeError, ValueError):
                 family_key = ""
             force_refresh = (
-                probability_refresh_family_keys is None
+                event.event_type == "DAY0_EXTREME_UPDATED"
+                or probability_refresh_family_keys is None
                 or family_key in probability_refresh_family_keys
             )
             if force_refresh:
                 cached_ineligible = (
+                    None if event.event_type == "DAY0_EXTREME_UPDATED" else
                     _probe_global_probability_family_ineligible_cache(
                         probability_cache_namespace,
                         family_key=family_key,
@@ -9821,6 +9847,7 @@ def event_bound_live_adapter_from_trade_conn(
         def _prepare_held_current_scope_event(event, at):
             """Prepare current held q without granting entry authority."""
 
+            from src.contracts.exceptions import ObservationUnavailableError
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
             )
@@ -9838,11 +9865,18 @@ def event_bound_live_adapter_from_trade_conn(
                     ),
                     proof_accepted=False,
                 )
-            held_event = _latest_causal_day0_family_event(
-                calibration_conn,
-                event=event,
-                decision_time=at,
-            ) or event
+            try:
+                held_event = _latest_causal_day0_family_event(
+                    calibration_conn,
+                    event=event,
+                    decision_time=at,
+                ) or event
+            except ObservationUnavailableError as exc:
+                return EventSubmissionReceipt(
+                    False, event.event_id, event.causal_snapshot_id,
+                    reason=f"GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:{type(exc).__name__}:{exc}",
+                    proof_accepted=False,
+                )
             held_is_day0 = held_event.event_type == "DAY0_EXTREME_UPDATED"
             held_is_forecast_lane = (
                 held_event.event_type in _FORECAST_DECISION_EVENT_TYPES
@@ -19253,6 +19287,12 @@ def _current_global_actuation_prepared_family(
                 revalidation_time = stamp
     else:
         revalidation_time = decision_time
+    from src.engine.current_day0_observation import current_wrh_probability_replay_event
+
+    event = current_wrh_probability_replay_event(
+        observation_conn, event, selected_at=revalidation_time,
+        decision_time=decision_time,
+    )
     pinned_complete_bundle = _rehydrate_held_pinned_bundle_for_actuation(
         event,
         selected=selected,
@@ -40419,6 +40459,13 @@ def _latest_causal_day0_family_event(
 
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_HELD_DAY0_EVENT_DECISION_TIME_NAIVE")
+    from src.engine.current_day0_observation import current_wrh_probability_event
+
+    current_event = current_wrh_probability_event(
+        conn, event, decision_time=decision_time,
+    )
+    if current_event is not event:
+        return current_event
     payload = _payload(event)
     city = str(payload.get("city") or "").strip()
     target_date = str(payload.get("target_date") or "").strip()
@@ -40939,6 +40986,14 @@ def _prepare_current_global_probability_family(
         raise GlobalValueFault("GLOBAL_PROVISIONAL_DAY0_REPLACEMENT_POLICY_INVALID")
     if not isinstance(probability_use, _CurrentProbabilityUse):
         raise GlobalValueFault("GLOBAL_PROBABILITY_USE_INVALID")
+    from src.engine.current_day0_observation import current_wrh_probability_event
+
+    # The event may only be the durable wake/claim carrier. Reproduce the
+    # current native product on every ENTRY, held and submit-time probability
+    # read, including when the selected target retained a forecast event type.
+    event = current_wrh_probability_event(
+        observation_conn or forecast_conn, event, decision_time=decision_time,
+    )
     if not isinstance(_force_day0_redecision_fallback, bool):
         raise GlobalValueFault("GLOBAL_DAY0_REDECISION_FALLBACK_POLICY_INVALID")
     entry_authority = probability_use is _CurrentProbabilityUse.ENTRY

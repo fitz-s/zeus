@@ -59,6 +59,7 @@ from src.data.replacement_forecast_materializer import (  # noqa: E402
 )
 from src.data.raw_forecast_artifact_manifest import parse_manifest, write_manifest_to_db  # noqa: E402
 from src.data.replacement_forecast_live_materialization_queue import (  # noqa: E402
+    DEADLINE_NOT_STARTED_STAGE,
     MANIFEST_ARTIFACT_ROLE,
     MATERIALIZATION_IDENTITY_VERSION,
     MATERIALIZATION_INPUT_VALIDATION_REVISION,
@@ -77,6 +78,9 @@ _IMMEDIATE_RETRY_DELAY_SECONDS = 0.05
 _WriterLockFactory = Callable[[], ContextManager[None]]
 _WRITE_DEFERRED_REASON = "REPLACEMENT_FORECAST_WRITE_DEFERRED"
 _STAGE_RECEIPT_SUFFIX = ".stage"
+# A batch request after the first starts only with this much child deadline left:
+# measured single-request wall time on the live priority lane is p90 8.3 s.
+_BATCH_REQUEST_START_BUDGET_SECONDS = 9.0
 
 
 class MaterializationDeadlineExceeded(RuntimeError):
@@ -86,6 +90,18 @@ class MaterializationDeadlineExceeded(RuntimeError):
         self.stage = stage
         self.deadline_at = deadline_at
         super().__init__(f"REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_{stage.upper()}")
+
+
+def _deadline_deferred_response(exc: MaterializationDeadlineExceeded) -> dict[str, object]:
+    """The verdict the queue reads as retry-later: returncode 75 plus these fields."""
+    return {
+        "status": "DEFERRED",
+        "reason_codes": [str(exc)],
+        "stage": exc.stage,
+        "deadline_at": exc.deadline_at.astimezone(UTC).isoformat(),
+        "committed": False,
+        "reactor_wake_published": False,
+    }
 
 
 class RequestInputInvalid(ValueError):
@@ -1646,15 +1662,9 @@ def _run_one(
             return returncode, "", log_output.getvalue() + encoded
         return returncode, encoded, log_output.getvalue()
     except MaterializationDeadlineExceeded as exc:
-        response = {
-            "status": "DEFERRED",
-            "reason_codes": [str(exc)],
-            "stage": exc.stage,
-            "deadline_at": exc.deadline_at.astimezone(UTC).isoformat(),
-            "committed": False,
-            "reactor_wake_published": False,
-        }
-        return 75, "", log_output.getvalue() + json.dumps(response, sort_keys=True) + "\n"
+        return 75, "", log_output.getvalue() + json.dumps(
+            _deadline_deferred_response(exc), sort_keys=True
+        ) + "\n"
     except Exception as exc:
         return 2, "", log_output.getvalue() + json.dumps(
             {**_error_response(exc), **witnesses()}, sort_keys=True
@@ -1844,7 +1854,27 @@ def main(argv: list[str] | None = None) -> int:
                     for input_json in args.batch_input_json:
                         _print_batch_envelope(input_json, 2, "", stderr)
                     return 0
-            for input_json in args.batch_input_json:
+            for index, input_json in enumerate(args.batch_input_json):
+                if (
+                    index
+                    and deadline_at is not None
+                    and (deadline_at - datetime.now(UTC)).total_seconds()
+                    < _BATCH_REQUEST_START_BUDGET_SECONDS
+                ):
+                    # Too little time to finish another request: defer it and all
+                    # later ones instead of being killed. The not-started stage
+                    # tells the queue nothing ran, so it retries them at once.
+                    stderr = json.dumps(
+                        _deadline_deferred_response(
+                            MaterializationDeadlineExceeded(
+                                DEADLINE_NOT_STARTED_STAGE, deadline_at
+                            )
+                        ),
+                        sort_keys=True,
+                    ) + "\n"
+                    for deferred in args.batch_input_json[index:]:
+                        _print_batch_envelope(deferred, 75, "", stderr)
+                    break
                 returncode, stdout, stderr = _run_one(
                     input_json,
                     commit=args.commit,

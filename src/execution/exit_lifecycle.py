@@ -8593,6 +8593,7 @@ def _execute_live_exit(
         if not intent_recorded:
             return "exit_blocked: exit_intent_persistence_failed"
     request_denial: dict[str, datetime] = {}
+    capture_liquidity_error = ""
     try:
         required_book_hash = (
             global_sell_authority.jit_candidate.executable_sell_curve.book_hash
@@ -8617,8 +8618,16 @@ def _execute_live_exit(
                 else None
             ),
             require_exact_handoff_snapshot=global_authorized,
+            require_fresh_capture=bool(
+                is_red_force_exit or hard_fact_authorized or branchwise_authorized
+            ),
             request_denial_sink=request_denial,
         )
+    except _ExitCaptureNoBid:
+        # Native SELL capture proved no bid but intentionally minted no
+        # executable snapshot. Classify liquidity without borrowing old truth.
+        snapshot_context = {}
+        capture_liquidity_error = "exit_no_executable_bid"
     except Exception as exc:  # noqa: BLE001
         snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_ERROR]"
         snapshot_error = (
@@ -8852,7 +8861,11 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=dust_reason, error=dust_error)
         return f"sell_blocked_dust: {dust_error}"
 
-    if conn is not None and not str(snapshot_context.get("executable_snapshot_id") or "").strip():
+    if (
+        conn is not None
+        and not capture_liquidity_error
+        and not str(snapshot_context.get("executable_snapshot_id") or "").strip()
+    ):
         snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_UNAVAILABLE]"
         snapshot_error = (
             "global_sell_exit_executable_snapshot_unavailable"
@@ -8892,7 +8905,7 @@ def _execute_live_exit(
     # price, and it may validly rest at 0.05 while the current bid is below
     # that floor.  The capital certificate, exact snapshot, absolute submit
     # band, post-only check, and venue boundary remain cumulative gates.
-    liquidity_error = (
+    liquidity_error = capture_liquidity_error or (
         "exit_no_in_band_bid"
         if protective_kind and protective_bid is not None and protective_bid_unavailable
         else _exit_sell_liquidity_error(exit_intent, snapshot_context)
@@ -9594,6 +9607,7 @@ def _latest_exit_snapshot_context(
     now: datetime | None = None,
     require_sell_bid: bool = True,
     reject_future_captured: bool = False,
+    required_snapshot_id: str | None = None,
 ) -> dict[str, object]:
     """Return executor snapshot kwargs for the latest fresh snapshot by token.
 
@@ -9614,6 +9628,9 @@ def _latest_exit_snapshot_context(
     try:
         captured_filter = "AND captured_at <= ?" if reject_future_captured else ""
         params = (now_s, now_s, token_id) if reject_future_captured else (now_s, token_id)
+        identity_filter = "AND snapshot_id = ?" if required_snapshot_id else ""
+        if required_snapshot_id:
+            params += (required_snapshot_id,)
         bid_filter = (
             """
                AND orderbook_top_bid IS NOT NULL
@@ -9632,6 +9649,7 @@ def _latest_exit_snapshot_context(
              WHERE freshness_deadline >= ?
                {captured_filter}
                AND selected_outcome_token_id = ?
+               {identity_filter}
                {bid_filter}
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
@@ -9968,6 +9986,10 @@ def _seed_exit_snapshot_identity(
     return seeded if applied else siblings
 
 
+class _ExitCaptureNoBid(RuntimeError):
+    """Current native SELL capture found no bid; grants no execution authority."""
+
+
 def _latest_or_capture_exit_snapshot_context(
     conn: sqlite3.Connection | None,
     clob,
@@ -9979,6 +10001,7 @@ def _latest_or_capture_exit_snapshot_context(
     required_snapshot_id: str | None = None,
     prefetched_orderbook: Mapping[str, object] | None = None,
     require_exact_handoff_snapshot: bool = False,
+    require_fresh_capture: bool = False,
     request_denial_sink: dict[str, datetime] | None = None,
 ) -> dict[str, object]:
     """Return fresh snapshot kwargs for exits, capturing one when possible.
@@ -10016,15 +10039,22 @@ def _latest_or_capture_exit_snapshot_context(
         snapshot = get_snapshot(conn, snapshot_id)
         return bool(snapshot is not None and snapshot.raw_orderbook_hash == required)
 
+    capture_started_at = _utcnow() if require_fresh_capture else None
     context = _latest_exit_snapshot_context(conn, token_id, now=now)
-    if context and matches_required_book(context):
+    if not require_fresh_capture and context and matches_required_book(context):
         return context
-    no_bid_context = _latest_exit_snapshot_context(
+    prior_context = _latest_exit_snapshot_context(
         conn,
         token_id,
-        now=now,
+        now=capture_started_at or now,
         require_sell_bid=False,
     )
+    # INV-47 SCOPE: this qualified protective SELL attempt. DRAIN: the normal
+    # exit retry captures the current book after any request-admission embargo.
+    # RESET: a current exact-token capture supplies executable or no-bid truth.
+    # An ordinary selection snapshot's remaining TTL cannot price a protective
+    # FAK, nor become fallback authority when its mandatory capture fails.
+    no_bid_context = {} if require_fresh_capture else prior_context
     if conn is None or not token_id:
         return no_bid_context
     if clob is None:
@@ -10062,6 +10092,29 @@ def _latest_or_capture_exit_snapshot_context(
         market_id = market_id or str(identity_seed.get("condition_id") or "").strip()
     if not market_id or not yes_token or not no_token:
         return no_bid_context
+
+    def current_capture_context(
+        *, checked_at: datetime, snapshot_id: str | None = None,
+    ) -> dict[str, object]:
+        from src.state.snapshot_repo import get_snapshot
+
+        current = _latest_exit_snapshot_context(
+            conn, token_id, now=checked_at, require_sell_bid=False,
+            reject_future_captured=True,
+            required_snapshot_id=snapshot_id,
+        )
+        if not current or not matches_required_book(current):
+            return {}
+        snapshot = get_snapshot(conn, str(current["executable_snapshot_id"]))
+        if (
+            snapshot is None
+            or snapshot.condition_id != market_id
+            or snapshot.yes_token_id != yes_token
+            or snapshot.no_token_id != no_token
+            or snapshot.captured_at < capture_started_at
+        ):
+            return {}
+        return current
 
     try:
         from src.data.market_scanner import (
@@ -10102,7 +10155,7 @@ def _latest_or_capture_exit_snapshot_context(
             },
             edge=SimpleNamespace(direction=direction),
         )
-        captured_at = now or _utcnow()
+        captured_at = _utcnow() if require_fresh_capture else now or _utcnow()
         fields = capture_executable_market_snapshot(
             conn,
             market={
@@ -10117,7 +10170,7 @@ def _latest_or_capture_exit_snapshot_context(
             execution_side="SELL",
             prefetched_orderbook=(
                 dict(prefetched_orderbook)
-                if prefetched_orderbook is not None
+                if prefetched_orderbook is not None and not require_fresh_capture
                 else None
             ),
             # capture_policy_spec.md §2 trigger 2: synchronous pre-submit
@@ -10135,6 +10188,12 @@ def _latest_or_capture_exit_snapshot_context(
                 token_id,
             )
             return no_bid_context
+        if require_fresh_capture:
+            # Validate at completion, not the pre-network timestamp. A slow
+            # capture must not revive an expired or invalidated book.
+            return current_capture_context(
+                checked_at=_utcnow(), snapshot_id=snapshot_id,
+            )
         refreshed_context = _latest_exit_snapshot_context(
             conn,
             token_id,
@@ -10177,6 +10236,14 @@ def _latest_or_capture_exit_snapshot_context(
             ),
         }
     except Exception as exc:
+        from src.data.market_scanner import ExecutableSnapshotCaptureError
+
+        if (
+            require_fresh_capture
+            and isinstance(exc, ExecutableSnapshotCaptureError)
+            and str(exc) == "CLOB orderbook missing bids"
+        ):
+            raise _ExitCaptureNoBid() from exc
         # The caller's ``now`` preceded the network attempt. Revalidate at the
         # actual failure time; otherwise a slow capture can revive expired data.
         checked_at = _utcnow()
@@ -10187,6 +10254,13 @@ def _latest_or_capture_exit_snapshot_context(
         # a committed, exact-token, still-valid snapshot may enter the ordinary
         # executor/JIT gates; never read this connection's uncommitted capture.
         if denied_until is not None and conn is not None and not conn.in_transaction:
+            if require_fresh_capture:
+                concurrent = current_capture_context(checked_at=checked_at)
+                if concurrent.get("executable_snapshot_id") != prior_context.get(
+                    "executable_snapshot_id"
+                ):
+                    return concurrent
+                return {}
             concurrent = _latest_exit_snapshot_context(
                 conn, token_id, now=checked_at, reject_future_captured=True,
             )
@@ -12839,6 +12913,11 @@ def _fresh_exit_liquidity_recovered(
         ).fetchone()
         payload = json.loads(str(monitor["payload_json"] or "{}"))
         observed_at = _parse_iso(str(monitor["occurred_at"] or ""))
+        quote_witness = payload.get("held_sell_quote_witness")
+        quote_at = (
+            _parse_iso(str(quote_witness.get("observed_at") or ""))
+            if isinstance(quote_witness, Mapping) else None
+        )
         bid = _positive_decimal(payload.get("last_monitor_best_bid"))
         direction = str(monitor["direction"] or "")
         token = monitor["token_id"] if direction == "buy_yes" else monitor["no_token_id"]
@@ -12851,6 +12930,10 @@ def _fresh_exit_liquidity_recovered(
             and payload.get("direction") == direction
             and str(token or "") == _asset_id_for_position(position)
             and observed_at is not None and observed_at > rejected_at
+            and isinstance(quote_witness, Mapping)
+            and str(quote_witness.get("token_id") or "") == str(token or "")
+            and quote_at is not None and rejected_at < quote_at
+            and timedelta(0) <= _utcnow() - quote_at <= FRESHNESS_WINDOW_DEFAULT
             and timedelta(0) <= _utcnow() - observed_at <= FRESHNESS_WINDOW_DEFAULT
             and payload.get("held_sell_full_depth_action_authority") is True
             and payload.get("last_monitor_market_price_is_fresh") is True
@@ -16018,6 +16101,22 @@ def run_exit_monitor_cycle(
                 summary["monitoring_error"] = str(exc)
 
             succeeded = "monitoring_error" not in summary
+            if succeeded and target_families is not None and not (
+                _full_book_monitor_completed_canonical_coverage(
+                    summary,
+                    open_position_count=len(monitor_portfolio.positions),
+                )
+            ):
+                # SCOPE: only the positions admitted by this targeted wake.
+                # DRAIN: the listener retains the wake and retries after its
+                # existing one-turn fairness exclusion. RESET: every admitted
+                # candidate has a canonical verdict or is discharged. A
+                # durable DATA_DEGRADED/no-action verdict remains complete.
+                summary["monitoring_error"] = (
+                    "TARGETED_MONITOR_CANONICAL_COVERAGE_INCOMPLETE"
+                )
+                summary["held_monitor_failure_outcome"] = "COVERAGE_INCOMPLETE"
+                succeeded = False
             if succeeded and target_families is None:
                 full_book_canonical_scope_complete = (
                     _full_book_monitor_completed_canonical_coverage(

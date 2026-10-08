@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-10-07
-# Lifecycle: created=2026-04-27; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Last reused/audited: 2026-10-08
+# Lifecycle: created=2026-04-27; last_reviewed=2026-10-08; last_reused=2026-10-08
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md (2026-10-06 cloud-only physical-evidence exit repair)
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -367,6 +367,197 @@ def _snapshot_hash(c, snapshot_id: str) -> str:
     snapshot = get_snapshot(c, snapshot_id)
     assert snapshot is not None
     return snapshot.executable_snapshot_hash
+
+
+def _install_current_exit_capture(
+    conn, monkeypatch, *, bid="0.10", condition_id="condition-test",
+):
+    """Fake only public market transport; keep native capture and its checks."""
+    from src.data import market_scanner
+    from src.execution import exit_lifecycle
+
+    class CaptureClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+
+    class CaptureClock(datetime, metaclass=CaptureClockType):
+        @classmethod
+        def now(cls, tz=None):
+            now = exit_lifecycle._utcnow()
+            return now if tz else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(market_scanner, "datetime", CaptureClock)
+
+    market = {
+        "condition_id": condition_id, "market_id": condition_id,
+        "question_id": "question-test", "token_id": YES_TOKEN,
+        "no_token_id": NO_TOKEN, "tokens": [YES_TOKEN, NO_TOKEN],
+        "active": True, "closed": False, "archived": False, "accepting_orders": True,
+        "enable_orderbook": True, "enable_order_book": True, "feesEnabled": False,
+        "tick_size": "0.01", "min_order_size": "5", "neg_risk": False,
+    }
+    market["gamma_market_raw"] = dict(market)
+    calls = []
+
+    def market_info(_clob, selected_condition_id):
+        assert selected_condition_id == condition_id
+        assert not conn.in_transaction
+        calls.append("market")
+        return dict(market)
+
+    def book(_clob, token_id):
+        assert token_id in (YES_TOKEN, NO_TOKEN)
+        assert not conn.in_transaction
+        calls.append(token_id)
+        return {
+            "asset_id": token_id, "tick_size": "0.01",
+            "min_order_size": "5", "neg_risk": False,
+            "bids": [] if bid is None else [{"price": bid, "size": "20"}],
+            "asks": [{"price": "0.99", "size": "20"}],
+        }
+
+    monkeypatch.setattr(market_scanner, "get_sibling_outcomes", lambda _: [dict(market)])
+    monkeypatch.setattr(market_scanner, "get_last_scan_authority", lambda: "VERIFIED")
+    monkeypatch.setattr(market_scanner, "_fetch_clob_market_info", market_info)
+    monkeypatch.setattr(market_scanner, "_fetch_orderbook_snapshot", book)
+    monkeypatch.setattr(market_scanner, "_fetch_fee_details", lambda _clob, token: {
+        "source": "test_fee_transport", "token_id": token,
+        "fee_rate_fraction": 0.0, "fee_rate_bps": 0.0,
+        "fee_rate_source_field": "fee_rate_fraction", "fee_rate_raw_unit": "fraction",
+    })
+    return calls
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("bid", ("0.05", "0.10", "0.95", "0.04", "0.96", None))
+def test_protective_capture_replaces_live_selection_cache_with_native_book(
+    conn, monkeypatch, direction, bid,
+):
+    from src.execution import exit_lifecycle
+    from src.state.snapshot_repo import get_snapshot
+
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    position = SimpleNamespace(
+        trade_id="capture-held", market_id="condition-test", condition_id="condition-test",
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN, direction=direction,
+    )
+    calls = _install_current_exit_capture(conn, monkeypatch, bid=bid)
+    _ensure_snapshot(
+        conn, snapshot_id="still-fresh-selection", selected_outcome_token_id=token,
+        captured_at=_NOW - timedelta(seconds=1),
+        freshness_deadline=_NOW + timedelta(seconds=179),
+    )
+    conn.commit()
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: _NOW)
+    def capture():
+        return exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn, object(), position, token, require_fresh_capture=True,
+            # Protective pricing cannot inherit caller-supplied old book/time.
+            now=_NOW - timedelta(seconds=1), prefetched_orderbook={"bids": [{"price": "0.49"}]},
+        )
+    if bid is None:
+        with pytest.raises(exit_lifecycle._ExitCaptureNoBid):
+            capture()
+        assert calls == ["market", token]
+        assert conn.execute("SELECT count(*) FROM executable_market_snapshots").fetchone()[0] == 1
+        return
+    context = capture()
+    assert calls == ["market", token]
+    assert context["executable_snapshot_id"] != "still-fresh-selection"
+    assert context["executable_snapshot_orderbook_top_bid"] == bid
+    snapshot = get_snapshot(conn, context["executable_snapshot_id"])
+    assert snapshot.captured_at == _NOW
+    assert snapshot.freshness_deadline == _NOW + timedelta(seconds=180)
+    assert conn.execute(
+        "SELECT capture_trigger FROM executable_market_snapshots WHERE snapshot_id=?",
+        (snapshot.snapshot_id,),
+    ).fetchone()[0] == "JIT_SUBMIT"
+    assert not conn.in_transaction
+
+
+@pytest.mark.parametrize("old_bid", ("0.49", None))
+@pytest.mark.parametrize("case", (
+    "transport", "source", "empty", "network", "denied", "same_row",
+    "older_concurrent", "valid_concurrent", "no_bid_concurrent", "future",
+    "expired", "invalidated", "wrong_token", "wrong_pair", "uncommitted",
+    "expired_during_capture",
+))
+def test_protective_capture_failure_never_revives_prior_authority(
+    conn, monkeypatch, old_bid, case,
+):
+    from src.data import market_scanner
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+    from src.execution import exit_lifecycle
+    from src.state.snapshot_repo import record_snapshot_invalidation
+
+    position = SimpleNamespace(
+        trade_id="capture-race", market_id="condition-test", condition_id="condition-test",
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN, direction="buy_yes",
+    )
+    _install_current_exit_capture(conn, monkeypatch)
+    # Same-clock old rows must also be excluded from admission-denial fallback.
+    _ensure_snapshot(
+        conn, snapshot_id="old-capture", captured_at=_NOW,
+        freshness_deadline=_NOW + timedelta(seconds=180), orderbook_top_bid=old_bid,
+    )
+    conn.commit()
+    clock = [_NOW]
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: clock[0])
+    denied_until = _NOW + timedelta(seconds=10)
+
+    def fail_capture(conn_arg, **kwargs):
+        assert not conn_arg.in_transaction
+        if case == "empty":
+            return {}
+        if case == "network":
+            raise RuntimeError("book unavailable")
+        if case not in {"denied", "same_row"}:
+            clock[0] += timedelta(seconds=1)
+            captured_at = (
+                _NOW - timedelta(seconds=1) if case == "older_concurrent"
+                else clock[0] + timedelta(seconds=1) if case == "future"
+                else clock[0]
+            )
+            _ensure_snapshot(
+                conn_arg, snapshot_id="new-capture", captured_at=captured_at,
+                freshness_deadline=clock[0] if case == "expired" else clock[0] + timedelta(seconds=180),
+                selected_outcome_token_id=NO_TOKEN if case == "wrong_token" else YES_TOKEN,
+                no_token_id="foreign-no" if case == "wrong_pair" else NO_TOKEN,
+                orderbook_top_bid=None if case == "no_bid_concurrent" else "0.10",
+            )
+            if case == "invalidated":
+                record_snapshot_invalidation(
+                    conn_arg, condition_id="condition-test", token_id=YES_TOKEN,
+                    reason="current-correction", invalidated_at=clock[0],
+                )
+            if case != "uncommitted":
+                conn_arg.commit()
+            if case in {"expired", "expired_during_capture"}:
+                clock[0] += timedelta(seconds=181)
+            if case == "expired_during_capture":
+                return {"executable_snapshot_id": "new-capture"}
+        raise RequestAdmissionDenied(f"POLYMARKET_REQUEST_IN_FLIGHT:{denied_until.isoformat()}")
+
+    monkeypatch.setattr(market_scanner, "capture_executable_market_snapshot", fail_capture)
+    if case == "source":
+        monkeypatch.setattr(market_scanner, "get_last_scan_authority", lambda: "UNKNOWN")
+    if case == "transport":
+        monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client",
+                            lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    denial = {}
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn, None if case == "transport" else object(), position, YES_TOKEN,
+        require_fresh_capture=True, request_denial_sink=denial,
+    )
+    if case in {"valid_concurrent", "no_bid_concurrent"}:
+        assert context["executable_snapshot_id"] == "new-capture"
+        assert context["executable_snapshot_orderbook_top_bid"] == (
+            "ABSENT" if case == "no_bid_concurrent" else "0.10"
+        )
+    else:
+        assert context == {}
+    if case in {"denied", "same_row", "valid_concurrent"}:
+        assert denial == {"retry_at": denied_until}
 
 
 def _ensure_envelope(
@@ -9489,13 +9680,10 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
         day0_active=True,
     )
 
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_held_monitor_clob_client",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("fresh no-bid must not trigger transport recovery")
-        ),
-    )
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
+    recovered = []
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client",
+                        lambda: recovered.append(True) or object())
     monkeypatch.setattr(
         exit_lifecycle,
         "_refresh_exit_collateral_snapshot_for_submit",
@@ -9533,6 +9721,7 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
     )
 
     assert outcome == "exit_blocked: no_executable_bid"
+    assert recovered == [True]
     assert position.state == "pending_exit"
     assert position.exit_state == "retry_pending"
     assert position.exit_retry_count == 0
@@ -9636,6 +9825,8 @@ def test_hard_fact_exit_with_zero_snapshot_bid_falls_to_liquidity_wait_not_autho
         "_hard_fact_sell_authority_valid",
         lambda *args, **kwargs: True,
     )
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client", lambda: object())
 
     outcome = exit_lifecycle.execute_exit(
         portfolio,
@@ -10466,6 +10657,8 @@ def test_live_exit_sub_floor_bid_waits_without_submit_or_retry_budget(conn, monk
         "_hard_fact_sell_authority_valid",
         lambda *args, **kwargs: True,
     )
+    _install_current_exit_capture(conn, monkeypatch, bid="0.01")
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client", lambda: object())
 
     outcome = exit_lifecycle.execute_exit(
         PortfolioState(positions=[position]),
@@ -11613,7 +11806,7 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
     assert loaded["exit_state"] == "backoff_exhausted"
 
 
-def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypatch):
+def test_live_exit_concurrent_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel
     from src.state.portfolio import ExitContext, PortfolioState, Position
@@ -11678,6 +11871,25 @@ def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypat
         "execute_exit_order",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dust must not submit")),
     )
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client", lambda: object())
+
+    def concurrent_no_bid(conn_arg, **_kwargs):
+        from src.data.polymarket_request_governor import RequestAdmissionDenied
+
+        captured_at = exit_lifecycle._utcnow()
+        _ensure_snapshot(
+            conn_arg, snapshot_id="current-concurrent-no-bid", captured_at=captured_at,
+            freshness_deadline=captured_at + timedelta(seconds=180),
+            selected_outcome_token_id=NO_TOKEN, min_order_size="5",
+            orderbook_top_bid=None, orderbook_top_ask="0.001",
+        )
+        conn_arg.commit()
+        raise RequestAdmissionDenied(
+            "POLYMARKET_REQUEST_IN_FLIGHT:" + (captured_at + timedelta(seconds=10)).isoformat()
+        )
+
+    monkeypatch.setattr("src.data.market_scanner.capture_executable_market_snapshot", concurrent_no_bid)
     exit_intent = exit_lifecycle.ExitIntent(
         trade_id=position.trade_id,
         reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
@@ -19352,6 +19564,7 @@ def _exact_zero_exit_case(conn, monkeypatch, *, direction="buy_yes", shares=10.0
     )
     conn.commit()
     monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    _install_current_exit_capture(conn, monkeypatch)
     context = ExitContext(
         exit_reason="POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
         fresh_prob=0.0, fresh_prob_is_fresh=True,
@@ -19403,6 +19616,100 @@ def test_exact_zero_exit_crosses_bid_with_distinct_protected_authority(
     assert result.startswith("sell_pending:"), result
     assert len(submitted) == 1
     assert submitted[0]["shares"] == shares
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("kind", ("hard_fact", "exact_zero"))
+def test_qualified_protective_exit_refreshes_live_selection_price(
+    conn, monkeypatch, direction, kind,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction)
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    _ensure_snapshot(
+        conn, snapshot_id="selection-priced-old", selected_outcome_token_id=token,
+        captured_at=now, freshness_deadline=now + timedelta(seconds=180),
+        orderbook_top_bid="0.49", orderbook_top_ask="0.51",
+    )
+    conn.commit()
+    if kind == "hard_fact":
+        context, authority = _bind_canonical_hard_fact_case(conn, position, context, now)
+        authority_kwargs = {"hard_fact_authority": authority}
+    else:
+        authority_kwargs = {"branchwise_sell_authority":
+            exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)}
+    submitted = []
+
+    def submit(**kwargs):
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=position.trade_id, status="pending", order_id="current-book-order",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit)
+    result = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, **authority_kwargs,
+    )
+    assert result.startswith("sell_pending:"), result
+    assert len(submitted) == 1
+    assert submitted[0]["exact_limit_price"] == .10
+    assert submitted[0]["protective_sell_execution_authority"].snapshot_id != "selection-priced-old"
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_protective_native_empty_book_keeps_liquidity_retry_drainable(
+    conn, monkeypatch, direction,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction)
+    context, authority = _bind_canonical_hard_fact_case(conn, position, context, now)
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
+    before = conn.execute("SELECT count(*) FROM executable_market_snapshots").fetchone()[0]
+    result = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=object(), conn=conn, hard_fact_authority=authority,
+    )
+    assert result == "exit_blocked: no_executable_bid"
+    assert position.last_exit_error == "exit_no_executable_bid"
+    assert position.exit_retry_count == 0
+    assert conn.execute("SELECT count(*) FROM executable_market_snapshots").fetchone()[0] == before
+    assert conn.execute("SELECT count(*) FROM venue_commands").fetchone()[0] == 0
+    conn.commit()
+    later = now + timedelta(seconds=5)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    # The normal monitor's later current full-depth bid discharges only the
+    # liquidity debt; the next submit still needs its own native JIT capture.
+    row = conn.execute(
+        "SELECT payload_json FROM position_events WHERE position_id=? "
+        "AND event_type='MONITOR_REFRESHED' ORDER BY sequence_no DESC LIMIT 1",
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(row[0])
+    payload.update(direction=direction, last_monitor_best_bid=.10,
+                   last_monitor_market_price_is_fresh=True,
+                   held_sell_full_depth_action_authority=True,
+                   held_sell_quote_witness={
+                       "token_id": YES_TOKEN if direction == "buy_yes" else NO_TOKEN,
+                       "observed_at": later.isoformat(),
+                   })
+    conn.execute(
+        "INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,"
+        "occurred_at,phase_before,phase_after,source_module,env,payload_json) "
+        "SELECT 'restored-bid-monitor',?,1,MAX(sequence_no)+1,'MONITOR_REFRESHED',?,"
+        "'pending_exit','pending_exit','src.engine.cycle_runtime','live',? "
+        "FROM position_events WHERE position_id=?",
+        (position.trade_id, later.isoformat(), json.dumps(payload), position.trade_id),
+    )
+    conn.commit()
+    assert exit_lifecycle.check_pending_retries(position, conn=conn)
+    assert not exit_lifecycle.is_exit_cooldown_active(position)
+    assert position.exit_retry_count == 0
 
 
 @pytest.mark.parametrize("tiny", (1e-13, 1e-100))
@@ -19696,12 +20003,13 @@ def test_exact_zero_exit_real_executor_persists_fak_before_fake_sdk(
 
 
 @pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
-@pytest.mark.parametrize("bid,allowed", (("0.05", True), ("0.04", False), ("0.96", False)))
+@pytest.mark.parametrize("bid,allowed", (("0.05", True), ("0.95", True), ("0.04", False), ("0.96", False)))
 def test_exact_zero_jit_bid_keeps_absolute_band(conn, monkeypatch, direction, bid, allowed):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState
 
     position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction)
+    _install_current_exit_capture(conn, monkeypatch, bid=bid)
     authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
     later = now + timedelta(seconds=1)
     monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
@@ -19726,7 +20034,7 @@ def test_exact_zero_jit_bid_keeps_absolute_band(conn, monkeypatch, direction, bi
     )
     if allowed:
         assert result.startswith("sell_pending:"), result
-        assert submitted[0]["exact_limit_price"] == 0.05
+        assert submitted[0]["exact_limit_price"] == float(bid)
     else:
         assert result == "exit_blocked: no_in_band_bid"
         assert submitted == []
@@ -19745,6 +20053,7 @@ def test_hard_fact_reobservation_retains_pending_exposure(state, eligible):
 @pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
 @pytest.mark.parametrize("quote_kind", (
     "fresh_depth", "bba_only", "stale", "wrong_direction", "wrong_writer", "outside_band",
+    "old_quote", "missing_quote", "future_quote", "wrong_token", "naive_quote",
 ))
 def test_liquidity_recovery_accepts_only_current_canonical_full_depth_monitor(
     conn, monkeypatch, direction, quote_kind,
@@ -19784,11 +20093,151 @@ def test_liquidity_recovery_accepts_only_current_canonical_full_depth_monitor(
              "last_monitor_market_price_is_fresh": quote_kind != "stale",
              "held_sell_full_depth_action_authority": quote_kind != "bba_only",
              "last_monitor_best_bid": 0.04 if quote_kind == "outside_band" else 0.10,
+             "held_sell_quote_witness": None if quote_kind == "missing_quote" else {
+                 "token_id": "other-token" if quote_kind == "wrong_token" else token,
+                 "observed_at": (
+                     now if quote_kind == "old_quote"
+                     else later + timedelta(seconds=1) if quote_kind == "future_quote"
+                     else later.replace(tzinfo=None) if quote_kind == "naive_quote"
+                     else later
+                 ).isoformat(),
+             },
          })),
     )
     assert exit_lifecycle.check_pending_retries(
         position, conn=conn, current_min_order_size=Decimal("0.01"),
     ) is (quote_kind == "fresh_depth")
+
+
+def test_monitor_prefetch_preserves_each_tokens_native_capture_time(conn, monkeypatch):
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.execution import exit_lifecycle
+
+    now = _NOW
+    clock = [now - timedelta(seconds=30)]
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: clock[0])
+    _install_current_exit_capture(conn, monkeypatch)
+    positions = []
+    for direction, age in (("buy_yes", 30), ("buy_no", 1)):
+        clock[0] = now - timedelta(seconds=age)
+        token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+        pos = SimpleNamespace(
+            trade_id=direction, direction=direction, condition_id="condition-test",
+            market_id="condition-test", token_id=YES_TOKEN, no_token_id=NO_TOKEN,
+            state="day0_window",
+        )
+        positions.append(pos)
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn, object(), pos, token, require_fresh_capture=True,
+        )
+    clock[0] = now
+    clob = SimpleNamespace()
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        conn, clob, positions, {}, now_utc=now,
+        deps=SimpleNamespace(logger=SimpleNamespace(warning=lambda *args: None)),
+        local_only=True,
+    )
+    for pos, age in zip(positions, (30, 1)):
+        quote = monitor_refresh.monitor_quote_refresh(conn, clob, pos)
+        assert quote is not None
+        assert quote.source_timestamp == (now - timedelta(seconds=age)).isoformat()
+        monitor_refresh._persist_monitor_quote(None, pos, quote)
+        assert pos._zeus_held_monitor_quote_witness == {
+            "token_id": quote.token_id, "observed_at": quote.source_timestamp,
+        }
+
+
+@pytest.mark.parametrize("case", ("mixed_network", "cached_clock", "cached_missing", "typed_missing"))
+def test_network_monitor_prefetch_preserves_token_and_cached_clocks(monkeypatch, case):
+    import time
+    from src.data.polymarket_client import HeldOrderbookReadResult
+    from src.engine import cycle_runtime, monitor_refresh
+
+    old = _NOW - timedelta(seconds=30)
+    new = _NOW - timedelta(seconds=1)
+    books = {token: {"asset_id": token,
+                    "bids": [{"price": ".10", "size": "20"}],
+                    "asks": [{"price": ".12", "size": "20"}]}
+             for token in (YES_TOKEN, NO_TOKEN)}
+    positions = [SimpleNamespace(trade_id=token, token_id=token, no_token_id="unused",
+                                 direction="buy_yes", state="day0_window")
+                 for token in books]
+    monkeypatch.setattr(cycle_runtime, "_fresh_local_held_monitor_orderbooks", lambda *args, **kwargs: {})
+
+    def fetch(tokens):
+        assert set(tokens) == set(books)
+        if case.startswith("cached"):
+            monitor_refresh.install_monitor_orderbook_prefetch(
+                clob, {YES_TOKEN: books[YES_TOKEN]},
+                captured_at_by_token={YES_TOKEN: old} if case == "cached_clock" else {},
+            )
+            return HeldOrderbookReadResult(
+                {NO_TOKEN: books[NO_TOKEN]}, attempted_token_ids=tokens,
+                terminal_reason="complete", captured_at=new,
+                captured_at_by_token={NO_TOKEN: new},
+            )
+        return HeldOrderbookReadResult(
+            books, attempted_token_ids=tokens, terminal_reason="complete", captured_at=old,
+            captured_at_by_token={YES_TOKEN: old, **({NO_TOKEN: new} if case == "mixed_network" else {})},
+        )
+
+    clob = SimpleNamespace(get_orderbook_snapshots=fetch)
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        None, clob, positions, {}, now_utc=_NOW, deadline_monotonic=time.monotonic() + 10,
+        deps=SimpleNamespace(logger=SimpleNamespace(warning=lambda *args: None)),
+    )
+    expected = {YES_TOKEN: "" if case == "cached_missing" else old.isoformat(),
+                NO_TOKEN: "" if case == "typed_missing" else new.isoformat()}
+    for pos in positions:
+        quote = monitor_refresh.monitor_quote_refresh(None, clob, pos)
+        assert quote is not None
+        assert quote.source_timestamp == expected[pos.token_id]
+    published = monitor_refresh.current_monitor_orderbook_batch(
+        books, checked_at_utc=_NOW, max_age=timedelta(seconds=180),
+    )
+    assert published is not None
+    assert set(published[0]) == {token for token, stamp in expected.items() if stamp}
+
+
+@pytest.mark.parametrize("has_token_clock", (True, False))
+def test_singular_typed_monitor_read_keeps_its_token_clock(has_token_clock):
+    import time
+    from src.data.polymarket_client import HeldOrderbookReadResult
+    from src.engine import monitor_refresh
+
+    captured_at = _NOW - timedelta(seconds=1)
+    book = {"asset_id": YES_TOKEN, "bids": [{"price": ".10", "size": "20"}],
+            "asks": [{"price": ".12", "size": "20"}]}
+    clob = SimpleNamespace(get_held_orderbook_snapshots_hard_deadline=lambda *args, **kwargs:
+        HeldOrderbookReadResult(
+            {YES_TOKEN: book}, terminal_reason="complete", captured_at=captured_at,
+            captured_at_by_token={YES_TOKEN: captured_at} if has_token_clock else {},
+        ))
+    pos = SimpleNamespace(token_id=YES_TOKEN, no_token_id=NO_TOKEN, direction="buy_yes",
+                          state="day0_window", _zeus_held_monitor_deadline_monotonic=time.monotonic() + 10)
+    quote = monitor_refresh.monitor_quote_refresh(None, clob, pos)
+    assert quote is not None
+    assert quote.source_timestamp == (captured_at.isoformat() if has_token_clock else "")
+
+
+def test_old_quote_cannot_release_liquidity_wait_before_periodic_retry(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+
+    position, _, now = _exact_zero_exit_case(conn, monkeypatch)
+    position.state = "pending_exit"
+    position.pre_exit_state = "day0_window"
+    position.exit_trigger = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+    exit_lifecycle._mark_exit_retry(
+        position, reason=position.exit_trigger, error="exit_no_executable_bid", conn=conn,
+    )
+    conn.commit()
+    retry_at = datetime.fromisoformat(position.next_exit_retry_at)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now + timedelta(seconds=5))
+    assert not exit_lifecycle.check_pending_retries(position, conn=conn)
+    assert position.next_exit_retry_at == retry_at.isoformat()
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: retry_at + timedelta(microseconds=1))
+    assert exit_lifecycle.check_pending_retries(position, conn=conn)
+    assert position.exit_retry_count == 0
 
 
 @pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
@@ -19812,6 +20261,7 @@ def test_source_only_correction_revokes_real_exact_exit_before_sdk(conn, monkeyp
     condition = '0x' + 'a' * 64
     position.condition_id = condition
     position.market_id = condition
+    _install_current_exit_capture(conn, monkeypatch, condition_id=condition)
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
     old_book = get_snapshot(conn, 'exact-zero-book')
     insert_snapshot(conn, replace(old_book, snapshot_id='source-bound-book', condition_id=condition))

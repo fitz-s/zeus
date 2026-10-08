@@ -3206,6 +3206,23 @@ def scan_current_global_auction_scope(
                 cancelled=_cancelled,
             ),
         )
+        from src.contracts.exceptions import ObservationUnavailableError
+        from src.engine.current_day0_observation import current_wrh_probability_event
+
+        current_events = []
+        for event in events:
+            _raise_if_cancelled()
+            try:
+                current_event = current_wrh_probability_event(
+                    world_conn, event, decision_time=decision_at_utc,
+                )
+            except ObservationUnavailableError:
+                # Retain this family's claim for its typed preparation refusal.
+                # Both ENTRY and HELD re-read the owned source before cache use;
+                # one unreadable family must not suppress the rest of the cut.
+                current_event = event
+            current_events.append(current_event)
+        events = tuple(current_events)
         _raise_if_cancelled()
     except InterruptedError as exc:
         if cancellation_seen:

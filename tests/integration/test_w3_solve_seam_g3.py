@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-07
+# Last reused/audited: 2026-10-08
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -50466,6 +50466,19 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     # capture is causal; the original forecast issue/cycle still governs age.
     captured = datetime(2026,9,29,23,10,tzinfo=utc)
     cut = datetime(2026, 9, 30, 6, 20, tzinfo=utc)
+    # This synthetic replay owns the current reader clock as well as its
+    # capture/write clocks. Never renew old evidence to the host's wall time.
+    from src.data import replacement_forecast_bundle_reader as reader
+    reader_clock = [cut]
+    class ClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+    class ConsumerClock(datetime, metaclass=ClockType):
+        @classmethod
+        def now(cls, tz=None):
+            at = reader_clock[0]
+            return at.astimezone(tz) if tz else at.replace(tzinfo=None)
+    monkeypatch.setattr(reader, "datetime", ConsumerClock)
     target = date(2026, 9, 30)
     city = runtime_cities_by_name()["Hong Kong"]
     if observed_extreme_native is None:
@@ -50793,7 +50806,8 @@ def _hko_clock_normal_materializer_fixture(tmp_path, monkeypatch, metric, *, pri
     conn.commit()
     return SimpleNamespace(conn=conn,db=db,city=city,request=request,result=result,cut=cut,bins=bins,
                            anchor_request=anchor_request,artifact_path=artifact_path,manifest_dir=manifest_dir,
-                           write_provider_cohort=write_provider_cohort,sql_clock=sql_clock)
+                           write_provider_cohort=write_provider_cohort,sql_clock=sql_clock,
+                           reader_clock=reader_clock,clock=ConsumerClock)
 
 
 @pytest.mark.parametrize("metric",("high","low"))
@@ -50833,6 +50847,34 @@ def test_held_point_trace_observes_normal_hko_consumer_without_changing_witness(
             assert trace["producer_witness_identity"] == baseline.probability_witness.witness_identity
             assert trace["lane"] == use.value
             assert trace["decision_at_utc"] == fixture.cut.isoformat()
+        # The exact same certificate must stop serving when its current ENS
+        # coverage expires, even if a caller retains the earlier decision cut.
+        before = tuple(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone())
+        coverage = dict(fixture.conn.execute("SELECT * FROM source_run_coverage WHERE source_run_id=?",
+            (fixture.request.baseline_source_run_id,)).fetchone())
+        expiry = _dt.datetime.fromisoformat(coverage["expires_at"])
+        assert max(_dt.datetime.fromisoformat(coverage[key]) for key in ("computed_at", "recorded_at")) <= fixture.cut < expiry
+        from src.data import replacement_forecast_bundle_reader as reader
+        from src.data.replacement_forecast_readiness import latest_replacement_readiness
+        readiness = latest_replacement_readiness(fixture.conn,city=fixture.city.name,
+            target_date="2026-09-30",temperature_metric=metric,decision_time=fixture.cut)
+        def read_current():
+            return reader.read_replacement_forecast_bundle(fixture.conn,baseline_bundle=None,
+                readiness=readiness,city=fixture.city.name,target_date="2026-09-30",
+                temperature_metric=metric,decision_time=fixture.cut,require_baseline_bundle=False,
+                enforce_raw_input_hwm=True,raw_input_hwm_conn=fixture.conn,
+                authority_purpose=reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION)
+        current = read_current()
+        assert current.ok and current.bundle.posterior_id == fixture.result.posterior_id
+        fixture.reader_clock[0] = expiry + _dt.timedelta(microseconds=1)
+        expired = read_current()
+        assert not expired.ok
+        assert expired.reason_code == "REPLACEMENT_CURRENT_ENSEMBLE_SNAPSHOT_COVERAGE_BLOCKED"
+        assert tuple(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (fixture.result.posterior_id,)).fetchone()) == before
+        assert dict(fixture.conn.execute("SELECT * FROM source_run_coverage WHERE source_run_id=?",
+            (fixture.request.baseline_source_run_id,)).fetchone()) == coverage
     finally:
         fixture.conn.close()
 
@@ -51938,7 +51980,7 @@ def test_selected_order_runner_up_trace_binds_final_held_family_proposal(tmp_pat
                     WHERE selection_epoch_identity=? AND candidate_id=? LIMIT 1""",
                     (actual_selected.actuation.selection_epoch_identity,winner.candidate_id)).fetchone()
                 if native is not None:
-                    assert native == (winner.token_id,selected_point)
+                    assert tuple(native) == (winner.token_id,selected_point)
                 else:
                     mode = trade.execute("SELECT mode FROM decision_log WHERE rowid=?",(row[5],)).fetchone()[0]
                     assert mode == "global_single_order_auction_delta"
@@ -54827,16 +54869,7 @@ def _normal_hko_concentrated_sell(tmp_path, monkeypatch, request, _hko_clock_nat
     init_schema_trade_only(trade)
     actual_batch, hooks = global_batch_runtime.process_current_global_batch, []
     at = fixture.cut
-    from src.data import replacement_forecast_bundle_reader as reader
-    class ClockType(type):
-        def __instancecheck__(cls, value):
-            return isinstance(value, _dt.datetime)
-    class ConsumerClock(_dt.datetime, metaclass=ClockType):
-        @classmethod
-        def now(cls, tz=None):
-            return at.astimezone(tz) if tz else at.replace(tzinfo=None)
-    # Reproduce a fixed simulated current clock, never renew source timestamps.
-    monkeypatch.setattr(reader, "datetime", ConsumerClock)
+    ConsumerClock = fixture.clock
     monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
     monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
     monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
@@ -55163,8 +55196,12 @@ def test_value_sell_persists_fake_sdk_fill_before_partial_reduction(
     conn.close()
     monkeypatch.setattr("src.state.db.get_world_connection", lambda **_: sqlite3.connect(audit_db))
     calls = []
+    public_funder = "0x0000000000000000000000000000000000000001"
     class FakeSdk:
         def bind_submission_envelope(self, envelope):
+            assert envelope.funder_address == public_funder
+            assert envelope.selected_outcome_token_id == case.selected.token_id
+            assert envelope.condition_id == case.selected.condition_id
             self.envelope = envelope
         def bind_signed_submission_identity_persister(self, persister):
             self.persister = persister
@@ -55181,6 +55218,20 @@ def test_value_sell_persists_fake_sdk_fill_before_partial_reduction(
                 "tradeIDs":["fake-log-trade"], "_venue_submission_envelope":envelope.to_dict()}
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeSdk)
     case.trade.commit()
+    # Public identity is an external host input, not execution authority.
+    # Its absence must still fail closed before command/envelope/fill writes.
+    with monkeypatch.context() as missing_identity:
+        missing_identity.setattr("src.data.polymarket_client.resolve_funder_address", lambda: "")
+        rejected = executor.execute_exit_order(intent, conn=case.trade,
+            decision_id="global-sell:"+case.ranked.actuation.actuation_identity,
+            q_version=case.probability.q_version)
+    assert rejected.status == "rejected"
+    assert rejected.reason == "pre_submit_identity_binding_failed: canonical funder_address is empty"
+    assert calls == [] and not rejected.venue_call_started and not rejected.venue_ack_received
+    for table in ("venue_commands", "venue_submission_envelopes", "venue_trade_facts"):
+        assert case.trade.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    assert tuple(case.trade.execute("SELECT phase,shares FROM position_current").fetchone()) == ("active", 5)
+    monkeypatch.setattr("src.data.polymarket_client.resolve_funder_address", lambda: public_funder)
     pending = load_runtime_open_portfolio(case.trade).positions[0]
     assert exit_lifecycle._record_exit_intent_before_execution_gates(case.trade, pending, exit_intent)
     result = executor.execute_exit_order(intent, conn=case.trade,

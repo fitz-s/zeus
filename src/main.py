@@ -10457,8 +10457,15 @@ def _exit_monitor_cycle(
         current_overdue = _canonical_overdue_monitor_families(
             require_fresh_inputs=False,
         )
+        # A cold wake already admits its target families before the lazy
+        # canonical debt read discovers them. They are work owned by this
+        # claim, not a new outside-scope obligation that should preempt it.
+        # New debt in another family still yields to the existing recovery.
+        admitted_families = absorbed_overdue_families | frozenset(
+            target_families or ()
+        )
         return current_overdue is None or not current_overdue.issubset(
-            absorbed_overdue_families
+            admitted_families
         )
 
     periodic_full_book = target_families is None and not urgent_fact

@@ -1024,10 +1024,16 @@ class PolymarketUserChannelIngestor:
                     price_tick_size=None if exact_taker else price_tick_size,
                 )
                 if same_fill_economics and str(latest_fact.get("state") or "") == status:
+                    command_event = None
+                    if status == "CONFIRMED":
+                        from src.execution.command_recovery import reconcile_confirmed_partial_exit_command
+
+                        if reconcile_confirmed_partial_exit_command(conn, str(command["command_id"])):
+                            command_event = "PARTIAL_FILL_OBSERVED"
                     conn.commit()
                     return {
                         "trade_fact_id": int(latest_fact["trade_fact_id"]),
-                        "command_event": None,
+                        "command_event": command_event,
                         "reason": "duplicate_trade_fact",
                     }
                 if same_fill_economics:

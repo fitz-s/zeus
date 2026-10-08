@@ -22194,3 +22194,351 @@ passed; nonmergeable PR checks did not run. This new compatible source tree
 still requires exact remote publication and hosted check results. No merge,
 deployment, restart, production database operation or trade is authorized by
 this evidence record, and no loss-elimination or funding guarantee is made.
+
+
+## 2026-10-08 scheduled physical-exit replay: admitted bounded slice
+
+Published baseline: PR535 head f5181ebe18ea87c1b8c009ca56aa1bc2141675f9,
+tree52ebdab62e69e7f4e38d50e61fd4b7ea2bb629c9. This new offline slice starts
+from actual CI merge3fbfa0f6c878dd5dcb3d29fa49c435c561317d4a, preserving
+current livee552a588 source. It does not authorize deployment or live actions.
+
+Acceptance requires real registered scheduler dispatch, qualified native
+WRH/forecast inputs, canonical ownership and durable wake/queue delivery,
+normal materialization and held selection, command persistence, fake venue
+ingestion, and canonical confirmed-fill reconciliation. No direct posterior,
+authoritative receipt, decision or fill-projection injection may bypass these
+handoffs. The deterministic scheduler/event clock and synthetic executable
+book window are assumptions, not measured wall-clock or production latency.
+The inclusive existing [0.05,0.95] action band remains unchanged. Cases cover
+exact-dead YES/NO and positive-q deterioration, restored liquidity, partial
+residual redecision, corrected/unreadable source refusal, restart/duplicate
+events/late fills and stale-evidence reentry refusal.
+
+First genuine scheduled RED, frozen as test-only0b67e6414b2f6b035bbd4ed6a59afe4b1214a07d:
+registered WRH acquisition receives a qualified native product but commits
+zero because the outer world_write_mutex already owns the WORLD live flock
+that get_forecasts_connection_with_world(write_class=live,blocking=False)
+acquires through another descriptor. Real canonical writer controls succeed
+immediately before and after the job. Independent Linux reproduction has
+two assertion failures and no teardown errors. Earlier tests substituted
+mutex/DB context and did not cover this production handoff. No production
+incident or platform-wide occurrence is inferred from this cloud evidence.
+
+Authorized minimal runtime scope: only _day0_current_noaa_wrh_tick drops its
+redundant outer WORLD acquisition and relies on the existing canonical,
+nonblocking FORECASTS-to-WORLD writer owner. Do not change the global lock
+implementation or make protection permissive. Require real cross-thread
+exclusion, contention deferral, rollback/no-wake, prepared-CAS correction
+races, and no provider/body I/O under either writer lease. Wake publication
+remains after commit and lease release. Independently review the frozen fix,
+then continue downstream scheduled replay to expose later genuine gaps.
+
+Separately review test-only repairs for deterministic public fake funder
+resolution and owned HKO source clocks. Preserve missing-identity and same-
+certificate expiry negatives, native causal clocks, source/receipt/gateway
+checks and canonical fill-before-reduction assertions. Do not silence other
+red tests or change source/SELL law to make fixtures pass. The inherited
+deadline-label race has equal transient retry/backoff for both outcomes and
+is lower priority than restoring the blocked producer-to-fill proof.
+
+
+Scheduled replay second boundary (2026-10-08): normal cold startup can lazily
+discover canonical overdue debt after targeted claim admission. Already
+admitted same-family debt was treated as newly outside scope and preempted
+that first pass. Targeted run_exit_monitor_cycle then returned True without
+MONITOR_REFRESHED, suppressing immediate same-wake retry. Normal periodic
+fallback produces a refresh at+5 simulated seconds; a predeclared synthetic
+bid0.10 until+4s then0.04 demonstrates the avoidable refresh-window miss for
+YES and NO. This is an inherited cold-start latency/completion defect, not
+permanent debt loss or yet proof of a lost live fill.
+
+Authorized narrow runtime scope: main recognizes target families already
+admitted to the claim when classifying unabsorbed debt; genuinely new other
+families still preempt. exit_lifecycle applies its existing canonical and
+discharged-ID completion predicate to the filtered targeted portfolio. A
+preempted/incomplete pass returns typed COVERAGE_INCOMPLETE and preserves the
+durable wake through existing one-turn fairness; no retry spin, global debt
+waiver or risk/source/price-band relaxation. Durable DATA_DEGRADED/no-action
+verdicts, empty/discharged targets and existing artifact-defer behavior retain
+their contracts. Cold/restart and duplicate coverage remains explicit.
+
+Author freeze: main914b10c9cd5bd28ed279b35c6efa6e0afe2300eb, completion
+7e94b15e7c3f7b50d4dbb5e89f0533c372de678a. Independent review completed the named runtime changes with 41 passing
+post-repair checks, preserved genuine cold YES/NO RED, and no remaining
+Critical or Important finding in that scope. The integrated scheduled suite
+passes 23 tests. Memory-reset replay is not an OS-process restart, and the
+review corrected a fixture-only mixed wall/simulated lifecycle clock before
+accepting repeated-cycle evidence.
+The source-to-real-producer posterior milestone is distinct from the still
+incomplete fixed-book before/after decision and normal fill-confirmation
+handoff. Simulated deadlines and book windows are not wall-clock SLAs.
+
+
+Scheduled replay third boundary (2026-10-08): the exact-zero refresh deletes
+its old monitor probability receipt but does not bind the typed hard-fact
+verdict already obtained by its caller. The existing protective semantic
+gate then rejects PROTECTIVE_AUTHORITY_ERROR before any command or SDK call.
+The test-only RED is 837a53ac06bd39c9450ac3ea110523b900954277, with genuine
+scheduled YES/NO failures. Static comparison to untouched e552 confirms the
+refresh, both callers, exit context and receipt-required gate already have
+this mismatch; the candidate's added current-source reproof is later and
+cannot cause the earlier missing-receipt rejection. Native scheduled RED
+was executed on the candidate, not attributed to a live holding.
+
+Authorized bounded repair propagates the existing typed hard-fact verdict
+through both normal and q-only refresh callers and constructs the existing
+monitor receipt with its native evidence and snapshot identity. It creates
+no new authority or numeric-zero shortcut. Reject incomplete, wrong-family,
+wrong-side, unknown-source, future/stale or tiny-positive evidence, and prove
+that source correction, retraction or unreadability after refresh still
+blocks the real final semantic recheck. Continue the ordinary readiness,
+command, venue-ingest and canonical confirmed-fill chain after this repair;
+a persisted receipt or a later readiness refusal is not fill acceptance.
+
+Receipt source freeze ffaa7ec38dd4e633dc4ff354e906b52088545807 and paired
+test freeze 5ff3af2e0baf91788dccf1c9c4d235e19da9231e passed the integrated
+47-test scheduled suite. Independent bounded review passed 63 checks across
+native YES/NO, HIGH/LOW, exact loss/win, q-only/full overlay parity, malformed
+or scalar evidence, final source changes and wrong identity controls. No
+Critical or Important finding remains in this receipt slice. A shape-valid
+but wrong-date/source-identity diagnostic receipt still fails current-source
+semantic reproof; the constructor does not replace that final authority gate.
+The ordinary exact replay advances to its explicit offline readiness block,
+not yet a confirmed fill. No deployment readiness is claimed.
+
+Scheduled replay fourth boundary (2026-10-08): a normally captured full book
+at 0.49 one second before source arrival remains valid for the native
+180-second selection lifetime. The qualified exact-dead held lane reuses it
+while an external 0.10 bid remains executable for a declared 30-second window.
+Its FAK receives a deterministic no-match. The +5-second registered monitor
+retains that snapshot and the rejected command identity instead of capturing
+0.10. Supplying a genuinely new normal 0.10 snapshot at +1 allows the same
++5 monitor to submit. This is a cache/retry failure in the bounded held lane,
+not a newer-row precedence defect or proof that every independent market
+refresh lane fails. Broader generic reactor consumption is outside that probe.
+
+The authorized repair requires fresh executable capture for qualified
+immediate protective execution, preserving exact global handoff authority,
+source reproof, request admission, inclusive price band and idempotency. Do
+not clear rejected command IDs, make a market fall an exit reason, or disable
+all snapshot caching. Capture and external I/O stay outside canonical write
+leases. Unavailable depth, expiry, correction, duplicate wake, and concurrently
+committed snapshot behavior need explicit negative/positive controls. Source
+ownership for this bounded change is exit_lifecycle and focused exit tests.
+
+Scheduled replay fifth boundary (2026-10-08): normal REST polling persists a
+CONFIRMED partial SELL trade while its command remains ACKED. Frozen-source
+recovery selectors exclude that state despite positive confirmed quantity;
+full recovery priming does include the exact order, so absent point collection
+is not the established cause. The native WebSocket first-delivery path emits
+PARTIAL_FILL_OBSERVED, but the same trade arriving through WebSocket after REST
+returns as a duplicate before that transition. A later independent chain
+mirror changes holdings 5 to 3; this is not by itself canonical economic-fill
+journaling or residual redecision proof. The selector probe reads only the
+identified synthetic test DB, whose bytes remain unchanged.
+
+Repair only the inconsistent derived command transition under existing
+canonical native fill authority. Preserve duplicate/crash/restart safety,
+confirmed quantity conservation and terminal-order proof; do not infer fills
+or cash from ACK, relax unknown-side-effect gates, or edit accounting truth.
+The real user-channel handler and registered polling/recovery owners remain
+separate acceptance paths. Preserve original polling offsets and budgets;
+normal external input may be delivered through its registered native handler.
+
+The source-to-first signed submission milestone is distinct from full exit:
+registered YES and cold NO actuation pass, while a matched ACK leaves all five
+canonical shares unchanged. Polling first ingests confirmed two at simulated
++90 seconds and chain mirror updates at +120. The original +4-second residual
+window remains unproved. Later restored-depth windows are separate recovery
+controls, not retrospective proof that the earlier exit window was met.
+Wall execution time is recorded independently because synchronous callbacks
+can run while the deterministic scheduler clock stays fixed.
+
+Full statistical actuation additionally needs genuine initial ENTRY policy,
+certificate and filled-command lineage. The bare synthetic holding is not an
+authoritative substitute. Build a normal offline BUY/fake-confirmed-fill
+prelude from coherent current source inputs, then demonstrate prior HOLD to
+positive-q SELL through actual global actuation using the predeclared book and
+unchanged action law. No manually injected authority receipt or entry lineage
+may make the final scheduled proof appear complete.
+
+Polling follow-up freeze bc2aef617762e1bc0d42a0d57801e3b4e8ea5dd0 passed
+independent review: 77 focused/scheduled checks and a separate actual native
+WS/REST interleaving. Initial 44ee allowed two partial command events during
+one duplicate-delivery race, without a second trade fact, cash or holding
+mutation; an atomic proof-and-append savepoint fixes that exact race. The
+missing economic journal was separately traced to a constant fixture clock:
+intent and command had equal time, violating the unchanged causal binder.
+Advancing the event clock by one microsecond at submit yields the normal
+confirmed two-share journal, basis 0.24 and PnL -0.04. No economics runtime
+change was made. The first attempted copied DB labels were unreliable and
+must not be used; subsequent backups follow each case's explicit XML path.
+
+The fresh-capture freeze c6638bff1e87bbacad4835e2f973babbdf0cb003 passed
+523 exit-safety tests versus 471 on untouched source, and independent native
+scheduled controls. A subsequent persistent-empty negative exposes a separate
+quote-origin gap: a prefetched old selection quote is stamped with the monitor
+run time and falsely releases liquidity debt before capture again sees empty
+depth. No order is created, but debt/capture churn is not genuine recovery.
+The bounded correction preserves per-token quote capture time through the
+existing prefetch and monitor receipt, excludes pre-absence cache only for
+liquidity waits, and uses the existing bounded current-quote read. Recovery
+must use quote time, not monitor event time; missing/future/mismatched proof
+cannot grant recovery. The 120-second fallback and command fences remain.
+Owned runtime surfaces extend to cycle_runtime and monitor_refresh solely for
+that existing quote witness; no new price/source exit law is authorized.
+
+Full-depth hard-fact replay freeze 277c3865b996a2f0d435129254eeb7b6a3bf39a4
+passes the combined 79-case scheduled/partial modules. Cold YES and NO quote
+100 shares with a predeclared five-share match cap. All five match at T+1us,
+inside the synthetic four-second book window; native CONFIRMED arrives at
++1 second and normal canonical closure at +5, with no open position and PnL
+-0.10. Recorded source-to-submit wall times are 0.585s and 0.087s for those
+specific runs, not latency guarantees. Cash receipt authority remains UNKNOWN.
+The partial case explicitly caps its transport match at two despite displayed
+depth100; it establishes confirmed reduction and later restored-depth recovery,
+not a guarantee that displayed depth clears the whole order. Native duplicate
+confirmation and process-memory reset preserve quantity and do not reopen it.
+Independent full-depth review and statistical full-actuation remain separate.
+
+The normal statistical entry prelude first preserves a cash10 no-entry control:
+its one-dollar risk cap is below the current 1.046 minimum all-in BUY cost.
+A separately predeclared cash20 scenario keeps books, fees and law unchanged.
+Its missing ECMWF native raw capture must be supplied by the normal downloader
+from the same native anchor body, not by editing posterior provenance. This
+fixture extension does not validate the older legacy-model free-cash CI setup,
+whose wider current-source migration remains explicitly deferred.
+
+Per-token quote-origin correction is frozen at
+10672600a797c2d6977cd1f736fb63579ab2c20d. Independent review found and closed
+both mixed-result errors before this freeze: collapsing native token clocks
+to a batch minimum, and renewing a cached fallback with a newer network
+clock. Independent final checks pass 24 native/network and 30 focused cases;
+persistent empty through registered +5/+35 monitors retains one forced
+capture and emits no liquidity-release event, while a genuine new +5 quote
+recovers normally. The full exit-safety suite passes 541 cases. Selected
+engine/monitor failures and skips match their exact pre-change baselines and
+are retained as limits, not a global green result.
+
+Integrated source e4d25e0fc0a7c71c71757c2454dca07a5c9dd168 passes all 620
+scheduled/partial/exit-safety checks. Independent 277c full-depth/partial/
+restart review separately passed five cases and inspected canonical facts.
+This establishes the bounded hard-fact closure and recovery slices. It does
+not establish statistical Day0 action-role consistency or deployed behavior.
+
+The initial missing-vector statistical RED is now classified correctly:
+the fixture advanced from 14:58 acquisition to 18:00 beyond the existing
+three-hour bound. Fresh normal inputs restore actual causal bundle/vector
+proof and fresh positive q without any probability source or monitor change.
+The stale case remains a refusal control. A subsequent fixture version uses
+normal deterministic fetch/cache/parser and ENS metadata/body paths over
+explicit repeated external-response bodies; this is an offline availability
+assumption, not an observation of a real provider. Native trade messages omit
+fee_paid_micro, use documented five-decimal modeled fees and match SELL at
+the external bid; canonical fee and on-chain cash proof remain UNKNOWN.
+
+The unchanged full-window statistical replay does submit inside its declared
+window and closes after fixing the same causal microtime seam. Its own exact
+held request delays construction until a successor loses exact qualification;
+that is a measured delay, not proof that the original window was missed.
+The final action consumes changed-source posterior4 but scalar/non-Day0 q
+0.00802038, while current monitor remaining-day q is 0.00346185. The lawful
+final information-set/role selection remains under audit, including the
+ordinary registered catch-up emitter. No reactor or probability-source repair
+is included in this staged candidate for that unresolved question.
+
+Admitted current-WRH probability-role repair (2026-10-08): the full normal
+periodic EDLI catch-up control preserves the split. Its scanner accepts
+observation_prints carriers but intentionally excludes current_wrh_product;
+adding the actual configured cadence emits no Day0 event for this scenario.
+The monitor already constructs a validated read-only current-WRH carrier and
+consumes the remaining-day witness. Auction/JIT preparation sees only persisted
+Day0 events and consumes scalar posterior4 instead. Existing observation-domain
+precedence makes the final current information-set binding the active issue;
+an equality check on two arbitrary q values is not the authority test.
+
+Share the existing current-snapshot carrier constructor with global family
+scope/preparation and final JIT. Preserve PROVISIONAL_CURRENT_SNAPSHOT,
+validated body custody, station/date/unit, snapshot membership, effective
+availability, correction/retraction and invalid-owner semantics. Re-read
+current ownership before cache reuse and at submit; unknown/stale/current-
+source failures stay family-scoped. Never persist an invented monotone event,
+change the durable wake/claim identity, manufacture vector fields or weaken
+source eligibility. ENTRY and HELD consume the same lawful current evidence
+while retaining their independent economic, readiness and risk gates.
+
+Keep the reactor construction experiment out of this repair. Its proposed
+owned-debt exemption failed independent unknown-state controls, and the
+unchanged original window still permits an eventual SELL. The exact measured
+self-delay and successor qualification loss remain diagnostic evidence, not
+an asserted loss or permission to relax construction cancellation.
+
+The statistical replay's post-close reentry work also retains normal process
+readiness: boot fill-bridge and source-health refusal are not stale-specific
+or corrected-source eligibility proofs. Exercise those normal owners or state
+the limitation; do not inject a success/completion flag to obtain a BUY.
+
+Current-WRH role integration is frozen for final verification at the source
+slice f54572b58d, after independent d35 review proved the actual claim,
+receipt, positive-q action and canonical close. The initial shared reader
+overreached historical source-date policy and unrelated typed Day0 carriers;
+its 26 added failures were removed without migrating fixtures. The paired
+355-test suite then matched its 345-pass/10-failure baseline. Final legacy
+Day0 submit-time reproof also rejects a changed current WRH owner before
+selected-q replay. No extra universe scan or reactor exemption is included.
+
+The registered native replay consumes Day0 remaining-day q
+0.003461845154150711 at the actual selected SELL, with matching probability
+and capital receipt identities. Its 12.5-share match at
+18:02:08.000001 precedes the declared 18:02:30 book expiry; confirmation at
+18:02:32 and canonical closure at 18:02:37 follow it. Changed-source
+availability to submit is 62.000001 simulated seconds; one independent run
+measured 16.0484 wall seconds. These are specific offline observations, not
+runtime latency or real-exchange fill guarantees.
+
+Post-close correction recovery required canonical queue directory names in
+the fixture; normal source producers then materialize the returning 26C
+revision. The first eligible unchanged-source auction rejects the exited
+token1003 and selects the different token1001. The single-token synthetic
+transport cannot execute that alternative, and its unknown outcome blocks
+later admission. Consequently neither a whole-window stale-reentry pass nor
+corrected-source BUY eligibility is claimed. The test retains this explicit
+coverage limit instead of changing the action law or external books.
+
+Upstream 843b4589061dc4c5815265732ad4bbe5503e00a0 is preserved by the
+integration. Its post-selection epoch deadline change passes all six supplied
+controls, including stale-epoch refusal and urgent cancellation. It is
+independent of the rejected reactor construction exemption. Final integrated
+checks and independent review remain required before publishing this stage.
+
+Final integrated runtime f8f790db62 passes 643 scheduled/source/partial/exit
+safety/epoch checks and 1963 lifecycle relationships. Independent final
+current-WRH/JIT/ABA review passes 19 cases on that same runtime. All scoped
+source-rationale, test-quality, semantic/invariant, planning, map, freshness
+and DB schema-fingerprint checks pass. The unrelated topology registry schema
+omissions previously recorded are not relabeled as repaired.
+
+The broader boundary acceptance module initially exposed four obsolete
+fixture interfaces: per-token capture clocks and canonical quote persistence
+were missing, hard-fact input lacked its qualified FORECAST-owned evidence,
+and its simulated datetime class rejected ordinary datetime instances. The
+test-only e4aa585356 repair preserves native capture and receipt validation;
+all 46 cases pass, including the original +10s retry and two-order residual
+assertions. These are fixture corrections, not additional runtime repairs.
+
+Same-selected-cut comparison reproduces the complete native Day0 payload,
+500-by-3 samples, full simplex, role, bands and token bindings across monitor
+and final JIT, with exact monitor reload stability. Composite outer witness
+hashes differ between lanes; their full preimage was not captured, and no
+single-field explanation or universal hash-equality claim is made. Actual
+selected JIT and final receipt identities match exactly.
+
+The narrowed reentry diagnostic 3050e4bdab refreshes terminal command facts
+and allows XFAIL only for the exact known alternate-token transport assertion.
+Its actual assertion tail was checked against the immutable
+completed replay. It does not hide another unknown-submit cause or establish
+corrected-source entry eligibility. Full native alternate-token execution,
+real venue cash/fees, deployed scheduler performance and broad repository CI
+remain separate deployment-review evidence gaps. This is a tested offline
+candidate for the existing draft PR, not authority to merge, deploy or fund.

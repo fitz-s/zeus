@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-10-06; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Lifecycle: created=2026-10-06; last_reviewed=2026-10-08; last_reused=2026-10-08
 # Purpose: Prove offline lawful early exits, liquidity recovery and canonical churn fences.
 # Reuse: Run when physical source-to-q, global exit selection or exit execution authority changes.
 # Created: 2026-10-06
-# Last reused/audited: 2026-10-07
+# Last reused/audited: 2026-10-08
 # Authority basis: offline physical-exit investigation; preserve INV-01/06/28/41
 # and the inclusive .05-.95 executable-price law.
 """Independent offline acceptance probes for the lawful early-exit window.
@@ -384,9 +384,10 @@ def test_monitor_redecides_exact_exit_when_liquidity_returns_inside_retry_delay(
     """Monitor scheduling boundary: accepted hard fact and fresh book wake the
     ordinary exit organ at +10s, not after the old no-bid +120s timer.
 
-    The hard-fact classifier is controlled; the branchwise receipt binds an
-    accepted NOAA print through the real source reader. The gateway is captured
-    here. Pending scan, quotes, canonical writers, exit law and retry are real.
+    The classifier returns a verdict read from canonical resolver evidence;
+    the branchwise receipt binds an accepted NOAA print through the real source
+    reader. The gateway is captured here. Pending scan, quotes, canonical
+    writers, exit law and retry are real.
     """
     import logging
     from zoneinfo import ZoneInfo
@@ -394,9 +395,11 @@ def test_monitor_redecides_exact_exit_when_liquidity_returns_inside_retry_delay(
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime, monitor_refresh
     from src.execution import exit_lifecycle, day0_hard_fact_exit
-    from src.state.portfolio import PortfolioState, Position
+    from src.state.portfolio import ExitContext, PortfolioState, Position
     from tests import test_day0_hard_fact_exit as monitor_harness
-    from tests.test_exit_safety import _ensure_snapshot, _bind_exact_zero_source_receipt
+    from tests.test_exit_safety import (
+        _ensure_snapshot, _bind_exact_zero_source_receipt, _bind_canonical_hard_fact_case,
+    )
     from src.state import write_coordinator
 
     # The real coordinator caches canonical DB paths process-wide. Each replay
@@ -415,10 +418,16 @@ def test_monitor_redecides_exact_exit_when_liquidity_returns_inside_retry_delay(
     conn, read_conn = monitor_harness._production_monitor_topology(tmp_path, monkeypatch, pos, phase="day0_window")
     # Real NOAA print and owner reader bind the full receipt in WORLD. The
     # guard is not mocked; canonical monitor/exit evidence remains in TRADE.
+    hard_fact_verdict = None
     with sqlite3.connect(tmp_path / "zeus-world.db") as source_conn:
         source_conn.row_factory = sqlite3.Row
         compact_receipt = _bind_exact_zero_source_receipt(source_conn, pos, initial)
         source_conn.commit()
+    if proof_kind == "hard_fact":
+        with sqlite3.connect(tmp_path / "zeus-forecasts.db") as forecasts_conn:
+            forecasts_conn.row_factory = sqlite3.Row
+            _, hard_fact_verdict = _bind_canonical_hard_fact_case(
+                forecasts_conn, pos, ExitContext(), initial)
     portfolio = PortfolioState(positions=[pos])
     exit_lifecycle._mark_exit_retry(pos, reason="POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
                                   error="exit_no_executable_bid", conn=conn)
@@ -436,12 +445,15 @@ def test_monitor_redecides_exact_exit_when_liquidity_returns_inside_retry_delay(
             from src.data.polymarket_client import HeldOrderbookReadResult
             wanted = [str(token) for token in token_ids]
             return HeldOrderbookReadResult({token: self._book(token) for token in wanted},
-                attempted_token_ids=wanted, terminal_reason="complete", captured_at=later)
+                attempted_token_ids=wanted, terminal_reason="complete", captured_at=later,
+                captured_at_by_token={token: later for token in wanted})
 
     seen = []
     def refresh(read, clob, position, **kwargs):
         quote = monitor_refresh.monitor_quote_refresh(read, clob, position)
         assert quote is not None and quote.full_depth_action_authority
+        assert quote.source_timestamp == later.isoformat()
+        monitor_refresh._persist_monitor_quote(conn, position, quote)
         position.last_monitor_at = later.isoformat()
         position.last_monitor_prob = 0.0
         position._current_global_held_probability_samples = (0.0, 0.0)
@@ -459,10 +471,7 @@ def test_monitor_redecides_exact_exit_when_liquidity_returns_inside_retry_delay(
             n_edges_found=1, n_edges_after_fdr=1, market_velocity_1h=0, divergence_score=0)
 
     monkeypatch.setattr(monitor_refresh, "refresh_position", refresh)
-    monkeypatch.setattr(day0_hard_fact_exit, "evaluate_hard_fact_exit", lambda **_: (
-        day0_hard_fact_exit.HardFactVerdict(action="EXIT_DEAD_BIN",
-            reason="current same-station exact running extreme", metric="high", rounded_extreme=26.0,
-            source="same_station_fast_tail") if proof_kind == "hard_fact" else None))
+    monkeypatch.setattr(day0_hard_fact_exit, "evaluate_hard_fact_exit", lambda **_: hard_fact_verdict)
     monkeypatch.setattr(exit_lifecycle, "handle_exit_pending_missing", lambda *_a, **_k: {"action": "none"})
     monkeypatch.setattr(exit_lifecycle, "execute_exit", lambda **kwargs: seen.append(kwargs) or "exit_retry:offline_probe")
     deps = SimpleNamespace(
@@ -473,9 +482,16 @@ def test_monitor_redecides_exact_exit_when_liquidity_returns_inside_retry_delay(
         cycle_runtime.execute_monitoring_phase(conn, Book(.10, .12), portfolio,
             SimpleNamespace(add_monitor_result=results.append), SimpleNamespace(record_exit=lambda _: None),
             summary, deps=deps, read_conn=read_conn)
-        assert len(seen) == 1, summary
+        assert len(seen) == 1, json.dumps(summary, default=str, sort_keys=True)
         assert seen[0]["exit_context"].exit_reason.startswith(
             "DAY0_HARD_FACT_BIN_DEAD" if proof_kind == "hard_fact" else "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES")
+        monitor = conn.execute("""SELECT occurred_at, payload_json FROM position_events
+            WHERE position_id=? AND event_type='MONITOR_REFRESHED'
+            ORDER BY sequence_no DESC LIMIT 1""", (pos.trade_id,)).fetchone()
+        assert monitor["occurred_at"] == later.isoformat()
+        assert json.loads(monitor["payload_json"])["held_sell_quote_witness"] == {
+            "token_id": pos.token_id, "observed_at": later.isoformat(),
+        }
         assert clock[0] < deadline
     finally:
         read_conn.close()
@@ -969,6 +985,14 @@ def test_exact_proof_terminal_partial_reconciles_then_monitor_exits_residual(
         def get_open_orders(self): return []
         def get_order_status(self, order_id):
             return {"status":"MATCHED", "remaining_size":"0", "size_matched":"1"}
+        def get_orderbook_snapshots(self, token_ids, *, timeout=None):
+            from src.data.polymarket_client import HeldOrderbookReadResult
+            wanted = [str(token_id) for token_id in token_ids]
+            return HeldOrderbookReadResult({token_id: self._book(token_id) for token_id in wanted},
+                attempted_token_ids=wanted, terminal_reason="complete", captured_at=clock[0],
+                captured_at_by_token={token_id: clock[0] for token_id in wanted})
+        def get_held_orderbook_snapshots_hard_deadline(self, token_ids, *, timeout_seconds):
+            return self.get_orderbook_snapshots(token_ids, timeout=timeout_seconds)
 
     position, context, t0 = H._exact_zero_exit_case(conn, monkeypatch, direction=direction, shares=2.0)
     position.entered_at = (t0-timedelta(hours=1)).isoformat()
@@ -976,7 +1000,9 @@ def test_exact_proof_terminal_partial_reconciles_then_monitor_exits_residual(
     portfolio = PortfolioState(positions=[position])
     clock, balance, calls = [t0], [2.0], []
     deadline = t0 + timedelta(seconds=30)
-    class EventClock(datetime):
+    class EventClockType(type):
+        def __instancecheck__(cls, value): return isinstance(value, datetime)
+    class EventClock(datetime, metaclass=EventClockType):
         @classmethod
         def now(cls, tz=None):
             return clock[0].astimezone(tz) if tz else clock[0].replace(tzinfo=None)
@@ -1060,6 +1086,8 @@ def test_exact_proof_terminal_partial_reconciles_then_monitor_exits_residual(
         def refresh(_conn, clob, pos, **kwargs):
             quote = monitor_refresh.monitor_quote_refresh(_conn, clob, pos)
             assert quote is not None and quote.full_depth_action_authority
+            assert quote.source_timestamp == clock[0].isoformat()
+            monitor_refresh._persist_monitor_quote(conn, pos, quote)
             pos.last_monitor_prob = 0.0
             pos.last_monitor_prob_is_fresh = True
             pos.last_monitor_at = clock[0].isoformat()

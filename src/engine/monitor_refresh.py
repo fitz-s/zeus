@@ -28,9 +28,13 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from src.execution.day0_hard_fact_exit import HardFactVerdict
 
 from src.config import (
     cities_by_name,
@@ -72,6 +76,8 @@ _MONITOR_PRIMARY_BELIEF_READ_ELAPSED_SECONDS_ATTR = (
     "_monitor_primary_belief_read_elapsed_seconds"
 )
 _MONITOR_PREFETCHED_ORDERBOOKS_ATTR = "_zeus_monitor_prefetched_orderbooks"
+_MONITOR_PREFETCHED_ORDERBOOK_TIMES_ATTR = "_zeus_monitor_prefetched_orderbook_times"
+_HELD_MONITOR_QUOTE_WITNESS_ATTR = "_zeus_held_monitor_quote_witness"
 _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
 )
@@ -517,6 +523,7 @@ def install_monitor_orderbook_prefetch(
     *,
     attempted_token_ids=(),
     merge: bool = False,
+    captured_at_by_token: dict[str, datetime] | None = None,
 ) -> bool:
     """Attach one-cycle batch books to the cycle-scoped CLOB client."""
 
@@ -530,11 +537,21 @@ def install_monitor_orderbook_prefetch(
         for value in attempted_token_ids
         if (token_id := str(value).strip())
     )
+    capture_times = {
+        token_id: captured_at.astimezone(timezone.utc).isoformat()
+        for token_id, captured_at in (captured_at_by_token or {}).items()
+        if token_id in clean and getattr(captured_at, "tzinfo", None) is not None
+    }
     if merge:
         current_books = getattr(clob, "__dict__", {}).get(
             _MONITOR_PREFETCHED_ORDERBOOKS_ATTR
         )
         if isinstance(current_books, dict):
+            old_times = getattr(clob, _MONITOR_PREFETCHED_ORDERBOOK_TIMES_ATTR, {})
+            capture_times = {
+                **{token: value for token, value in old_times.items() if token not in clean},
+                **capture_times,
+            }
             clean = {**current_books, **clean}
         current_attempted = getattr(clob, "__dict__", {}).get(
             _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR
@@ -543,6 +560,7 @@ def install_monitor_orderbook_prefetch(
             attempted = current_attempted | attempted
     try:
         setattr(clob, _MONITOR_PREFETCHED_ORDERBOOKS_ATTR, clean)
+        setattr(clob, _MONITOR_PREFETCHED_ORDERBOOK_TIMES_ATTR, capture_times)
         setattr(clob, _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR, attempted)
     except (AttributeError, TypeError):
         return False
@@ -664,7 +682,44 @@ def prefetched_monitor_orderbook(clob, token_id: str) -> dict | None:
     return book if isinstance(book, dict) and book else None
 
 
-def _remember_monitor_orderbook(clob, token_id: str, book: object) -> bool:
+def prefetched_monitor_orderbook_timestamp(clob, token_id: str) -> str | None:
+    times = getattr(clob, _MONITOR_PREFETCHED_ORDERBOOK_TIMES_ATTR, {})
+    return times.get(str(token_id)) if isinstance(times, dict) else None
+
+
+def _liquidity_wait_quote_cutoff(conn, pos) -> datetime | None:
+    """A cached quote predating this position's known liquidity loss is obsolete."""
+    # INV-47 SCOPE: this pending position's liquidity-only wait. DRAIN: the
+    # existing bounded monitor read obtains its next quote. RESET: only a quote
+    # observed after the loss can prove recovery; normal retry cadence remains.
+    if conn is None or str(getattr(pos, "state", "") or "") != "pending_exit":
+        return None
+    try:
+        row = conn.execute(
+            """SELECT event.occurred_at, event.payload_json
+                 FROM position_events event
+                 JOIN position_current current ON current.position_id=event.position_id
+                WHERE event.position_id=? AND event.event_type='EXIT_ORDER_REJECTED'
+                  AND current.phase='pending_exit' AND current.order_status='retry_pending'
+                ORDER BY event.sequence_no DESC LIMIT 1""",
+            (str(getattr(pos, "trade_id", "") or ""),),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row[1] or "{}"))
+        if payload.get("status") != "liquidity_wait" or payload.get("error") not in {
+            "exit_no_executable_bid", "exit_no_in_band_bid",
+        }:
+            return None
+        cutoff = datetime.fromisoformat(str(row[0]).replace("Z", "+00:00"))
+        return cutoff.astimezone(timezone.utc) if cutoff.tzinfo is not None else None
+    except (sqlite3.Error, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _remember_monitor_orderbook(
+    clob, token_id: str, book: object, *, source_timestamp: str,
+) -> bool:
     """Keep a successful singular refresh available for this monitor cycle."""
 
     books = getattr(clob, "__dict__", {}).get(_MONITOR_PREFETCHED_ORDERBOOKS_ATTR)
@@ -677,6 +732,9 @@ def _remember_monitor_orderbook(clob, token_id: str, book: object) -> bool:
     ):
         return False
     books[token] = book
+    times = getattr(clob, _MONITOR_PREFETCHED_ORDERBOOK_TIMES_ATTR, None)
+    if isinstance(times, dict):
+        times[token] = source_timestamp
     return True
 
 
@@ -905,6 +963,7 @@ def _fresh_canonical_monitor_orderbook(
     if not condition_id or not token_id:
         return None
     checked_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    liquidity_cutoff = _liquidity_wait_quote_cutoff(conn, pos)
     outer_deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
     read_deadline = time.monotonic() + 0.25
     if outer_deadline is not None:
@@ -1053,7 +1112,8 @@ def _fresh_canonical_monitor_orderbook(
     candidates = [
         candidate
         for candidate in candidates
-        if not any(
+        if (liquidity_cutoff is None or candidate[0] > liquidity_cutoff)
+        and not any(
             candidate[0] <= invalidated_at <= checked_at
             for invalidated_at in invalidated_at_values
         )
@@ -1110,6 +1170,7 @@ def _fresh_canonical_monitor_no_bid_witness(
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
 
     checked_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    liquidity_cutoff = _liquidity_wait_quote_cutoff(conn, pos)
     outer_deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
     read_deadline = time.monotonic() + 0.25
     if outer_deadline is not None:
@@ -1204,6 +1265,7 @@ def _fresh_canonical_monitor_no_bid_witness(
                     quote_at > checked_at
                     or created_at > checked_at
                     or checked_at - quote_at > FRESHNESS_WINDOW_DEFAULT
+                    or (liquidity_cutoff is not None and quote_at <= liquidity_cutoff)
                     or not str(row[0] or "").strip()
                     or not str(row[1] or "").strip()
                     or not str(row[12] or "").strip()
@@ -2820,7 +2882,8 @@ def _one_sided_monitor_quote(
             ask_sz_f = 0.0
         if not np.isfinite(bid_f) or bid_f < 0.0 or not np.isfinite(bid_sz_f) or bid_sz_f < 0.0:
             return None
-        source_timestamp = source_timestamp or datetime.now(timezone.utc).isoformat()
+        if source_timestamp is None:
+            source_timestamp = datetime.now(timezone.utc).isoformat()
         from src.data.market_scanner import _bid_ladder_from_book
 
         return HeldTokenMonitorQuote(
@@ -2861,7 +2924,18 @@ def monitor_quote_refresh(
         return None
 
     book = prefetched_monitor_orderbook(clob, tid)
-    source_timestamp: str | None = None
+    source_timestamp = (
+        prefetched_monitor_orderbook_timestamp(clob, tid) or ""
+        if book is not None else None
+    )
+    liquidity_cutoff = _liquidity_wait_quote_cutoff(conn, pos)
+    if book is not None and liquidity_cutoff is not None:
+        try:
+            captured_at = datetime.fromisoformat(str(source_timestamp).replace("Z", "+00:00"))
+            if captured_at.tzinfo is None or captured_at <= liquidity_cutoff:
+                book, source_timestamp = None, None
+        except (TypeError, ValueError):
+            book, source_timestamp = None, None
     if book is None:
         # The market-channel snapshot is selection evidence, not submit
         # authority. Consume it before any bounded venue read so a fresh
@@ -2885,6 +2959,8 @@ def monitor_quote_refresh(
     get_orderbook = getattr(clob, "get_orderbook", None)
     try:
         if book is None:
+            read_started_at = datetime.now(timezone.utc).isoformat()
+            network_book = False
             deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
             if deadline is not None:
                 remaining = float(deadline) - time.monotonic()
@@ -2901,10 +2977,20 @@ def monitor_quote_refresh(
                     float(deadline) - HELD_MONITOR_PRIMARY_BELIEF_READ_COST_FLOOR_SECONDS,
                     HELD_MONITOR_NETWORK_QUOTE_READ_MAX_SECONDS,
                 )
-                book = hard_deadline_books(
+                result = hard_deadline_books(
                     [tid],
                     timeout_seconds=max(0.0, quote_deadline - time.monotonic()),
-                ).get(tid)
+                )
+                book = result.get(tid)
+                network_book = book is not None
+                from src.data.polymarket_client import HeldOrderbookReadResult
+
+                if network_book and isinstance(result, HeldOrderbookReadResult):
+                    captured_at = result.captured_at_by_token.get(tid)
+                    source_timestamp = (
+                        captured_at.astimezone(timezone.utc).isoformat()
+                        if getattr(captured_at, "tzinfo", None) is not None else ""
+                    )
                 if book is None:
                     fallback = _fresh_canonical_monitor_orderbook(conn, pos, tid)
                     if fallback is None:
@@ -2916,6 +3002,7 @@ def monitor_quote_refresh(
                     book, source_timestamp = fallback
             else:
                 book = get_orderbook(tid) if callable(get_orderbook) else None
+                network_book = book is not None
                 if book is None:
                     fallback = _fresh_canonical_monitor_orderbook(conn, pos, tid)
                     if fallback is not None:
@@ -2927,8 +3014,13 @@ def monitor_quote_refresh(
                             tid,
                         )
             if source_timestamp is None:
-                _remember_monitor_orderbook(clob, tid, book)
+                source_timestamp = read_started_at
+            if network_book:
+                _remember_monitor_orderbook(clob, tid, book, source_timestamp=source_timestamp)
         if book is not None:
+            book_token = str(book.get("asset_id") or book.get("assetId") or book.get("token_id") or "")
+            if book_token and book_token != str(tid):
+                return None
             from src.data.market_scanner import _top_book_level_decimal
 
             try:
@@ -2959,7 +3051,8 @@ def monitor_quote_refresh(
             if pos.state == "day0_window"
             else float(vwmp(bid_f, ask_f, bid_sz_f, ask_sz_f))
         )
-        source_timestamp = source_timestamp or datetime.now(timezone.utc).isoformat()
+        if source_timestamp is None:
+            source_timestamp = datetime.now(timezone.utc).isoformat()
         from src.data.market_scanner import _bid_ladder_from_book
 
         return HeldTokenMonitorQuote(
@@ -2997,6 +3090,10 @@ def monitor_quote_refresh(
 def _persist_monitor_quote(conn, pos: Position, quote: HeldTokenMonitorQuote | None) -> None:
     """Write quote evidence only after probability-side WORLD writes finish."""
 
+    setattr(pos, _HELD_MONITOR_QUOTE_WITNESS_ATTR, {
+        "token_id": str(getattr(quote, "token_id", "") or ""),
+        "observed_at": str(getattr(quote, "source_timestamp", "") or ""),
+    } if quote is not None else None)
     if conn is None or quote is None:
         return
     try:
@@ -3512,15 +3609,8 @@ def _day0_absorbing_hard_fact_overlay(
     setattr(
         hard_pos,
         _MONITOR_PROBABILITY_RECEIPT_ATTR,
-        _compact_monitor_probability_receipt(
-            {
-                "schema_version": 1,
-                "selected_method": SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT,
-                "probability_authority": "day0_absorbing_hard_fact",
-                "probability_functional": "DETERMINISTIC_ABSORBING_FACT",
-                "held_side_probability": float(belief.held_side_prob),
-                "hard_fact_evidence": evidence.as_dict(),
-            }
+        _exact_hard_fact_probability_receipt(
+            pos, verdict, held_probability=float(belief.held_side_prob),
         ),
     )
     _set_monitor_probability_fresh(hard_pos, True)
@@ -4057,78 +4147,14 @@ def _materialize_current_global_day0_probability(
 
 
 def _current_wrh_monitor_observation_carrier(conn, position: Position, *, now: datetime):
-    """A read-only adapter carrier for the qualified current resolver product.
+    """Read the shared current-product carrier on the monitor's canonical owner."""
+    from src.engine.current_day0_observation import current_wrh_day0_observation_carrier
 
-    This is never persisted as a monotone event. SCOPE: this owned WRH
-    city/day/metric. DRAIN: the current-product acquisition/repair path.
-    RESET: a valid nonempty current snapshot. Unknown/EMPTY cannot resurrect
-    an obsolete event; the probability adapter still proves its own source,
-    carrier and action authority under its existing laws.
-    """
-    city = cities_by_name.get(str(position.city))
-    if city is None or str(city.settlement_source_type).lower() != "noaa":
-        return None
-    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
-    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
-    from src.contracts.settlement_semantics import SettlementSemantics
-    from src.events.day0_authority import (
-        DAY0_LIVE_AUTHORITY_MATCHES,
-        DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
+    return current_wrh_day0_observation_carrier(
+        conn, city=cities_by_name.get(str(position.city)),
+        target_date=str(position.target_date), metric=resolve_position_metric(position)[0],
+        now=now, canonical_owner=True,
     )
-    from src.events.opportunity_event import (
-        Day0ExtremeUpdatedPayload,
-        make_day0_extreme_updated_event,
-    )
-
-    metric = resolve_position_metric(position)[0]
-    owned, snapshot = read_current_noaa_wrh_snapshot(
-        conn, city=city, target_date=str(position.target_date), as_of=now,
-        _canonical_owner=True,  # Opened by the canonical FORECAST+WORLD reader below.
-    )
-    if owned is False:
-        return None
-    extreme = snapshot.extreme(metric) if owned is True and snapshot is not None else None
-    if extreme is None:
-        raise ObservationUnavailableError("WRH_CURRENT_SNAPSHOT_UNAVAILABLE")
-    fact = _latest_authorized_day0_fact(
-        conn, city=str(position.city), target_date=str(position.target_date),
-        temperature_metric=metric, decision_time=now, require_settlement_channel=True,
-    )
-    if not isinstance(fact, Mapping) or any((
-        fact.get("source") != "current_wrh_product:" + snapshot.source,
-        fact.get("raw_payload_sha256") != snapshot.response_sha256,
-        fact.get("observation_available_at") != snapshot.received_at.isoformat(),
-        fact.get("observed_extreme_native") != extreme.value,
-        fact.get("station_id") != snapshot.station,
-        fact.get("unit") != snapshot.unit,
-    )):
-        raise ObservationUnavailableError("WRH_CURRENT_SNAPSHOT_SUPERSEDED_DURING_READ")
-    payload = Day0ExtremeUpdatedPayload(
-        city=str(position.city), target_date=str(position.target_date), metric=metric,
-        settlement_source=snapshot.source, station_id=snapshot.station,
-        settlement_source_type="noaa",
-        observation_time=str(fact["observation_time"]),
-        observation_available_at=snapshot.received_at.isoformat(),
-        raw_value=extreme.value,
-        rounded_value=int(SettlementSemantics.for_city(city).round_single(extreme.value)),
-        high_so_far=extreme.value if metric == "high" else None,
-        low_so_far=extreme.value if metric == "low" else None,
-        evidence_finality=DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
-        observation_availability_basis="canonical_current_product_receipt",
-        observation_transport="held_monitor_current_wrh_view",
-        raw_report_identity=snapshot.response_sha256,
-        **DAY0_LIVE_AUTHORITY_MATCHES,
-    )
-    carrier = make_day0_extreme_updated_event(
-        entity_key="|".join((payload.city, payload.target_date, metric, payload.station_id)),
-        source="held_monitor_current_wrh_view", observed_at=payload.observation_time,
-        received_at=snapshot.received_at.isoformat(), payload=payload,
-        causal_snapshot_id="current_wrh_product:" + snapshot.response_sha256,
-    )
-
-    # Creation describes this read-only view, not a new source receipt. Neither
-    # source availability nor the semantic carrier identity is renewed here.
-    return replace(carrier, created_at=now.isoformat())
 
 
 def _build_current_global_day0_family_snapshot(
@@ -5172,13 +5198,62 @@ def monitor_probability_refresh(
     return pos.p_posterior, pos, False
 
 
-def refresh_exact_one_position(pos: Position) -> EdgeContext:
+def _exact_hard_fact_probability_receipt(
+    pos: Position, verdict: "HardFactVerdict | None", *, held_probability: float,
+) -> dict[str, object] | None:
+    """Carry the qualified typed verdict through the fast monitor handoff.
+
+    This constructs no source authority. The source owner produced the typed
+    evidence, and the protective submit gate must still reproduce it from the
+    current canonical product. A scalar zero or old position receipt cannot
+    replace the verdict.
+    """
+    if verdict is None:
+        return None
+    from src.config import runtime_cities_by_name
+    from src.execution.day0_hard_fact_exit import (
+        HardFactEvidence, HardFactVerdict, hard_fact_bin_verdict, hard_fact_monitor_belief,
+    )
+    from src.events.day0_authority import DAY0_ABSORBING_FINALITIES, day0_evidence_finality
+
+    city = runtime_cities_by_name().get(pos.city)
+    evidence = getattr(verdict, "evidence", None)
+    if (
+        not isinstance(verdict, HardFactVerdict)
+        or not isinstance(evidence, HardFactEvidence)
+        or city is None
+        or not evidence.is_complete_for(city)
+        or verdict.metric != pos.temperature_metric
+        or verdict.source != evidence.source
+        or verdict.rounded_extreme != evidence.rounded_extreme
+        or day0_evidence_finality({"settlement_source": evidence.source}) not in DAY0_ABSORBING_FINALITIES
+        or datetime.fromisoformat(evidence.issued_at) > datetime.now(timezone.utc)
+    ):
+        raise ValueError("DAY0_HARD_FACT_RECEIPT_INVALID")
+    low, high = _parse_temp_range(pos.bin_label)
+    current = hard_fact_bin_verdict(metric=verdict.metric, direction=pos.direction,
+        bin_low=low, bin_high=high, effective_extreme=evidence.rounded_extreme)
+    belief = hard_fact_monitor_belief(verdict=verdict, direction=pos.direction)
+    if current is None or current.action != verdict.action or belief is None or belief.held_side_prob != held_probability:
+        raise ValueError("DAY0_HARD_FACT_RECEIPT_POSITION_MISMATCH")
+    return _compact_monitor_probability_receipt({
+        "schema_version": 1,
+        "selected_method": SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT,
+        "probability_authority": "day0_absorbing_hard_fact",
+        "probability_functional": "DETERMINISTIC_ABSORBING_FACT",
+        "held_side_probability": float(belief.held_side_prob),
+        "hard_fact_evidence": evidence.as_dict(),
+    })
+
+
+def refresh_exact_one_position(pos: Position, *, hard_fact_verdict: "HardFactVerdict | None" = None) -> EdgeContext:
     """Build a no-I/O context after settlement truth fixes held value at one."""
 
     if pos.direction not in {"buy_yes", "buy_no"}:
         raise ValueError(f"Unknown direction {pos.direction} for trade {pos.trade_id}")
-
     pos.last_monitor_at = datetime.now(timezone.utc).isoformat()
+    pos.last_monitor_prob_is_fresh = False
+    _set_day0_zero_probability_exit_authority(pos, False)
     pos.last_monitor_best_bid = None
     pos.last_monitor_best_ask = None
     pos.last_monitor_min_tick = None
@@ -5191,16 +5266,21 @@ def refresh_exact_one_position(pos: Position) -> EdgeContext:
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _GLOBAL_MONITOR_ALPHA_ATTR,
         "_replacement_current_evidence_held_bounds",
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+        "_day0_monitor_probability_receipt",
     ):
         try:
             delattr(pos, attr)
         except AttributeError:
             pass
 
+    receipt = _exact_hard_fact_probability_receipt(pos, hard_fact_verdict, held_probability=1.0)
     pos.selected_method = SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
     pos.last_monitor_prob = 1.0
     pos.last_monitor_prob_is_fresh = True
     pos.last_monitor_edge = float("nan")
+    if receipt is not None:
+        setattr(pos, _MONITOR_PROBABILITY_RECEIPT_ATTR, receipt)
     _set_day0_zero_probability_exit_authority(pos, False)
     _append_monitor_validation(pos, SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT)
     _append_monitor_validation(pos, "day0_hard_fact_probability_recompute_bypassed")
@@ -5230,13 +5310,15 @@ def refresh_exact_zero_position(
     pos: Position,
     *,
     refresh_quote: bool = True,
+    hard_fact_verdict: "HardFactVerdict | None" = None,
 ) -> EdgeContext:
     """Build a held-position context after settlement truth fixes q at zero."""
 
     if pos.direction not in {"buy_yes", "buy_no"}:
         raise ValueError(f"Unknown direction {pos.direction} for trade {pos.trade_id}")
-
     pos.last_monitor_at = datetime.now(timezone.utc).isoformat()
+    pos.last_monitor_prob_is_fresh = False
+    _set_day0_zero_probability_exit_authority(pos, False)
     pos.last_monitor_best_bid = None
     pos.last_monitor_best_ask = None
     pos.last_monitor_min_tick = None
@@ -5250,12 +5332,14 @@ def refresh_exact_zero_position(
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _GLOBAL_MONITOR_ALPHA_ATTR,
         _MONITOR_PROBABILITY_RECEIPT_ATTR,
+        "_day0_monitor_probability_receipt",
     ):
         try:
             delattr(pos, attr)
         except AttributeError:
             pass
 
+    receipt = _exact_hard_fact_probability_receipt(pos, hard_fact_verdict, held_probability=0.0)
     current_p_market = (
         pos.last_monitor_market_price
         if pos.last_monitor_market_price is not None
@@ -5292,6 +5376,8 @@ def refresh_exact_zero_position(
     pos.selected_method = SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
     pos.last_monitor_prob = 0.0
     pos.last_monitor_prob_is_fresh = True
+    if receipt is not None:
+        setattr(pos, _MONITOR_PROBABILITY_RECEIPT_ATTR, receipt)
     pos.last_monitor_edge = (
         -float(current_p_market)
         if pos.last_monitor_market_price_is_fresh

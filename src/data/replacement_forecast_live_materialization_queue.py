@@ -91,6 +91,11 @@ _TIMEOUT_RETRY_MAX_SECONDS = 600.0
 _TIMEOUT_RETRY_DEFERRED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_TIMEOUT_RETRY_DEFERRED"
 )
+# A batch child that skips a request for lack of deadline budget reports this stage;
+# its envelope reason is the stage-derived DEADLINE code. Nothing ran and nothing
+# failed, so the queue restores that request at once: no attempt, no backoff.
+DEADLINE_NOT_STARTED_STAGE = "not_started"
+DEADLINE_NOT_STARTED_REASON = "REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_NOT_STARTED"
 _CAPITAL_PROTECTION_TIMEOUT_RETRY_SECONDS = 1.0
 _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ATTEMPTS = 3
 _CAPITAL_PROTECTION_TIMEOUT_RETRY_MAX_ELAPSED_SECONDS = 75.0
@@ -9231,6 +9236,7 @@ def _process_claimed_materialization_batch(
     timed_out_requests: list[str] = []
     timeout_stage_reasons: list[str] = []
     deadline_deferred_reasons: list[str] = []
+    not_started_deferred: list[str] = []
     transient_read_retries: list[str] = []
     transient_read_reason_codes: set[str] = set()
     pending: list[_PendingMaterialization] = []
@@ -9547,12 +9553,14 @@ def _process_claimed_materialization_batch(
                 if runner_started is not None:
                     _trace_phase_finished("runner_wait", runner_started)
 
-    # Started means the worker itself answered for the item: a synthetic
-    # timeout or missing-envelope result proves no item began. Ambiguous
-    # outcomes (a crash mid-batch) therefore never count as started.
+    # Started means the worker itself answered for the item and began it: a
+    # synthetic timeout or missing-envelope result proves no item began, nor
+    # does the child's own not-started deferral. Ambiguous outcomes (a crash
+    # mid-batch) therefore never count as started.
     started = [
         item for item in pending
         if _worker_answered(completed_by_path[item.input_json])
+        and not _deadline_not_started(completed_by_path[item.input_json])
     ]
     committed_posterior_count = 0
     reactor_wake_published_count = 0
@@ -9589,8 +9597,10 @@ def _process_claimed_materialization_batch(
             timeout_stage_reasons.append(timeout_reason)
         result_reason_codes = _subprocess_result_reason_codes(completed)
         result_status = _subprocess_result_status(completed)
+        not_started = _deadline_not_started(completed)
         deadline_deferred = (
             result_status == "DEFERRED"
+            and not not_started
             and any(
                 reason.startswith("REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_")
                 for reason in result_reason_codes
@@ -9743,7 +9753,11 @@ def _process_claimed_materialization_batch(
             )
             processed.append(str(receipt))
             unchanged_blocked.append(str(receipt))
-        elif _WRITE_DEFERRED_REASON in result_reason_codes:
+        elif not_started or _WRITE_DEFERRED_REASON in result_reason_codes:
+            # SCOPE: this request, plainly restored under its own name: same
+            # inode, mtime (so its arrival-order position) and timeout-retry
+            # attempt, no backoff. A not-started request did no work and failed
+            # nothing; the writer-busy request is retried by the next claim.
             if retry_path is None or input_json.parent == retry_path:
                 restored = input_json
             else:
@@ -9752,7 +9766,9 @@ def _process_claimed_materialization_batch(
                     retry_path,
                     request_path.name,
                 )
-            write_deferred.append(str(restored))
+            (not_started_deferred if not_started else write_deferred).append(
+                str(restored)
+            )
         elif item.request_payload is not None and (verdict or result_status in ("ERROR", None)):
             # SCOPE: this one request. An ENVIRONMENT_RETRY or UNCLASSIFIED error,
             # or a verdict not bound to the bytes it judged, is no verdict on the
@@ -9836,6 +9852,8 @@ def _process_claimed_materialization_batch(
             "replacement forecast writes deferred by transient contention: count=%d",
             len(write_deferred),
         )
+    if not_started_deferred:
+        reasons.append(DEADLINE_NOT_STARTED_REASON)
     if unclassified_retained:
         reasons.append(_UNCLASSIFIED_ERROR_REASON)
     if unbound_verdicts:
@@ -9895,10 +9913,19 @@ def _process_claimed_materialization_batch(
         completed_count=completed_count,
         deferred_count=(
             len(timed_out_requests) + len(transient_read_retries) + len(write_deferred)
+            + len(not_started_deferred)
         ),
         held_first=bool(started) and _request_family_scope(
             started[0].request_payload
         ) in _current_money_risk_families_or_empty(),
+    )
+
+
+def _deadline_not_started(completed: subprocess.CompletedProcess[str]) -> bool:
+    """The child's explicit verdict that it never began this request."""
+    return (
+        _subprocess_result_status(completed) == "DEFERRED"
+        and DEADLINE_NOT_STARTED_REASON in _subprocess_result_reason_codes(completed)
     )
 
 

@@ -4118,6 +4118,108 @@ def _confirmed_bound_trade_fact_summary(
     }
 
 
+def _confirmed_partial_exit_command_proof(
+    conn: sqlite3.Connection, command_id: str,
+) -> tuple[dict, dict] | None:
+    row = conn.execute(
+        """SELECT * FROM venue_commands WHERE command_id = ?
+             AND intent_kind = 'EXIT' AND UPPER(COALESCE(side, '')) = 'SELL'
+             AND state IN ('ACKED', 'POST_ACKED')
+             AND COALESCE(venue_order_id, '') != ''""", (command_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    command = _dict_row(row)
+    fills = _confirmed_bound_trade_fact_summary(
+        conn, command_id=command_id, venue_order_id=str(command["venue_order_id"]),
+        limit_price=command.get("price"), side=command.get("side"),
+    )
+    filled = _positive_decimal_or_none(fills.get("filled_size"))
+    requested = _positive_decimal_or_none(command.get("size"))
+    if not (
+        filled is not None and requested is not None and filled < requested
+        and fills.get("authenticated_confirmed") is True
+        and fills.get("fill_prices_respect_limit") is True
+        and _parse_ts(fills.get("observed_at")) is not None
+        and not _fill_size_completes_limit_order(filled, requested, side="SELL")
+    ):
+        return None
+    # Facts retain native bodies. Recheck the selected leg so a legacy fact
+    # with command/order columns but contradictory token/side cannot acquire
+    # a new command transition through this recovery path.
+    for fact_id in fills["trade_fact_ids"]:
+        fact = _dict_row(conn.execute(
+            "SELECT raw_payload_json, filled_size, fill_price FROM venue_trade_facts WHERE trade_fact_id=?",
+            (fact_id,),
+        ).fetchone())
+        raw = _json_dict(fact.get("raw_payload_json"))
+        order_id = str(command["venue_order_id"])
+        binding = _exchange_reconcile._trade_fill_economics_binding(
+            conn, command=command, raw=raw, venue_order_id=order_id,
+        )
+        if binding.state == "TAKER_UNVERIFIABLE":
+            return None
+        if binding.state == "EXACT_TAKER":
+            size, price = binding.filled_size, binding.fill_price
+        else:
+            leg = _exchange_reconcile._selected_maker_order(raw, order_id) or raw
+            if (
+                str(leg.get("asset_id") or leg.get("token_id") or "") != str(command["token_id"])
+                or str(leg.get("side") or "").upper() != "SELL"
+                or order_id not in _exchange_reconcile._trade_order_ids(raw)
+            ):
+                return None
+            size = _exchange_reconcile._trade_filled_size(raw, order_id)
+            price = _exchange_reconcile._trade_fill_price(raw, order_id)
+        if (_positive_decimal_or_none(size) != _positive_decimal_or_none(fact.get("filled_size"))
+                or _positive_decimal_or_none(price) != _positive_decimal_or_none(fact.get("fill_price"))):
+            return None
+    return command, fills
+
+
+def confirmed_partial_exit_command_pending(
+    conn: sqlite3.Connection, command_id: str,
+) -> bool:
+    """Read whether an authenticated partial SELL still lacks its command fold."""
+    return _confirmed_partial_exit_command_proof(conn, command_id) is not None
+
+
+def reconcile_confirmed_partial_exit_command(
+    conn: sqlite3.Connection, command_id: str,
+) -> bool:
+    """Expose confirmed partial SELL truth to the existing remainder recovery.
+
+    SCOPE: one ACKED/POST_ACKED EXIT and its bound confirmed trade identities.
+    DRAIN: REST ingest or duplicate WS delivery folds its canonical facts once.
+    RESET: PARTIAL stops the fold; terminal remainder and position/cash owners
+    still require their own evidence. This does not declare a fill complete.
+    """
+    # WS duplicate delivery can enter without an outer writer transaction.
+    # Keep the state proof and append on one SQLite snapshot: a concurrent
+    # fold must yield a retry, never a second legal PARTIAL -> PARTIAL event.
+    conn.execute("SAVEPOINT confirmed_partial_exit_fold")
+    try:
+        proof = _confirmed_partial_exit_command_proof(conn, command_id)
+        if proof is not None:
+            command, fills = proof
+            append_event(conn, command_id=command_id, event_type="PARTIAL_FILL_OBSERVED",
+                occurred_at=str(fills["observed_at"]), payload={
+                    "reason": "canonical_confirmed_partial_exit_trade_facts",
+                    "venue_order_id": str(command["venue_order_id"]),
+                    "source": str(fills["source"]),
+                    "trade_ids": list(fills["trade_ids"]),
+                    "trade_fact_ids": list(fills["trade_fact_ids"]),
+                    "filled_size": str(fills["filled_size"]),
+                    "fill_price": str(fills["fill_price"]),
+                })
+        conn.execute("RELEASE SAVEPOINT confirmed_partial_exit_fold")
+        return proof is not None
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT confirmed_partial_exit_fold")
+        conn.execute("RELEASE SAVEPOINT confirmed_partial_exit_fold")
+        raise
+
+
 def reconcile_complete_exit_trade_fact_commands(
     conn: sqlite3.Connection,
     *,

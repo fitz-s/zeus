@@ -2191,7 +2191,7 @@ def _day0_current_noaa_wrh_tick() -> dict[str, object]:
     from src.data.station_temperature_adapters import iter_current_noaa_wrh_products, iter_noaa_wrh_completed_owner_recovery
     from src.data.daily_obs_append import append_current_noaa_wrh_product, prepare_current_noaa_wrh_product
     from src.state.db import (get_forecasts_connection_with_world,
-                              get_forecasts_connection_with_world_read_only, world_write_mutex)
+                              get_forecasts_connection_with_world_read_only)
 
     cities = runtime_cities_by_name()
     scope_keys = {
@@ -2272,12 +2272,13 @@ def _day0_current_noaa_wrh_tick() -> dict[str, object]:
             logger.warning("WRH_CURRENT_PRODUCT_PREPARE_DEFERRED city=%s error=%s", city.name, type(exc).__name__)
             stages.append({"label": "received_product_prepare", "ok": False, "error": type(exc).__name__})
             continue
-        mutex = world_write_mutex()
-        if not mutex.acquire(timeout=0.05):
-            stages.append({"label": "received_product_commit", "ok": False, "error": "WORLD_WRITER_BUSY"})
-            continue
         changed = False
         try:
+            # This owner acquires FORECAST then WORLD writer flocks together.
+            # The legacy world mutex already owns that same WORLD flock;
+            # nesting it here makes our own nonblocking writer defer forever.
+            # SCOPE: this received product. DRAIN: the next scheduled poll.
+            # RESET: the canonical dual-DB lease becomes available.
             with get_forecasts_connection_with_world(write_class="live", blocking=False) as conn:
                 conn.execute("PRAGMA busy_timeout = 100")
                 conn.execute("BEGIN IMMEDIATE")
@@ -2293,8 +2294,6 @@ def _day0_current_noaa_wrh_tick() -> dict[str, object]:
         except Exception as exc:
             logger.warning("WRH_CURRENT_PRODUCT_WRITE_DEFERRED city=%s error=%s", city.name, type(exc).__name__)
             stages.append({"label": "received_product_commit", "ok": False, "error": type(exc).__name__})
-        finally:
-            mutex.release()
         if changed:
             committed += 1
             wake = publish_current_temperature_wakes(

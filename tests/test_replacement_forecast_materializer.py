@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-10-05
-# Lifecycle: created=2026-06-06; last_reviewed=2026-10-05; last_reused=2026-10-05
+# Last reused/audited: 2026-10-07
+# Lifecycle: created=2026-06-06; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Protect DB materialization for Open-Meteo ECMWF IFS 9km + Bayes-fusion replacement live layer.
 # Reuse: Run before changing replacement forecast live/experiment write path.
 # Authority basis: Operator-directed replacement forecast simple-switch readiness.
@@ -6772,6 +6772,175 @@ def test_materialize_script_batch_prepares_schema_before_first_input_error(
     assert all(call[1]["init_schema"] is False for call in calls)
     envelopes = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [envelope["returncode"] for envelope in envelopes] == [2, 0]
+
+
+class _TrackedConnection(sqlite3.Connection):
+    closed = False
+
+    def close(self):
+        self.closed = True
+        super().close()
+
+
+def _batch_child_with_fake_clock(tmp_path, monkeypatch, *, inputs, run_seconds, deadline_in):
+    """Drive the real batch loop of the child with a hand-advanced clock.
+
+    ``_run_one`` is stubbed to a READY commit that costs ``run_seconds`` of the
+    fake clock, so how many requests fit before the deadline is exact.
+    """
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.state.db as state_db
+
+    now = [datetime(2026, 10, 7, 17, 0, 0, tzinfo=timezone.utc)]
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now[0] if tz is None else now[0].astimezone(tz)
+
+    conn = sqlite3.connect(":memory:", factory=_TrackedConnection)
+    monkeypatch.setattr(cli, "datetime", _Clock)
+    monkeypatch.setattr(
+        state_db, "connect_existing_forecasts_db_without_journal_bootstrap", lambda: conn
+    )
+    monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
+    monkeypatch.setattr(
+        cli,
+        "_prepare_live_schema_and_manifest",
+        lambda *_a, **_k: cli._DurablePreparationReceipt(
+            schema_ready=True, anchor_artifact_id=None, manifest_committed=False
+        ),
+    )
+    ran = []
+
+    def _run_one(input_json, **_kwargs):
+        ran.append(input_json)
+        now[0] += timedelta(seconds=run_seconds)
+        return 0, '{"status":"READY","committed":true,"posterior_id":1}\n', ""
+
+    monkeypatch.setattr(cli, "_run_one", _run_one)
+    deadline = now[0] + timedelta(seconds=deadline_in)
+    rc = cli.main(
+        [
+            "--batch-input-json",
+            *(str(path) for path in inputs),
+            "--deadline-utc",
+            deadline.isoformat(),
+            "--commit",
+        ]
+    )
+    return rc, conn, ran, deadline
+
+
+def test_materialize_script_batch_defers_requests_that_cannot_finish_before_deadline(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """29 s of child budget, 8 s per request, 9 s start budget: requests 1-3
+    start (29, 21 and 13 s left), 4 and 5 (5 s left) are deferred, not started.
+    The envelope is the deadline-expired shape (returncode 75, DEFERRED) with the
+    explicit not-started stage; the child exits 0 with no kill."""
+    inputs = [tmp_path / f"req{i}.json" for i in range(5)]
+    rc, conn, ran, deadline = _batch_child_with_fake_clock(
+        tmp_path, monkeypatch, inputs=inputs, run_seconds=8.0, deadline_in=29.0
+    )
+
+    assert rc == 0
+    assert conn.closed is True
+    assert ran == inputs[:3]
+    envelopes = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [Path(e["input_json"]) for e in envelopes] == inputs
+    assert [e["returncode"] for e in envelopes] == [0, 0, 0, 75, 75]
+    for envelope in envelopes[3:]:
+        assert envelope["stdout"] == ""
+        # The explicit not-started marker: the queue restores these for an
+        # immediate retry, unlike a request that started and hit its deadline.
+        assert json.loads(envelope["stderr"]) == {
+            "status": "DEFERRED",
+            "reason_codes": ["REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_NOT_STARTED"],
+            "stage": "not_started",
+            "deadline_at": deadline.isoformat(),
+            "committed": False,
+            "reactor_wake_published": False,
+        }
+
+
+def test_materialize_script_budget_deferral_differs_from_a_started_deadline_only_by_its_marker(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """The not-started envelope has the exact shape the real ``_run_one`` returns
+    for a request whose deadline elapsed mid-run; only stage, reason code and
+    deadline_at differ, and the reason code is the one the queue reads."""
+    import scripts.materialize_replacement_forecast_live as cli
+    from src.data import replacement_forecast_live_materialization_queue as queue_mod
+
+    real_run_one = cli._run_one
+    inputs = [tmp_path / "a.json", tmp_path / "b.json"]
+    rc, _conn, _ran, deadline = _batch_child_with_fake_clock(
+        tmp_path, monkeypatch, inputs=inputs, run_seconds=1.0, deadline_in=5.0
+    )
+    assert rc == 0
+    deferred = [json.loads(line) for line in capsys.readouterr().out.splitlines()][1]
+    assert deferred["returncode"] == 75
+
+    expired_rc, expired_stdout, expired_stderr = real_run_one(
+        tmp_path / "expired.json",
+        commit=False,
+        init_schema=False,
+        deadline_at=deadline - timedelta(seconds=60),
+    )
+
+    assert (deferred["returncode"], deferred["stdout"]) == (expired_rc, expired_stdout)
+    batch_fields = json.loads(deferred["stderr"])
+    expired_fields = json.loads(expired_stderr.strip().splitlines()[-1])
+    assert set(batch_fields) == set(expired_fields)
+    assert batch_fields["reason_codes"] == [queue_mod.DEADLINE_NOT_STARTED_REASON]
+    assert batch_fields["stage"] == queue_mod.DEADLINE_NOT_STARTED_STAGE
+    assert expired_fields["reason_codes"] == [
+        "REPLACEMENT_LIVE_MATERIALIZATION_DEADLINE_OPEN_READ_SNAPSHOT"
+    ]
+    marker = {"stage", "reason_codes", "deadline_at"}
+    assert {k: v for k, v in batch_fields.items() if k not in marker} == {
+        k: v for k, v in expired_fields.items() if k not in marker
+    }
+
+
+def test_materialize_script_batch_always_starts_the_first_request(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """A batch whose deadline leaves less than the start budget still starts
+    its first request; everything after it is deferred."""
+    inputs = [tmp_path / f"req{i}.json" for i in range(3)]
+    rc, conn, ran, _deadline = _batch_child_with_fake_clock(
+        tmp_path, monkeypatch, inputs=inputs, run_seconds=1.0, deadline_in=2.0
+    )
+
+    assert rc == 0
+    assert conn.closed is True
+    assert ran == inputs[:1]
+    envelopes = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [e["returncode"] for e in envelopes] == [0, 75, 75]
+
+
+def test_materialize_script_batch_without_deadline_never_defers(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """An operator dry-run carries no queue deadline: every request runs."""
+    import scripts.materialize_replacement_forecast_live as cli
+    import src.state.db as state_db
+
+    inputs = [tmp_path / f"req{i}.json" for i in range(3)]
+    ran = []
+    conn = sqlite3.connect(":memory:", factory=_TrackedConnection)
+    monkeypatch.setattr(state_db, "get_forecasts_connection", lambda **_k: conn)
+    monkeypatch.setattr(cli, "_attach_world_read_only", lambda _conn: None)
+    monkeypatch.setattr(
+        cli, "_run_one",
+        lambda input_json, **_k: ran.append(input_json) or (0, '{"status":"READY"}\n', ""),
+    )
+
+    assert cli.main(["--batch-input-json", *(str(p) for p in inputs)]) == 0
+    assert ran == inputs
+    assert [json.loads(l)["returncode"] for l in capsys.readouterr().out.splitlines()] == [0, 0, 0]
 
 
 def test_materialize_manifest_persistence_does_not_verify_files_under_lock(

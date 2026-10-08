@@ -8684,6 +8684,18 @@ def process_current_global_batch(
             else book_deadline
         )
 
+    # SCOPE: stages after the cut's q/book/wealth fence: selection receipt,
+    #   carrier-rebound receipt, winner preflight and receipt, final actuation.
+    # DRAIN: they run to the book epoch's actuation deadline (when its quotes
+    #   stop being current) rather than the construction budget that bounds
+    #   scope, prepare and book capture; the EPOCH_EXPIRED checks below refuse
+    #   a stale winner at that same instant. An exact held-SELL completion
+    #   deadline, when earlier, bounds them instead (effective_actuation_deadline).
+    #   cancel_requested is carried over unchanged, so urgent wakes and exact
+    #   held-SELL preemption still cancel.
+    # RESET: each cut re-derives this at its own fence.
+    acting_context = work_context
+
     def expired_held_request_bindings(
         at: datetime | None = None,
     ) -> tuple[object, ...]:
@@ -8719,8 +8731,8 @@ def process_current_global_batch(
 
     def cancelled(stage: str) -> bool:
         last_stage[0] = stage
-        if work_context is not None:
-            work_context.checkpoint(stage)
+        if acting_context is not None:
+            acting_context.checkpoint(stage)
             return False
         if selection_cancelled is None:
             return False
@@ -8755,12 +8767,12 @@ def process_current_global_batch(
 
     @contextmanager
     def bounded_read(conn: object, stage: str, *, shared_connection: bool = False):
-        if work_context is None or not isinstance(conn, sqlite3.Connection):
+        if acting_context is None or not isinstance(conn, sqlite3.Connection):
             yield conn
             return
         with bounded_work_sqlite(
             conn,
-            work_context,
+            acting_context,
             stage=stage,
             shared_connection=shared_connection,
         ) as read_conn:
@@ -9837,6 +9849,25 @@ def process_current_global_batch(
         )
         if cancelled("book_epoch_fence"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
+        if (
+            work_context is not None
+            and work_context.deadline_monotonic is not None
+            and book_epoch is not None
+        ):
+            acting_context = WorkContext(
+                deadline_monotonic=work_context.monotonic()
+                + max(
+                    0.0,
+                    (
+                        effective_actuation_deadline(
+                            book_epoch.captured_at_utc + book_epoch.max_age
+                        )
+                        - current_time()
+                    ).total_seconds(),
+                ),
+                cancel_requested=work_context.cancel_requested,
+                monotonic=work_context.monotonic,
+            )
         # The complete q/book/wealth cut is immutable from this point forward.
         # Later global wakes belong to the next epoch. Consulting them again
         # below would starve actuation whenever unrelated books update
@@ -9889,7 +9920,7 @@ def process_current_global_batch(
                     base_decision_log_id=last_selection_receipt_row_id,
                     persist_artifact=_global_auction_artifact_persister(
                         trade_conn,
-                        work_context=work_context,
+                        work_context=acting_context,
                         owner="global_auction_carrier_rebound_receipt",
                     ),
                 )
@@ -10585,7 +10616,7 @@ def process_current_global_batch(
                 held_point_traces=held_point_traces,
                     persist_artifact=_global_auction_artifact_persister(
                         trade_conn,
-                        work_context=work_context,
+                        work_context=acting_context,
                         owner="global_auction_selection_receipt",
                         # SCOPE: only a cut carrying an exact durable held-SELL
                         # request. DRAIN: its immutable receipt commits before
@@ -10940,14 +10971,6 @@ def process_current_global_batch(
                     0.0,
                     (auction_deadline - preflight_at).total_seconds(),
                 )
-                work_deadline_owns_preflight = bool(
-                    work_context is not None
-                    and work_context.deadline_monotonic is not None
-                    and work_context.deadline_monotonic
-                    <= preflight_deadline_monotonic
-                )
-                if work_deadline_owns_preflight:
-                    preflight_deadline_monotonic = work_context.deadline_monotonic
                 preflight_cancelled = (
                     work_context.cancel_requested
                     if work_context is not None
@@ -10982,12 +11005,6 @@ def process_current_global_batch(
                     preflight_fence is not None
                     and preflight_fence.interrupt_reason == "deadline"
                 ):
-                    if work_deadline_owns_preflight:
-                        raise WorkDeferred(
-                            WorkDeferredCode.DEADLINE,
-                            stage="winner_preflight:work_deadline",
-                            remaining_s=0.0,
-                        )
                     _LOG.warning(
                         "global winner preflight SQLite work exceeded epoch deadline: "
                         "elapsed_s=%.3f event=%s",
@@ -11071,7 +11088,7 @@ def process_current_global_batch(
                         venue_submit_count_after=after_preflight,
                         persist_artifact=_global_auction_artifact_persister(
                             trade_conn,
-                            work_context=work_context,
+                            work_context=acting_context,
                             owner="global_auction_preflight_receipt",
                             before_commit=preflight_commit_guard,
                         ),
@@ -11688,10 +11705,10 @@ def process_current_global_batch(
                     )
                 return checked_at, True
             # This checkpoint is deliberately the last callable boundary before
-            # the one-shot actuator: the effective deadline is the earlier of
-            # the auction wall-clock authority above and this shared work cut.
-            if work_context is not None:
-                work_context.checkpoint("final_actuation:before_submit")
+            # the one-shot actuator: its deadline is the book epoch's actuation
+            # deadline and cancel_requested still preempts it.
+            if acting_context is not None:
+                acting_context.checkpoint("final_actuation:before_submit")
             return checked_at, False
 
         final_actuation_at, auction_expired = checkpoint_final_actuation()

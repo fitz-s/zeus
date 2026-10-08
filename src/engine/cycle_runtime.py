@@ -3711,6 +3711,9 @@ def _emit_monitor_refreshed_canonical_if_available(
                             False,
                         )
                     )
+                    quote_witness = getattr(pos, "_zeus_held_monitor_quote_witness", None)
+                    if isinstance(quote_witness, dict):
+                        payload["held_sell_quote_witness"] = dict(quote_witness)
                     payload["flash_crash_count"] = int(
                         getattr(pos, "flash_crash_count", 0) or 0
                     )
@@ -4024,11 +4027,11 @@ def _refresh_monitor_probability_without_book(
         if action == "EXIT_DEAD_BIN":
             from src.engine.monitor_refresh import refresh_exact_zero_position
 
-            refresh_exact_zero_position(conn, clob, pos, refresh_quote=False)
+            refresh_exact_zero_position(conn, clob, pos, refresh_quote=False, hard_fact_verdict=hard_fact)
         elif action == "HOLD_STRUCTURAL_WIN":
             from src.engine.monitor_refresh import refresh_exact_one_position
 
-            refresh_exact_one_position(pos)
+            refresh_exact_one_position(pos, hard_fact_verdict=hard_fact)
         else:
             from src.engine.monitor_refresh import refresh_position
 
@@ -5392,8 +5395,10 @@ def _fresh_local_held_monitor_orderbooks(
     deps,
     deadline_monotonic: float | None = None,
     captured_at_out: list[datetime] | None = None,
+    captured_at_by_token_out: dict[str, datetime] | None = None,
 ) -> dict[str, dict]:
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.engine.monitor_refresh import _liquidity_wait_quote_cutoff
 
     if conn is None:
         return {}
@@ -5413,6 +5418,10 @@ def _fresh_local_held_monitor_orderbooks(
     )
     if not scope:
         return {}
+    liquidity_cutoffs = {
+        _position_held_token_id(pos): cutoff for pos in positions
+        if (cutoff := _liquidity_wait_quote_cutoff(conn, pos)) is not None
+    }
     scope_pairs = [
         (condition_id, token_id)
         for condition_id, token_id, _direction in scope
@@ -5428,6 +5437,8 @@ def _fresh_local_held_monitor_orderbooks(
         books = {token_id: value[1] for token_id, value in candidates.items()}
         if captured_at_out is not None and candidates:
             captured_at_out.append(min(value[0] for value in candidates.values()))
+        if captured_at_by_token_out is not None:
+            captured_at_by_token_out.update({token: value[0] for token, value in candidates.items()})
         summary["held_monitor_orderbooks_market_channel"] = len(
             market_channel_tokens
         )
@@ -5548,10 +5559,16 @@ def _fresh_local_held_monitor_orderbooks(
             ).strip()
             if token_id and asset_id == token_id:
                 captured_at = _parse_utc_timestamp(raw_captured_at)
-                if captured_at is not None:
+                if captured_at is not None and (
+                    token_id not in liquidity_cutoffs or captured_at > liquidity_cutoffs[token_id]
+                ):
                     candidates[token_id] = (captured_at, book)
 
-        snapshot_row_tokens = {str(row[0] or "").strip() for row in snapshot_rows}
+        snapshot_row_tokens = {
+            token for row in snapshot_rows
+            if (token := str(row[0] or "").strip())
+            and (token not in liquidity_cutoffs or token in candidates)
+        }
         # A miss in the current projection may still use a newer causal market-
         # channel quote, but it must not first scan historical snapshots merely
         # to decide whether that lookup is allowed.  The quote query below
@@ -5686,7 +5703,9 @@ def _fresh_local_held_monitor_orderbooks(
                 continue
             book = json.loads(str(row[1]))
             captured_at = _parse_utc_timestamp(row[2])
-            if not isinstance(book, dict) or captured_at is None:
+            if not isinstance(book, dict) or captured_at is None or (
+                token_id in liquidity_cutoffs and captured_at <= liquidity_cutoffs[token_id]
+            ):
                 continue
             try:
                 bid, _bid_size = _top_book_level_decimal(book, "bids")
@@ -5757,6 +5776,8 @@ def _prefetch_held_monitor_orderbooks(
         monitor_orderbook_prefetch_attempted,
         publish_current_monitor_orderbook_batch,
         prefetched_monitor_orderbook,
+        prefetched_monitor_orderbook_timestamp,
+        _liquidity_wait_quote_cutoff,
     )
 
     getter = _configured_batch_orderbook_getter(clob)
@@ -5768,12 +5789,24 @@ def _prefetch_held_monitor_orderbooks(
         )
     )
     existing_books: dict[str, dict] = {}
+    existing_capture_times: dict[str, datetime] = {}
+    liquidity_cutoffs = {
+        _position_held_token_id(pos): cutoff for pos in positions
+        if (cutoff := _liquidity_wait_quote_cutoff(conn, pos)) is not None
+    }
     existing_attempted: set[str] = set()
     if preserve_existing:
         for token_id in token_ids:
             book = prefetched_monitor_orderbook(clob, token_id)
+            captured_at = _parse_utc_timestamp(prefetched_monitor_orderbook_timestamp(clob, token_id))
+            if token_id in liquidity_cutoffs and (
+                captured_at is None or captured_at <= liquidity_cutoffs[token_id]
+            ):
+                continue
             if book is not None:
                 existing_books[token_id] = book
+                if captured_at is not None:
+                    existing_capture_times[token_id] = captured_at
             if monitor_orderbook_prefetch_attempted(clob, token_id):
                 existing_attempted.add(token_id)
     else:
@@ -5799,6 +5832,7 @@ def _prefetch_held_monitor_orderbooks(
         )
         return frozenset()
     local_capture_times: list[datetime] = []
+    local_capture_times_by_token: dict[str, datetime] = {}
     fresh_local_books = _fresh_local_held_monitor_orderbooks(
         conn,
         positions,
@@ -5807,6 +5841,7 @@ def _prefetch_held_monitor_orderbooks(
         deps=deps,
         deadline_monotonic=deadline_monotonic,
         captured_at_out=local_capture_times,
+        captured_at_by_token_out=local_capture_times_by_token,
     )
     local_books = {**existing_books, **fresh_local_books}
     summary["held_monitor_orderbooks_local"] = len(local_books)
@@ -5834,6 +5869,7 @@ def _prefetch_held_monitor_orderbooks(
             local_books,
             attempted_token_ids=attempted,
             merge=preserve_existing,
+            captured_at_by_token={**existing_capture_times, **local_capture_times_by_token},
         )
         summary["held_monitor_orderbook_prefetch_installed"] = installed
         summary["held_monitor_orderbooks_prefetched"] = (
@@ -5845,6 +5881,8 @@ def _prefetch_held_monitor_orderbooks(
     network_unattempted_token_ids: set[str] = set()
     network_terminal_reason = "complete"
     network_captured_at: datetime | None = None
+    network_capture_times: dict[str, datetime] = {}
+    cached_fallback_times: dict[str, datetime | None] = {}
     typed_network_result = False
     from src.data.polymarket_client import (
         HeldOrderbookReadResult,
@@ -5852,6 +5890,7 @@ def _prefetch_held_monitor_orderbooks(
     )
 
     try:
+        network_read_started_at = datetime.now(timezone.utc)
         if deadline_monotonic is not None:
             remaining = float(deadline_monotonic) - time.monotonic()
             if remaining <= 0.0:
@@ -5873,6 +5912,9 @@ def _prefetch_held_monitor_orderbooks(
                     cached = prefetched_monitor_orderbook(clob, token_id)
                     if cached is not None:
                         network_result[token_id] = cached
+                        cached_fallback_times[token_id] = _parse_utc_timestamp(
+                            prefetched_monitor_orderbook_timestamp(clob, token_id)
+                        )
         else:
             network_result = getter(missing_token_ids)
         if isinstance(network_result, HeldOrderbookReadResult):
@@ -5883,7 +5925,11 @@ def _prefetch_held_monitor_orderbooks(
                 network_result.unattempted_token_ids
             )
             network_terminal_reason = network_result.terminal_reason
-            network_captured_at = network_result.captured_at
+            network_capture_times = {
+                token: captured_at for token, captured_at in network_result.captured_at_by_token.items()
+                if token in network_books and token not in cached_fallback_times
+                and getattr(captured_at, "tzinfo", None) is not None
+            }
             if network_terminal_reason != "complete":
                 batch_transport_failed = True
                 summary["held_monitor_orderbook_prefetch_error"] = (
@@ -5896,6 +5942,15 @@ def _prefetch_held_monitor_orderbooks(
                 )
         else:
             network_books = network_result
+            if isinstance(network_books, dict):
+                network_capture_times = {
+                    token: network_read_started_at for token in network_books
+                    if token not in cached_fallback_times
+                }
+        network_capture_times.update({
+            token: captured_at for token, captured_at in cached_fallback_times.items()
+            if captured_at is not None
+        })
     except Exception as exc:  # noqa: BLE001 - one failed batch must not fan out.
         batch_transport_failed = True
         network_terminal_reason = f"batch_error:{type(exc).__name__}"
@@ -5950,9 +6005,12 @@ def _prefetch_held_monitor_orderbooks(
         network_terminal_reason
     )
     books = {**local_books, **network_books}
-    publish_books = {**fresh_local_books, **network_books}
-    if network_books and network_captured_at is None:
-        network_captured_at = datetime.now(timezone.utc)
+    publish_books = {
+        **fresh_local_books,
+        **{token: book for token, book in network_books.items() if token in network_capture_times},
+    }
+    if network_capture_times:
+        network_captured_at = min(network_capture_times.values())
     publish_capture_times = [*local_capture_times]
     if network_captured_at is not None:
         publish_capture_times.append(network_captured_at)
@@ -5969,6 +6027,10 @@ def _prefetch_held_monitor_orderbooks(
         books,
         attempted_token_ids=existing_attempted | network_attempted_token_ids,
         merge=preserve_existing,
+        captured_at_by_token={
+            **existing_capture_times, **local_capture_times_by_token,
+            **network_capture_times,
+        },
     )
     summary["held_monitor_orderbook_prefetch_installed"] = installed
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
@@ -5986,6 +6048,7 @@ def _mark_held_monitor_orderbook_attempted(
         install_monitor_orderbook_prefetch,
         monitor_orderbook_prefetch_attempted,
         prefetched_monitor_orderbook,
+        prefetched_monitor_orderbook_timestamp,
     )
 
     token_ids = {
@@ -6009,6 +6072,10 @@ def _mark_held_monitor_orderbook_attempted(
         clob,
         books,
         attempted_token_ids=attempted,
+        captured_at_by_token={
+            token: captured_at for token in books
+            if (captured_at := _parse_utc_timestamp(prefetched_monitor_orderbook_timestamp(clob, token))) is not None
+        },
     )
 
 
@@ -6488,6 +6555,10 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     pos.last_monitor_market_price_is_fresh = True
     pos.last_monitor_at = source_timestamp
     setattr(pos, _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR, True)
+    pos._zeus_held_monitor_quote_witness = {
+        "token_id": str(getattr(quote, "token_id", "") or ""),
+        "observed_at": source_timestamp,
+    }
     return (
         replace(
             exit_context,
@@ -9772,6 +9843,7 @@ def execute_monitoring_phase(
                         clob,
                         pos,
                         refresh_quote=not local_dead_bin_deadline_rescue,
+                        hard_fact_verdict=_hard_fact,
                     )
                     summary["day0_hard_fact_probability_refresh_bypassed"] = (
                         summary.get(
@@ -9783,7 +9855,7 @@ def execute_monitoring_phase(
                 elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
                     from src.engine.monitor_refresh import refresh_exact_one_position
 
-                    edge_ctx = refresh_exact_one_position(pos)
+                    edge_ctx = refresh_exact_one_position(pos, hard_fact_verdict=_hard_fact)
                     summary["day0_hard_fact_probability_refresh_bypassed"] = (
                         summary.get(
                             "day0_hard_fact_probability_refresh_bypassed",
