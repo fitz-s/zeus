@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-04
+# Last reused/audited: 2026-10-07 (KORD fast tail advances in settlement integers, G8)
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -51365,8 +51365,10 @@ def _kord_causal_fast_inputs(fixture,monkeypatch):
         @classmethod
         def now(cls,tz=None): return writer_at[0].astimezone(tz or timezone.utc)
     current_body = json.dumps([{"icaoId":"KORD","obsTime":observed.timestamp(),
-        "receiptTime":(observed+timedelta(seconds=10)).isoformat(),"temp":13.9,"metarType":"METAR", "rawOb":
-        f"KORD {observed:%d%H%M}Z 00000KT 10SM CLR 14/14 A3005 RMK AO2 T01390139"}]).encode()
+        "receiptTime":(observed+timedelta(seconds=10)).isoformat(),"temp":13.1,"metarType":"METAR", "rawOb":
+        f"KORD {observed:%d%H%M}Z 00000KT 10SM CLR 13/13 A3005 RMK AO2 T01310131"}]).encode()
+    # G8: the fast tail advances only in settlement integers.  13.1 C = 55.6 F settles 56 < 57
+    # (the page's 57.2 F); the former 13.9 C = 57.0 F settled 57, the same integer.
     fixture.current_reports = tuple(fast.parse_metar_api_payload(json.loads(current_body)))
     with monkeypatch.context() as writer:
         writer.setattr(fast,"datetime",LedgerClock)
@@ -51430,7 +51432,7 @@ def _kord_causal_fast_inputs(fixture,monkeypatch):
     qualified = fast.latest_fast_station_conditioning(conn,city=city.name,target_date=str(fixture.request.target_date),
         metric="low",decision_time=cut,settlement_extreme_native=57.2,settlement_unit="F")
     assert qualified is not None
-    assert qualified.observed_extreme_c == pytest.approx(13.9)
+    assert qualified.observed_extreme_c == pytest.approx(13.1)
     assert qualified.likelihood.residual_weights_c[0][0] == pytest.approx(-.4)
     assert qualified.likelihood.settlement_extreme_c == pytest.approx(14.0)
     assert qualified.likelihood.matched_pairs == fast.FAST_RESIDUAL_MIN_PAIRS
