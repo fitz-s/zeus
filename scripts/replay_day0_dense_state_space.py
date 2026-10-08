@@ -132,6 +132,14 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=2)
     args = ap.parse_args()
     conn = ro_pair()
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _same_reader(_conn):
+        yield conn
+
+    # The builder's SELECT reads through this one read-only pair (live state paths, not the worktree's).
+    evidence._read_connection = _same_reader
     report = {"generated_at": datetime.now(UTC).isoformat(), "legacy": [], "dense": []}
     for pid in args.legacy:
         report["legacy"].append(replay_legacy(conn, pid))
