@@ -42,16 +42,11 @@ DAY0_HELD_PINNED_RECOMPUTE_GLOBAL_AUTHORITY = (
 # config switch is on, every Day0 q in the process carries the resolver
 # revision (a provisional carrier that cannot compose fails closed rather than
 # fall back).
-# v36/v35 (2026-10-07): qualified cities price Day0 with the dense-observation
-# state-space law (src/data/day0_dense_state_space.py), whose content identity
-# binds the clock-dependent evidence state; fast-admission routes reach q as
-# provisional METAR-instant evidence instead of an unconditioned fused normal.
-# One process-wide revision: every Day0 q_version binder uses one constant.
 DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL = (
-    "day0_settlement_channel_revision_model_v36_dense_state_space_page_only_boundary_observation_clock_city_instrument_native_boundary_v1"
+    "day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
 )
 DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER = (
-    "day0_resolver_terminal_composition_v35_dense_state_space_page_only_boundary_observation_clock_city_instrument_native_boundary_v1"
+    "day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_observation_clock_city_instrument_native_boundary_v1"
 )
 
 
@@ -142,7 +137,7 @@ def current_day0_probability_mixture_policy_has_authority(
         or isinstance(shape, str) and shape in {
             "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2",
             "day0_remaining_shared_carrier_v3", "day0_remaining_shared_carrier_resolver_v1",
-            "day0_remaining_shared_carrier_dense_v1", "fused_day0_fast_residual_likelihood",
+            "fused_day0_fast_residual_likelihood",
         }
     )
 
@@ -168,7 +163,6 @@ def current_day0_remaining_center_policy_has_authority(
     operator_declared = operator_key in provenance
     carrier_fields = (identity_key,)
     if edli:
-        from src.data.day0_dense_evidence import DAY0_DENSE_STATE_SPACE_OPERATOR
         from src.data.day0_hourly_vectors import (
             DAY0_REMAINING_CARRIER_OPERATOR_V2,
             DAY0_REMAINING_CARRIER_OPERATOR_V3,
@@ -181,7 +175,7 @@ def current_day0_remaining_center_policy_has_authority(
         operator = provenance.get(operator_key)
         operator_declared = isinstance(operator, str) and operator in {
             DAY0_REMAINING_CARRIER_OPERATOR_V2, DAY0_REMAINING_CARRIER_OPERATOR_V3,
-            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER, DAY0_DENSE_STATE_SPACE_OPERATOR,
+            DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
         }
         carrier_fields += (
             "_edli_day0_remaining_carrier_q", "_edli_day0_remaining_probability_samples",
@@ -198,7 +192,7 @@ def current_day0_remaining_center_policy_has_authority(
     )) or operator_declared or isinstance(shape, str) and shape in {
         "day0_remaining_shared_carrier_v1", "day0_remaining_shared_carrier_v2",
         "day0_remaining_shared_carrier_v3", "day0_remaining_shared_carrier_resolver_v1",
-        "day0_remaining_shared_carrier_dense_v1", "fused_day0_fast_residual_likelihood",
+        "fused_day0_fast_residual_likelihood",
     }
     if not declared:
         return True
@@ -263,10 +257,10 @@ def day0_is_native_report_source(source: object, *, station: str | None = None) 
     """Whether a source is a registered native METAR-report route (RouteKind.NATIVE_REPORT).
 
     Its rows are parsed METAR/SPECI bodies: each value is the report's integer, equal to the
-    AWC integer for the same report (D1 audit: MGM 603/603, metaviatelecom 61/61, IMD 301/305
-    with the 4 matching another AWC version of that report).  It therefore joins the AWC/Ogimet
-    provisional family above.  An INSTRUMENT_PROXY (JMA, SWOB) never does: its 0.1 C reading is
-    another measurement of the air, not the report (consult 2026-10-07, Tokyo 24.6 vs AWC 25).
+    AWC integer for the same report (audit 2026-10-07: MGM 603/603, metaviatelecom 61/61, IMD
+    301/305 with the 4 matching another AWC version of that report).  It therefore joins the
+    AWC/Ogimet provisional family above.  An INSTRUMENT_PROXY (JMA, SWOB) never does: its 0.1 C
+    reading is another measurement of the air, not the report (Tokyo 24.6 vs AWC 25).
     ``station`` binds the route to one ICAO station.
     """
 

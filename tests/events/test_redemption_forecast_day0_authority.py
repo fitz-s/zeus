@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-10-07 (dense state-space v36/v35 revision; old v34/v33 and reverted v35 stay parseable)
+# Last reused/audited: 2026-09-30
 # Authority basis: docs/operations/edli_v1/PR328_REDEMPTION_PACKAGE.md R2/R3 proof.
 
 import pytest
@@ -53,12 +53,11 @@ def test_unshifted_joint_revision_preserves_clock_instrument_and_native_boundary
     from src.events import day0_authority as authority
 
     suffix = "observation_clock_city_instrument_native_boundary_v1"
-    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == f"day0_settlement_channel_revision_model_v36_dense_state_space_page_only_boundary_{suffix}"
-    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == f"day0_resolver_terminal_composition_v35_dense_state_space_page_only_boundary_{suffix}"
+    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL == f"day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_{suffix}"
+    assert authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER == f"day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_{suffix}"
     for current_revision, previous_revision in (
-        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL, f"day0_settlement_channel_revision_model_v34_unmixed_unshifted_remaining_{suffix}"),
-        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER, f"day0_resolver_terminal_composition_v33_unmixed_unshifted_remaining_{suffix}"),
-        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL, "day0_native_domain_roles_v35_point_interval_confidence_v1"),
+        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_SURVIVAL, f"day0_settlement_channel_revision_model_v33_unshifted_remaining_{suffix}"),
+        (authority.DAY0_PROBABILITY_SEMANTICS_REVISION_RESOLVER, f"day0_resolver_terminal_composition_v32_unshifted_remaining_{suffix}"),
     ):
         monkeypatch.setattr(authority, "DAY0_PROBABILITY_SEMANTICS_REVISION", current_revision)
         old = f"day0-semrev:{previous_revision}:immutable-source-certificate"

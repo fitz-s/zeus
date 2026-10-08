@@ -87,6 +87,20 @@ DAY0_REMAINING_CARRIER_OPERATOR_V3 = (
 )
 DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER = "resolver_graded_terminal_composition_v1"
 DAY0_REMAINING_CARRIER_OPERATOR = DAY0_REMAINING_CARRIER_OPERATOR_V2
+DAY0_REMAINING_CARRIER_OPERATOR_DENSE = "dense_observation_state_space_extreme_v1"
+
+
+class Day0CarrierEvaluation(str, Enum):
+    """Why a caller builds a Day0 carrier.
+
+    SELECT: a new decision at ``identity_inputs['probability_cutoff_utc']``; with no explicit
+      operator the dense law may serve on the evidence received by that cut.
+    REPLAY: reproduce a persisted certificate; the explicit operator runs exactly, and the dense
+      operator runs only from its sealed evidence and content-addressed parameters (no DB read).
+    None (the default): the legacy operators, byte for byte."""
+
+    SELECT = "select"
+    REPLAY = "replay"
 
 
 def _day0_utc_now() -> datetime:
@@ -1643,8 +1657,13 @@ def build_day0_remaining_probability_carrier(
     operator: str | None = None,
     remaining_center_bias_native: float = 0.0,
     resolver_terminal: Any = None,
+    evaluation: Day0CarrierEvaluation | None = None,
+    sealed_dense: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Pure ``extreme(boundary, noisy future)`` carrier for both Day0 readers.
+
+    ``evaluation`` (Day0CarrierEvaluation) opts into the dense-observation law; None keeps every
+    operator byte-identical.  See ``src/data/day0_dense_evidence.py`` for SELECT and REPLAY.
 
     Boundary scenarios are a statistical report-survival likelihood, not final
     settlement authority.  Noise is always applied to the future path first.
@@ -1668,6 +1687,17 @@ def build_day0_remaining_probability_carrier(
     ``resolver_terminal`` (a ``Day0ResolverTerminalInput``) selects the
     resolver-graded composition instead of the survival mixture.
     """
+    if evaluation is None:
+        if sealed_dense is not None:
+            raise ValueError("DAY0_DENSE_SEALED_EVIDENCE_WITHOUT_EVALUATION")
+    elif not isinstance(evaluation, Day0CarrierEvaluation):
+        raise ValueError("DAY0_CARRIER_EVALUATION_INVALID")
+    elif operator not in {
+        None, DAY0_REMAINING_CARRIER_OPERATOR_V1, DAY0_REMAINING_CARRIER_OPERATOR_V2,
+        DAY0_REMAINING_CARRIER_OPERATOR_V3, DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER,
+        DAY0_REMAINING_CARRIER_OPERATOR_DENSE,
+    }:
+        raise ValueError("DAY0_REMAINING_CARRIER_OPERATOR_UNKNOWN")
     if resolver_terminal is not None or operator == DAY0_REMAINING_CARRIER_OPERATOR_RESOLVER:
         if resolver_terminal is None or operator not in {
             None,
@@ -1754,29 +1784,16 @@ def build_day0_remaining_probability_carrier(
                 for b, w in scenarios
             )):
         raise ValueError("DAY0_REMAINING_CARRIER_INPUT_INVALID")
-    # Dense-observation state-space law: the live operator for qualified cities
-    # (fitted parameters, a fresh dense channel today, valid inputs).  Anything
-    # else returns None and the legacy operators below run on unchanged inputs.
-    from src.data.day0_dense_evidence import (
-        DAY0_DENSE_STATE_SPACE_OPERATOR,
-        dense_remaining_carrier,
-    )
+    if evaluation is not None:
+        from src.data.day0_dense_evidence import dense_carrier_for_evaluation
 
-    dense = dense_remaining_carrier(
-        metric=metric,
-        bin_bounds=bounds,
-        identity_inputs=identity_inputs,
-        settlement_semantics=settlement_semantics,
-        n_samples=n_samples,
-        resolver_terminal=resolver_terminal,
-    )
-    if dense is not None:
-        return dense
-    if operator == DAY0_DENSE_STATE_SPACE_OPERATOR:
-        # SCOPE: this persisted dense certificate. DRAIN: the seed/materialization
-        # loop writes a current certificate. RESET: the dense preconditions hold
-        # again, or a legacy certificate replaces it.
-        raise ValueError("DAY0_DENSE_STATE_SPACE_REPLAY_UNAVAILABLE")
+        dense = dense_carrier_for_evaluation(
+            evaluation=evaluation, operator=operator, sealed_dense=sealed_dense, metric=metric,
+            bin_bounds=bounds, identity_inputs=identity_inputs,
+            settlement_semantics=settlement_semantics, n_samples=n_samples,
+        )
+        if dense is not None:
+            return dense
     selected_operator = (
         DAY0_REMAINING_CARRIER_OPERATOR_V3
         if operator is None and final_centers.size
