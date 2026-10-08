@@ -15,6 +15,8 @@ import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from src.state.fact_revocation import (
     OBSERVATION_PRINTS_TABLE,
     REASON_PAGE_PRINT_ABSENT,
@@ -152,8 +154,10 @@ def test_tick_records_page_absence_in_the_print_transaction(monkeypatch, tmp_pat
         assert _absent_clocks(conn) == [(start + timedelta(minutes=30)).isoformat()]
 
 
-def test_absence_failure_never_costs_the_print_write(monkeypatch, tmp_path):
+@pytest.mark.parametrize("failure", [sqlite3.OperationalError("disk I/O error"), ValueError("bad clock")])
+def test_absence_failure_never_costs_the_print_write(monkeypatch, tmp_path, failure):
     from src.config import cities_by_name
+    from src.state import fact_revocation
     from src.data import replacement_forecast_production as production
     from src.data import station_temperature_adapters as adapters
     from src.data.physical_current_sources import load_physical_current_sources
@@ -166,9 +170,18 @@ def test_absence_failure_never_costs_the_print_write(monkeypatch, tmp_path):
     now = datetime.now(UTC).replace(second=0, microsecond=0)
     path = tmp_path / "world.sqlite"
     with sqlite3.connect(path) as conn:
-        ensure_table(conn)  # no fact_revocations table: the absence write must fail softly
+        ensure_table(conn)
     samples = tuple(adapters._sample(route, now - timedelta(minutes=m), 75.02, now, "a" * 64)
                     for m in (60, 0))
+    calls = []
+
+    def failing_record(conn, **kw):
+        # Write inside the savepoint first, so the rollback has something to undo.
+        conn.execute("CREATE TABLE absence_probe (x)")
+        calls.append(kw)
+        raise failure
+
+    monkeypatch.setattr(fact_revocation, "record_page_print_absences", failing_record)
 
     class Lease:
         def __enter__(self):
@@ -192,9 +205,13 @@ def test_absence_failure_never_costs_the_print_write(monkeypatch, tmp_path):
                         lambda: {})
     monkeypatch.setattr(ingest, "_physical_current_pending_wakes", set())
     result = ingest._day0_current_temperature_source_tick(city, route)
+    assert len(calls) == 1, "the absence record must have been attempted"
     assert result["status"] == "COMMITTED" and result["inserted"] == 2
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0] == 2
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'absence_probe'"
+        ).fetchone()[0] == 0, "the savepoint rollback must undo the failed absence write"
 
 
 def test_report_counts_absences_per_station_and_unit(tmp_path, capsys):

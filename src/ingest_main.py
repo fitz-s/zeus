@@ -2276,7 +2276,7 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
                         if absent:
                             logger.warning("PAGE_PRINT_ABSENT station=%s channel=%s count=%d",
                                            station_id, source_channel, absent)
-                    except sqlite3.Error as exc:
+                    except Exception as exc:  # noqa: BLE001 - evidence never costs the prints
                         conn.execute("ROLLBACK TO page_print_absence")
                         logger.warning("PAGE_PRINT_ABSENCE_UNRECORDED station=%s error=%s",
                                        station_id, type(exc).__name__)
