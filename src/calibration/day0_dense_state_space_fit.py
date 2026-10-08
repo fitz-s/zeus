@@ -330,3 +330,81 @@ def estimate(days: Sequence[TrainingDay], *, step: float, cadence: float, shrink
                            pi=float(noise_fit["pi"]), tau_e=max(float(drift["tau_e"]), 1.0), sd2=float(sd2)),
                 noise_choice="mixture" if noise_fit is mx else "gauss", mean=mean, ou_one=one, ou_two=two,
                 n_pairs=int(M.size), drift_lags=lags, drift_rhos=[float(v) for v in rhos])
+
+
+# ---------------------------------------------------------------- report lifecycle (D2)
+
+LAG_BINS_MIN = (10.0, 20.0, 40.0, 60.0, 120.0, 180.0)
+OUTAGE_MIN_STATIONS = 4
+GROSS_DEVIATION = 2
+
+
+def _jeffreys(successes: float, n: float) -> float:
+    return (successes + 0.5) / (n + 1.0)
+
+
+def fit_lifecycle(reports: Sequence[dict], fetch_checks: Sequence[tuple[float, bool]]) -> dict:
+    """Fit the settlement-page lifecycle of received reports (pooled over stations).
+
+    ``reports``: one dict per received provisional report on a finalized page-covered day, with
+      station, utc_hour (ISO hour), speci (bool), outcome in {kept, corrected, absent},
+      delta (page - report, corrected only), neighbour_gap (|k - kept page values within 60 min|
+      at its smallest, absent only; None when there is no neighbour).
+    ``fetch_checks``: (lag_minutes, visible) for every intraday page fetch whose returned span
+      covers a finally kept instant.
+
+    Shared outage: UTC hours where at least OUTAGE_MIN_STATIONS stations lose reports.  A report in
+    such an hour is an outage removal (still valid temperature evidence); the outage prior is the
+    Jeffreys share of reports in outage hours.  Outside outages an absent report is gross when its
+    integer sits GROSS_DEVIATION or more from its kept neighbours (or has none), else a valid removal.
+    Branch probabilities per report kind are smoothed shares (half a count per branch).  Visibility
+    a(lag) is the Jeffreys posterior predictive per lag bin, made non-decreasing by pooling adjacent
+    violators."""
+    hours: dict[str, set] = {}
+    for r in reports:
+        if r["outcome"] == "absent":
+            hours.setdefault(r["utc_hour"], set()).add(r["station"])
+    outage_hours = {h for h, s in hours.items() if len(s) >= OUTAGE_MIN_STATIONS}
+    counts = {k: dict(kept=0.0, corrected=0.0, removed=0.0, gross=0.0) for k in ("routine", "speci")}
+    deltas: dict[int, float] = {}
+    n_outage = 0
+    for r in reports:
+        if r["utc_hour"] in outage_hours:
+            n_outage += 1
+            continue
+        kind = "speci" if r["speci"] else "routine"
+        if r["outcome"] == "absent":
+            gap = r.get("neighbour_gap")
+            counts[kind]["gross" if gap is None or gap >= GROSS_DEVIATION else "removed"] += 1
+        else:
+            counts[kind][r["outcome"]] += 1
+            if r["outcome"] == "corrected":
+                deltas[int(r["delta"])] = deltas.get(int(r["delta"]), 0.0) + 1
+    branches: dict[str, dict[str, float]] = {b: {} for b in ("kept", "corrected", "removed", "gross")}
+    for kind, c in counts.items():
+        total = sum(c.values()) + 2.0
+        for b in c:
+            branches[b][kind] = (c[b] + 0.5) / total
+    support = sorted(set(deltas) | {-1, 1})
+    dw = {d: deltas.get(d, 0.0) + 0.5 for d in support}
+    tot = sum(dw.values())
+    delta = [[d, dw[d] / tot] for d in support]
+    by_bin = {u: [0.0, 0.0] for u in LAG_BINS_MIN}
+    for lag, visible in fetch_checks:
+        for u in LAG_BINS_MIN:
+            if lag <= u:
+                by_bin[u][0] += float(visible)
+                by_bin[u][1] += 1.0
+                break
+    merged: list = []
+    for u in LAG_BINS_MIN:  # pool adjacent violators: a(lag) is non-decreasing
+        merged.append([by_bin[u][0], by_bin[u][1], [u]])
+        while len(merged) > 1 and _jeffreys(merged[-2][0], merged[-2][1]) > _jeffreys(merged[-1][0], merged[-1][1]):
+            s2, n2, u2 = merged.pop()
+            merged[-1][0] += s2
+            merged[-1][1] += n2
+            merged[-1][2] += u2
+    visibility = [[u, _jeffreys(s, n)] for s, n, us in merged for u in us]
+    return dict(**branches, outage_prior=_jeffreys(n_outage, len(reports)), delta=delta, visibility=visibility,
+                counts=counts, n_reports=len(reports), n_outage_reports=n_outage, outage_hours=sorted(outage_hours),
+                n_fetch_checks=len(fetch_checks), visibility_counts={str(u): by_bin[u] for u in LAG_BINS_MIN})
