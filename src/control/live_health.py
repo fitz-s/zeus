@@ -106,10 +106,11 @@ POSTERIOR_STALENESS_ALERT_HOURS_DEFAULT = 12.0
 # expiry at 2026-07-14T06:00+.
 POSTERIOR_STARVATION_REASON_MAX_CHARS = 300
 # Fleet commit-rate alarm: 30 min of normal operation commits 150-280 live
-# posteriors (rolling minimum over 2026-09-25..10-08 outside outages: 41); every
-# 2026-10-06/07 outage window sat at <=33 and most at ~0.
+# posteriors. Minute-by-minute backtest 2026-09-25..10-08 (rows visible at each
+# evaluation): threshold 30 catches every outage with 1 suspected false episode;
+# 40 adds 7 short false episodes (normal-operation minimum 41).
 POSTERIOR_COMMIT_RATE_WINDOW_MINUTES = 30
-POSTERIOR_COMMIT_RATE_MIN_COUNT = 40
+POSTERIOR_COMMIT_RATE_MIN_COUNT = 30
 # A row's computed_at never exceeds the time it was inserted, so every row
 # computed inside the window is among the rows inserted inside it. Observed peak
 # insert volume is 568 rows / 30 min; this tail leaves 3.5x headroom, and a burst

@@ -5,12 +5,12 @@
 # Reuse: Run when live-health posterior surfaces, the replacement_forecast_live receipt dirs, or the probe flag set change.
 # Authority basis: incidents 2026-10-06/07 (four outages, ~zero live posteriors for 1-5 h each, no alarm
 #   distinguished them; posterior_starvation fires only at 12 h per-family staleness); operator calibration
-#   threshold 40 per trailing 30 min.
+#   threshold 30 per trailing 30 min (minute backtest 2026-09-25..10-08).
 """Posterior commit-rate alarm antibody.
 
 ``_posterior_commit_rate_surface`` (src/control/live_health.py) counts live
 ``forecast_posteriors`` rows whose ``computed_at`` falls in the trailing 30
-minutes.  Fewer than 40 is an outage (normal is 150-280); the alarm names its
+minutes.  Fewer than 30 is an outage (normal is 150-280); the alarm names its
 branch (queued request files + top decline/failure reason codes) and is a
 log-only surface, never an entry gate.
 """
@@ -115,7 +115,7 @@ def test_fires_at_ten_rows_and_names_the_branch(tmp_path, caplog):
     assert result["evaluated"] is True
     assert result["count"] == 10
     assert result["window_min"] == POSTERIOR_COMMIT_RATE_WINDOW_MINUTES == 30
-    assert result["threshold"] == POSTERIOR_COMMIT_RATE_MIN_COUNT == 40
+    assert result["threshold"] == POSTERIOR_COMMIT_RATE_MIN_COUNT == 30
     assert result["queued"] == 4
     assert result["issue"] == "POSTERIOR_COMMIT_RATE_COLLAPSE:count=10"
     assert result["top_reasons"] == [
@@ -125,7 +125,7 @@ def test_fires_at_ten_rows_and_names_the_branch(tmp_path, caplog):
     ]
     lines = [r.getMessage() for r in caplog.records if "ZEUS_POSTERIOR_COMMIT_RATE_COLLAPSE" in r.getMessage()]
     assert lines == [
-        "ZEUS_POSTERIOR_COMMIT_RATE_COLLAPSE count=10 window_min=30 threshold=40 queued=4 "
+        "ZEUS_POSTERIOR_COMMIT_RATE_COLLAPSE count=10 window_min=30 threshold=30 queued=4 "
         "top_reasons=FUSION_DECLINED:CURRENT_SHAPE_ENS_UNAVAILABLE:3,"
         "READINESS_CERT_CYCLE_REGRESSION:1,SEED_FAILED:database_is_locked:1"
     ]
@@ -146,9 +146,9 @@ def test_ok_at_one_hundred_rows_and_silent(tmp_path, caplog):
     assert not [r for r in caplog.records if "COLLAPSE" in r.getMessage()]
 
 
-def test_threshold_boundary_is_strictly_fewer_than_forty(tmp_path):
+def test_threshold_boundary_is_strictly_fewer_than_thirty(tmp_path):
     sd = _state(tmp_path)
-    _write_posteriors(sd, 39, minutes_ago=5)
+    _write_posteriors(sd, 29, minutes_ago=5)
     assert _posterior_commit_rate_surface(sd, NOW)["ok"] is False
     _write_posteriors(sd, 1, minutes_ago=5)
     assert _posterior_commit_rate_surface(sd, NOW)["ok"] is True
