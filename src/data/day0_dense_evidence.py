@@ -158,7 +158,9 @@ def _native_channels(city_obj) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True)
-class _Report:
+class Report:
+    """A received METAR-content report at its own instant."""
+
     k: int
     received: datetime
     speci: bool
@@ -194,7 +196,7 @@ def _page_versions(conn, table, *, city, station, lo, hi, cut, semantics):
     return latest, sorted(receipts)
 
 
-def _reports(conn, table, *, city, station, channels, lo, hi, cut, routine) -> dict[datetime, _Report]:
+def _reports(conn, table, *, city, station, channels, lo, hi, cut, routine) -> dict[datetime, Report]:
     """Received METAR-content reports at their own instants: the first receipt of each instant
     across channels, the integer of its latest received version.  A report off the station's
     routine minutes, or headed SPECI, is a SPECI."""
@@ -209,7 +211,7 @@ def _reports(conn, table, *, city, station, channels, lo, hi, cut, routine) -> d
         f"AND {RECEIPT_US_SQL} <= ? ORDER BY {RECEIPT_US_SQL}, rowid",
         (city, *channels, (lo - timedelta(hours=2)).isoformat(), (hi + timedelta(hours=2)).isoformat(), receipt_us(cut)),
     ).fetchall()
-    out: dict[datetime, _Report] = {}
+    out: dict[datetime, Report] = {}
     for channel, published, value, unit, sid, raw, fetched in rows:
         try:
             pub, rec, val = _utc(published), _utc(fetched), float(value)
@@ -229,7 +231,7 @@ def _reports(conn, table, *, city, station, channels, lo, hi, cut, routine) -> d
             continue
         speci = "SPECI" in text.upper() or obs.minute not in routine
         prior = out.get(obs)
-        out[obs] = _Report(int(val), rec if prior is None else min(prior.received, rec),
+        out[obs] = Report(int(val), rec if prior is None else min(prior.received, rec),
                            speci or (prior is not None and prior.speci))
     return out
 
@@ -285,6 +287,15 @@ def _missed(lc, fetches: Sequence[datetime], t: datetime) -> float:
 # ---------------------------------------------------------------- the prepared request (D4)
 
 @dataclass(frozen=True)
+class OfflineInputs:
+    """Walk-forward qualification inputs: candidate city parameters and a forecast-path source
+    ``forecast(start_utc, grid_minutes) -> array``."""
+
+    params: Any
+    forecast: Any
+
+
+@dataclass(frozen=True)
 class PreparedDense:
     """The sealed dense request for one family at one cut, or the typed reason it is unavailable."""
 
@@ -297,17 +308,24 @@ class PreparedDense:
 
 
 def prepare_dense_request(conn, *, city: str, metric: str, target: date, cut: datetime,
-                          semantics: SettlementSemantics) -> PreparedDense:
-    """Full qualification and construction of the dense evidence for one family at ``cut``."""
+                          semantics: SettlementSemantics, offline: "OfflineInputs | None" = None) -> PreparedDense:
+    """Full qualification and construction of the dense evidence for one family at ``cut``.
+
+    ``offline`` is for the walk-forward qualification only: it supplies the candidate parameters
+    (in place of the eligible artifact block) and the forecast path, and keeps every other rule."""
     from src.calibration.day0_dense_state_space_params import dense_params_for
     from src.config import runtime_cities_by_name
 
     if semantics.measurement_unit != "C" or metric not in {"high", "low"}:
         return PreparedDense(None, "UNIT_OR_METRIC_UNSUPPORTED")
-    qualified = dense_params_for(city, metric, target.isoformat())
-    if qualified is None:
-        return PreparedDense(None, "NOT_QUALIFIED")
-    artifact, params = qualified
+    if offline is None:
+        qualified = dense_params_for(city, metric, target.isoformat())
+        if qualified is None:
+            return PreparedDense(None, "NOT_QUALIFIED")
+        artifact, params = qualified
+        artifact_hash, qualification_hash = artifact.content_hash, artifact.qualification_hash
+    else:
+        params, artifact_hash, qualification_hash = offline.params, "offline", None
     city_obj = runtime_cities_by_name().get(city)
     if city_obj is None or str(getattr(city_obj, "wu_station", "") or "").upper() != params.station:
         return PreparedDense(None, "STATION_MISMATCH")
@@ -323,7 +341,11 @@ def prepare_dense_request(conn, *, city: str, metric: str, target: date, cut: da
             raise DenseUnavailable("PRINT_TABLE_MISSING")
         day_minutes = (end - start).total_seconds() / 60.0
         minutes = ds.grid_minutes(day_minutes)
-        forecast, vector_ids = _forecast_path(conn, city=city, target=target, start_utc=start, minutes=minutes, cut=cut)
+        if offline is None:
+            forecast, vector_ids = _forecast_path(conn, city=city, target=target, start_utc=start, minutes=minutes,
+                                                  cut=cut)
+        else:
+            forecast, vector_ids = offline.forecast(start, minutes), ["offline"]
         hour = [int((start + timedelta(minutes=float(m))).astimezone(tz).hour) for m in minutes]
         lo = start - timedelta(minutes=ds.PRE_MIN)
         dense = _dense_rows(conn, table, city_obj=city_obj, params=params, lo=lo, hi=end, cut=cut)
@@ -342,6 +364,19 @@ def prepare_dense_request(conn, *, city: str, metric: str, target: date, cut: da
     except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
         logger.warning("DAY0_DENSE_PREPARE_ERROR city=%s metric=%s error=%s", city, metric, exc)
         return PreparedDense(None, f"PREPARE_ERROR:{type(exc).__name__}")
+    sealed = assemble_sealed(
+        params=params, artifact_hash=artifact_hash, qualification_hash=qualification_hash,
+        city=city, metric=metric, target=target, start=start, end=end, cut=cut, forecast=forecast, hour=hour,
+        vector_ids=vector_ids, page=page, fetches=fetches, reports=reports, dense=dense)
+    return PreparedDense(sealed, None)
+
+
+def assemble_sealed(*, params, artifact_hash: str, qualification_hash, city: str, metric: str, target: date,
+                    start: datetime, end: datetime, cut: datetime, forecast, hour, vector_ids,
+                    page: Mapping[datetime, int], fetches: Sequence[datetime],
+                    reports: Mapping[datetime, "Report"], dense: Sequence[tuple[datetime, float]]) -> dict:
+    """The sealed evidence of one family at one cut from admitted rows (pure; production and the
+    offline qualification share it)."""
     lc = params.lifecycle
     to_min = lambda moment: round((moment - start).total_seconds() / 60.0, 6)  # noqa: E731
     marks = []
@@ -366,23 +401,22 @@ def prepare_dense_request(conn, *, city: str, metric: str, target: date, cut: da
             joint = rk * miss + rc * miss + (1.0 - rk - rc)
             wk, wc = rk * miss / joint, rc * miss / joint
         pending.append([to_min(t), wk, wc])
-    sealed = {
+    return {
         "schema": SEALED_SCHEMA,
         "city": city, "metric": metric, "target_date": target.isoformat(),
         "probability_cutoff_utc": cut.isoformat(),
-        "params_artifact": artifact.content_hash, "city_params": params.params_hash,
-        "qualification_hash": artifact.qualification_hash,
-        "day_minutes": day_minutes,
-        "forecast": [round(float(v), 6) for v in forecast], "hour": hour, "vector_ids": vector_ids,
-        "page": [[to_min(t), k] for t, k in sorted(page.items())],
+        "params_artifact": artifact_hash, "city_params": params.params_hash,
+        "qualification_hash": qualification_hash,
+        "day_minutes": (end - start).total_seconds() / 60.0,
+        "forecast": [round(float(v), 6) for v in forecast], "hour": [int(h) for h in hour], "vector_ids": list(vector_ids),
+        "page": [[to_min(t), int(k)] for t, k in sorted(page.items())],
         "marks": marks, "pending": pending,
         "context": [[to_min(t), rep.k] for t, rep in sorted(reports.items()) if t < start],
         "dense": [[to_min(t), round(float(x), 3)] for t, x in dense],
-        "dense_count": len(dense), "dense_newest_utc": newest.isoformat(),
+        "dense_count": len(dense), "dense_newest_utc": dense[-1][0].isoformat() if dense else None,
         "delta": [list(d) for d in lc.delta],
         "speci_from": to_min(cut), "speci_rate": params.speci_rate_per_min, "outage_prior": lc.outage_prior,
     }
-    return PreparedDense(sealed, None)
 
 
 def dense_serves(conn, *, city: str, metric: str, target_date: str, decision: datetime) -> bool:
