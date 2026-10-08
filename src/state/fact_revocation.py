@@ -1,5 +1,5 @@
 # Created: 2026-07-12
-# Last reused or audited: 2026-07-12
+# Last reused or audited: 2026-10-08 CURRENT_REUSABLE (G10 page-print absence reason)
 # Authority basis: docs/rebuild/quarantine_excision_2026-07-11.md DIQ packet
 #   (Consult adjudication "DIQ CONDITIONAL"); supersedes
 #   src/state/decision_integrity_quarantine.py (PR-E 2026-05-22).

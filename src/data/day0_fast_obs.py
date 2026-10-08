@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-10-07 (KMA polls every eligible RKSI/RKPK family, fast-obs G4)
+# Last reused or audited: 2026-10-08 CURRENT_REUSABLE (G9: residual settlement extreme reads the latest page version, degF grid bound)
 # Authority basis: day0 first-principles review 2026-06-10 §6.2 (live obs hook)
 #   + operator green-light 2026-06-10 (free METAR fast lane; no paid sources);
 #   NOAA/NWS station files provide current-exposure priority transport, cycle
