@@ -267,3 +267,35 @@ D3 requires a new decision to evaluate at the carrier's sealed probability cutof
   - (b) pass `operator=None` (dense-eligible) on rebuild together with the sealed cutoff.
   Both need an edit to `event_reactor_adapter.py`.
 - D4 (one prepared dense request deciding seed fast-tail suppression, lag detection and dispatch) does not need the protected file. It is held because its dispatch half depends on the D3 decision above.
+
+## R3 seam spec for the protected adapter (requested only after D6 qualifies)
+File: `src/engine/event_reactor_adapter.py`. The builder already accepts the inputs, since R1 landed on this branch (`build_day0_remaining_probability_carrier(..., evaluation: Day0CarrierEvaluation | None, sealed_dense: Mapping | None)`). With `evaluation=None` every operator is byte-identical to live.
+
+1. Decision-time rebuild, `_rebuild_decision_time_day0_carrier` (def ~48728; cutoff at ~48892; builder call at ~48977):
+   - Pass `evaluation=Day0CarrierEvaluation.SELECT`.
+   - Pass `operator=None` instead of the explicit V3/V2 (~48967–48973) only when `src.data.day0_dense_evidence.dense_serves(conn, city, metric, target_date, decision=decision_time)` is true. Otherwise keep the explicit legacy operator.
+   - Keep `decision_time_utc = probability_cutoff_utc = cutoff` (already the decision cut, ~48892).
+   - After the call, persist `carrier["dense_evidence"]["sealed"]` into the payload as `_edli_day0_dense_sealed_evidence` whenever `carrier["operator"] == DAY0_DENSE_STATE_SPACE_OPERATOR`.
+   - Callers: ENTRY current path ~50540, held current bundle ~50556, held shared current path ~50573, held A' ~49051.
+2. Strict replay, `_day0_remaining_p_raw_vector` (def ~46826; identity inputs ~47134; builder call ~47204–47208):
+   - Pass `evaluation=Day0CarrierEvaluation.REPLAY`.
+   - Pass `sealed_dense=payload.get("_edli_day0_dense_sealed_evidence")`.
+   - The persisted operator is passed already, so a dense certificate replays from sealed evidence with no DB read. Without sealed evidence it fails closed with `DAY0_DENSE_REPLAY_SEALED_EVIDENCE_MISSING`.
+3. Persisted-carrier binding (~38956 `carrier_fields`): add `"day0_dense_sealed_evidence": "_edli_day0_dense_sealed_evidence"`.
+   - The materializer then writes `day0_dense_sealed_evidence` into provenance, and only once (1) and (2) exist (R2). Today it passes no `evaluation`.
+4. ENTRY staleness gate, `_day0_replacement_conditioning` (~37595–37640): `fast_sources` lists `aviationweather_metar` literally. Extend it with native report routes:
+   `or src.events.day0_authority.day0_is_native_report_source(conditioned_source)`
+   That way a native-report conditioning gets the same 15-min ENTRY age contract as AWC (D1 residual).
+
+Test matrix for the adapter owner (all exist on this branch except the adapter-level rows, marked *):
+
+| case | old certificate | dense now | path | expected |
+|---|---|---|---|---|
+| legacy V2/V3 persisted | V2/V3 | any | strict replay (REPLAY, explicit op) | byte-identical q/samples/identity (tests: `test_no_evaluation_is_legacy_and_never_reads_dense`, `test_select_with_explicit_legacy_operator_runs_that_operator`) |
+| dense persisted with sealed | DENSE + sealed | absent/refitted law | strict replay | reproduces without DB (`test_select_serves_dense_at_the_cut_and_replay_reproduces_without_db`); fails closed when the law hash is gone (`test_replay_fails_closed_without_sealed_evidence_or_parameters`) |
+| dense persisted, requalified | DENSE + sealed | metrics changed only | strict replay | replays (`test_requalification_alone_keeps_sealed_certificates_replayable`) |
+| new ENTRY decision | none | serves | rebuild (SELECT, op None) | dense carrier sealed at the cut * |
+| new ENTRY decision | none | absent/stale/wrong station/missing forecast/unqualified | rebuild | byte-identical legacy (`test_unavailable_dense_select_is_byte_identical_legacy`) |
+| HELD redecision | V2/V3 | serves | rebuild | dense successor carrier; old certificate still replays * |
+| rollback to live code | DENSE + sealed | — | live strict replay | live builder rejects the unknown operator → `unsupported Day0 remaining carrier operator`; held family falls to its legacy rebuild (D7) * |
+| native-report ENTRY | AWC-equivalent | — | `_day0_replacement_conditioning` | 15-min age gate applies * |
