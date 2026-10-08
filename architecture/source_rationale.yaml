@@ -391,14 +391,14 @@ files:
   src/data/day0_dense_state_space.py:
     zone: K3_extension
     authority_role: day0_dense_state_space_operator
-    why: Pure dense-observation state-space law for the settled Day0 extreme. Forward recursion on residual cells with exact OU transitions, exact METAR interval and quantised dense-mixture likelihoods, page rows as the only semantic certificate, mirrored METAR rows as per-row page-retention marks, pending-instant and SPECI kills, and a Gauss-Hermite static offset. No IO, no DB.
+    why: Pure dense-observation state-space law for the settled Day0 extreme (tape = final page rows; empty tape = lowest bracket). Forward recursion on residual cells at exact report instants; normalized kept/corrected/removed/gross report-lifecycle marks with a shared outage mixture; joint closed-form integration per threshold column; continuous SPECI exposure; page rows are the only semantic certificate. No IO, no DB.
     downstream:
     - src/data/day0_dense_evidence.py
     - scripts/fit_day0_dense_state_space.py
   src/data/day0_dense_evidence.py:
     zone: K3_extension
-    authority_role: day0_dense_state_space_dispatch
-    why: Receipt-gated evidence reader and dispatch for the dense carrier. Called by build_day0_remaining_probability_carrier; returns the dense carrier only for fitted city/metric, fresh dense rows today and valid inputs, else None so the legacy operator runs unchanged. Evidence is admitted at the current-state print's first receipt (writer/replay agreement). Reads FORECAST day0_hourly_vectors and WORLD observation_prints read-only; computation outside write locks.
+    authority_role: day0_dense_state_space_evidence
+    why: Typed SELECT/REPLAY seam of build_day0_remaining_probability_carrier. SELECT admits rows received by the probability cut and seals them into the carrier; REPLAY rebuilds from sealed evidence and the content-addressed city block with no DB read. One prepared request decides qualification for dispatch and seed suppression. No caller passes an evaluation today, so no dense certificate is written. Reads FORECAST day0_hourly_vectors and WORLD observation_prints read-only.
     downstream:
     - src/data/day0_hourly_vectors.py
   src/data/physical_current_sources.py:
@@ -2728,13 +2728,13 @@ files:
   src/calibration/day0_dense_state_space_params.py:
     zone: K3_extension
     authority_role: day0_dense_state_space_params_loader
-    why: Read-only loader of the content-hashed FORECAST-class artifact config/day0_dense_state_space_params.json. A city/metric is served only for target dates after its training and page-retention evidence; malformed blocks are absent (legacy serves). No DB reads or writes.
+    why: Read-only loader of the content-hashed FORECAST-class artifact config/day0_dense_state_space_params.json (schema 2). City blocks carry the fitted law and report lifecycle; eligibility (metrics) binds to the D6 qualification report by hash and is excluded from the law hash, so requalification never orphans a sealed certificate. No DB reads or writes.
     downstream:
     - src/data/day0_dense_evidence.py
   src/calibration/day0_dense_state_space_fit.py:
     zone: K3_extension
     authority_role: day0_dense_state_space_estimation
-    why: Pure walk-forward estimation (ported from the dense-station backtest) of dense noise, drift, mean and OU parameters from training days. No IO.
+    why: Pure walk-forward estimation of dense noise, drift, mean, OU parameters and the settlement-page report lifecycle (branch priors, outage prior, corrected deltas, visibility a(lag)). No IO.
     downstream:
     - scripts/fit_day0_dense_state_space.py
   src/calibration/day0_resolver_terminal_residual.py:
