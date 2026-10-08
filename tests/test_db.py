@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-09-15
+# Last reused/audited: 2026-10-07
 # Lifecycle: created=2026-03-30; last_reviewed=2026-09-15; last_reused=2026-09-15
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
@@ -23,6 +23,248 @@ from src.state.db import (
     init_schema,
     init_schema_forecasts,
 )
+
+
+@pytest.mark.parametrize("lane", ["direct", "era"])
+@pytest.mark.parametrize("claim", [
+    {}, {"first_publication": True}, {"source_grade": "VERIFIED"},
+    {"correction": "HKO may revise daily data"},
+    {"source_entity": {"entity_sha256": "a" * 64,
+                       "capture_received_at_utc": "2026-09-29T00:00:00Z"}},
+    {"city": "NYC", "target_date": "2026-09-28", "temperature_metric": "low",
+     "station_id": "VHHH", "first_publication": True},
+])
+def test_hko_canonical_publication_refusal_preserves_existing_truth(tmp_path, lane, claim):
+    from src.state.db import log_settlement
+    from src.state.settlement_writers import dispatch_era_basis, write_settlement_with_era_provenance
+    from datetime import date
+
+    conn = get_connection(tmp_path / "private-hko-forecasts.db")
+    init_schema_forecasts(conn)
+    row = dict(city="Hong Kong", target_date="2026-09-27", temperature_metric="high",
+               market_slug="hko-sep27-high", winning_bin="32°C", settlement_value=32.0,
+               settlement_source="HKO", settled_at="2026-09-29T00:00:00Z",
+               authority="VERIFIED", provenance=claim, settlement_unit="C")
+    def write():
+        if lane == "era":
+            return write_settlement_with_era_provenance(
+                row, dispatch_era_basis(date(2026, 9, 29)).era_basis, conn=conn)
+        return log_settlement(conn, **row)
+    changes = conn.total_changes
+    for _ in range(2):
+        result = write()
+        assert result["source_grade"] == "UNKNOWN"
+        assert result["authority"] == "DISPUTED"
+        assert result["status"] == "refused_unknown_source_publication"
+    assert conn.total_changes == changes
+    assert conn.execute("SELECT count(*) FROM settlement_outcomes").fetchone()[0] == 0
+    # Private historical fact fixture: refusal must not revise any field.
+    conn.execute("INSERT INTO settlement_outcomes(city,target_date,temperature_metric,market_slug,"
+                 "winning_bin,settlement_value,settlement_source,settled_at,authority,provenance_json,settlement_unit) "
+                 "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                 ("Hong Kong", "2026-09-27", "high", "historical-contract", "32°C", 32.0,
+                  "HKO", "2026-09-28T00:00:00Z", "VERIFIED", '{"historical":true}', "C"))
+    original = tuple(conn.execute("SELECT * FROM settlement_outcomes").fetchone())
+    changes = conn.total_changes
+    result = write()
+    assert result["status"] == "preserved_existing_fact"
+    assert result["source_grade"] == "UNKNOWN"
+    assert tuple(conn.execute("SELECT * FROM settlement_outcomes").fetchone()) == original
+    assert conn.total_changes == changes
+    conn.close()
+
+
+def test_non_hko_canonical_settlement_keeps_existing_source_law(tmp_path):
+    from src.state.db import log_settlement
+    conn = get_connection(tmp_path / "private-wu-forecasts.db")
+    init_schema_forecasts(conn)
+    result = log_settlement(conn, city="NYC", target_date="2026-09-27",
+             temperature_metric="high", market_slug="nyc-high", winning_bin="74°F",
+             settlement_value=74.0, settlement_source="WU_KLGA",
+             settled_at="2026-09-28T00:00:00Z", authority="VERIFIED", settlement_unit="F")
+    assert result["status"] == "written"
+    assert conn.execute("SELECT authority FROM settlement_outcomes").fetchone()[0] == "VERIFIED"
+    conn.close()
+
+
+@pytest.mark.parametrize("lane", ["direct", "era"])
+def test_hko_central_native_point_reset_is_venue_truth(tmp_path, lane):
+    from tests.test_harvester_truth_writer_source_disagreement import _native_gamma_witness
+    from src.state.db import log_settlement
+    from src.state.settlement_writers import write_settlement_with_era_provenance, dispatch_era_basis
+    from datetime import date
+    import base64
+
+    conn = get_connection(tmp_path / "private-central-reset.db")
+    init_schema_forecasts(conn)
+    proof = _native_gamma_witness()
+    body = json.loads(base64.b64decode(proof["entity_bytes_b64"]))
+    condition = next(m["conditionId"] for m in body[0]["markets"]
+                     if json.loads(m["outcomePrices"]) == ["1", "0"])
+    qualified = datetime.now(timezone.utc).isoformat()
+    row = dict(city="Hong Kong", target_date="2026-09-27", temperature_metric="high",
+        market_slug=body[0]["slug"], winning_bin="32°C", settlement_value=32.0,
+        settlement_source="polymarket_gamma", settled_at=qualified, authority="VERIFIED",
+        settlement_unit="C", provenance={"claim_basis": "venue_unique_integer_point_v1",
+            "venue_point_witness": proof, "venue_condition_id": condition,
+            "venue_qualification_at": qualified, "source_grade": "UNKNOWN"})
+    def write():
+        if lane == "era":
+            return write_settlement_with_era_provenance(row,
+                dispatch_era_basis(date(2026, 9, 29)).era_basis, conn=conn)
+        return log_settlement(conn, **row)
+    body[0]["closed"] = False
+    row["provenance"]["venue_point_witness"] = _native_gamma_witness(json.dumps(body).encode())
+    qualified = datetime.now(timezone.utc).isoformat()
+    row["settled_at"] = row["provenance"]["venue_qualification_at"] = qualified
+    assert write()["status"] == "refused_unknown_source_publication"
+    row["provenance"]["venue_point_witness"] = proof
+    assert write()["status"] == "written"
+    record = conn.execute("SELECT * FROM settlement_outcomes").fetchone()
+    assert record["settlement_value"] == 32.0
+    assert record["settlement_source"] == "polymarket_gamma"
+    assert json.loads(record["provenance_json"])["source_grade"] == "UNKNOWN"
+    original = tuple(record)
+    changes = conn.total_changes
+    assert write()["status"] == "preserved_existing_fact"
+    assert tuple(conn.execute("SELECT * FROM settlement_outcomes").fetchone()) == original
+    assert conn.total_changes == changes
+    conn.close()
+
+
+@pytest.mark.parametrize("bad", ["hash", "capture_clock", "future_clock", "no_entity", "parsed_only",
+    "unresolved", "proposed", "099", "multiple_winners", "range", "shoulder", "no_only_point",
+    "wrong_metric", "wrong_date", "wrong_unit", "wrong_value", "wrong_condition", "wrong_source",
+    "fake_grade", "backdate", "native_question", "clock_before_revision", "wrong_city",
+    "entity_content", "qualification_before_capture", "recorded_clock", "wrong_basis"])
+def test_hko_central_rejects_bad_venue_integer_claim_without_writes(tmp_path, bad):
+    from tests.test_harvester_truth_writer_source_disagreement import _native_gamma_witness
+    from src.state.db import log_settlement
+    from src.contracts.settlement_semantics import gamma_capture_identity
+    import base64
+
+    conn = get_connection(tmp_path / "private-bad-claim.db")
+    init_schema_forecasts(conn)
+    proof = _native_gamma_witness()
+    body = json.loads(base64.b64decode(proof["entity_bytes_b64"]))
+    winner = next(m for m in body[0]["markets"] if json.loads(m["outcomePrices"]) == ["1", "0"])
+    qualified = datetime.now(timezone.utc).isoformat()
+    row = dict(city="Hong Kong", target_date="2026-09-27", temperature_metric="high",
+        market_slug=body[0]["slug"], winning_bin="32°C", settlement_value=32.0,
+        settlement_source="polymarket_gamma", settled_at=qualified, authority="VERIFIED",
+        settlement_unit="C", provenance={"claim_basis": "venue_unique_integer_point_v1",
+            "venue_point_witness": proof, "venue_condition_id": winner["conditionId"],
+            "venue_qualification_at": qualified})
+    if bad == "hash": proof["entity_sha256"] = "0" * 64
+    elif bad == "capture_clock": proof["capture_received_at_utc"] = "2026-09-29T00:00:00Z"
+    elif bad in {"future_clock", "clock_before_revision"}:
+        clock = "2099-01-01T00:00:00Z" if bad == "future_clock" else "2026-09-28T00:00:00Z"
+        proof.update(capture_started_at_utc=clock, capture_received_at_utc=clock)
+        proof["capture_identity_sha256"] = gamma_capture_identity(proof)
+    elif bad == "no_entity": proof.pop("entity_bytes_b64")
+    elif bad == "parsed_only": proof["entity_bytes_b64"] = body
+    elif bad == "entity_content": proof["entity_bytes_b64"] = base64.b64encode(b"[]").decode()
+    elif bad == "unresolved": body[0]["closed"] = False
+    elif bad == "proposed": winner["umaResolutionStatus"] = "proposed"
+    elif bad == "099": winner["outcomePrices"] = '["0.99","0.01"]'
+    elif bad == "multiple_winners":
+        other = next(m for m in body[0]["markets"] if m is not winner)
+        other["outcomePrices"] = '["1","0"]'
+    elif bad in {"range", "shoulder"}:
+        winner["groupItemTitle"] = "32-33°C" if bad == "range" else "32°C or higher"
+    elif bad == "no_only_point": winner["outcomePrices"] = '["0","1"]'
+    elif bad == "wrong_metric": row["temperature_metric"] = "low"
+    elif bad == "wrong_city": row["city"] = "NYC"
+    elif bad == "wrong_date": row["target_date"] = "2026-09-28"
+    elif bad == "wrong_unit": row["settlement_unit"] = "F"
+    elif bad == "wrong_value": row["settlement_value"] = 32.7
+    elif bad == "wrong_condition": row["provenance"]["venue_condition_id"] = "0x" + "0" * 64
+    elif bad == "wrong_source": row["settlement_source"] = "HKO"
+    elif bad == "wrong_basis": row["provenance"]["claim_basis"] = "source_publication"
+    elif bad == "fake_grade":
+        row["provenance"] = {"source_grade": "VERIFIED", "claim_basis": "venue_unique_integer_point_v1"}
+    elif bad == "backdate": row["settled_at"] = "2026-09-27T00:00:00Z"
+    elif bad == "recorded_clock": row["recorded_at"] = "2099-01-01T00:00:00Z"
+    elif bad == "native_question": winner["question"] = winner["question"].replace("32°C", "33°C")
+    if bad in {"unresolved", "proposed", "099", "multiple_winners", "range", "shoulder", "no_only_point", "native_question"}:
+        row["provenance"]["venue_point_witness"] = _native_gamma_witness(json.dumps(body).encode())
+    qualified = datetime.now(timezone.utc).isoformat()
+    row["provenance"]["venue_qualification_at"] = qualified
+    if bad != "backdate":
+        row["settled_at"] = qualified
+    if bad == "qualification_before_capture":
+        row["settled_at"] = row["provenance"]["venue_qualification_at"] = "2026-09-27T00:00:00+00:00"
+    changes = conn.total_changes
+    result = log_settlement(conn, **row)
+    assert result["status"] == "refused_unknown_source_publication", result
+    assert result["source_grade"] == "UNKNOWN"
+    assert conn.total_changes == changes
+    assert conn.execute("SELECT count(*) FROM settlement_outcomes").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("lane", ["direct", "era"])
+@pytest.mark.parametrize("metric,value", [("high", 32.0), ("low", 27.0)])
+@pytest.mark.parametrize("child", ["winner", "loser"])
+@pytest.mark.parametrize("revision", ["future", "naive", "malformed", "missing"])
+def test_hko_child_revision_refuses_integer_without_writes(tmp_path, lane, metric, value, child, revision):
+    from tests.test_harvester_truth_writer_source_disagreement import _native_gamma_witness
+    from src.contracts.settlement_semantics import gamma_unique_point_truth
+    from src.state.db import log_settlement
+    from src.state.settlement_writers import write_settlement_with_era_provenance, dispatch_era_basis
+    from datetime import date
+
+    raw = (Path(__file__).resolve().parents[1] / "docs/operations/current/evidence" /
+           f"gamma_hko_20260927_{metric}.body").read_bytes()
+    body = json.loads(raw)
+    winner = next(m for m in body[0]["markets"] if json.loads(m["outcomePrices"]) == ["1", "0"])
+    selected = winner if child == "winner" else next(m for m in body[0]["markets"] if m is not winner)
+    if revision == "missing":
+        selected.pop("updatedAt")
+    else:
+        selected["updatedAt"] = {"future": "2099-01-01T00:00:00Z",
+            "naive": "2026-09-28T00:00:00", "malformed": "not-a-native-clock"}[revision]
+    # A new consistent private capture does not legalize a revision after possession.
+    proof = _native_gamma_witness(json.dumps(body).encode())
+    qualified = datetime.now(timezone.utc).isoformat()
+    identity = dict(city="Hong Kong", target_date="2026-09-27", temperature_metric=metric,
+                    market_slug=body[0]["slug"])
+    assert gamma_unique_point_truth(proof, **identity, qualification_at=qualified) is None
+    conn = get_connection(tmp_path / "private-child-clock.db")
+    init_schema_forecasts(conn)
+    row = dict(**identity, winning_bin=f"{int(value)}°C", settlement_value=value,
+        settlement_source="polymarket_gamma", settled_at=qualified, authority="VERIFIED",
+        settlement_unit="C", provenance={"claim_basis": "venue_unique_integer_point_v1",
+            "venue_point_witness": proof, "venue_condition_id": winner["conditionId"],
+            "venue_qualification_at": qualified})
+    changes = conn.total_changes
+    if lane == "era":
+        result = write_settlement_with_era_provenance(row,
+            dispatch_era_basis(date(2026, 9, 29)).era_basis, conn=conn)
+    else:
+        result = log_settlement(conn, **row)
+    assert result["status"] == "refused_unknown_source_publication"
+    assert result["source_grade"] == "UNKNOWN"
+    assert conn.total_changes == changes
+    assert conn.execute("SELECT count(*) FROM settlement_outcomes").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_hko_child_revision_may_follow_parent_metadata(metric):
+    from tests.test_harvester_truth_writer_source_disagreement import _native_gamma_witness
+    from src.contracts.settlement_semantics import gamma_unique_point_truth
+    raw = (Path(__file__).resolve().parents[1] / "docs/operations/current/evidence" /
+           f"gamma_hko_20260927_{metric}.body").read_bytes()
+    body = json.loads(raw)
+    body[0]["updatedAt"] = "2026-09-27T00:00:00Z"
+    assert any(datetime.fromisoformat(m["updatedAt"].replace("Z", "+00:00")) >
+               datetime.fromisoformat(body[0]["updatedAt"].replace("Z", "+00:00"))
+               for m in body[0]["markets"])
+    proof = _native_gamma_witness(json.dumps(body).encode())
+    assert gamma_unique_point_truth(proof, city="Hong Kong", target_date="2026-09-27",
+        temperature_metric=metric, market_slug=body[0]["slug"],
+        qualification_at=datetime.now(timezone.utc).isoformat()) is not None
 
 
 def _create_opportunity_fact_table(conn):

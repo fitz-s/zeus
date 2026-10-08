@@ -1,6 +1,6 @@
 # Created: 2026-04-21
-# Lifecycle: created=2026-04-21; last_reviewed=2026-10-06; last_reused=2026-10-06
-# Last reused/audited: 2026-10-06 (strict versioned custody compatibility)
+# Lifecycle: created=2026-04-21; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Last reused/audited: 2026-10-07 CURRENT_REUSABLE (custody core ignores writer version)
 # Authority basis: plan v3 antibodies A1/A2/A6 (.omc/plans/observation-
 #                  instants-migration-iter3.md L119-124); step2 Phase 0 file #3.
 #   docs/operations/current/finite_evidence_probability_symmetry/PLAN.md HKO station-binding defect.
@@ -769,11 +769,16 @@ def _custody_revision_core_matches(existing, incoming):
     The normal hourly translator derives only these fields from the permitted
     extrema/count/latest-report advance. Raw clocks already bind the exact
     captured contributors; latest scalar/count must also bind the row values.
-    Everything else, including unknown keys, remains identical. This check is
-    used only when validated custody enabled a source_file exception.
+    ``parser_version`` names the writer, not the bucket: custody binds city,
+    source, station, date, hour, unit and payload hash, never the writer, so
+    a backfill_obs row stays revisable by a live custody row. The writer's own
+    receipts (widened_from, revised_from) are stripped by
+    ``_normalize_material_value``. Everything else, including station,
+    source_url, tier and unknown keys, remains identical. This check is used
+    only when validated custody enabled a source_file exception.
     """
-    derived = {'payload_hash', 'hour_max_raw_ts', 'hour_min_raw_ts',
-               'latest_raw_ts', 'latest_temp', 'raw_obs_count'}
+    unbound = {'payload_hash', 'hour_max_raw_ts', 'hour_min_raw_ts',
+               'latest_raw_ts', 'latest_temp', 'raw_obs_count', 'parser_version'}
     cores = []
     for row in (existing, incoming):
         provenance = _normalize_material_value('provenance_json', row['provenance_json'])
@@ -784,7 +789,7 @@ def _custody_revision_core_matches(existing, incoming):
                     type(provenance['raw_obs_count']) is not int or
                     provenance['raw_obs_count'] != row['observation_count'])):
             return False
-        cores.append({key: value for key, value in provenance.items() if key not in derived})
+        cores.append({key: value for key, value in provenance.items() if key not in unbound})
     return _json_dumps(cores[0]) == _json_dumps(cores[1])
 
 

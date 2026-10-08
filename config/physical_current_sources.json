@@ -1094,6 +1094,1007 @@
       "role": "canonical_resolver"
     },
     {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_eham",
+      "station_id": "EHAM",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "EHAM",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_ltac",
+      "station_id": "LTAC",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "LTAC",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_zbaa",
+      "station_id": "ZBAA",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZBAA",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_saez",
+      "station_id": "SAEZ",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "SAEZ",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 90,
+        "n_exact": 90,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 90,
+          "n_exact": 90
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_rkpk",
+      "station_id": "RKPK",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "RKPK",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_fact",
+      "station_id": "FACT",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "FACT",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_zuuu",
+      "station_id": "ZUUU",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZUUU",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_zuck",
+      "station_id": "ZUCK",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZUCK",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_zggg",
+      "station_id": "ZGGG",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZGGG",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_efhk",
+      "station_id": "EFHK",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "EFHK",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_ltfm",
+      "station_id": "LTFM",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "LTFM",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 90,
+        "n_exact": 90,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 90,
+          "n_exact": 90
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_oejn",
+      "station_id": "OEJN",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "OEJN",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_opkc",
+      "station_id": "OPKC",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "OPKC",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_wmkk",
+      "station_id": "WMKK",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "WMKK",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 76,
+        "n_exact": 76,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 76,
+          "n_exact": 76
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_eglc",
+      "station_id": "EGLC",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "EGLC",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_vilk",
+      "station_id": "VILK",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "VILK",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_lemd",
+      "station_id": "LEMD",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "LEMD",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_rpll",
+      "station_id": "RPLL",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "RPLL",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 76,
+        "n_exact": 76,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 76,
+          "n_exact": 76
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_mmmx",
+      "station_id": "MMMX",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "MMMX",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 90,
+        "n_exact": 90,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 90,
+          "n_exact": 90
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_limc",
+      "station_id": "LIMC",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "LIMC",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_uuww",
+      "station_id": "UUWW",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "UUWW",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 90,
+        "n_exact": 90,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 90,
+          "n_exact": 90
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_eddm",
+      "station_id": "EDDM",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "EDDM",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_mpmg",
+      "station_id": "MPMG",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "MPMG",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 72,
+        "n_exact": 72,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 78,
+          "n_exact": 72,
+          "exceptions_note": "2026-08-30..09-01 high and low (6 cells) settled to the open lowest bracket: the contract no-data clause, not a temperature disagreement (docs/operations/current/noaa_settlement_page_truth/evidence.md). DISPUTED, never forced."
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_lfpb",
+      "station_id": "LFPB",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "LFPB",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_zsqd",
+      "station_id": "ZSQD",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZSQD",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_sbgr",
+      "station_id": "SBGR",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "SBGR",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 90,
+        "n_exact": 90,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 90,
+          "n_exact": 90
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_rksi",
+      "station_id": "RKSI",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "RKSI",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_zspd",
+      "station_id": "ZSPD",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZSPD",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_zgsz",
+      "station_id": "ZGSZ",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZGSZ",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_wsss",
+      "station_id": "WSSS",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "WSSS",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 76,
+        "n_exact": 76,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 76,
+          "n_exact": 76
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_llbg",
+      "station_id": "LLBG",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "LLBG",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 90,
+        "n_exact": 90,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 90,
+          "n_exact": 90
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_rjtt",
+      "station_id": "RJTT",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "RJTT",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_cyyz",
+      "station_id": "CYYZ",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "CYYZ",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 90,
+        "n_exact": 90,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 90,
+          "n_exact": 90
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_epwa",
+      "station_id": "EPWA",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "EPWA",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_nzwn",
+      "station_id": "NZWN",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "NZWN",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 87,
+        "n_exact": 87,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 87,
+          "exceptions_note": "2026-09-17 low: the daily row was fetched 05:33Z, before that local day ended at 12:00Z, so it missed the later 9C rows; a partial-day fetch, not a page-identity mismatch. DISPUTED."
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_zhhh",
+      "station_id": "ZHHH",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZHHH",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 88,
+        "n_exact": 88,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 88,
+          "n_exact": 88
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
+      "provider": "noaa_wrh",
+      "source_channel": "noaa_wrh_zhcc",
+      "station_id": "ZHCC",
+      "settlement_source_types": [
+        "noaa"
+      ],
+      "unit": "C",
+      "minimum_poll_seconds": 60,
+      "identity": {
+        "provider_station": "ZHCC",
+        "resolver_view": "all"
+      },
+      "value_identity_proof": {
+        "n_pairs": 80,
+        "n_exact": 80,
+        "mismatches": [],
+        "basis": "The weather.gov/wrh/timeseries page product itself (Synoptic air_temp_set_1, metric view, every row): the existing daily noaa_wrh_<icao> observation rounded through SettlementSemantics against VERIFIED settlement_outcomes.",
+        "chain_bin": {
+          "n_pairs": 80,
+          "n_exact": 80
+        },
+        "report_path": "artifacts/fast_obs_audit/g5_noaa_page_daily_proof.json"
+      },
+      "authority_note": "The settlement product polled intraday in the shared degC unit/station-set batch, one request per minute; the daily_tick product is unchanged. AWC physical current remains independent; no claim this publisher is faster than AWC.",
+      "role": "canonical_resolver"
+    },
+    {
       "provider": "metaviatelecom_metar",
       "source_channel": "metaviatelecom_metar_temperature",
       "station_id": "UUWW",

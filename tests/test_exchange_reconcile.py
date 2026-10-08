@@ -10589,6 +10589,193 @@ def test_exit_pending_missing_without_chain_proof_preserves_canonical_exposure(
     }
 
 
+def test_backoff_exhausted_chain_absence_unknown_preserves_canonical(conn, monkeypatch):
+    from src.execution.exit_lifecycle import handle_exit_pending_missing
+    from src.state.portfolio import PortfolioState, Position
+
+    token = "1049501"
+    monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", "0x" + "12" * 20)
+    rpc_calls = []
+
+    def unavailable_rpc(url, method, params):
+        rpc_calls.append((method, params))
+        raise TimeoutError("private absence probe timed out")
+    position_id = "pos-backoff-chain-absent"
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-backoff-exit")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-backoff-exit',
+               order_status = 'backoff_exhausted',
+               shares = 4.95,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, NOW.isoformat(), position_id),
+    )
+    pos = Position(
+        trade_id=position_id,
+        market_id="condition-m5",
+        city="Karachi",
+        cluster="Karachi",
+        target_date="2026-05-17",
+        bin_label="test-bin",
+        direction="buy_yes",
+        unit="C",
+        env="live",
+        state="pending_exit",
+        exit_state="backoff_exhausted",
+        chain_state="exit_pending_missing",
+        token_id=token,
+        no_token_id=f"{token}-no",
+        condition_id="condition-m5",
+        order_id="ord-backoff-exit",
+        order_status="backoff_exhausted",
+        last_exit_order_id="ord-backoff-exit",
+        last_exit_error="exit_pending_missing",
+        shares=4.95,
+        cost_basis_usd=1.0,
+        entry_price=0.2,
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        edge_source="opening_inertia",
+        discovery_mode="opening_hunt",
+        decision_snapshot_id="snap-m5",
+        entered_at=NOW.isoformat(),
+    )
+    portfolio = PortfolioState(positions=[pos])
+
+    result = handle_exit_pending_missing(portfolio, pos, conn=conn, rpc_call=unavailable_rpc)
+
+    current = conn.execute(
+        "SELECT phase, order_status FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    latest_event = conn.execute(
+        """
+        SELECT event_type, phase_after, source_module
+          FROM position_events
+         WHERE position_id = ?
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    assert len(rpc_calls) == 1 and rpc_calls[0][0] == "eth_call"
+    assert result["action"] == "skip"
+    assert result["reason"] == "CHAIN_ABSENCE_UNCONFIRMED"
+    assert result["position"] is pos and pos.state == "pending_exit"
+    assert portfolio.positions == [pos] and pos.shares == pytest.approx(4.95)
+    assert dict(current) == {"phase": "pending_exit", "order_status": "backoff_exhausted"}
+    assert latest_event is None or latest_event["event_type"] != "MANUAL_OVERRIDE_APPLIED"
+    review = conn.execute(
+        "SELECT status, reason_code FROM review_work_items WHERE subject_id=?",
+        (position_id,),
+    ).fetchone()
+    assert dict(review) == {"status": "OPEN", "reason_code": "TIMEOUT_ABSENCE_UNCONFIRMED"}
+
+
+def test_recoverable_exit_pending_missing_does_not_persist_admin_close(conn, monkeypatch):
+    from src.execution.exit_lifecycle import handle_exit_pending_missing
+    from src.state.portfolio import PortfolioState, Position
+
+    token = "1049502"
+    monkeypatch.setenv("POLYMARKET_FUNDER_ADDRESS", "0x" + "12" * 20)
+    rpc_calls = []
+
+    def unavailable_rpc(url, method, params):
+        rpc_calls.append((method, params))
+        raise TimeoutError("private absence probe timed out")
+    position_id = "pos-recoverable-chain-absent"
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-recoverable-exit")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               order_id = 'ord-recoverable-exit',
+               order_status = 'retry_pending',
+               shares = 4.95,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, NOW.isoformat(), position_id),
+    )
+    pos = Position(
+        trade_id=position_id,
+        market_id="condition-m5",
+        city="Karachi",
+        cluster="Karachi",
+        target_date="2026-05-17",
+        bin_label="test-bin",
+        direction="buy_yes",
+        unit="C",
+        env="live",
+        state="pending_exit",
+        exit_state="retry_pending",
+        chain_state="exit_pending_missing",
+        token_id=token,
+        no_token_id=f"{token}-no",
+        condition_id="condition-m5",
+        order_id="ord-recoverable-exit",
+        order_status="retry_pending",
+        last_exit_order_id="ord-recoverable-exit",
+        last_exit_error="exit_pending_missing",
+        shares=4.95,
+        cost_basis_usd=1.0,
+        entry_price=0.2,
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        edge_source="opening_inertia",
+        discovery_mode="opening_hunt",
+        decision_snapshot_id="snap-m5",
+        entered_at=NOW.isoformat(),
+    )
+
+    portfolio = PortfolioState(positions=[pos])
+    result = handle_exit_pending_missing(portfolio, pos, conn=conn, rpc_call=unavailable_rpc)
+
+    current = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    admin_events = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MANUAL_OVERRIDE_APPLIED'
+        """,
+        (position_id,),
+    ).fetchone()[0]
+    assert len(rpc_calls) == 1 and rpc_calls[0][0] == "eth_call"
+    assert result["action"] == "skip"
+    assert result["reason"] == "CHAIN_ABSENCE_UNCONFIRMED"
+    assert current["phase"] == "pending_exit"
+    assert admin_events == 0
+    assert portfolio.positions == [pos] and pos.shares == pytest.approx(4.95)
+    review = conn.execute(
+        "SELECT status, reason_code FROM review_work_items WHERE subject_id=?",
+        (position_id,),
+    ).fetchone()
+    assert dict(review) == {"status": "OPEN", "reason_code": "TIMEOUT_ABSENCE_UNCONFIRMED"}
+
+    def held_balance_rpc(url, method, params):
+        rpc_calls.append((method, params))
+        return hex(4_950_000)
+
+    recovered = handle_exit_pending_missing(portfolio, pos, conn=conn, rpc_call=held_balance_rpc)
+    assert len(rpc_calls) == 2 and rpc_calls[-1][0] == "eth_call"
+    assert recovered["action"] == "evaluate"
+    assert portfolio.positions == [pos] and pos.shares == pytest.approx(4.95)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=? AND event_type='MANUAL_OVERRIDE_APPLIED'",
+        (position_id,),
+    ).fetchone()[0] == 0
+
+
 def test_pending_exit_chain_missing_filled_order_is_not_current_journal_exposure(conn):
     from src.execution.exchange_reconcile import record_finding, refresh_unresolved_reconcile_findings
 

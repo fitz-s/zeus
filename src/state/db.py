@@ -9146,6 +9146,48 @@ def log_settlement(
     recorded_at_value = _forward_clean_str(recorded_at) or datetime.now(timezone.utc).isoformat()
     provenance_payload = dict(provenance or {})
     provenance_payload.setdefault("legacy_table", "settlements")
+    from src.contracts.settlement_semantics import settlement_source_publication_grade
+    publication = settlement_source_publication_grade(
+        city=clean_city, target_date=clean_target_date,
+        temperature_metric=clean_metric, market_slug=clean_market_slug,
+        settlement_source=settlement_source, provenance=provenance_payload,
+        qualification_at=provenance_payload.get("venue_qualification_at"),
+    )
+    if publication is not None:
+        # Independent final source boundary, including direct/era callers.
+        # Never UPSERT UNKNOWN over historical truth or certify a null source
+        # value from venue payout evidence. No polling debt is created here.
+        existing = conn.execute(
+            "SELECT authority FROM settlement_outcomes WHERE city=? "
+            "AND target_date=? AND temperature_metric=?",
+            (clean_city, clean_target_date, clean_metric),
+        ).fetchone()
+        point = publication.get("venue_point")
+        try:
+            venue_recorded_at = datetime.fromisoformat(recorded_at_value.replace("Z", "+00:00"))
+            qualified_at = datetime.fromisoformat(str(provenance_payload.get("venue_qualification_at")))
+            venue_clock_valid = (venue_recorded_at.tzinfo is not None and qualified_at.tzinfo is not None
+                                 and qualified_at <= venue_recorded_at <= datetime.now(timezone.utc))
+        except (TypeError, ValueError):
+            venue_clock_valid = False
+        valid_venue_claim = (
+            point is not None and clean_authority == "VERIFIED"
+            and settlement_source == "polymarket_gamma"
+            and provenance_payload.get("claim_basis") == "venue_unique_integer_point_v1"
+            and provenance_payload.get("venue_condition_id") == point["condition_id"]
+            and settlement_unit == point["unit"]
+            and winning_bin == point["winning_bin"]
+            and settlement_value == point["settlement_value"]
+            and _forward_clean_str(settled_at) == point["qualification_at"]
+            and venue_clock_valid
+        )
+        if (existing and existing[0] == "VERIFIED") or not valid_venue_claim:
+            return {
+                **publication, "table": table, "authority": "DISPUTED",
+                "status": ("preserved_existing_fact" if existing and existing[0] == "VERIFIED"
+                           else "refused_unknown_source_publication"),
+            }
+        provenance_payload["source_grade"] = "UNKNOWN"
     provenance_json = json.dumps(provenance_payload, sort_keys=True, default=str)
 
     try:

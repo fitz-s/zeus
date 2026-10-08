@@ -4318,7 +4318,19 @@ class Day0FastObsEmitter:
                     canonical: list[MetarReport] = []
                     for group in grouped.values():
                         if any(report.transport_id == KMA_METAR_TRANSPORT_ID for report in group):
-                            canonical.extend(_kma_canonicalize_reports(group))
+                            try:
+                                canonical.extend(_kma_canonicalize_reports(group))
+                            except KmaObservationConflict as conflict:
+                                # One conflicting KMA instant withholds only its
+                                # own KMA-transport reports; every other report
+                                # in the tick still merges, and the conflict
+                                # stays a typed fact for the consumers.
+                                canonical.extend(
+                                    report for report in group
+                                    if report.transport_id != KMA_METAR_TRANSPORT_ID
+                                )
+                                kma_conflicts_snapshot.setdefault(conflict.station_id, conflict)
+                                self._last_kma_conflicts = dict(kma_conflicts_snapshot)
                         else:
                             canonical.extend(group)
                     merged = sorted(

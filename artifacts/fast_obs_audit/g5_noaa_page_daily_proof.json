@@ -1,0 +1,744 @@
+{
+ "computed_at_utc": "2026-10-07T11:10:34+00:00",
+ "database": "state/zeus-forecasts.db (read-only)",
+ "cities": [
+  {
+   "city": "Amsterdam",
+   "station": "EHAM",
+   "channel": "noaa_wrh_eham",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Ankara",
+   "station": "LTAC",
+   "channel": "noaa_wrh_ltac",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Beijing",
+   "station": "ZBAA",
+   "channel": "noaa_wrh_zbaa",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Buenos Aires",
+   "station": "SAEZ",
+   "channel": "noaa_wrh_saez",
+   "daily_rows": 45,
+   "first_date": "2026-08-23",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Busan",
+   "station": "RKPK",
+   "channel": "noaa_wrh_rkpk",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Cape Town",
+   "station": "FACT",
+   "channel": "noaa_wrh_fact",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Chengdu",
+   "station": "ZUUU",
+   "channel": "noaa_wrh_zuuu",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Chongqing",
+   "station": "ZUCK",
+   "channel": "noaa_wrh_zuck",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Guangzhou",
+   "station": "ZGGG",
+   "channel": "noaa_wrh_zggg",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Helsinki",
+   "station": "EFHK",
+   "channel": "noaa_wrh_efhk",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Istanbul",
+   "station": "LTFM",
+   "channel": "noaa_wrh_ltfm",
+   "daily_rows": 45,
+   "first_date": "2026-08-23",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Jeddah",
+   "station": "OEJN",
+   "channel": "noaa_wrh_oejn",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Karachi",
+   "station": "OPKC",
+   "channel": "noaa_wrh_opkc",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Kuala Lumpur",
+   "station": "WMKK",
+   "channel": "noaa_wrh_wmkk",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 76,
+    "n_exact": 76,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 76,
+    "n_exact": 76,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "London",
+   "station": "EGLC",
+   "channel": "noaa_wrh_eglc",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Lucknow",
+   "station": "VILK",
+   "channel": "noaa_wrh_vilk",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Madrid",
+   "station": "LEMD",
+   "channel": "noaa_wrh_lemd",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Manila",
+   "station": "RPLL",
+   "channel": "noaa_wrh_rpll",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 76,
+    "n_exact": 76,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 76,
+    "n_exact": 76,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Mexico City",
+   "station": "MMMX",
+   "channel": "noaa_wrh_mmmx",
+   "daily_rows": 45,
+   "first_date": "2026-08-23",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Milan",
+   "station": "LIMC",
+   "channel": "noaa_wrh_limc",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Moscow",
+   "station": "UUWW",
+   "channel": "noaa_wrh_uuww",
+   "daily_rows": 45,
+   "first_date": "2026-08-23",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Munich",
+   "station": "EDDM",
+   "channel": "noaa_wrh_eddm",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Panama City",
+   "station": "MPMG",
+   "channel": "noaa_wrh_mpmg",
+   "daily_rows": 45,
+   "first_date": "2026-08-23",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 72,
+    "n_exact": 72,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 78,
+    "n_exact": 72,
+    "exceptions": [
+     {
+      "date": "2026-08-30",
+      "metric": "high",
+      "page": 29.0,
+      "page_rounded": 29.0,
+      "pm_bin_lo": null,
+      "pm_bin_hi": 24.0,
+      "authority": "DISPUTED",
+      "dispute_reason": "harvester_live_obs_outside_bin"
+     },
+     {
+      "date": "2026-08-30",
+      "metric": "low",
+      "page": 27.0,
+      "page_rounded": 27.0,
+      "pm_bin_lo": null,
+      "pm_bin_hi": 20.0,
+      "authority": "DISPUTED",
+      "dispute_reason": "harvester_live_obs_outside_bin"
+     },
+     {
+      "date": "2026-08-31",
+      "metric": "high",
+      "page": 28.0,
+      "page_rounded": 28.0,
+      "pm_bin_lo": null,
+      "pm_bin_hi": 23.0,
+      "authority": "DISPUTED",
+      "dispute_reason": "harvester_live_obs_outside_bin"
+     },
+     {
+      "date": "2026-08-31",
+      "metric": "low",
+      "page": 24.0,
+      "page_rounded": 24.0,
+      "pm_bin_lo": null,
+      "pm_bin_hi": 20.0,
+      "authority": "DISPUTED",
+      "dispute_reason": "harvester_live_obs_outside_bin"
+     },
+     {
+      "date": "2026-09-01",
+      "metric": "high",
+      "page": 32.0,
+      "page_rounded": 32.0,
+      "pm_bin_lo": null,
+      "pm_bin_hi": 23.0,
+      "authority": "DISPUTED",
+      "dispute_reason": "harvester_live_obs_outside_bin"
+     },
+     {
+      "date": "2026-09-01",
+      "metric": "low",
+      "page": 26.0,
+      "page_rounded": 26.0,
+      "pm_bin_lo": null,
+      "pm_bin_hi": 19.0,
+      "authority": "DISPUTED",
+      "dispute_reason": "harvester_live_obs_outside_bin"
+     }
+    ]
+   }
+  },
+  {
+   "city": "Paris",
+   "station": "LFPB",
+   "channel": "noaa_wrh_lfpb",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Qingdao",
+   "station": "ZSQD",
+   "channel": "noaa_wrh_zsqd",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Sao Paulo",
+   "station": "SBGR",
+   "channel": "noaa_wrh_sbgr",
+   "daily_rows": 45,
+   "first_date": "2026-08-23",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Seoul",
+   "station": "RKSI",
+   "channel": "noaa_wrh_rksi",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Shanghai",
+   "station": "ZSPD",
+   "channel": "noaa_wrh_zspd",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Shenzhen",
+   "station": "ZGSZ",
+   "channel": "noaa_wrh_zgsz",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Singapore",
+   "station": "WSSS",
+   "channel": "noaa_wrh_wsss",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 76,
+    "n_exact": 76,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 76,
+    "n_exact": 76,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Tel Aviv",
+   "station": "LLBG",
+   "channel": "noaa_wrh_llbg",
+   "daily_rows": 45,
+   "first_date": "2026-08-23",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Tokyo",
+   "station": "RJTT",
+   "channel": "noaa_wrh_rjtt",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Toronto",
+   "station": "CYYZ",
+   "channel": "noaa_wrh_cyyz",
+   "daily_rows": 45,
+   "first_date": "2026-08-23",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 90,
+    "n_exact": 90,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Warsaw",
+   "station": "EPWA",
+   "channel": "noaa_wrh_epwa",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Wellington",
+   "station": "NZWN",
+   "channel": "noaa_wrh_nzwn",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 87,
+    "n_exact": 87,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 87,
+    "exceptions": [
+     {
+      "date": "2026-09-17",
+      "metric": "low",
+      "page": 10.0,
+      "page_rounded": 10.0,
+      "pm_bin_lo": 9.0,
+      "pm_bin_hi": 9.0,
+      "authority": "DISPUTED",
+      "dispute_reason": "harvester_source_disagreement_within_tolerance"
+     }
+    ]
+   }
+  },
+  {
+   "city": "Wuhan",
+   "station": "ZHHH",
+   "channel": "noaa_wrh_zhhh",
+   "daily_rows": 44,
+   "first_date": "2026-08-24",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 88,
+    "n_exact": 88,
+    "exceptions": []
+   }
+  },
+  {
+   "city": "Zhengzhou",
+   "station": "ZHCC",
+   "channel": "noaa_wrh_zhcc",
+   "daily_rows": 45,
+   "first_date": "2026-08-23",
+   "last_date": "2026-10-06",
+   "verified": {
+    "n_pairs": 80,
+    "n_exact": 80,
+    "mismatches": []
+   },
+   "chain_bin": {
+    "n_pairs": 80,
+    "n_exact": 80,
+    "exceptions": []
+   }
+  }
+ ]
+}

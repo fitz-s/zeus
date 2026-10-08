@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-07 (KNMI key resolver env->config/knmi_secret.json; fast-obs G3a)
+# Last reused/audited: 2026-10-07 (KNMI key resolver env->config/knmi_secret.json, G3a; WRH batch takes the request slot and 403 stays WrhTokenRefused, G5)
 """Fixed-endpoint station observations with independent receipt and valid clocks.
 
 Provider names select parsers, never arbitrary URLs or executable config. Native
@@ -190,6 +190,8 @@ def _fetch_wrh_batch(route, client):
     This is the existing resolver product, not a promotion of a slower substitute
     for AWC. The physical METAR lane continues independently. Errors are cached
     as errors, never as source-empty evidence, and credentials never enter prints.
+    Every batch takes the module's request slot, so the per-unit batches and the
+    daily product share one in-process spacing; a 403 stays WrhTokenRefused.
     """
     from src.data import noaa_wrh_timeseries as wrh
     from src.data.physical_current_sources import load_physical_current_sources
@@ -197,11 +199,18 @@ def _fetch_wrh_batch(route, client):
                         if r.provider == "noaa_wrh" and r.unit == route.unit} | {route.station_id}))
 
     def fetch():
-        body = _bounded_body(
-            client, "GET", wrh.WRH_TIMESERIES_URL,
-            params=wrh._query_params(",".join(ids), unit=route.unit, start_utc=None, end_utc=None,
-                                     recent_minutes=180, token=wrh.fetch_wrh_token()),
-            headers=wrh._page_headers(ids[0]), timeout=6)
+        token = wrh.fetch_wrh_token()
+        wrh._wait_for_request_slot()
+        try:
+            body = _bounded_body(
+                client, "GET", wrh.WRH_TIMESERIES_URL,
+                params=wrh._query_params(",".join(ids), unit=route.unit, start_utc=None, end_utc=None,
+                                         recent_minutes=180, token=token),
+                headers=wrh._page_headers(ids[0]), timeout=6)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                raise wrh.WrhTokenRefused("WRH batch refused (HTTP 403)") from None
+            raise
         return _WrhBatchPayload(json.loads(body), hashlib.sha256(body).hexdigest())
 
     return _cached_fetch(_WRH_BATCH_CACHE, (route.unit, ids, id(client)), fetch,
@@ -585,7 +594,10 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
             raise ValueError("KNMI_DOWNLOAD_HOST_INVALID")
     else:
         raise ValueError("STATION_ADAPTER_UNKNOWN")
-    body = _bounded_body(client, "GET", url, params=params, headers=headers, timeout=6)
+    # httpx replaces a URL's query string with ``params`` even when it is empty,
+    # which strips a presigned download URL's signature (KNMI S3 -> 403).
+    body = _bounded_body(client, "GET", url, headers=headers, timeout=6,
+                         **({"params": params} if params else {}))
     received = datetime.now(UTC)
     return tuple(s for s in parse_station_payload(route, body, received_at=received)
                  if start <= s.observed_at <= end)
@@ -657,15 +669,22 @@ def iter_current_noaa_wrh_products(scopes, *, client=httpx):
         key = (unit, ids, tuple(sorted({target for city, target, start in group})), id(client))
         earliest = min(start for city, target, start in group)
         def fetch():
+            token = wrh.fetch_wrh_token()
+            wrh._wait_for_request_slot()
             started = datetime.now(UTC)
             minutes = math.ceil((started - earliest).total_seconds() / 60) + 180
             if minutes > wrh.MAX_REQUEST_WINDOW_DAYS * 24 * 60:
                 raise ValueError("WRH_CURRENT_PRODUCT_WINDOW_EXPIRED")
-            body = _bounded_body(
-                client, "GET", wrh.WRH_TIMESERIES_URL,
-                params=wrh._query_params(",".join(ids), unit=unit, start_utc=None, end_utc=None,
-                                         recent_minutes=minutes, token=wrh.fetch_wrh_token()),
-                headers=wrh._page_headers(ids[0]), timeout=6)
+            try:
+                body = _bounded_body(
+                    client, "GET", wrh.WRH_TIMESERIES_URL,
+                    params=wrh._query_params(",".join(ids), unit=unit, start_utc=None, end_utc=None,
+                                             recent_minutes=minutes, token=token),
+                    headers=wrh._page_headers(ids[0]), timeout=6)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 403:
+                    raise wrh.WrhTokenRefused("WRH current product refused (HTTP 403)") from None
+                raise
             return body, started, started - timedelta(minutes=minutes)
         try:
             (body, started, coverage_start), received = _current_wrh_cached_fetch(
@@ -711,11 +730,18 @@ def iter_noaa_wrh_completed_owner_recovery(scope, *, client=httpx):
         return
     key = ("completed_owner", city.wu_station, city.settlement_unit, target, id(client))
     def fetch():
+        token = wrh.fetch_wrh_token()
+        wrh._wait_for_request_slot()
         started = datetime.now(UTC)
-        body = _bounded_body(client, "GET", wrh.WRH_TIMESERIES_URL,
-            params=wrh._query_params(city.wu_station, unit=city.settlement_unit,
-                                     start_utc=start, end_utc=end, recent_minutes=None, token=wrh.fetch_wrh_token()),
-            headers=wrh._page_headers(city.wu_station), timeout=6)
+        try:
+            body = _bounded_body(client, "GET", wrh.WRH_TIMESERIES_URL,
+                params=wrh._query_params(city.wu_station, unit=city.settlement_unit,
+                                         start_utc=start, end_utc=end, recent_minutes=None, token=token),
+                headers=wrh._page_headers(city.wu_station), timeout=6)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                raise wrh.WrhTokenRefused("WRH completed owner recovery refused (HTTP 403)") from None
+            raise
         return body, started
     try:
         (body, started), received = _current_wrh_cached_fetch(key, fetch,

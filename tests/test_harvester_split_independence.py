@@ -1,4 +1,5 @@
 # Lifecycle: created=2026-04-30; last_reviewed=2026-05-16; last_reused=2026-05-16
+# Last reused/audited: 2026-10-07
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §6 antibody #12; docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
 """Antibody #12 — Harvester split independence.
 
@@ -268,3 +269,43 @@ def test_harvester_pnl_resolver_passes_verified_forecasts_truth_to_position_sett
     assert '"trades.payout_observations"' in source
     assert "settlement_authority=authority" in source
     assert "settlement_temperature_metric=str(temperature_metric or \"\")" in source
+
+
+def test_hko_unknown_source_grade_does_not_block_finalized_venue_payout(tmp_path):
+    """Actual payout reader stays condition-scoped and invents no weather value."""
+    import sqlite3
+    from types import SimpleNamespace
+    from src.state.schema.payout_observations_schema import ensure_table
+    from src.execution.harvester_pnl_resolver import _read_finalized_payout_settlement_rows
+    from src.contracts.settlement_semantics import settlement_source_publication_grade
+
+    conn = sqlite3.connect(tmp_path / "private-payout.db")
+    conn.row_factory = sqlite3.Row
+    ensure_table(conn)
+    for index, numerator in ((0, 1), (1, 0)):
+        conn.execute("INSERT INTO payout_observations(condition_id,outcome_index,payout_numerator,"
+                     "payout_denominator,state,block_number,block_hash,observed_at,source) "
+                     "VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("condition-hko", index, numerator, 1,
+                      "RESOLVED_NONZERO" if numerator else "RESOLVED_ZERO", 1, "block",
+                      "2026-09-28T00:00:00Z", "chain_rpc_finalized_v1"))
+    key = ("Hong Kong", "2026-09-27", "high")
+    pos = SimpleNamespace(city=key[0], target_date=key[1], temperature_metric=key[2],
+                          condition_id="condition-hko", token_id="yes-hko", no_token_id="no-hko",
+                          phase="settled")
+    snapshot = {"yes_token_id": "yes-hko", "no_token_id": "no-hko", "event_slug": "hko-event"}
+    grade = settlement_source_publication_grade(city=key[0], target_date=key[1],
+             temperature_metric=key[2], market_slug="hko-event", source_family="HKO")
+    assert grade["source_grade"] == "UNKNOWN"
+    changes = conn.total_changes
+    rows = _read_finalized_payout_settlement_rows(conn, SimpleNamespace(positions=[pos]),
+                                                 {key}, {"condition-hko": snapshot})
+    assert len(rows) == 1
+    assert rows[0]["authority"] == "VENUE_RESOLVED"
+    assert rows[0]["settlement_value"] is None
+    assert rows[0]["winning_bin"] is None
+    assert rows[0]["condition_yes_won"] is True
+    assert rows[0]["settlement_scope"] == "condition"
+    assert pos.phase == "settled"
+    assert conn.total_changes == changes
+    conn.close()

@@ -96,6 +96,10 @@ write_routes:
 # PRs independently added a `providers:` block to satisfy the same gate; this
 # resolution keeps every declared id under the single canonical map.
 providers:
+  station_temperature:
+    role: current_observation
+    client: src/data/station_temperature_adapters.py
+    why: Existing station clients and valid_station_print replay canonical observation_prints station_id, source_channel, raw_report, value_native, unit, publish_ts_utc and fetched_at_utc. This current-observation role neither certifies final daily settlement nor infers missing source-issued clocks.
   observation:
     role: settlement_capture_observation
     client: src/data/observation_client.py
@@ -331,7 +335,7 @@ files:
     zone: K1_truth
     authority_role: station_temperature_provider_adapter
     why: Fixed-endpoint station clients preserve native values, QC, observation and actual receipt clocks. Reviewed exact-value equality is registry metadata; no fabricated
-      publisher timestamp or final daily value. Shared sample conversion rejects JSON booleans before float coercion while preserving real numeric zero, negative and finite native values and existing clock/QC rules. WRH fast JSON references preserve observed station metadata and original full-batch response identity separately from temperature identity; metadata is not ground or sensor-height authority. Current held WRH acquisition streams verified native station-batch products with actual request/receipt clocks and complete local-day request coverage, so one received product can commit and wake before an unrelated request finishes. The KNMI key resolves from env KNMI_API_KEY, then the gitignored config/knmi_secret.json; it never enters a log, error or print.
+      publisher timestamp or final daily value. Shared sample conversion rejects JSON booleans before float coercion while preserving real numeric zero, negative and finite native values and existing clock/QC rules. WRH fast JSON references preserve observed station metadata and original full-batch response identity separately from temperature identity; metadata is not ground or sensor-height authority. Current held WRH acquisition streams verified native station-batch products with actual request/receipt clocks and complete local-day request coverage, so one received product can commit and wake before an unrelated request finishes. Current-full and completed-owner recovery share the existing WRH request slot before acquisition clocks; typed refusals remain scoped cached errors, and slot waits and HTTP stay outside DB leases. The KNMI key resolves from env KNMI_API_KEY, then the gitignored config/knmi_secret.json; it never enters a log, error or print.
     downstream: []
   src/data/noaa_wrh_timeseries.py:
     zone: K1_truth
@@ -459,6 +463,7 @@ files:
     authority_role: day0_remaining_window_forecast_vectors
     why: Current Day0 v35 separates native remaining-X and full-Y point roles from interval confidence; older probability revisions remain historical replay only, with operator/content-bound identities. Persists fresh target-day hourly forecast vectors in zeus-forecasts.db and derives only the interval not yet covered by the latest causal settlement-channel observation. Vector freshness stays bound to decision time; the observation clock only defines the remaining stochastic window, including a terminal tail after local midnight. Decision/cutoff clocks remain causal provenance but are excluded from the carrier economic content hash and deterministic sampling seed once the selected future vector, observation likelihood, sigma, bins, and source identities are unchanged, so a no-new-information refresh cannot manufacture a new q or starve held-SELL coverage. The current global bundle retains ECMWF, ICON, JMA, and UKMO hourly paths so a city outside regional-model domains cannot collapse Day0 probability to one deterministic provider. The Day0 carrier validates complete settlement coverage in thermal order but emits q in the venue candidate order, so a valid family cannot lose probability authority merely because Gamma presents its bins non-monotonically. Its KMA consumer preserves typed invalid-versus-absent source state; unavailable raw evidence returns no remaining-window authority before any older AWC fallback, while true absence retains the existing route. Original scheduled 2t knots and paired exact mn/mx extrema bind independent lawful role frontiers, member/grid/body/PIT and pinned replay; a newer partial X row cannot steal a lawful Y subset. Straddling intervals supply conservative bounds, never their supremum or midpoint as the served point. Role-specific width, zero-width atoms and the sigma-to-zero limit use C/F settlement preimages; Gaussian-mass envelopes include interior spread stationary points. Missing originals or unidentified prefix likelihood remains typed UNKNOWN, not fallback width or absorbing evidence.
       When aggregate retention removed a body, the owning native role reader may replay its byte-identical retained message by canonical SHA/length, preserving the original receipt and possession clocks and all member/run/grid/header checks. A present aggregate remains the primary source; invalid or symlink originals do not become a replica fallback or fresh capture. Retention replicas alter custody only, not current role, q revision, station equivalence or absorbing authority. Qualified WRH complete-product revision identity is a separate current-path dependency even when an independent newer physical print supplies the latest point. Older-peak corrections therefore cannot disappear behind equal latest point/value/source triples; transport-only confirmation does not renew the semantic identity or source clocks.
+      Deterministic hourly vectors retain the producer's immutable response descriptor and register its existing body and HTTP artifacts on the same FORECAST connection as the vector. Both causal-capture and newest-vector readers replay exact body/hash, canonical city/requested point, proved returned model cell, model/run/unit/arrays and possession/written PIT. A transport-120h donor may supply a lawful consumer-72h projection without new HTTP or renewed capture clocks; canonical local dates remain strict. Missing originals, same-timezone foreign-city labels and legacy OM Ensemble API labels cannot grant generic current authority; native ENS roles keep their independent GRIB/member/static path.
     hazards:
     - Recovery acquisition cost must not borrow old q authority. Exact city/date causal expected-member run metadata plus a recorded usable newer pin may release successTTL even when old51 values expire or are incomplete; strict new51 readback still gates q, and retry-not-before, quota/deadline and healthy deterministic siblings retain their original protection.
     - SOURCE_TRUTH_PLANE_COLLAPSE
@@ -493,6 +498,7 @@ files:
       Final selection also replays a canonical HKO original for ordinary or legacy requests carrying no witness. None is absent reporting, not permanent suppression of original evidence; non-HKO None remains inert and source witnesses never become probability-core inputs.
       Current Day0 v35 derives independent native X/Y role shapes from current provider centers and role-specific ENS disagreement, with typed prefix information and immutable original replay. A reported-product proxy supplies only its coarsened bound; unidentified strong same-quantity Y prefix likelihood refuses that role rather than guessing conditioning. Raw custody, spot evidence and source completeness do not become absorbing settlement authority.
       When full-Y originals are unavailable, an independently original-qualified remaining-X admission variant is sealed to carrier.X and its component noise W²+delta² (between-spread is inside the equal-provider mixture); only the complete current Day0 pushforward may serve it, never full-Y/global Normal or parameter-bootstrap fallback.
+      Zero-width point and bootstrap use the owning pure preimage-axis quantizer with the already-bound rule/step, not an invented city SettlementSemantics; positive-width integration and source authority remain unchanged.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -958,7 +964,7 @@ files:
     zone: K0_frozen_kernel
     authority_role: settlement_rounding_law
     why: Settlement rounding contract (wmo_half_up + oracle_truncate) for DB writes and MC simulation. for_city() factory
-      routes HKO to oracle_truncate, all others to wmo_half_up.
+      routes HKO to oracle_truncate, all others to wmo_half_up. from_frozen_payload strictly restores the five already-captured settlement fields for diagnostic replay without consulting current city configuration or changing live dispatch. A pure preimage-axis quantizer reuses the same rounding formula for already-bound forecast coordinates without manufacturing a city contract.
     hazards:
     - WMO_ROUNDING_LAW
     - ORACLE_TRUNCATION_BIAS
@@ -1665,12 +1671,14 @@ files:
     zone: K2_runtime
     authority_role: replacement_raw_forecast_capture
     why: Captures exact current and previous Open-Meteo model runs into raw forecast evidence, accepts a partial current-day run only when its missing prefix is already elapsed and its suffix covers the unresolved local day, and exposes distinct source-clock and held-capital quota lanes. Current-run completion is measured only across the HIGH/LOW metrics actually present in the current target family; an absent non-market sibling metric cannot cause an otherwise complete multi-location batch to refetch forever and consume source-clock quota. Its optional standard metadata bracket binds original before/after entity receipts to the exact temperature request and body SHA without changing source availability, cached possession, numerical payload or probability identity; absent or unwritable evidence stays diagnostic UNKNOWN. It does not derive probabilities or place orders.
+      A shared registration primitive records existing immutable response bodies for BPF rows and deterministic Day0 vectors on the caller's canonical FORECAST transaction, without manufacturing raw forecast values or committing a second connection. Original body/HTTP receipt identity and first-possession clocks survive duplicate registration. Strict ISO local-date normalization preserves legal 120h-to-72h donor coverage while invalid/datetime inputs remain unavailable; no source run, suffix coverage, PIT or probability gate is loosened.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
     - scripts/backfill_bayes_precision_fusion_history_from_b0.py
     - scripts/backfill_bayes_precision_fusion_promoted_model_history.py
     - src/data/bayes_precision_fusion_capture.py
+    - src/data/day0_hourly_vectors.py
     - src/data/openmeteo_ecmwf_ifs9_anchor.py
     - src/data/replacement_forecast_production.py
     - src/data/source_clock_update_probe.py
@@ -2233,7 +2241,7 @@ files:
   src/engine/tier0_auction_corpus.py:
     zone: K2_runtime
     authority_role: auction_learning_corpus_writer
-    why: Builds the complete per-cut learning corpus from the cut's frozen witness/book/evaluation inputs (no I/O), holds it in a bounded in-process queue, and writes it after the batch's receipts commit in its own fail-soft transaction, so the corpus can never cost a receipt or delay a submit; raw q per leg comes from the family witness itself, never a sealed correction, so pre-scoring rejections keep their q. Evidence only; no trading decision reads it. Optional held-point replay validates the bounded native X/Y math-role projection and hash under the existing 16KiB/queue limits; old absent roles remain historical diagnostics only and current missing/malformed roles are typed unavailable. The corpus stores no raw/PIT blobs and grants no source or action authority.
+    why: Builds the complete per-cut learning corpus from the cut's frozen witness/book/evaluation inputs (no I/O), holds it in a bounded in-process queue, and writes it after the batch's receipts commit in its own fail-soft transaction, so the corpus can never cost a receipt or delay a submit; raw q per leg comes from the family witness itself, never a sealed correction, so pre-scoring rejections keep their q. Evidence only; no trading decision reads it. Optional held-point capture/freeze/replay validates the bounded source-derived native X/Y math-role projection and hash under the existing 16KiB/queue limits and restores frozen settlement fields through their strict owning factory; old absent roles remain historical diagnostics only and current missing/malformed roles are typed unavailable. The corpus stores no raw/PIT blobs and grants no source or action authority.
     downstream:
     - src/engine/global_batch_runtime.py
     - src/execution/post_trade_capital.py
@@ -2539,6 +2547,9 @@ files:
       contract even when its raw publication and causal clocks are complete.
       A scalar memo or intraday containment never creates a hard fact.
       FinalDailyObservation exposes a reproducible identity of its existing admitted canonical source semantics, preserving native digests where available. This identity is not a claim of newly acquired original-byte custody and does not change source eligibility.
+      Final daily decimal evidence must pass the existing publication classifier;
+      an UNKNOWN HKO publication cannot become exact held q or survive protective
+      SELL reproof merely because its row is VERIFIED or its capture has a digest.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:

@@ -575,8 +575,8 @@ def _final_daily_observation_extreme(
     """Read source-correct final daily settlement evidence after local day end.
 
     Daily observations are a separate truth plane from Day0 hourly/current
-    observations. Only VERIFIED rows from the configured settlement family may
-    collapse the held-side probability to an exact outcome.
+    observations. A VERIFIED row must also satisfy its source's publication
+    qualification before it can collapse held-side probability to an exact outcome.
     """
 
     if conn is None or not _target_local_day_complete(city, target_date, now=now):
@@ -637,6 +637,20 @@ def _final_daily_observation_extreme(
             if not _final_daily_source_matches(city, source):
                 continue
             if str(authority or "").strip().upper() != "VERIFIED":
+                continue
+            from src.contracts.settlement_semantics import settlement_source_publication_grade
+
+            publication = settlement_source_publication_grade(
+                city=str(city.name), target_date=str(target_date),
+                temperature_metric=metric, market_slug=None,
+                source_family=str(getattr(city, "settlement_source_type", "") or ""),
+                settlement_source=str(source), qualification_at=now.isoformat(),
+            )
+            if publication is not None and publication.get("source_grade") != "VERIFIED":
+                # SCOPE: this unqualified daily decimal's exact payoff only.
+                # DRAIN: ordinary source/monitor refresh and independent venue
+                # settlement. RESET: the owning publication contract qualifies
+                # the source; a venue integer cannot authenticate this decimal.
                 continue
             if expected_unit and str(unit or "").strip().upper() != expected_unit:
                 continue

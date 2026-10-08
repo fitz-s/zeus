@@ -12198,9 +12198,14 @@ def test_hko_held_redecision_binds_readiness_posterior_for_station_pin(
     forecast.close()
 
 
-def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("source_family", ("qualified_wrh", "unknown_hko"))
+def test_post_day_final_daily_observation_requires_qualified_source_for_exact_simplex(
     monkeypatch,
+    metric,
+    source_family,
 ):
+    city = "Singapore" if source_family == "qualified_wrh" else "Hong Kong"
     forecast = sqlite3.connect(":memory:")
     forecast.row_factory = sqlite3.Row
     forecast.execute(
@@ -12221,9 +12226,9 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
     forecast.executemany(
         "INSERT INTO market_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            ("Hong Kong", "2026-07-11", "high", "c0", "yes0", "a", "28C or below", None, 28.0),
-            ("Hong Kong", "2026-07-11", "high", "c1", "yes1", "b", "29C", 29.0, 29.0),
-            ("Hong Kong", "2026-07-11", "high", "c2", "yes2", "c", "30C or above", 30.0, None),
+            (city, "2026-07-11", metric, "c0", "yes0", "a", "28C or below", None, 28.0),
+            (city, "2026-07-11", metric, "c1", "yes1", "b", "29C", 29.0, 29.0),
+            (city, "2026-07-11", metric, "c2", "yes2", "c", "30C or above", 30.0, None),
         ),
     )
     forecast.execute(
@@ -12244,17 +12249,31 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
     forecast.execute(
         "INSERT INTO observations VALUES (?,?,?,?,?,?,?,?,?)",
         (
-            "Hong Kong",
+            city,
             "2026-07-11",
-            "hko_daily_api",
-            "HKO",
+            "noaa_wrh_wsss" if source_family == "qualified_wrh" else "hko_daily_api",
+            "WSSS" if source_family == "qualified_wrh" else "HKO",
             "VERIFIED",
             "C",
-            29.8,
-            26.0,
+            29.0,
+            29.0,
             "2026-07-12T06:00:00+00:00",
         ),
     )
+    provenance = {"upstream":"weather.gov_wrh_timeseries", "station":"WSSS",
+        "settlement_page_view":"all", "payload_hash":"sha256:" + "a" * 64,
+        "high_local_timestamp":"2026-07-11T12:00:00+08:00",
+        "low_local_timestamp":"2026-07-11T06:00:00+08:00"}
+    if source_family == "unknown_hko":
+        provenance = {"payload_hash": "sha256:" + "a" * 64}
+    for field in ("high_provenance_metadata", "low_provenance_metadata"):
+        forecast.execute(f"ALTER TABLE observations ADD COLUMN {field} TEXT")
+        forecast.execute(f"UPDATE observations SET {field}=?", (json.dumps(provenance),))
+    forecast.execute("ALTER TABLE observations ADD COLUMN id INTEGER")
+    forecast.execute("UPDATE observations SET id=1")
+    for field in ("high_fetch_utc", "low_fetch_utc"):
+        forecast.execute(f"ALTER TABLE observations ADD COLUMN {field} TEXT")
+        forecast.execute(f"UPDATE observations SET {field}=fetched_at")
     monkeypatch.setattr(
         era,
         "_forecast_snapshot_row_for_event",
@@ -12272,9 +12291,24 @@ def test_post_day_final_daily_observation_builds_exact_complete_global_simplex(
 
     day0_payload: dict[str, object] = {}
     event = _global_day0_scope_event(
-        city="Hong Kong", source_run_id="run-hong-kong"
+        city=city, source_run_id="qualified-final-daily"
     )
+    event_payload = json.loads(event.payload_json)
+    event_payload["metric"] = metric
+    event = replace(event, payload_json=json.dumps(event_payload))
     decision_time = _dt.datetime(2026, 7, 12, 12, 0, tzinfo=_dt.timezone.utc)
+    if source_family == "unknown_hko":
+        from src.contracts.settlement_semantics import settlement_source_publication_grade
+        assert settlement_source_publication_grade(city=city,target_date="2026-07-11",
+            temperature_metric=metric,market_slug=None,settlement_source="hko_daily_api")["source_grade"] == "UNKNOWN"
+        with pytest.raises(ValueError, match="POST_LOCAL_DAY_FINAL_OBSERVATION_UNAVAILABLE"):
+            era._prepare_current_global_probability_family(event, forecast_conn=forecast,
+                topology_conn=forecast, observation_conn=forecast, decision_time=decision_time,
+                max_age=_dt.timedelta(seconds=30), day0_payload_out=day0_payload,
+                probability_use=era._CurrentProbabilityUse.HELD_MONITOR)
+        assert "final_daily_observation_exact" not in str(day0_payload)
+        forecast.close()
+        return
     prepared = era._prepare_current_global_probability_family(
         event,
         forecast_conn=forecast,

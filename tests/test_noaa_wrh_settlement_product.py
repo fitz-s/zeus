@@ -1,6 +1,6 @@
 # Created: 2026-09-12
-# Last reused/audited: 2026-10-03
-# Lifecycle: created=2026-09-12; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Last reused/audited: 2026-10-07
+# Lifecycle: created=2026-09-12; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Pin the weather.gov/wrh/timeseries settlement product — page render law,
 #   per-city view selection, settlement-source precedence, and the backfill report.
 # Reuse: Read src/data/noaa_wrh_timeseries.py's measured facts and
@@ -2481,6 +2481,68 @@ def test_current_wrh_aged_recovery_uses_bounded_explicit_day_request(monkeypatch
     assert len(calls) == len(products) == 1
     snapshot = wrh.current_snapshot_from_product(products[0][2], city=city, target_date="2026-10-06", as_of=now)
     assert snapshot.complete_day and snapshot.received_at == now
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_current_wrh_real_slot_and_request_precede_every_db_lease(tmp_path, monkeypatch, completed):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    import httpx
+    import src.ingest_main as ingest
+    from src.state import db
+    from src.data import station_temperature_adapters as adapters, noaa_wrh_timeseries as wrh
+    from src.data import daily_obs_append as appender, physical_current_delivery as delivery
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    city = cities_by_name["Singapore"]
+    first = _current_product()
+    now = datetime(2026, 10, 20, 2, tzinfo=timezone.utc) if completed else first.station_reference.fetched_at
+    paths, mutex = _current_wrh_ingest_fixture(monkeypatch, tmp_path, now=now)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {city.name: city})
+    if completed:
+        with _attached(*paths) as conn:
+            appender.append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06",
+                product=first, as_of=first.station_reference.fetched_at)
+    else:
+        monkeypatch.setattr(delivery, "current_temperature_priority_families",
+                            lambda: {(city.name, "2026-10-06", "high"): ()})
+    active = []
+    def track(factory):
+        @contextmanager
+        def connection(**kwargs):
+            with factory(**kwargs) as conn:
+                active.append(conn)
+                try:
+                    yield conn
+                finally:
+                    active.remove(conn)
+        return connection
+    for name in ("get_forecasts_connection_with_world", "get_forecasts_connection_with_world_read_only"):
+        monkeypatch.setattr(db, name, track(getattr(db, name)))
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None): return now
+    monkeypatch.setattr(adapters, "datetime", Clock)
+    elapsed, sleeps, requests = [100.0], [], []
+    def sleep(seconds):
+        assert not active and not mutex.locked()
+        sleeps.append(seconds)
+        elapsed[0] += seconds
+    monkeypatch.setattr(wrh, "time", SimpleNamespace(monotonic=lambda: elapsed[0], sleep=sleep))
+    monkeypatch.setattr(wrh, "_last_request_at", 100.0)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "synthetic")
+    monkeypatch.setattr(adapters, "_WRH_CURRENT_PRODUCT_CACHE", {})
+    def handler(request):
+        assert not active and not mutex.locked()
+        requests.append(request)
+        return httpx.Response(200, content=first.native_body)
+    bounded_body = adapters._bounded_body
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        monkeypatch.setattr(adapters, "_bounded_body", lambda ignored, *a, **kw: bounded_body(client, *a, **kw))
+        assert ingest._day0_current_noaa_wrh_tick.__wrapped__()["committed"] == 1
+    assert sleeps == [wrh._MIN_REQUEST_INTERVAL_SECONDS] and len(requests) == 1
+    with _attached(*paths) as conn:
+        owned, snapshot = read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=now)
+        assert owned and snapshot.complete_day is completed
 
 
 def test_current_wrh_missing_semantic_body_is_not_masked_by_readable_noop_confirmation(tmp_path):

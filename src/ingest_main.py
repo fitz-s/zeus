@@ -5485,8 +5485,16 @@ def _replacement_availability_poll_tick():
         sorted(set(source_clock_report.updated_sources) - set(advanced_sources))
     )
     # A source whose cursor cannot yet advance reports "changed" on every poll;
-    # the anchor residual must not wait for the clock to go quiet.
-    if "ecmwf_ifs" not in source_clock_report.updated_sources:
+    # the anchor residual must not wait for the clock to go quiet. An ecmwf_ifs
+    # change runs its own broad anchor wave, but that wave commits nothing while
+    # the next run is not yet servable or another download holds the lane; a
+    # family listed after the last wave then had no anchor until ecmwf_ifs went
+    # quiet (2026-10-07: residual idle 02:22Z-15:00Z, Dallas/Denver 10-09 high
+    # without a posterior for 4 h). Drain whenever that wave committed nothing.
+    if "ecmwf_ifs" not in source_clock_report.updated_sources or not (
+        isinstance(source_clock_anchor_report, dict)
+        and _committed_anchor_scopes(source_clock_anchor_report)
+    ):
         _drain_anchor_residual(report)
     logger.info("replacement source-clock scoped download report: %s", report)
     return report

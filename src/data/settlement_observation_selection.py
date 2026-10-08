@@ -28,6 +28,29 @@ PROOF_VERSION = "noaa_wrh_absence_proof_v2"
 PRODUCT = "weather.gov_wrh_timeseries"
 
 
+def gamma_response_witness(response, *, started_at, received_at, request_params) -> dict | None:
+    """Retain the normal response's decoded original bytes and immutable custody."""
+    import base64
+    import hashlib
+    from src.data.wu_hourly_client import capture_entity
+    from src.contracts.settlement_semantics import gamma_capture_identity
+    capture = capture_entity(response, started_at=started_at, finished_at=received_at,
+        request_url="https://gamma-api.polymarket.com/events", request_params=request_params,
+        native_unit="per_market_contract")
+    if capture.entity is None:
+        return None
+    witness = {
+        "entity_bytes_b64": base64.b64encode(capture.entity).decode("ascii"),
+        "entity_sha256": hashlib.sha256(capture.entity).hexdigest(),
+        "capture_started_at_utc": capture.started_at,
+        "capture_received_at_utc": capture.finished_at,
+        "request_url": capture.request_url, "request_params": capture.request_params,
+        "source_issued_at_utc": None,
+    }
+    witness["capture_identity_sha256"] = gamma_capture_identity(witness)
+    return witness
+
+
 def fallback_deadline(target_date: str | date) -> datetime:
     target = date.fromisoformat(str(target_date))
     return datetime.combine(target + timedelta(days=1), time(23, 59),
@@ -187,7 +210,30 @@ def observation_selection(conn, city, target_date, source: str, *, row=None, met
     if source_type == "wu_icao" and (name == "wu_icao_history" or name.startswith("wu_icao_history_")):
         return 0, {"selected": "PRIMARY_WU"}
     if source_type == "hko" and (name == "hko_daily_api" or name.startswith("hko_daily_api_")):
-        return 0, {"selected": "PRIMARY_HKO_DAILY_EXTRACT"}
+        def original(field):
+            try:
+                return row[field] if row is not None else None
+            except (KeyError, IndexError, TypeError):
+                return None
+        metadata = original(f"{metric}_provenance_metadata")
+        try:
+            parsed = json.loads(metadata) if isinstance(metadata, str) else metadata
+            entity = parsed.get("source_entity") if isinstance(parsed, dict) else None
+        except (ValueError, TypeError):
+            entity = None
+        # Selection names the product, never publication eligibility. Keep the
+        # metric's original provenance/entity/clocks without borrowing its twin.
+        return 0, {
+            "selected": "PRIMARY_HKO_DAILY_EXTRACT", "source_grade": "UNKNOWN",
+            "city": city.name, "target_date": str(target_date),
+            "temperature_metric": metric, "source": source,
+            "station_id": original("station_id"),
+            "source_entity": entity,
+            "provenance_metadata": metadata,
+            "source_issued_at": (entity.get("source_issued_at_utc")
+                                 if isinstance(entity, dict) else None),
+            "fetched_at": original("fetched_at"),
+        }
     return None
 
 

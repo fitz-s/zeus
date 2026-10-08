@@ -40,6 +40,11 @@ Scope limitation (Path A, accepted by operator 2026-05-18):
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
+import base64
+import hashlib
+import json
+import re
+from datetime import datetime, timezone
 from typing import Any, Callable, ClassVar, Literal, Optional
 
 import logging
@@ -52,6 +57,227 @@ from src.types.temperature import CelsiusDecimal
 logger = logging.getLogger(__name__)
 
 RoundingRule = Literal["wmo_half_up", "floor", "ceil", "oracle_truncate"]
+
+
+def _round_values_on_axis(values: Any, precision: float, rounding_rule: str) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    inv = 1.0 / precision if precision > 0 else 1.0
+    scaled = arr * inv
+    if rounding_rule == "wmo_half_up":
+        rounded = np.floor(scaled + 0.5)
+    elif rounding_rule in ("floor", "oracle_truncate"):
+        rounded = np.floor(scaled)
+    elif rounding_rule == "ceil":
+        rounded = np.ceil(scaled)
+    else:
+        raise ValueError(f"Unsupported settlement rounding rule: {rounding_rule}")
+    return rounded / inv
+
+
+def quantize_preimage_axis(values: Any, *, rounding_rule: str, half_step: float) -> np.ndarray:
+    """Quantize already-bound forecast coordinates, not a city settlement claim."""
+    if (type(half_step) not in (int, float) or not np.isfinite(half_step)
+            or half_step <= 0 or not np.isfinite(2.0 * half_step)
+            or rounding_rule not in ("wmo_half_up", "floor", "ceil", "oracle_truncate")):
+        raise ValueError("FORECAST_PREIMAGE_AXIS_INVALID")
+    arr = np.asarray(values, dtype=float)
+    if not np.isfinite(arr).all():
+        raise ValueError("FORECAST_PREIMAGE_VALUES_NONFINITE")
+    result = _round_values_on_axis(arr, 2.0 * half_step, rounding_rule)
+    if not np.isfinite(result).all():
+        raise ValueError("FORECAST_PREIMAGE_RESULT_NONFINITE")
+    return result
+
+
+def settlement_source_publication_grade(
+    *, city: str, target_date: str, temperature_metric: str,
+    market_slug: str | None, source_family: str | None = None,
+    settlement_source: str | None = None, provenance: dict | None = None,
+    qualification_at: str | None = None,
+) -> dict | None:
+    """Separate HKO source publication eligibility from integer rounding/payout.
+
+    No supported original publication record or market-specific accepted
+    correction format is available yet. Capture hashes, fetch clocks, first-seen
+    flags and generic correction terms cannot authenticate the initial value.
+    Retain such originals as evidence, but never mint a positive witness from
+    them. Non-HKO sources keep their existing qualification law.
+    """
+    evidence = provenance or {}
+    sources = (source_family, settlement_source, evidence.get("source_family"),
+               evidence.get("settlement_source_type"), evidence.get("obs_source"))
+    is_hko = city.replace(" ", "").lower() == "hongkong" or any(
+        "hko" in str(source or "").lower() for source in sources
+    )
+    venue_claim = (evidence.get("claim_basis") == "venue_unique_integer_point_v1"
+                   or settlement_source == "polymarket_gamma" and evidence.get("venue_point_witness") is not None)
+    if not is_hko and not venue_claim:
+        return None
+    # SCOPE: this tuple's unproven decimal claim, not every HKO integer fact.
+    # DRAIN/RESET: possessed native Gamma evidence becomes strictly resolved
+    # with one YES point, independently proving its unique settlement integer.
+    # Decimal publication eligibility stays a separate UNKNOWN fact.
+    result = {
+        "source_grade": "UNKNOWN",
+        "reason": "hko_publication_witness_unavailable",
+        "city": city, "target_date": target_date,
+        "temperature_metric": temperature_metric, "market_slug": market_slug,
+    }
+    point = gamma_unique_point_truth(
+        evidence.get("venue_point_witness"), city=city, target_date=target_date,
+        temperature_metric=temperature_metric, market_slug=market_slug,
+        qualification_at=qualification_at,
+    )
+    if point is not None:
+        result.update(venue_integer_grade="VERIFIED", venue_point=point, reason=None)
+    return result
+
+
+def gamma_capture_identity(witness: dict) -> str:
+    """Bind the retained entity and its capture clocks, never source-issued time."""
+    fields = ("entity_sha256", "capture_started_at_utc", "capture_received_at_utc",
+              "request_url", "request_params")
+    return hashlib.sha256(json.dumps({key: witness.get(key) for key in fields},
+                         sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def gamma_binary_outcome(market: dict) -> dict | None:
+    """Strict native closed/resolved binary fact; 0/1 are payout facts only."""
+    from src.contracts.settlement_outcome import classify_settlement_outcome, SettlementOutcome
+    def items(value):
+        return json.loads(value) if isinstance(value, str) else value
+    try:
+        if not isinstance(market, dict) or market.get("closed") is not True or classify_settlement_outcome(market) not in {
+            SettlementOutcome.VENUE_RESOLVED_WIN, SettlementOutcome.VENUE_RESOLVED_LOSE,
+        }:
+            return None
+        labels = items(market.get("outcomes"))
+        prices = items(market.get("outcomePrices"))
+        tokens = items(market.get("clobTokenIds"))
+        if not all(isinstance(values, list) and len(values) == 2
+                   for values in (labels, prices, tokens)):
+            return None
+        labels = [str(label).lower() for label in labels]
+        if labels not in (["yes", "no"], ["no", "yes"]):
+            return None
+        if any(isinstance(value, bool) for value in prices) or [float(p) for p in prices] not in (
+            [1.0, 0.0], [0.0, 1.0],
+        ):
+            return None
+        if not all(isinstance(token, str) and token.strip() for token in tokens) or tokens[0] == tokens[1]:
+            return None
+        condition = market.get("conditionId")
+        if not isinstance(condition, str) or not re.fullmatch(r"0x[0-9a-fA-F]{64}", condition):
+            return None
+        yes = labels.index("yes")
+        return {"condition_id": condition, "yes_token_id": tokens[yes],
+                "yes_won": float(prices[yes]) == 1.0}
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def gamma_unique_point_truth(witness, *, city: str, target_date: str,
+                             temperature_metric: str, market_slug: str | None,
+                             qualification_at: str | None) -> dict | None:
+    """Reproduce a venue integer from an original native entity, never weather floor.
+
+    A hash/capture binds custody, not publication. Qualification is a separate
+    actual clock no earlier than possession or the native entity's revision.
+    Parsed objects and source-name/positive-grade flags authorize nothing.
+    """
+    from src.types.market import Bin
+    from types import SimpleNamespace
+    try:
+        if not isinstance(witness, dict) or city != "Hong Kong" or temperature_metric not in {"high", "low"}:
+            return None
+        if witness.get("request_url") != "https://gamma-api.polymarket.com/events":
+            return None
+        if witness.get("capture_identity_sha256") != gamma_capture_identity(witness):
+            return None
+        raw = base64.b64decode(witness["entity_bytes_b64"], validate=True)
+        if not raw or hashlib.sha256(raw).hexdigest() != witness["entity_sha256"]:
+            return None
+        clock = lambda value: datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        started, received, qualified = map(clock, (witness["capture_started_at_utc"],
+            witness["capture_received_at_utc"], qualification_at))
+        if any(value.tzinfo is None for value in (started, received, qualified)) or not (
+            started <= received <= qualified <= datetime.now(timezone.utc)
+        ):
+            return None
+        target = datetime.fromisoformat(target_date).date()
+        if target_date != target.isoformat():
+            return None
+        extreme = "highest" if temperature_metric == "high" else "lowest"
+        expected_slug = f"{extreme}-temperature-in-hong-kong-on-{target.strftime('%B').lower()}-{target.day}-{target.year}"
+        if market_slug != expected_slug:
+            return None
+        body = json.loads(raw)
+        if not isinstance(body, list):
+            return None
+        events = [event for event in body if isinstance(event, dict) and event.get("slug") == market_slug]
+        if len(events) != 1 or events[0].get("closed") is not True:
+            return None
+        event = events[0]
+        if event.get("title") != f"{extreme.capitalize()} temperature in Hong Kong on {target.strftime('%B')} {target.day}?":
+            return None
+        updated = clock(event["updatedAt"])
+        if updated.tzinfo is None or updated > received:
+            return None
+        markets = event.get("markets")
+        if not isinstance(markets, list) or not markets:
+            return None
+        for market in markets:
+            updated = clock(market["updatedAt"])
+            if updated.tzinfo is None or updated > received:
+                return None
+        facts = [gamma_binary_outcome(market) for market in markets]
+        if any(fact is None for fact in facts):
+            return None
+        if len({fact["condition_id"] for fact in facts}) != len(facts):
+            return None
+        winners = [(market, fact) for market, fact in zip(markets, facts) if fact["yes_won"]]
+        if len(winners) != 1:
+            return None
+        winner, fact = winners[0]
+        label = winner.get("groupItemTitle")
+        match = re.fullmatch(r"(-?\d+)°C", str(label))
+        if match is None:
+            return None  # NO-only point, range and shoulder prove no scalar.
+        value = float(match.group(1))
+        if winner.get("question") != f"Will the {extreme} temperature in Hong Kong be {label} on {target.strftime('%B')} {target.day}?":
+            return None
+        bin_ = Bin(value, value, "C", str(label))
+        if not bin_.is_point or bin_.settlement_values != [int(value)]:
+            return None
+        sem = SettlementSemantics.for_city(SimpleNamespace(settlement_source_type="hko", settlement_unit="C"))
+        if sem.assert_settlement_value(value, context="gamma_unique_point_truth") != value:
+            return None
+        return {**fact, "settlement_value": value, "winning_bin": label,
+                "unit": "C", "qualification_at": qualified.isoformat(),
+                "outcomes": facts,
+                "capture_identity_sha256": witness["capture_identity_sha256"]}
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return None
+
+
+def gamma_point_outcomes_match(point: dict, outcomes) -> bool:
+    """Only emit caller-requested payout rows independently reproduced in the entity."""
+    if outcomes is None:
+        return True
+    try:
+        native = {row["condition_id"]: row for row in point["outcomes"]}
+        seen = set()
+        for outcome in outcomes:
+            row = outcome if isinstance(outcome, dict) else vars(outcome)
+            condition = row.get("condition_id")
+            if condition in seen or condition not in native or type(row.get("yes_won")) is not bool:
+                return False
+            seen.add(condition)
+            if any(row.get(key) != native[condition][key] for key in ("yes_token_id", "yes_won")):
+                return False
+        return True
+    except (TypeError, KeyError, AttributeError):
+        return False
 
 
 def expected_settlement_station_id(city: Any) -> str:
@@ -182,6 +408,28 @@ class SettlementSemantics:
     rounding_rule: RoundingRule
     finalization_time: str  # "12:00:00Z"
 
+    @classmethod
+    def from_frozen_payload(cls, payload: Any) -> "SettlementSemantics":
+        """Restore captured contract semantics, never today's city configuration."""
+        fields = {"resolution_source", "measurement_unit", "precision",
+                  "rounding_rule", "finalization_time"}
+        if (not isinstance(payload, dict) or set(payload) != fields
+                or not isinstance(payload["resolution_source"], str)
+                or not 0 < len(payload["resolution_source"]) <= 256
+                or payload["measurement_unit"] not in ("C", "F")
+                or type(payload["precision"]) not in (int, float)
+                or not np.isfinite(payload["precision"]) or payload["precision"] <= 0
+                or payload["rounding_rule"] not in ("wmo_half_up", "floor", "ceil", "oracle_truncate")
+                or not isinstance(payload["finalization_time"], str)):
+            raise ValueError("FROZEN_SETTLEMENT_SEMANTICS_INVALID")
+        clock = payload["finalization_time"]
+        if (len(clock) != 9 or clock[2] != ":" or clock[5] != ":" or clock[8] != "Z"
+                or not all(clock[a:b].isascii() and clock[a:b].isdigit()
+                           for a, b in ((0, 2), (3, 5), (6, 8)))
+                or int(clock[:2]) > 23 or int(clock[3:5]) > 59 or int(clock[6:8]) > 59):
+            raise ValueError("FROZEN_SETTLEMENT_SEMANTICS_INVALID")
+        return cls(**payload)
+
     def round_values(
         self, values: Any
     ) -> "np.ndarray[Any, np.dtype[Any]]":
@@ -191,27 +439,10 @@ class SettlementSemantics:
         ``self.measurement_unit`` (set by ``for_city()``).  Typed-unit
         enforcement for this path is PR 2/3 scope.
         """
-        arr = np.asarray(values, dtype=float)
-        inv = 1.0 / self.precision if self.precision > 0 else 1.0
-        scaled = arr * inv
-
-        if self.rounding_rule == "wmo_half_up":
-            rounded = np.floor(scaled + 0.5)
-        elif self.rounding_rule in ("floor", "oracle_truncate"):
-            # DANGER: oracle_truncate 仅限 HKO 等受到 UMA 截断偏见污染
-            # 的合约使用！严禁用于正常的气象学 P_raw 模拟！
-            #
-            # UMA voters treat decimal °C as truncated: "28.7 hasn't
-            # reached 29, so it's 28". Empirically verified: floor()
-            # achieves 14/14 (100%) match on HKO same-source settlement
-            # days vs 5/14 (36%) with wmo_half_up.
-            rounded = np.floor(scaled)
-        elif self.rounding_rule == "ceil":
-            rounded = np.ceil(scaled)
-        else:
-            raise ValueError(f"Unsupported settlement rounding rule: {self.rounding_rule}")
-
-        return rounded / inv
+        # Dispatch remains the captured/live contract's own rule; the shared
+        # primitive also serves forecast-preimage coordinates without claiming
+        # those coordinates are a new city contract.
+        return _round_values_on_axis(values, self.precision, self.rounding_rule)
 
     def round_single(self, value: float) -> float:
         """Round a single settlement value to contract precision.

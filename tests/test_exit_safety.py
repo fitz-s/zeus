@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-10-06
-# Lifecycle: created=2026-04-27; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Last reused/audited: 2026-10-07
+# Lifecycle: created=2026-04-27; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md (2026-10-06 cloud-only physical-evidence exit repair)
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -19795,7 +19795,7 @@ def test_liquidity_recovery_accepts_only_current_canonical_full_depth_monitor(
 @pytest.mark.parametrize("authority_kind,source_change", [
     (kind, change) for kind in ("branchwise", "hard_fact", "final_daily")
     for change in ("unchanged", "correction", "unreadable")
-] + [("final_daily", "body_revision")])
+] + [("final_daily", "body_revision"), ("legacy_hko", "unchanged")])
 def test_source_only_correction_revokes_real_exact_exit_before_sdk(conn, monkeypatch, direction, source_change, authority_kind):
     """Real source reader/exact-family/materialization, real command gateway, fake SDK only."""
     import inspect
@@ -19865,8 +19865,9 @@ def test_source_only_correction_revokes_real_exact_exit_before_sdk(conn, monkeyp
     hard_fact_authority = None
     if authority_kind == "hard_fact":
         context, hard_fact_authority = _bind_canonical_hard_fact_case(conn, position, context, now)
-    if authority_kind == "final_daily":
-        context = _bind_canonical_final_daily_case(conn, position, context, now)
+    if authority_kind in {"final_daily", "legacy_hko"}:
+        context = _bind_canonical_final_daily_case(conn, position, context, now,
+            legacy_hko=authority_kind == "legacy_hko")
         receipt = context.probability_receipt
         conn.execute("INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,occurred_at,phase_before,phase_after,source_module,env,payload_json) VALUES ('real-final-monitor',?,1,3,'MONITOR_REFRESHED',?,'day0_window','day0_window','src.engine.cycle_runtime','live',?)", (position.trade_id, now.isoformat(), json.dumps({
             'direction':direction,'monitor_probability_receipt':receipt,'last_monitor_prob':0.0,
@@ -19917,10 +19918,18 @@ def test_source_only_correction_revokes_real_exact_exit_before_sdk(conn, monkeyp
                 conn.commit()
             elif source_change == "body_revision":
                 # Existing native provenance changes without value/time changes.
-                conn.execute("UPDATE observations SET high_provenance_metadata=?", (json.dumps({"payload_hash":"sha256:"+"b"*64}),))
+                metadata = json.loads(conn.execute("SELECT high_provenance_metadata FROM observations ORDER BY id DESC LIMIT 1").fetchone()[0])
+                metadata["payload_hash"] = "sha256:" + "b" * 64
+                conn.execute("UPDATE observations SET high_provenance_metadata=?", (json.dumps(metadata),))
                 conn.commit()
+                from src.config import runtime_cities_by_name
+                from src.execution.day0_hard_fact_exit import _final_daily_observation_extreme
+                current = _final_daily_observation_extreme(
+                    city=runtime_cities_by_name()[position.city], target_date=position.target_date,
+                    metric="high", now=changed, conn=conn)
+                assert current is not None and current.settled_extreme == 32.0
             source_changed.append(True)
-            assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='MONITOR_REFRESHED'").fetchone()[0] == (3 if authority_kind == "final_daily" else 2)
+            assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='MONITOR_REFRESHED'").fetchone()[0] == (3 if authority_kind in {"final_daily", "legacy_hko"} else 2)
         def place_limit_order(self,**kwargs):
             calls.append(kwargs)
             return _fake_submit_result(self.envelope,order_id='source-race-order')
@@ -19935,6 +19944,15 @@ def test_source_only_correction_revokes_real_exact_exit_before_sdk(conn, monkeyp
     try:
         result=exit_lifecycle.execute_exit(PortfolioState(positions=[position]),position,context,
             clob=SimpleNamespace(get_order_status=lambda _: {'status':'OPEN'}),conn=conn,branchwise_sell_authority=authority,hard_fact_authority=hard_fact_authority)
+        if authority_kind == "legacy_hko":
+            assert calls == [], result
+            assert source_changed == [], result
+            assert result == "exit_blocked: protective_authority_unavailable"
+            assert not exit_lifecycle._protective_source_receipt_current(
+                conn, position_id=position.trade_id, receipt=context.probability_receipt,
+                source_receipt_json=authority.source_receipt_json)
+            assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0] == 0
+            return
         assert source_changed == [True], result
         if source_change == "unchanged":
             assert len(calls) == 1, result
@@ -20034,19 +20052,40 @@ def _bind_canonical_hard_fact_case(conn, position, context, now):
     }), verdict
 
 
-def _bind_canonical_final_daily_case(conn, position, context, now):
+def _bind_canonical_final_daily_case(conn, position, context, now, *, legacy_hko=False):
     from zoneinfo import ZoneInfo
     from src.config import runtime_cities_by_name
     from src.engine.event_reactor_adapter import _global_final_daily_probability_payload
     from src.engine.monitor_refresh import _compact_monitor_probability_receipt
-    from src.execution.day0_hard_fact_exit import _final_daily_observation_extreme, final_observed_bin_verdict
-    position.city = "Hong Kong"
-    position.target_date = (now.astimezone(ZoneInfo("Asia/Hong_Kong")).date() - timedelta(days=1)).isoformat()
+    from src.execution.day0_hard_fact_exit import FinalDailyObservation, _final_daily_observation_extreme, final_observed_bin_verdict
+    position.city = "Hong Kong" if legacy_hko else "Singapore"
+    zone = ZoneInfo("Asia/Hong_Kong" if legacy_hko else "Asia/Singapore")
+    position.target_date = (now.astimezone(zone).date() - timedelta(days=1)).isoformat()
     conn.execute("UPDATE position_current SET city=?,target_date=? WHERE position_id=?", (position.city,position.target_date,position.trade_id))
-    conn.execute("INSERT INTO observations (city,target_date,source,station_id,unit,authority,high_temp,low_temp,fetched_at,high_provenance_metadata) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                 (position.city,position.target_date,"hko_daily_api","HKO","C","VERIFIED",32.0,27.0,now.isoformat(),json.dumps({"payload_hash":"sha256:"+"a"*64})))
+    source, station = ("hko_daily_api", "HKO") if legacy_hko else ("noaa_wrh_wsss", "WSSS")
+    provenance = {"payload_hash": "sha256:" + "a" * 64}
+    if not legacy_hko:
+        provenance.update(upstream="weather.gov_wrh_timeseries", station=station,
+            settlement_page_view="all", high_local_timestamp=position.target_date + "T12:00:00+08:00",
+            low_local_timestamp=position.target_date + "T06:00:00+08:00")
+    conn.execute("INSERT INTO observations (city,target_date,source,station_id,unit,authority,high_temp,low_temp,fetched_at,high_provenance_metadata,low_provenance_metadata,high_fetch_utc,low_fetch_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (position.city,position.target_date,source,station,"C","VERIFIED",32.0,27.0,now.isoformat(),json.dumps(provenance),json.dumps(provenance),now.isoformat(),now.isoformat()))
     conn.commit()
-    final = _final_daily_observation_extreme(city=runtime_cities_by_name()[position.city], target_date=position.target_date, metric="high", now=now, conn=conn)
+    if legacy_hko:
+        # Recreate the persisted receipt shape emitted by the previous reader.
+        # No source or execution guard is mocked: current reproof must revoke it.
+        from src.decision_kernel.canonicalization import stable_hash
+        from src.contracts.settlement_semantics import settlement_source_publication_grade
+        assert settlement_source_publication_grade(city=position.city, target_date=position.target_date,
+            temperature_metric="high", market_slug=None, settlement_source=source,
+            provenance=provenance)["source_grade"] == "UNKNOWN"
+        identity = stable_hash({"city":position.city,"target_date":position.target_date,"metric":"high",
+            "source":source,"station_id":station,"unit":"C","raw_extreme":32.0,"settled_extreme":32.0,
+            "fetched_at":now.isoformat(),"native_payload_sha256":"a"*64})
+        final = FinalDailyObservation(raw_extreme=32.,settled_extreme=32.,source=source,
+            station_id=station,unit="C",fetched_at=now,source_evidence_identity=identity)
+    else:
+        final = _final_daily_observation_extreme(city=runtime_cities_by_name()[position.city], target_date=position.target_date, metric="high", now=now, conn=conn)
     assert final is not None
     low, high = (None,30.0) if position.direction == "buy_yes" else (31.0,None)
     assert final_observed_bin_verdict(metric="high",direction=position.direction,bin_low=low,bin_high=high,final_extreme=final.settled_extreme).action == "EXIT_DEAD_BIN"
