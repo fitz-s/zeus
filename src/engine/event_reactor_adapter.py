@@ -9405,7 +9405,9 @@ def event_bound_live_adapter_from_trade_conn(
             # yields to pending monitor work, while a quiet cut gets enough
             # time for the observed ~26s selected-family JIT revalidation after
             # the global scope/book/solve stages.  Do not borrow the 180s book
-            # TTL as whole-batch authority.
+            # TTL as whole-batch authority.  This budget bounds the stages that
+            # build the cut; once the book epoch is fenced, the receipt, winner
+            # preflight and actuation run on that epoch's own deadline.
             deadline_monotonic=global_batch_started + _GLOBAL_AUCTION_WORK_CUT_SECONDS,
             cancel_requested=_day0_selection_cancelled,
             monotonic=_time.monotonic,
