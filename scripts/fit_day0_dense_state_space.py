@@ -211,9 +211,11 @@ def lifecycle_inputs(last: str) -> tuple[list[dict], list[tuple[float, bool]]]:
         days = defaultdict(list)
         for t in final:
             days[t.astimezone(tz).date()].append(t)
+        from src.data.day0_dense_evidence import PAGE_FETCH_COVER_MINUTES
+
         for rec in sorted(set(intraday_fetches)):
             for t, seen in first_seen.items():
-                if rec - timedelta(minutes=180) <= t <= rec:
+                if rec - timedelta(minutes=PAGE_FETCH_COVER_MINUTES) <= t <= rec:
                     checks.append(((rec - t).total_seconds() / 60.0, seen <= rec))
         awc = {}
         for raw, v, p in conn.execute("SELECT raw_report, value_native, publish_ts_utc FROM observation_prints "
