@@ -924,18 +924,31 @@ def build_fast_station_residual_likelihood(
 
 
 def fast_extreme_supersedes_settlement(
-    *, metric: str, fast_extreme_c: float, settlement_extreme_c: float
+    *, metric: str, fast_extreme_c: float, settlement_extreme_c: float, city: object | None = None
 ) -> bool:
     """Whether a fast-tail extreme strictly advances settlement-channel truth.
 
     The one rule for when the fast tail may stand in for the settlement
     channel; once settlement reaches the fast value, settlement truth governs.
+    The comparison is in settlement integers under the city's own rounding
+    law: a 0.1 C route reading 24.6 and a whole-degree METAR 25 at the same
+    instant both settle 25, so neither advances the other (G8, Toronto/Tokyo
+    2026-10-07).  Without a city the raw values are compared.
     """
+    if metric not in {"high", "low"}:
+        return False
+    if city is not None:
+        from src.contracts.settlement_semantics import SettlementSemantics
+
+        semantics = SettlementSemantics.for_city(city)
+        unit = str(getattr(city, "settlement_unit", "C") or "C").strip().upper()
+        to_native = (lambda c: c) if unit == "C" else (lambda c: c * 9.0 / 5.0 + 32.0)
+        fast = semantics.round_single(to_native(float(fast_extreme_c)))
+        settled = semantics.round_single(to_native(float(settlement_extreme_c)))
+        return fast > settled if metric == "high" else fast < settled
     if metric == "high":
         return fast_extreme_c > settlement_extreme_c + 1e-9
-    if metric == "low":
-        return fast_extreme_c < settlement_extreme_c - 1e-9
-    return False
+    return fast_extreme_c < settlement_extreme_c - 1e-9
 
 
 def latest_fast_station_conditioning(
@@ -993,10 +1006,13 @@ def latest_fast_station_conditioning(
     )
     if likelihood is None:
         return None
+    from src.config import runtime_cities_by_name
+
     if settlement_extreme_c is not None and not fast_extreme_supersedes_settlement(
         metric=normalized_metric,
         fast_extreme_c=observed_extreme_c,
         settlement_extreme_c=settlement_extreme_c,
+        city=runtime_cities_by_name().get(city),
     ):
         return None
     return FastStationConditioning(

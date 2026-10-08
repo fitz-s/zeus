@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-07 (G5: canonical-resolver routes are the "resolver" rival, not a new one)
+# Last reused/audited: 2026-10-08 (G5 resolver rival; typed route kinds)
 """Station-bound current observations and their settlement roles.
 
 Adapters own fixed endpoints. Configuration cannot inject URLs, SQL, or code.
@@ -36,6 +36,27 @@ class SourceRole(str, Enum):
     PHYSICAL_ONLY = "physical_only"
 
 
+class RouteKind(str, Enum):
+    """What one stored row of a route measures (independent of its settlement role).
+
+    NATIVE_REPORT: a proven fast-admission parsed METAR/SPECI body; integer value at the report's
+      own issued clock, the same content AWC carries for that report (routine or SPECI, no cadence
+      gate).
+    INSTRUMENT_PROXY: a 0.1 C national-instrument value; never a settlement fact, boundary or
+      frontier substitute at any instant.
+    RESOLVER_PAGE: the settlement product's own rows.
+    PHYSICAL: any other station instrument."""
+
+    NATIVE_REPORT = "native_report"
+    INSTRUMENT_PROXY = "instrument_proxy"
+    RESOLVER_PAGE = "resolver_page"
+    PHYSICAL = "physical"
+
+
+NATIVE_REPORT_PROVIDERS = frozenset({"mgm_metar", "imd_olbs_metar", "metaviatelecom_metar"})
+INSTRUMENT_PROXY_PROVIDERS = frozenset({"jma_amedas", "eccc_swob"})
+
+
 # Resolver products by settlement source type; nothing else may claim the role.
 _CANONICAL = {"noaa_wrh": "noaa", "wu_station_history": "wu_icao"}
 # Current paths every fast admission must beat, besides other registry routes
@@ -60,6 +81,17 @@ class PhysicalCurrentSource:
     @property
     def settlement_authorized(self) -> bool:
         return self.role is not SourceRole.PHYSICAL_ONLY
+
+    @property
+    def kind(self) -> RouteKind:
+        if self.role is SourceRole.CANONICAL_RESOLVER:
+            return RouteKind.RESOLVER_PAGE
+        if self.provider in NATIVE_REPORT_PROVIDERS and self.role is SourceRole.FAST_ADMISSION:
+            # Proof-bound: the loader admits the route only on exact value identity.
+            return RouteKind.NATIVE_REPORT
+        if self.provider in INSTRUMENT_PROXY_PROVIDERS:
+            return RouteKind.INSTRUMENT_PROXY
+        return RouteKind.PHYSICAL
 
     @property
     def current_path(self) -> str:

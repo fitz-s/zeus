@@ -250,6 +250,31 @@ def day0_is_noaa_preliminary_source(source: object) -> bool:
             "observation_prints:aviationweather_metar",
             "observation_prints:ogimet_metar_",
         )
+    ) or day0_is_native_report_source(normalized)
+
+
+def day0_is_native_report_source(source: object, *, station: str | None = None) -> bool:
+    """Whether a source is a registered native METAR-report route (RouteKind.NATIVE_REPORT).
+
+    Its rows are parsed METAR/SPECI bodies: each value is the report's integer, equal to the
+    AWC integer for the same report (audit 2026-10-07: MGM 603/603, metaviatelecom 61/61, IMD
+    301/305 with the 4 matching another AWC version of that report).  It therefore joins the
+    AWC/Ogimet provisional family above.  An INSTRUMENT_PROXY (JMA, SWOB) never does: its 0.1 C
+    reading is another measurement of the air, not the report (Tokyo 24.6 vs AWC 25).
+    ``station`` binds the route to one ICAO station.
+    """
+
+    normalized = str(source or "").strip().lower().removeprefix("observation_prints:")
+    try:
+        from src.data.physical_current_sources import RouteKind, load_physical_current_sources
+
+        routes = load_physical_current_sources()[0]
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError):
+        return False
+    return any(
+        r.source_channel == normalized and r.kind is RouteKind.NATIVE_REPORT
+        and (station is None or r.station_id == str(station).strip().upper())
+        for r in routes
     )
 
 
@@ -309,6 +334,8 @@ def day0_evidence_finality(payload: Mapping[str, object]) -> str:
     # Raw station reports and mirrors can contain prints omitted by the
     # resolver's NOAA WRH page product. Publication maturity or a calibrated
     # station margin cannot establish membership in that settlement product.
+    # Native METAR-report routes carry the same report content as AWC: provisional,
+    # never MONOTONE_SETTLEMENT_BOUND (that is the noaa_wrh page alone).
     if day0_is_noaa_preliminary_source(source) or source.startswith(
         ("same_station_fast_tail", "observation_prints:same_station_fast_tail")
     ):

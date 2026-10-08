@@ -243,6 +243,8 @@ def _day0_observed_extreme_seed_payload(
             temperature_metric=metric_norm,
             decision_time=computed_at,
             require_settlement_channel=False,
+            # A physical-only station (FMI) never conditions a seed (G1).
+            metar_content_only=True,
         )
         if fact is None:
             row = world_conn.execute(
