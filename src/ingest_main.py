@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-10-08; last_reused=2026-10-08
+# Lifecycle: created=2026-04-30; last_reviewed=2026-10-09; last_reused=2026-10-09
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_data_daemon_live_efficiency/DATA_DAEMON_LIVE_EFFICIENCY_REFACTOR_PLAN.md
 #   Phase 2 legacy OpenData mutual exclusion with forecast-live-daemon; 2026-05-20
 #   live stability hotfix keeps SIGTERM scheduler shutdown exit code clean.
@@ -2281,6 +2281,27 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
                         logger.warning("PAGE_PRINT_ABSENCE_UNRECORDED station=%s error=%s",
                                        station_id, type(exc).__name__)
                     conn.execute("RELEASE page_print_absence")
+                asos5 = getattr(prints, "asos5", ())
+                if asos5:
+                    # No reader admits this channel yet: no count, wake or trace.
+                    conn.execute("SAVEPOINT asos5_prints")
+                    try:
+                        from src.data.station_temperature_adapters import asos5_channel
+
+                        for sample in asos5:
+                            append_print(
+                                conn, city=city.name, station_id=station_id,
+                                source_channel=asos5_channel(station_id),
+                                publish_ts_utc=sample.observed_at.isoformat(),
+                                value_native=sample.value_native, unit=route.unit,
+                                fetched_at_utc=sample.fetched_at.isoformat(),
+                                raw_report=sample.raw_report,
+                            )
+                    except Exception as exc:  # noqa: BLE001 - a derived channel never costs the prints
+                        conn.execute("ROLLBACK TO asos5_prints")
+                        logger.warning("ASOS5_PRINTS_UNRECORDED station=%s error=%s",
+                                       station_id, type(exc).__name__)
+                    conn.execute("RELEASE asos5_prints")
                 started = time.monotonic()
                 conn.commit()
                 world_committed_ns = time.monotonic_ns()
