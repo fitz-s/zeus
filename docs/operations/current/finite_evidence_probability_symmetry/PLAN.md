@@ -23314,3 +23314,49 @@ separately dispositioned; this change does not relax KMA fallback or native-toke
 policy. Publish an ordinary append to the existing draft repair branch, verify
 its exact tree and follow hosted checks to terminal. No deployment, real trade,
 production database operation or PR-body edit is included.
+
+
+### Adopt the existing KMA invalid-frontier test owner (2026-10-09)
+
+checked=2026-W41; basis=exact-94c92fa owner port, paired offline execution and
+independent review; until=recheck-on-use. Adopt only the 66-insertion/5-deletion
+test delta from existing owner 48a35656163b01c92e48337de321aa7450eebd68.
+Do not import
+the later native source chain or the whole local pricing file. The received
+patch SHA256 is
+914c3636deeac09a2b6408bc588d61ce68614745482d44ae80b385ab4db14628.
+Only the old header-date context required adaptation to the public base;
+all added owner test bytes remain unchanged. The final pricing test SHA256 is
+86c5fcce22b7997090ecf86241e0f5850181853d220d991f899a047e60f7096f.
+
+All six original damage cases and the lawful KMA fixtures remain. Each invalid
+claimed frontier must produce its precise KmaObservationUnavailable reason,
+make the current-temperature reader unavailable, and leave the older 29 C AWC
+ledger row byte-for-byte intact. This aligns the fixture with the existing
+source law: invalid evidence cannot be silently treated as source absence.
+A separate no-frontier positive passes a controlled normal AWC API body through
+the real parser and ledger writer to the current-temperature reader, proving
+its raw report, station, unit, publication/receipt clocks, physical value and
+unchanged ledger. It authorizes physical-current evidence only, not settlement
+certainty or an exit probability by itself. No source or fallback policy changes.
+
+Paired evidence: all six original assertions fail on the exact public tree
+before this port; all 577 pricing-module tests pass after it. The full pricing
+plus adjacent fast-observation run is 916 passed and two failed. Both failures
+are unchanged KMA cursor fixtures using a September 22 raw METAR stamp against
+the actual October 9 response clock: current month inference selects a future
+October 22 report and truthfully rejects it. Both exact failures and messages
+reproduce in a separate clean 94c92fa worktree. These adjacent fixtures remain
+unmodified, and the combined suite is not claimed green. Independent review
+finds no introduced Critical/Important issue and independently executes the
+nine damaged, lawful/correction and genuine-absence cases: 9 passed. Counts
+overlap, and all evidence uses private offline fixtures and the network guard.
+
+This bounded append changes only tests/test_day0_remaining_day_pricing.py and
+this existing record. Keep the native structural-protocol classifier question
+separate; do not restore rolled-back runtime features, lower proof counts or
+weaken authority merely to green CI. Publish this reviewed owner portion by
+ordinary append to the existing draft repair branch, verify exact tree/head,
+and follow hosted checks to terminal. Red required checks still block release;
+there is no deployment, real order, production database operation, PR-body edit
+or live/funding-readiness claim.

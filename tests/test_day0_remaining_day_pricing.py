@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-10-07
-# Lifecycle: created=2026-06-10; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Last reused/audited: 2026-10-08
+# Lifecycle: created=2026-06-10; last_reviewed=2026-10-08; last_reused=2026-10-08
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -344,15 +344,76 @@ def test_kma_window_reaches_current_state_and_extreme_consumers(correction):
 ])
 def test_kma_invalid_evidence_cannot_replace_current_temperature(damage):
     from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.day0_fast_obs import _latest_kma_day0_event_state, KmaObservationUnavailable
 
     conn, city, cutoff = _kma_consumer_fixture(damage=damage)
     try:
+        before = tuple(tuple(row) for row in conn.execute("SELECT * FROM observation_prints ORDER BY id"))
+        assert len(before) == 1
+        assert conn.execute("SELECT value_native FROM observation_prints").fetchone()[0] == 29.0
+        expected_reason = {
+            "station_id": "KMA_SOURCE_IDENTITY_UNQUALIFIED",
+            "raw_report_identity": "KMA_SOURCE_CURRENT_OBSERVATION_MISMATCH",
+            "current_observation_temp_c": "KMA_SOURCE_CURRENT_OBSERVATION_MISMATCH",
+            "observation_transport": "KMA_SOURCE_IDENTITY_UNQUALIFIED",
+            "observation_availability_basis": "KMA_SOURCE_IDENTITY_UNQUALIFIED",
+            "observation_available_at": "KMA_SOURCE_CLOCK_NONCAUSAL",
+        }[next(iter(damage))]
+        with pytest.raises(KmaObservationUnavailable, match=f"reason={expected_reason}$"):
+            _latest_kma_day0_event_state(conn, city=city, target_date="2026-09-22",
+                decision_time=cutoff, metric=None)
         state = read_day0_current_temperature_state(
             conn=conn, city=city, target_date="2026-09-22", decision_time=cutoff,
         )
-        assert state is not None
-        assert state.value_native == 29.0
-        assert state.observed_at.hour == 4
+        # An invalid latest KMA frontier is not source absence. The older
+        # same-station AWC print survives, but cannot bypass this typed refusal.
+        assert state is None
+        assert tuple(tuple(row) for row in conn.execute("SELECT * FROM observation_prints ORDER BY id")) == before
+    finally:
+        conn.close()
+
+
+def test_current_temperature_uses_normal_awc_when_kma_frontier_is_absent():
+    from src.data import day0_fast_obs as fast
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import ensure_table
+    from src.state.schema.opportunity_events_schema import ensure_table as ensure_events
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_table(conn)
+        ensure_events(conn)
+        city = runtime_cities_by_name()["Busan"]
+        observed = datetime(2026, 9, 22, 5, tzinfo=UTC)
+        published = observed + timedelta(seconds=34)
+        received = observed + timedelta(seconds=35)
+        cutoff = observed + timedelta(minutes=1)
+        raw = "METAR RKPK 220500Z 05014KT 9999 FEW050 29/14 Q1016="
+        reports = fast.parse_metar_api_payload([{
+            "icaoId": "RKPK", "obsTime": observed.timestamp(),
+            "receiptTime": published.isoformat(), "temp": 29.0,
+            "metarType": "METAR", "rawOb": raw,
+        }], first_seen_at=received)
+        assert len(reports) == 1
+        source = fast.fast_obs_source_for_city(city, target_date="2026-09-22")
+        assert source is not None and source.station_id == "RKPK"
+        assert fast._append_metar_prints_to_ledger(conn, ((city, source, "2026-09-22"),), reports)
+        assert conn.execute("SELECT 1 FROM opportunity_events").fetchone() is None
+        assert fast._latest_kma_day0_event_state(conn, city=city, target_date="2026-09-22",
+            decision_time=cutoff, metric=None) is None
+        print_row = conn.execute("SELECT * FROM observation_prints").fetchone()
+        assert print_row["raw_report"] == raw
+        assert print_row["unit"] == "C" and print_row["station_id"] == "RKPK"
+        assert datetime.fromisoformat(print_row["publish_ts_utc"]) == published
+        assert datetime.fromisoformat(print_row["fetched_at_utc"]) == received
+        state = read_day0_current_temperature_state(conn=conn, city=city,
+            target_date="2026-09-22", decision_time=cutoff)
+        assert state is not None and state.value_native == 29.0
+        assert state.observed_at == observed
+        assert state.source == "aviationweather_metar"
+        # Physical-current evidence only: no settlement/q authority is minted.
+        assert tuple(conn.execute("SELECT * FROM observation_prints").fetchone()) == tuple(print_row)
     finally:
         conn.close()
 
