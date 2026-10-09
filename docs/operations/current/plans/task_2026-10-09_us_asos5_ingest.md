@@ -1,6 +1,6 @@
 # US ASOS 5-minute rows as their own WORLD channel (asos5_<icao>)
 
-Branch: `feat/us-asos5-ingest` (from origin/live 1e3db865f). Status: IMPLEMENTED on branch; not landed on live.
+Branch: `feat/us-asos5-ingest` (from origin/live 1e3db865f, rebased onto af48569b1). Status: IMPLEMENTED on branch; not landed on live.
 Rollback point: 16203945f (anchor). Revert the branch commits; no schema, registry or
 config change ships, so the revert is code-only.
 
@@ -224,6 +224,20 @@ Focused re-run in this tree (asos5, G10, adapters, reaction chain, FMI):
 and 4x `test_observation_reaction_chain.py::test_observation_revision_materializes_then_serves[...]`.
 All 5 fail identically on base.
 
+Rebase onto origin/live af48569b1 (b2620cca5 moved the physical-current round to its own
+`physical_current_db` executor; af48569b1 is capital-only). Clean rebase, no conflict.
+Re-proof on the rebased HEAD vs a detached af48569b1 tree, same modules:
+```
+HEAD     asos5+G10+adapters+reaction+FMI+scheduler_adapter+receipt_chain: 29 failed, 330 passed
+af48569b1 same set minus the new asos5 module:                            29 failed, 315 passed
+per module, HEAD and base: test_scheduler_adapter.py 7 failed, 103 passed;
+                           test_fast_obs_receipt_chain.py 36 passed
+```
+330 = 315 + 15 (the new module), with the same failure count. In the combined run, one
+`test_fast_obs_receipt_chain.py` test fails by test order on both trees and passes alone on
+both. The executor move does not touch the tick body, so the asos5 savepoint still runs
+inside the same WORLD lease and mutex.
+
 Tick cost: 24-36 new asos5 appends per tick measured at 0.4-1.8 ms warm (27 ms on the
 first cold write of a fresh file), and a re-poll of seen clocks takes 0.28 ms per 24. That is
 well inside the tick's `max_hold_ms=300`.
@@ -238,7 +252,13 @@ well inside the tick's `max_hold_ms=300`.
   inside the block the pending branch rewrites. Fixed by moving **my line only** to an
   untouched spot (after `tests/test_om9_bounded_station_ground.py`), commit "place the asos5
   registry line apart...". Nothing was edited toward the pending branch.
-- final run: `exit=0`, tree d35402ffb, no conflicts. In the merged tree the asos5 block sits
+- run on the pre-rebase HEAD a88ca1c6c: `exit=0`, tree d35402ffb, no conflicts.
+- run after rebasing onto af48569b1: `CONFLICT (content): Merge conflict in
+  src/data/scheduler_adapter.py`. This branch does not touch that file. The conflict is
+  origin/live b2620cca5 (physical-current executor) vs the pending branch: `git merge-tree
+  --write-tree origin/fix/physical-evidence-exit-20261007 origin/live` alone gives the same
+  CONFLICT. Not resolved here (not this branch's file; not edited toward that branch).
+  station_temperature_adapters.py, ingest_main.py and test_topology.yaml auto-merge. In the merged tree the asos5 block sits
   after G10 inside the same tick, and the pending branch's `if inserted:` wake is unaffected,
   because asos5 rows never count toward `inserted`.
 
