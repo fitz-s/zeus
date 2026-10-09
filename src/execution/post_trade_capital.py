@@ -75,6 +75,9 @@ from src.config import get_mode
 logger = logging.getLogger("zeus.post_trade_capital")
 
 _TIER0_CANDIDATE_QUERY_CHUNK = 400
+# One read statement per chunk: a whole-table fetchall (3.6M rows) held one
+# read snapshot ~37 min and pinned the trade WAL to 7 GB (2026-10-09).
+_TIER0_CANDIDATE_READ_CHUNK = 50_000
 _TIER0_LABEL_WRITE_CHUNK = 200
 # A VERIFIED label older than this is final: labels land within 12 days of the
 # target date (measured 2026-09-01..22, p99 12.0 d), so corrections come sooner.
@@ -97,8 +100,16 @@ _TIER0_CORPUS_WAL_BYTES_LIMIT = 256 * 1024 * 1024
 
 def _load_tier0_candidate_rows(
     trade_conn: sqlite3.Connection,
+    *,
+    after_row_id: int = 0,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Read immutable Tier-0 decisions whose final binary label is derived."""
+    """Read immutable Tier-0 decisions whose final binary label is derived.
+
+    Keyset-bounded: one statement reads at most ``limit`` rows past
+    ``after_row_id``, so its implicit read snapshot ends when it returns and
+    never pins the trade WAL for the whole table.
+    """
 
     return [
         dict(row)
@@ -107,8 +118,11 @@ def _load_tier0_candidate_rows(
             SELECT row_id, market_key, city, target_date, side, settled_y,
                    label_available_at
               FROM tier0_candidate_set_provenance
+             WHERE row_id > ?
              ORDER BY row_id
-            """
+             LIMIT ?
+            """,
+            (int(after_row_id), -1 if limit is None else int(limit)),
         ).fetchall()
     ]
 
@@ -597,8 +611,11 @@ def _apply_tier0_family_label_changes(
 def run_tier0_candidate_settlement_fold() -> dict[str, int]:
     """Read-only diff, then compare-and-set writes of changed rows only.
 
-    No transaction spans two DBs, and no read runs inside a write transaction:
-    an unchanged fold never takes the trade-DB write lock.
+    No transaction spans two DBs, no read runs inside a write transaction, and
+    no read snapshot outlives one ``_TIER0_CANDIDATE_READ_CHUNK`` keyset chunk:
+    an unchanged fold never takes the trade-DB write lock or pins its WAL.
+    Per-market stats are summed per chunk, so a market whose rows span chunks
+    counts once per chunk.
 
     SCOPE: only ``tier0_candidate_set_provenance.settled_y`` rows whose exact
     condition has a VERIFIED canonical settlement and whose cached label
@@ -614,43 +631,48 @@ def run_tier0_candidate_settlement_fold() -> dict[str, int]:
         get_trade_connection_read_only,
     )
 
-    trade_read = get_trade_connection_read_only()
-    try:
-        if not _tier0_label_schema_ready(trade_read):
-            return {"schema_pending": 1}
-        candidates = _load_tier0_candidate_rows(trade_read)
-    finally:
-        trade_read.close()
-    if not candidates:
-        return {
-            "candidate_rows": 0,
-            "verified_market_labels": 0,
-            "labels_ready": 0,
-            "pending_rows": 0,
-            "ambiguous_markets": 0,
-            "invalid_truth_rows": 0,
-            "invalid_candidate_rows": 0,
-            "unchanged": 0,
-            "filled": 0,
-            "corrected": 0,
-            "stamped": 0,
-            "cas_lost": 0,
-        }
-
-    forecast_read = get_forecasts_connection_read_only()
-    try:
-        labels, stats = _tier0_candidate_settlement_labels(
-            forecast_read,
-            candidates,
-        )
-    finally:
-        forecast_read.close()
-    changes = _tier0_candidate_label_changes(candidates, labels)
-    return {
-        **stats,
-        "unchanged": len(labels) - len(changes),
-        **_apply_tier0_candidate_label_changes(changes),
-    }
+    totals = dict.fromkeys(
+        (
+            "candidate_rows", "verified_market_labels", "labels_ready",
+            "pending_rows", "ambiguous_markets", "invalid_truth_rows",
+            "invalid_candidate_rows", "unchanged", "filled", "corrected",
+            "stamped", "cas_lost",
+        ),
+        0,
+    )
+    # Each row is graded from its own market_key, so keyset chunks are exact:
+    # read one chunk (its snapshot ends with the statement), grade, write.
+    after_row_id = 0
+    while True:
+        trade_read = get_trade_connection_read_only()
+        try:
+            if after_row_id == 0 and not _tier0_label_schema_ready(trade_read):
+                return {"schema_pending": 1}
+            candidates = _load_tier0_candidate_rows(
+                trade_read,
+                after_row_id=after_row_id,
+                limit=_TIER0_CANDIDATE_READ_CHUNK,
+            )
+        finally:
+            trade_read.close()
+        if not candidates:
+            return totals
+        after_row_id = int(candidates[-1]["row_id"])
+        forecast_read = get_forecasts_connection_read_only()
+        try:
+            labels, stats = _tier0_candidate_settlement_labels(
+                forecast_read,
+                candidates,
+            )
+        finally:
+            forecast_read.close()
+        changes = _tier0_candidate_label_changes(candidates, labels)
+        for key, value in {
+            **stats,
+            "unchanged": len(labels) - len(changes),
+            **_apply_tier0_candidate_label_changes(changes),
+        }.items():
+            totals[key] = totals.get(key, 0) + int(value)
 
 
 def _tier0_corpus_retention_step(

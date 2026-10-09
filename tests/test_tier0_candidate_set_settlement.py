@@ -136,8 +136,8 @@ def fold(monkeypatch, tmp_path):
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _load(conn):
-        return [
+    def _load(conn, *, after_row_id=0, limit=None):
+        rows = [
             {**candidate, "settled_y": settled_y, "label_available_at": available}
             for candidate, (_row_id, settled_y, available) in zip(
                 candidates, conn.execute(
@@ -145,7 +145,9 @@ def fold(monkeypatch, tmp_path):
                     "FROM tier0_candidate_set_provenance ORDER BY row_id"
                 ).fetchall()
             )
+            if candidate["row_id"] > after_row_id
         ]
+        return rows if limit is None else rows[:limit]
 
     def _connect_existing(db_path):
         conn = sqlite3.connect(db_path, isolation_level="")
@@ -169,7 +171,13 @@ def fold(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ptc,
         "_tier0_candidate_settlement_labels",
-        lambda _conn, loaded: (list(labels["value"]), {"candidate_rows": len(loaded)}),
+        lambda _conn, loaded: (
+            [
+                label for label in labels["value"]
+                if label[0] in {row["row_id"] for row in loaded}
+            ],
+            {"candidate_rows": len(loaded)},
+        ),
     )
     monkeypatch.setattr(
         write_coordinator,
@@ -328,7 +336,7 @@ def test_label_diff_is_computed_from_the_read_only_snapshot():
 def test_changed_rows_fill_and_correct_and_refold_is_idempotent(fold):
     stats = ptc.run_tier0_candidate_settlement_fold()
 
-    assert stats == {
+    expected = {
         "candidate_rows": 3,
         # Row 2's outcome already matched; it only gains label_available_at.
         "unchanged": 0,
@@ -337,6 +345,7 @@ def test_changed_rows_fill_and_correct_and_refold_is_idempotent(fold):
         "stamped": 1,
         "cas_lost": 0,
     }
+    assert {key: stats[key] for key in expected} == expected
     assert _settled(fold.path) == [(1, 1), (2, 0), (3, 0)]
     assert _available(fold.path) == [_AVAILABLE] * 3
     assert fold.coordinator.transactions == 1
@@ -440,3 +449,44 @@ def test_post_trade_daemon_runs_fold_every_five_minutes_after_harvester():
     assert isinstance(keywords["coalesce"], ast.Constant)
     assert keywords["coalesce"].value is True
     assert "next_run_time" in keywords
+
+
+def test_candidate_rows_load_in_keyset_chunks_each_on_a_fresh_snapshot(tmp_path):
+    """A whole-table fetchall held one read snapshot ~37 min and pinned the trade
+    WAL to 7 GB (2026-10-09); each chunk must be its own bounded statement."""
+
+    path = tmp_path / "t.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE tier0_candidate_set_provenance (row_id INTEGER PRIMARY KEY, "
+        "market_key TEXT, city TEXT, target_date TEXT, side TEXT, settled_y INTEGER, "
+        "label_available_at TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO tier0_candidate_set_provenance VALUES (?,?,?,?,?,?,?)",
+        [(i, f"m{i}", "C", "2026-10-01", "YES", None, None) for i in range(1, 8)],
+    )
+    conn.commit()
+    conn.row_factory = sqlite3.Row
+    seen, after = [], 0
+    while chunk := ptc._load_tier0_candidate_rows(conn, after_row_id=after, limit=3):
+        assert len(chunk) <= 3
+        seen.extend(row["row_id"] for row in chunk)
+        after = chunk[-1]["row_id"]
+    assert seen == list(range(1, 8))
+    plan = " ".join(
+        str(row[-1]) for row in conn.execute(
+            "EXPLAIN QUERY PLAN SELECT row_id FROM tier0_candidate_set_provenance "
+            "WHERE row_id > ? ORDER BY row_id LIMIT ?", (0, 3)
+        )
+    )
+    assert "USING INTEGER PRIMARY KEY" in plan
+
+
+def test_fold_in_two_chunks_matches_the_single_chunk_result(monkeypatch, fold):
+    monkeypatch.setattr(ptc, "_TIER0_CANDIDATE_READ_CHUNK", 2)
+    stats = ptc.run_tier0_candidate_settlement_fold()
+    assert stats["candidate_rows"] == 3
+    assert (stats["filled"], stats["corrected"], stats["stamped"], stats["cas_lost"]) == (1, 1, 1, 0)
+    again = ptc.run_tier0_candidate_settlement_fold()
+    assert again["unchanged"] == 3
