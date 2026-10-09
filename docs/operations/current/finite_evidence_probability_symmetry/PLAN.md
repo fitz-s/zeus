@@ -23088,3 +23088,54 @@ scheduled/native evidence remains pinned to its original run, with unchanged
 source/module identity; no new native-cash, fees, restart, source acquisition or
 live execution claim is made. Required hosted checks on the exact new head remain
 the next release gate, and existing red gates cannot be waived by this local pass.
+
+
+### Bounded optional-hint clock and remaining-gate review (2026-10-09)
+
+Preserve published f3c596d9 and its terminal checks: the post-ACK rollback failure
+is removed, with fourteen prior failed nodes and no new failed node. Review only
+that exact remaining set. The next proposed correction is the two optional-
+universe-hint tests that must protect the normal claim window. Reproduce the
+current failure and its baseline before changing the clock fixture. Trace the
+real deadline and tracing clocks; a missing method on a time-module double is
+not evidence that the runtime consumed the claim window.
+
+If the fixture contract is unambiguously obsolete, repair only its clock seam
+while preserving both hint cases, every original assertion and the intended
+deadline/economic obligations. Never enlarge the runtime budget, omit a clock-
+sensitive branch, replace a failed requirement with a weaker expectation or
+silence a real database/source error. If a faithful fixture reveals a runtime
+defect, preserve that earliest failure and propose its minimal scope first.
+
+Independently classify the other twelve exact failed nodes without editing
+their source or tests. KMA source ownership and fallback disputes need a policy
+disposition before changes; missing proof is never permission to bypass it.
+Stop at these named gates rather than widening into unrelated repository debt.
+Freeze and independently review any unambiguous same-scope correction, retain
+paired evidence, then publish a normal reviewed append and follow exact-head CI.
+No live operations, production database access or attachment preparation.
+
+
+#### Optional-hint clock fixture disposition (2026-10-09)
+
+Both original cases fail identically on the current candidate and untouched
+1e3db865 before queue-claim execution: the queue-local time double omits
+perf_counter required by producer tracing. It also omits thread_time. This is
+a fixture failure before the intended claim-window proof, not evidence of a
+runtime deadline defect. The real optional hint retains its quarter-second
+slice and the normal claim retains its ten-second window.
+
+Frozen c2dfd1ef changes only the time-double expression. It copies the real time
+module's attributes into the local double and overrides only monotonic for the
+existing simulated deadline clock. No global clock or production budget changes.
+All eight original assertions, both hint parameters and the entire remaining
+file AST are unchanged. The owner's two target cases pass; the independent
+thirteen-case run also covers neighboring universe/admission/reset, deadline
+defer/retry, non-deadline error propagation, normal runner and claim fences.
+Counts overlap. Actual wall-clock latency is not proved by simulated deadlines.
+
+Production code, source authority and economic laws are unchanged. The other
+twelve failed nodes remain a separate read-only classification and are not
+waived by this fixture correction. Publish only this reviewed test and existing
+plan, verify the exact resulting tree/ref, and retain terminal hosted CI before
+any release-readiness assessment.
