@@ -1062,15 +1062,23 @@ def test_retention_run_pauses_on_a_large_wal(tmp_path, monkeypatch):
     assert stats["wal_paused"] == 1 and stats["chunks"] == 0
 
 
-def test_growth_report_counts_rows_and_bytes_per_table(tmp_path):
+def test_growth_report_counts_rows_and_bytes_per_table(tmp_path, monkeypatch):
+    monkeypatch.setattr(gbr, "_TIER0_CORPUS_MIN_FREE_BYTES", 0)
     conn = _trade_db(tmp_path)
     witness = _witness()
     _store(conn, _no_winner_decision(witness), witness=witness)
     growth = ptc.tier0_corpus_growth(conn, since_iso="2000-01-01T00:00:00+00:00")
     assert growth["tier0_auction_cut"]["new_rows"] == 1
-    assert growth["tier0_family_snapshot"]["payload_bytes"] == len(
+    assert growth["tier0_family_snapshot"]["new_payload_bytes"] == len(
         _only(conn, "tier0_family_snapshot")["payload"])
-    assert growth["tier0_cut_family"] == {"rows": 1, "new_rows": 1}
+    assert growth["tier0_cut_family"] == {"new_rows": 1}
+    # Never a whole-table BLOB scan: every payload read is bounded by the
+    # indexed time window, so an old-only window reads no payload at all.
+    plans = []
+    conn.set_trace_callback(plans.append)
+    ptc.tier0_corpus_growth(conn, since_iso="2999-01-01T00:00:00+00:00")
+    conn.set_trace_callback(None)
+    assert all("WHERE" in sql for sql in plans if "LENGTH(" in sql)
     assert ptc.tier0_corpus_growth(
         conn, since_iso="2999-01-01T00:00:00+00:00"
     )["tier0_auction_cut"]["new_rows"] == 0

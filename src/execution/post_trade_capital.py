@@ -851,11 +851,13 @@ _TIER0_CORPUS_TABLES = (
 
 
 def tier0_corpus_growth(trade_conn: sqlite3.Connection, *, since_iso: str) -> dict[str, dict[str, int]]:
-    """Rows and payload bytes per corpus table: in total, and written since.
+    """Rows and payload bytes per corpus table written since ``since_iso``.
 
-    Payload bytes are the stored BLOB lengths, the dominant term of each row.
-    ``tier0_cut_family`` has no payload; its rows are counted through the cuts
-    they belong to.
+    Only the indexed recent window is read: summing every stored BLOB of a
+    multi-GB corpus held one read snapshot for 15+ min and pinned the trade WAL
+    (2026-10-09). ``rows`` is the rowid high-water mark, an O(1) upper bound on
+    the table size (retention deletes leave gaps). ``tier0_cut_family`` has no
+    payload; its new rows are counted through the cuts they belong to.
     """
 
     out: dict[str, dict[str, int]] = {}
@@ -865,8 +867,8 @@ def tier0_corpus_growth(trade_conn: sqlite3.Connection, *, since_iso: str) -> di
         ("tier0_family_topology", "first_seen_at_utc", "payload"),
         ("tier0_family_label", "recorded_at", "payload"),
     ):
-        total_rows, total_bytes = trade_conn.execute(
-            f"SELECT COUNT(*), COALESCE(SUM(LENGTH({payload})), 0) FROM {table}"
+        (rows,) = trade_conn.execute(
+            f"SELECT COALESCE(MAX(rowid), 0) FROM {table}"
         ).fetchone()
         new_rows, new_bytes = trade_conn.execute(
             f"SELECT COUNT(*), COALESCE(SUM(LENGTH({payload})), 0) FROM {table} "
@@ -874,21 +876,20 @@ def tier0_corpus_growth(trade_conn: sqlite3.Connection, *, since_iso: str) -> di
             (since_iso,),
         ).fetchone()
         out[table] = {
-            "rows": int(total_rows),
-            "payload_bytes": int(total_bytes),
+            "rows": int(rows),
             "new_rows": int(new_rows),
             "new_payload_bytes": int(new_bytes),
         }
-    links, new_links = trade_conn.execute(
+    (new_links,) = trade_conn.execute(
         """
-        SELECT COUNT(*),
-               SUM(a.decision_at_utc >= ?)
-          FROM tier0_cut_family c
-          JOIN tier0_auction_cut a ON a.cut_seq = c.cut_seq
+        SELECT COUNT(*)
+          FROM tier0_auction_cut a
+          JOIN tier0_cut_family c ON c.cut_seq = a.cut_seq
+         WHERE a.decision_at_utc >= ?
         """,
         (since_iso,),
     ).fetchone()
-    out["tier0_cut_family"] = {"rows": int(links), "new_rows": int(new_links or 0)}
+    out["tier0_cut_family"] = {"new_rows": int(new_links or 0)}
     return out
 
 
@@ -915,7 +916,7 @@ def run_tier0_corpus_growth_report() -> dict[str, dict[str, int]]:
         "tier0 corpus growth 24h: %s",
         " ".join(
             f"{table}=+{stats['new_rows']}rows/+{stats.get('new_payload_bytes', 0)}B"
-            f"(total {stats['rows']}rows/{stats.get('payload_bytes', 0)}B)"
+            + (f"(rowid hwm {stats['rows']})" if "rows" in stats else "")
             for table, stats in growth.items()
         ),
     )
