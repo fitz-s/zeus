@@ -23036,3 +23036,55 @@ unrelated module definitions are unchanged. No runtime defect, source-policy or
 fallback expansion is established or implemented. Earlier scheduled/native
 acceptance is retained through source/module identity, not claimed as a new run.
 Exact-head hosted checks and remaining inherited failures stay separate gates.
+
+
+### Bounded post-ACK rollback test-clock continuation (2026-10-09)
+
+Preserve published b610b228 and its terminal CI: the two post-local failures are
+removed, fourteen prior failed nodes remain, and one newly observed post-ACK
+rollback test failure is independently reproduced on both prior and current
+trees. The changed post-local integration module is absent from that hosted job's
+identical selected-test lists. This attribution does not turn red CI green.
+
+The rollback completes, but the real one-hundred-millisecond maintenance slice
+can expire before the test's second snapshot sentinel. Its expected exception is
+then unreachable despite correct deferred behavior and exact accounting rollback.
+The authorized correction is test-only: control monotonic time for the existing
+sentinel path, preserve all original fact/state assertions, and separately test
+exhaustion after rollback with one capture, truthful deferred summary and exact
+command/trade/position/execution/collateral table preservation. Keep source clocks
+and the simulated test clock distinct. Do not extend runtime deadlines, swallow
+exceptions, make the sentinel optional or alter production recovery behavior.
+
+Retain the genuine hosted RED and deterministic paired reproductions. Review the
+frozen correction independently, including successful projection and unchanged
+rollback/retry controls. Do not absorb the separate scheduler-deadline diagnostic
+or other inherited source/fallback failures into this repair. Publish only the
+reviewed tests and this existing plan through an ordinary append, then follow
+exact-head CI to terminal. No live operations or production database access.
+
+
+#### Post-ACK test-clock disposition (2026-10-09)
+
+Frozen 6afc0616 controls only the existing test's monotonic clock; all original
+statements, eight assertions, False/True parametrization and required second-
+capture RuntimeError remain intact. The new separate case runs the real successful
+exit projection, injects its original failure, lets the real bounded transaction
+roll back, and spends the maintenance slice after a real maintenance pass. It
+requires exactly one snapshot, an unexpired outer scheduler deadline, truthful
+budget-deferred/full-sweep fields and exact equality across eleven accounting,
+command, venue-fact, execution and position tables. Pending exposure stays open.
+
+Owner focused three-case and neighboring twenty-six-case runs pass; the independent
+three-case run and AST/source-scope review pass. These counts overlap. Production
+code and budgets are unchanged. The preserved paired diagnostic proves a sufficient
+inherited timing mechanism on both trees; hosted logs lack the returned timing
+summary and do not prove which precise pass exhausted the budget there. No missing
+telemetry is invented. This correction does not absorb the separate outer-scheduler
+read-deadline diagnostic, other source/fallback disputes or broader fixture debt.
+
+Only the reviewed recovery test and this existing plan are published. Prior
+scheduled/native evidence remains pinned to its original run, with unchanged
+source/module identity; no new native-cash, fees, restart, source acquisition or
+live execution claim is made. Required hosted checks on the exact new head remain
+the next release gate, and existing red gates cannot be waived by this local pass.

@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-10-08; last_reused=2026-10-08
+# Lifecycle: created=2026-04-26; last_reviewed=2026-10-09; last_reused=2026-10-09
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-10-08
+# Last reused/audited: 2026-10-09
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -46017,6 +46017,10 @@ def test_live_tick_post_ack_exit_confirmed_fill_projects_position(
 ):
     from src.execution import command_recovery, venue_sync_contract
 
+    # This case exercises the second-capture rollback sentinel. Maintenance
+    # exhaustion is covered separately, without relying on host execution speed.
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 0.0)
+
     command_id = "cmd-post-ack-live-exit"
     order_id = "ord-post-ack-live-exit"
     position_id = "pos-post-ack-live-exit"
@@ -46153,6 +46157,180 @@ def test_live_tick_post_ack_exit_confirmed_fill_projects_position(
             "order_status": "sell_filled",
         }
         assert fact_count == 1
+
+
+def test_live_tick_post_ack_exit_rollback_defers_after_maintenance_budget_exhaustion(
+    conn, tmp_path, monkeypatch,
+):
+    from src.execution import command_recovery, venue_sync_contract
+
+    command_id = "cmd-post-ack-expired-exit"
+    order_id = "ord-post-ack-expired-exit"
+    position_id = "pos-post-ack-expired-exit"
+    _seed_post_ack_persistence_review(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        intent_kind="EXIT",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET position_id = ? WHERE command_id = ?",
+        (position_id, command_id),
+    )
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="seed-entry",
+        order_id="seed-order",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 10, chain_shares = 10,
+               cost_basis_usd = 5, entry_price = 0.50,
+               order_status = 'sell_pending_confirmation'
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    )
+    _seed_full_exit_intent(
+        conn,
+        position_id=position_id,
+        shares=10,
+        order_id=order_id,
+        command_id=command_id,
+    )
+    conn.execute(
+        "UPDATE venue_commands SET created_at = ? WHERE command_id = ?",
+        ("2026-04-26T00:05:00Z", command_id),
+    )
+    conn.commit()
+    db_path = tmp_path / "post-ack-expired-exit.db"
+    with sqlite3.connect(db_path) as target:
+        conn.backup(target)
+
+    def factory(**_kwargs):
+        db = sqlite3.connect(db_path)
+        db.row_factory = sqlite3.Row
+        return db
+
+    factory.supports_nonblocking_flocks = True
+
+    def accounting_snapshot(db):
+        tables = (
+            "venue_commands", "venue_command_events", "venue_order_facts",
+            "venue_trade_facts", "position_current", "position_events",
+            "execution_fact", "position_lots", "collateral_ledger_snapshots",
+            "collateral_reservations", "collateral_unsettled_proceeds",
+        )
+        return {
+            table: tuple(
+                tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY rowid")
+            )
+            for table in tables
+        }
+
+    with factory() as persisted:
+        before = accounting_snapshot(persisted)
+    snapshot = SimpleNamespace(
+        get_order=lambda _order_id: None,
+        get_open_orders=lambda: [],
+        get_trades=lambda: [{
+            "id": "trade-post-ack-expired-exit",
+            "status": "CONFIRMED",
+            "trader_side": "TAKER",
+            "match_time": "2026-04-26T00:06:00Z",
+            "transaction_hash": "0xpostackexpiredexit",
+            "asset_id": "tok-001",
+            "taker_order_id": order_id,
+            "side": "SELL",
+            "price": "0.50",
+            "size": "10",
+        }],
+        venue_reads_are_complete=True,
+        authenticated_point_absence_returns_none=True,
+    )
+    now = [0.0]
+    captures = []
+    projection_results = []
+    maintenance_passes = []
+    original_projection = command_recovery._append_exit_order_fill_projection
+    original_db_only_pass = venue_sync_contract.run_db_only_pass
+
+    def capture(*_args, **kwargs):
+        captures.append(kwargs)
+        if len(captures) > 1:
+            raise RuntimeError("unexpected capture after maintenance budget exhaustion")
+        return snapshot
+
+    def fail_after_projection(*args, **kwargs):
+        projection_results.append(original_projection(*args, **kwargs))
+        raise RuntimeError("injected post-projection failure")
+
+    def exhaust_maintenance(*args, **kwargs):
+        result = original_db_only_pass(*args, **kwargs)
+        if kwargs.get("label") == "recovery.review_work_retry":
+            maintenance_passes.append(kwargs["label"])
+            # The real post-ACK APPLY has rolled back and maintenance has its
+            # own 100 ms slice. Spend that slice, keeping the 1 s scheduler alive.
+            now[0] = 0.2
+        return result
+
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
+    monkeypatch.setattr(venue_sync_contract, "capture_venue_read_snapshot", capture)
+    monkeypatch.setattr(venue_sync_contract, "run_db_only_pass", exhaust_maintenance)
+    monkeypatch.setattr(
+        command_recovery,
+        "_append_exit_order_fill_projection",
+        fail_after_projection,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "drain_screen_redecision_cancel_obligations",
+        lambda *_args, **_kwargs: {"cancelled": 0, "errors": 0, "deferred": 0},
+    )
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(),
+        scope="live_tick",
+        deadline_monotonic=1.0,
+    )
+
+    assert projection_results == [True]
+    assert maintenance_passes == ["recovery.review_work_retry"]
+    assert now[0] == 0.2
+    assert len(captures) == 1
+    assert set(captures[0]["order_ids"]) == {order_id}
+    assert summary["post_ack_review_apply_rollback"] == 1
+    assert summary["live_tick_db_budget_seconds"] == pytest.approx(0.1)
+    assert summary["db_budget_deferred"] is True
+    assert summary["db_budget_deferred_at"] == "review_required_matched_submit_trade_fact"
+    assert summary["db_budget_deferred_count"] == 1
+    assert summary["deferred_full_sweep"] is True
+    assert summary["advanced"] == 0
+    assert summary["errors"] == 0
+    assert "post_ack_review_full_snapshot_fast" not in summary
+    with factory() as persisted:
+        assert accounting_snapshot(persisted) == before
+        assert _get_state(persisted, command_id) == "REVIEW_REQUIRED"
+        position = persisted.execute(
+            """
+            SELECT phase, order_status, shares, chain_shares, cost_basis_usd
+              FROM position_current WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(position) == {
+            "phase": "pending_exit",
+            "order_status": "sell_pending_confirmation",
+            "shares": 10.0,
+            "chain_shares": 10.0,
+            "cost_basis_usd": 5.0,
+        }
+        assert persisted.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()[0] == 0
 
 
 def test_live_tick_post_ack_snapshot_failure_leaves_review_unmodified(
