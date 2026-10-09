@@ -28,6 +28,7 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/adversarial/test_lease_v1_round7_boundaries.py: {created: "2026-10-04", last_used: "2026-10-09", note: "Private capture/lease crash and UNKNOWN isolation controls. Unreadable directory/receipt evidence cannot poison a healthy request's normal queue worker handoff or confer settled/quiescent authority; dry-run/apply parity, later permission-restoration reread and raw-body/inode preservation are explicit. Fake worker completion proves queue progress, not a materialized probability or live execution."}
     tests/test_settlement_sigma_floor_current_shape_wiring.py: {created: "2026-09-13", last_used: "2026-10-09", note: "Current-evidence HIGH/LOW q and bounds ignore fitted historical floors; real diagnostic artifacts and canonical HKO fixtures retain independent shoulder integrals, neutral provenance, and actual v2 Day0 carrier simplex/storage checks. Controlled fusion, future-member and likelihood inputs are synthetic test seams, not live calibration evidence."}
     tests/scripts/test_backfill_widened_observation_instants.py: {created: "2026-07-16", last_used: "2026-10-09", note: "Historical widening-only consumer uses complete captured revision fields and current writer semantics; missing or ambiguous metadata refuses. Public API and CLI operational apply always refuse pending settled/no-live authority. Private fixture transactions retain real BULK lock, single SAVEPOINT, stale-current/audit-collision refusal and full rollback; no production repair authority is established."}
     tests/engine/test_sqlite_work_deadline_deferral.py: {created: "2026-10-09", last_used: "2026-10-09", note: "Real exclusive SQLite contention at the truncated busy-timeout boundary, original exception/code custody, reactor retry and completion-debt retention; early lock and unrelated error controls. Controlled monotonic boundary only; no production state or SQL replay."}
@@ -946,6 +947,7 @@ test_trust_policy:
 
 categories:
   core_law_antibody:
+    - tests/adversarial/test_lease_v1_round7_boundaries.py
     - tests/test_settlement_sigma_floor_current_shape_wiring.py
     - tests/engine/test_sqlite_work_deadline_deferral.py
     - tests/test_current_temperature_delivery.py
@@ -1886,6 +1888,22 @@ relationship_test_manifests:
       - tests/test_runtime_guards.py
 
 test_metadata:
+  tests/adversarial/test_lease_v1_round7_boundaries.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/operations/current/plans/canonical_execution_lease.md
+      - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+    notes: >
+      Owned temporary capture directories, real flock and isolated child-process
+      crash boundaries preserve UNKNOWN evidence and recovery identity. A fresh
+      unrelated request must reach the normal queue worker handoff and durable
+      terminal receipt despite unreadable capture evidence. The worker result is
+      explicitly simulated; no probability generation, production state or venue
+      action is established. Permissions are restored only by the test fixture,
+      after which the unchanged normal classifier must reread and recover.
+    created: 2026-10-04
+    last_reused_or_audited: 2026-10-09
   tests/test_settlement_sigma_floor_current_shape_wiring.py:
     cohort: law_antibody
     trust: trusted

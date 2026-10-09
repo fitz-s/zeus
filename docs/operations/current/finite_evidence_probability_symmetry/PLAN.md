@@ -23521,3 +23521,67 @@ remaining-bias cases, four terminal-residual fingerprints and five EMOS cases.
 Their obligations and owner alignment require separate bounded review; none are
 weakened or omitted here to manufacture a full green result. This final evidence
 append changes only PLAN after the tested candidate, not its source/test bytes.
+
+### Isolate unreadable captures without blocking healthy requests (2026-10-09)
+
+checked=2026-W41; basis=paired 4db885bd/1e3 unreadable-capture RED and narrow
+local-owner audit; until=recheck-on-use. The normal background queue and
+migration reconciliation both run a terminal-receipt precheck before the shared
+capture classifier. That precheck catches only the typed unreadable-receipt
+error, while listing an unreadable capture directory raises ordinary OSError.
+The exception bypasses the classifier's existing UNKNOWN result and strands an
+unrelated healthy pending request. No existing fix or dirty overlap was found
+by the narrow local audit; its committed queue differences concern other scope.
+
+Independent review also reproduced a distinct false-terminal case: a listable
+payload directory without search permission has a matching readable receipt,
+but entry lstat fails. The generic regular-entry helper turns that failure into
+False, which cannot establish that the entry is a known alias. The receipt
+proof now requires its own successful no-follow lstat; it leaves the global
+helper unchanged. Failed receipt or entry metadata reads reach the same UNKNOWN
+classifier. Readable nonregular entries retain their existing terminal meaning.
+
+The integrator owns only src/data/replacement_forecast_live_materialization_queue.py
+capture precheck/receipt proof, tests/adversarial/test_lease_v1_round7_boundaries.py, exact
+source/test registry descriptions and this PLAN. Preserve MP-EXT-001/002 and
+INV-47: SCOPE is one unreadable capture, DRAIN is the normal later classifier
+reread after filesystem readability returns, and RESET is its ordinary terminal
+receipt or restoration. Unknown is never settled or quiescent. No chmod, deletion,
+alias following, stale lease expiry, priority/source/carrier policy change or
+authority upgrade is a recovery operation in this slice.
+
+Retain the genuine baseline RED. Strengthen the healthy-work check to observe a
+fresh request reach the normal queue's worker handoff and durable terminal
+receipt, with an explicitly fake worker result rather than expired-request
+cleanup. Test directory/receipt unreadability, dry-run/apply classification,
+normal permission-restoration RESET, raw-body/inode preservation and existing
+crash/held-flock controls. Independent review and frozen checks precede another
+publication-scope check. No production database, venue action, native-chain
+integration, merge, deployment or PR-body edit is authorized by these tests.
+
+The strengthened original directory case fails on unchanged 4db885bd before
+the precheck correction; five selected receipt controls pass. Separate symlink
+and FIFO cases fail before the no-follow metadata correction because unreadable
+metadata is falsely accepted as terminal. With both corrections, all 32 focused
+round-7 cases pass, including eleven real child-crash cuts. These tests establish
+capture isolation and truthful queue worker handoff, not canonical posterior
+generation, source-to-exit latency or a live trading result.
+
+Final independent acceptance passes sixteen complementary cases plus two crash
+controls on identical source/test bytes. These include forged matching receipts
+on regular payloads, metadata EIO, disappearance between listing and stat,
+capture inode replacement, held flock, and normal restored-readability RESET.
+The seven adjacent lease/recovery modules pass 153 cases; all 159 tests selected
+for the changed external-truth invariants pass. Classification, invariant
+coverage, test-quality metadata, AST lint, freshness, planning/map maintenance,
+YAML parsing and whitespace checks pass. No Critical/Important finding remains
+in this bounded capture slice.
+
+A separately labeled data/events diagnostic on preceding public 4db885bd
+collected 2,716 tests, then stopped at maxfail=20 with 235 passed and 20 failed.
+The 2,461 unexecuted tests include all 1,819 events cases. All twenty newly
+observed failures reproduce on clean 1e3db865 with matching normalized messages
+and tracebacks; they concern anchor transport, blocked-attempt fingerprints,
+freshness row selection and fusion-upgrade fixtures/contracts. They are distinct
+from the previous full-sweep failures and are not repaired or hidden by this
+capture change. Neither bounded diagnostic qualifies the full suite.
