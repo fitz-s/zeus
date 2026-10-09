@@ -295,3 +295,11 @@ Next:
   - Sol review running.
   - Open decision: should the pending branch's second WRH tick also emit asos5?
 - 2026-10-09 21:2xZ trade WAL kept growing after af48569b1 (18.8 → 21.8 GB, disk free 1.6–4 GB). Second pinning reader in post-trade-capital: daily `_tier0_corpus_growth_cycle` summed LENGTH(payload) over four multi-GB corpus tables in one snapshot (ran 15+ min). Fixed f2af8cfe3 (rowid high-water totals + indexed 24 h window only); post-trade-capital restarted 21:36:06Z. Also ran fail-fast PRAGMA wal_checkpoint(TRUNCATE) by hand: busy=1 each time (readers present). Freed ~2.6 GB of my own scratch copies (scratchpad base trees, lineage, trade_wal samples). Corpus flush is self-skipping below 8 GiB free ("tier0 learning corpus flush skipped"), which is why 14 corpus tests fail on any tree on this host (pre-existing, identical ids base vs branch).
+- 2026-10-09 ~20:40Z: route-kinds re-review (Opus) of 26acae021 is NO-GO (scratchpad/routekinds_review2.md).
+  - B1: without A1, native seeds are not age-gated. On a 24 h replay at +10 min, stale ENTRY admissions: Ankara 264 vs live 24, Istanbul 231 vs 24, Moscow 275 vs 26. A1 also cannot land first: it depends on a symbol that exists only on the branch. Both must land together, or a seed-side age gate must replace A1.
+  - H1: A4 ownership flips on corrections. Clock freezes (Istanbul low 23/24 h); Ankara binds 106/116 vs 116.
+  - H2: Lucknow IMD gives MISMATCH with no repair trigger.
+  - H3 (inferred): age basis differs from AWC.
+  - OK: A2 and WU (WU current is not a settlement channel); A3 survival binding; merge with Data's queue branch, 0 NEW.
+  - Sent back to the agent with B1 alternative = a seed-side 900 s gate.
+- The plan docs were swept by converge at 19:27Z (untracked for 24 h). Restored and committed on branch docs/fast-obs-plans (00b8afe2e). Updates continue there.
