@@ -205,14 +205,16 @@ one). Run module by module with a bash `while read` loop over the file, in this 
 a detached origin/live 1e3db865f tree (config/settings.json symlinked), at the same time.
 
 ```
-feature tree: 56 modules  passed 3827  failed 213  skipped 4  failing ids 213
+feature tree: 56 modules  passed 3836  failed 213  skipped 4  failing ids 213
 base tree:    56 modules  passed 3821  failed 213  skipped 4  failing ids 213
 NEW (failing in feature, not base): none
 FIXED (failing in base, not feature): none
 base tests/data/test_asos5_ingest.py: "no tests ran" (file absent at base), rc=4
 feature tests/data/test_asos5_ingest.py: 15 passed
 ```
-The +6 passed is the new module's 15 tests, net of rc-only noise; the failing-ID sets are
+Passed differs by exactly the new module's 15 tests (3836 = 3821 + 15). The feature
+summary line for tests/test_wu_scheduler.py was a pytest temp-dir cleanup warning; its log
+reads `9 passed in 1.63s`, the same as base, and is counted above. The failing-ID sets are
 identical (213 = 213, `comm` empty both ways). Every failure is pre-existing on
 origin/live. The base tree was removed after the run.
 
