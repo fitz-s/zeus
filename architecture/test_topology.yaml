@@ -36,13 +36,14 @@ test_trust_policy:
     tests/state/test_unidentified_exit_order_proxy.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Anonymous order-proxy prevention, strict producer-provenance refusal, real partial/full fill conservation, scoped and attached-schema reader parity, and pending-position no-retry on ambiguity. Raw facts remain append-only; historical projections are not rewritten."}
     tests/calibration/test_exact_payoff_entry_policy.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Typed exact ENTRY metadata, authenticated held policy binding, current causal fit or genuine insufficient-support selection, original ENTRY price-feature semantics, and malformed/legacy/refuted-source refusal. No fitting of exact payoff or inferred historical policy."}
     tests/engine/test_current_wrh_probability_handoff.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Native current WRH provisional source authority across monitor, auction and final JIT; full registered positive-q SELL and canonical closure plus source/correction/custody controls. Synthetic transport and deterministic clocks remain explicit."}
-    tests/engine/test_scheduled_statistical_exit_replay.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Normal current-source acquisition, statistical entry and held redecision through signed synthetic venue transport and canonical fill recovery. Readiness, cash, stale-source and reentry observations retain separately stated acceptance limits; no injected posterior, selected action or fill projection."}
+    tests/engine/test_scheduled_statistical_exit_replay.py: {created: "2026-10-08", last_used: "2026-10-09", note: "Normal source acquisition, synchronous real queue CLI, statistical entry and held redecision through signed synthetic transport and canonical fills. Unreadable-capture isolation, actual scalar coverage RESET, same-clock corrections, exact consumed-witness attribution and finite-window partial residual closure use simulated event time; native confirmation timing and process-restart limits remain separate. No injected posterior, selected action or fill projection."}
     tests/engine/test_confirmed_exit_partial_recovery.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Authenticated partial EXIT command-fold controls, native selected-leg identity/economics, duplicate REST/WS delivery, atomic race and rollback; initial command/state fixtures are explicit, full scheduling is separately tested."}
     tests/engine/test_wrh_carrier_revision_identity.py: {created: "2026-10-07", last_used: "2026-10-07", note: "Actual native WRH owner, residual calibration and HIGH/LOW persisted carrier adapter/public-reader replay preserve the qualified membership dependency; tamper, invalid custody, legacy absence, NOOP and fresh/frozen controls retain authority fences. Forecast vectors and decision facts are explicit bounded fixtures."}
     tests/engine/test_scheduled_physical_exit_replay.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Registered APScheduler WRH acquisition to durable held wake with real canonical writer flocks, exclusion, rollback, stale correction CAS and no I/O under leases; simulated scheduler time/native transport, cold held-family admission and truthful canonical monitor coverage; downstream execution coverage remains separately stated."}
     tests/engine/test_physical_wrh_q_delivery.py: {created: "2026-10-06", last_used: "2026-10-06", note: "Native WRH complete-product corrections through actual current q, global selection and submit probability reproof, JIT, lifecycle and confirmed finite-window partial fill. Explicit composed scheduling and controlled-fusion boundaries; native WRH source/currentness and winner authority are not mocked."}
     tests/engine/test_wrh_current_monitor_redecision.py: {created: "2026-10-06", last_used: "2026-10-06", note: "Real current WRH owner and held-monitor carrier boundary; absent or obsolete event, corrected pin, unknown or empty source, unchanged clocks and blocked-carrier controls."}
-    tests/data/test_wrh_current_membership_identity.py: {created: "2026-10-06", last_used: "2026-10-06", note: "Real typed product/owner/current reader and fusion revision comparison, including unchanged newest point, alternative physical point and semantic NOOP controls; posterior selection is separately tested."}
+    tests/data/test_wrh_current_membership_identity.py: {created: "2026-10-06", last_used: "2026-10-09", note: "Real typed product/owner/current reader and fusion revision comparison, including unchanged newest point, alternative physical point and semantic NOOP controls. Current canonical conditioning source, never prior posterior shape, selects scalar versus carrier revision debt."}
+    tests/data/test_scalar_conditioning_revision_debt.py: {created: "2026-10-09", last_used: "2026-10-09", note: "INV-47 scalar debt RESET after genuine materializer/readiness commit and canonical same-clock downward rediscovery. Revision-only WRH identity reaches durable physical wake and pending monitor source reread. Invalid and expired/unready refusal, station-priority A-B-A publication/CAS and real HIGH/LOW carrier RESET; missing canonical payload cannot discard queued carrier work. Current-dated scalar fixtures and explicitly controlled SQLite replay clock for the retained carrier fixture; no mocked coverage authority."}
     tests/engine/test_physical_exit_window_acceptance.py: {created: "2026-10-06", last_used: "2026-10-08", note: "Independent cloud-only physical source to current probability, real global HOLD or taker selection, canonical lifecycle/executor and fake venue confirmation, finite above-floor window, pending-liquidity monitor recovery, source correction and stale reentry controls. Boundary versus full-loop limitations remain explicit; no production fill claim."}
     tests/test_current_temperature_delivery.py: {created: "2026-09-29", last_used: "2026-10-06", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
     tests/test_observation_reaction_chain.py: {created: "2026-09-29", last_used: "2026-09-29", note: "Round-2 causal current-observation, source identity, delivery and failure regression."}
@@ -1986,9 +1987,9 @@ test_metadata:
     authority_docs:
     - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
     - docs/authority/zeus_current_architecture.md
-    notes: Normal source download, materialization, risk and identity producers admit the declared statistical BUY, then current physical evidence reaches held redecision, selected SELL, real SDK signing and native synthetic confirmation through canonical closure. No posterior, decision or fill projection is injected. Cash10 no-entry and cash20 entry are separately declared scenarios; modeled external fees do not substitute for unavailable canonical fee or chain-cash proof. Post-close reentry is accepted only when its actual source and candidate producers run, not from blanket readiness refusal.
+    notes: Normal source download, materialization, risk and identity producers admit the declared statistical BUY, then physical evidence reaches held redecision, selected SELL, real SDK signing and native synthetic confirmation through canonical closure. Capture cases run the real queue CLI synchronously under an effective private filesystem fault; consumed request bytes, scalar posterior, independently read physical revision, rebound held witness and actual selected actuation remain distinct proofs. Same-clock correction and repeated-debt RESET retain strong readiness and source checks. Partial fills require separate normal-owner residual selection, canonical per-order economics and duplicate receive-handler restart controls. Simulated event windows do not establish live latency or OS worker restart. No posterior, decision or fill projection is injected; modeled fees do not replace UNKNOWN native cash or NULL fee proof.
     created: '2026-10-08'
-    last_reused_or_audited: '2026-10-08'
+    last_reused_or_audited: '2026-10-09'
   tests/engine/test_confirmed_exit_partial_recovery.py:
     cohort: law_antibody
     trust: trusted
@@ -2040,9 +2041,17 @@ test_metadata:
     authority_docs:
     - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
     - docs/authority/zeus_current_architecture.md
-    notes: Real typed product/owner/current reader and fusion revision comparison, including unchanged newest point, alternative physical point and semantic NOOP controls; posterior selection is separately tested.
+    notes: Real typed product/owner/current reader and fusion revision comparison; the current canonical conditioning source selects scalar versus carrier debt, while physical R changes remain independently observable.
     created: '2026-10-06'
-    last_reused_or_audited: '2026-10-06'
+    last_reused_or_audited: '2026-10-09'
+  tests/data/test_scalar_conditioning_revision_debt.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+    - docs/authority/zeus_current_architecture.md
+    notes: INV-47 producer debt closes against real scalar materialization and readiness. Canonical correction rediscovery, revision-only durable wake and pending monitor source reread, invalid/unready refusal, publication CAS and HIGH/LOW carrier RESET remain separate assertions. Missing canonical payload cannot satisfy direct queue expansion revalidation.
+    created: '2026-10-09'
+    last_reused_or_audited: '2026-10-09'
   tests/engine/test_physical_exit_window_acceptance.py:
     cohort: law_antibody
     trust: trusted

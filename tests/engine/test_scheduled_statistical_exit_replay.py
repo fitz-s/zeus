@@ -1,11 +1,12 @@
 # Created: 2026-10-08
-# Last reused/audited: 2026-10-08
+# Last reused/audited: 2026-10-09
 # Authority basis: offline scheduled statistical exit and normal ENTRY lineage.
 """No injected posterior, decision, certificate, command, or fill projection."""
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import json
+import os
 import sqlite3
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -157,8 +158,13 @@ def scheduled_source(tmp_path, monkeypatch, request):
     try:
         yield case
     finally:
+        fault=getattr(case,'capture_fault',None)
+        if fault is not None:
+            fault['blocked'].chmod(fault['restore_mode'])
         cleanup()
         generator.close()
+        for clock_db in getattr(case,'queue_clock_databases',()):
+            clock_db.close()
 
 
 def _manage_replay_threads(case,monkeypatch):
@@ -268,19 +274,28 @@ class StatisticalVenue(ScheduledExitVenue):
         assert not post_only or not crossing
         assert size<=Decimal(levels[0]['size'])
         assert crossing or str(order_type)=='GTC'
+        matched_size=size if crossing else Decimal(0)
+        cap=self.case.params.get('first_exit_match_cap')
+        if cap is not None and crossing and side=='SELL' and token==self.held_token:
+            previous=[post for post in self.posts if post['side']=='SELL' and post['token_id']==token]
+            if not previous:
+                # Declared external matching loss after the advertised book
+                # capture. The normal action law still chooses its full size.
+                assert str(order_type)=='FAK'
+                matched_size=min(size,Decimal(str(cap)))
         self.orders[order_id]={'id':order_id,'orderID':order_id,'status':'MATCHED' if crossing else 'LIVE',
             'created_at':self.now().isoformat(),
             'market':self.tokens[token],'asset_id':token,'side':side,'price':str(price),
-            'original_size':str(size),'size_matched':str(size if crossing else 0),'associate_trades':[]}
+            'original_size':str(size),'size_matched':str(matched_size),'associate_trades':[]}
         fill_price=executable if crossing else price
         self.fill_prices[order_id]=fill_price
         self.record('post_order',order_id=order_id,command_id=command[0],signed_order_hash=signed_hash,
-            token_id=token,condition_id=self.tokens[token],side=side,size=str(size),filled_size=str(size if crossing else 0),price=str(price),
+            token_id=token,condition_id=self.tokens[token],side=side,size=str(size),filled_size=str(matched_size),price=str(price),
             maker_amount_micro=str(order.makerAmount),taker_amount_micro=str(order.takerAmount),
             fill_price=str(fill_price),order_type=str(order_type),post_only=post_only,durable_before_post=True)
         return {'success':True,'orderID':order_id,'status':'MATCHED' if crossing else 'LIVE',
-            'makingAmount':str(size*fill_price if side=='BUY' else size) if crossing else '0',
-            'takingAmount':str(size if side=='BUY' else size*fill_price) if crossing else '0'}
+            'makingAmount':str(matched_size*fill_price if side=='BUY' else matched_size) if crossing else '0',
+            'takingAmount':str(matched_size if side=='BUY' else matched_size*fill_price) if crossing else '0'}
 
     def check_token(self, token_id):
         assert str(token_id) in self.tokens
@@ -350,7 +365,7 @@ class StatisticalVenue(ScheduledExitVenue):
         payload['maker_orders'][0]['asset_id']=token
         payload['maker_orders'][0]['side']='SELL' if order['side']=='BUY' else 'BUY'
         self.confirmed_trades.append(deepcopy(payload))
-        order['status']='MATCHED'
+        order['status']='MATCHED' if Decimal(order['size_matched'])==Decimal(order['original_size']) else 'CANCELED'
         quantity=Decimal(payload['size'])
         gross=quantity*Decimal(payload['price'])
         fee=Decimal(modeled_fee_micro)/1_000_000
@@ -532,7 +547,11 @@ def _capture_existing_anchor_as_raw_provider(case,monkeypatch):
     {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True},
     {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True,'reentry_control':True},
     {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True,'collateral_contention':True},
-],indirect=True,ids=('cash10_control','cash20_entry','cash20_stale_hourly_control','cash20_probability_handoff','cash20_full_day0','cash20_registered_reactor','cash20_reentry_control','cash20_collateral_contention'))
+    {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True,'capture_fault':'directory'},
+    {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True,'capture_fault':'directory','first_exit_match_cap':'5'},
+    {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True,'capture_fault':'directory','capture_correction':'revision_only'},
+    {'forecast_inputs':True,'cash':20,'full_day0':True,'ordinary_reactor':True,'capture_fault':'directory','capture_correction':'downward'},
+],indirect=True,ids=('cash10_control','cash20_entry','cash20_stale_hourly_control','cash20_probability_handoff','cash20_full_day0','cash20_registered_reactor','cash20_reentry_control','cash20_collateral_contention','cash20_unreadable_capture','cash20_unreadable_capture_partial','cash20_unreadable_capture_revision_only','cash20_unreadable_capture_downward'))
 def test_pre_day0_normal_entry_with_declared_account_cash(scheduled_source,monkeypatch,record_property):
     from src.state import db
     from src.riskguard import riskguard
@@ -573,7 +592,11 @@ def test_pre_day0_normal_entry_with_declared_account_cash(scheduled_source,monke
         cfg[key].mkdir(parents=True,exist_ok=True)
     record_property('normal_queue_layout',json.dumps({key:str(value) for key,value in cfg.items()
         if key.endswith('_dir')}))
-    source._run_materializer_cli_on_replay_clock(case,monkeypatch)
+    case.materializer_cli_runs=source._run_materializer_cli_on_replay_clock(case,monkeypatch)
+    case.queue_config=cfg
+    if case.params.get('capture_fault'):
+        _bind_capture_queue_sql_clock(case,monkeypatch)
+        _observe_claimed_materializer_inputs(case,monkeypatch)
     source._stage_coherent_hourly_inputs(case,monkeypatch)
     case.values[0]=(26.,25.)
     for job in (daemon.REPLACEMENT_FORECAST_DISCOVERY_JOB_ID,
@@ -923,6 +946,586 @@ def _register_ordinary_reactor(case):
     exec(compile(code,main.__file__,'exec'),{**vars(main),'scheduler':scheduler,'edli_cfg':main._settings_section('edli',{})})
 
 
+def _bind_capture_queue_sql_clock(case,monkeypatch):
+    """SQLite and Python share the declared replay cut, including expiry checks."""
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    connect=queue._queue_read_only_connection
+    case.queue_clock_databases=[]
+    def open_at_replay_clock(path):
+        conn=connect(path)
+        native=sqlite3.connect(':memory:',check_same_thread=False)
+        case.queue_clock_databases.append(native)
+        def strftime(fmt,value):
+            return native.execute('SELECT strftime(?,?)',
+                (fmt,case.clock[0].isoformat() if value=='now' else value)).fetchone()[0]
+        conn.create_function('strftime',2,strftime)
+        assert conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%S','now')").fetchone()[0]==case.clock[0].strftime('%Y-%m-%dT%H:%M:%S')
+        return conn
+    monkeypatch.setattr(queue,'_queue_read_only_connection',open_at_replay_clock)
+
+
+def _observe_claimed_materializer_inputs(case,monkeypatch):
+    """Retain exact inputs before normal success cleanup; execute the real CLI."""
+    import hashlib
+    import time
+    from copy import deepcopy
+    from pathlib import Path
+    from scripts import materialize_replacement_forecast_live as cli
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data import replacement_fusion_upgrade_trigger as trigger
+    run=queue._run_command
+    validate=cli._validated_request
+    covered=queue._seed_already_covered
+    case.materializer_input_trace=[]
+    case.materializer_boundary_trace=[]
+    case.materializer_coverage_trace=[]
+    case.materializer_debt_trace=[]
+    compare_debt=trigger.scope_capture_offers_larger_provider_set
+    def observe_debt(*args,**kwargs):
+        verdict=compare_debt(*args,**kwargs)
+        case.materializer_debt_trace.append({'at':case.clock[0].isoformat(),
+            'family':[kwargs['city'],kwargs['target_date'],kwargs['metric']],
+            'verdict':deepcopy(verdict)})
+        return verdict
+    monkeypatch.setattr(trigger,'scope_capture_offers_larger_provider_set',observe_debt)
+    def observe_coverage(**kwargs):
+        result=covered(**kwargs)
+        seed=kwargs['seed']
+        case.materializer_coverage_trace.append({'at':case.clock[0].isoformat(),
+            'computed_at':seed.get('computed_at'),'covered':result,
+            'state':deepcopy(seed.get('day0_current_temperature_state'))})
+        return result
+    monkeypatch.setattr(queue,'_seed_already_covered',observe_coverage)
+    def observe_validation(payload,**kwargs):
+        request=validate(payload,**kwargs)
+        case.materializer_boundary_trace.append({
+            'at':case.clock[0].isoformat(),
+            'input_current_state':deepcopy(payload.get('day0_current_temperature_state')),
+            'input_revision_sources':deepcopy(payload.get('input_revision_sources')),
+            'request_field_names':sorted(request.__dataclass_fields__),
+            'request_current_state':getattr(request,'day0_current_temperature_state',None),
+            'request_observed_extreme_c':request.day0_observed_extreme_c,
+            'request_observed_extreme_source':request.day0_observed_extreme_source,
+        })
+        return request
+    monkeypatch.setattr(cli,'_validated_request',observe_validation)
+    def observe(argv):
+        batch='--batch-input-json' in argv
+        flag='--batch-input-json' if batch else '--input-json'
+        start=argv.index(flag)+1
+        end=next((i for i in range(start,len(argv)) if argv[i].startswith('--')),len(argv))
+        paths=[Path(value) for value in argv[start:end]]
+        assert paths and (batch or len(paths)==1)
+        traces={}
+        for path in paths:
+            raw=path.read_bytes()
+            trace={'started_at':case.clock[0].isoformat(),'input_path':str(path),
+                'input_sha256':hashlib.sha256(raw).hexdigest(),'input':json.loads(raw),
+                'wall_started':time.perf_counter(),'argv':list(argv)}
+            traces[path]=trace
+            case.materializer_input_trace.append(trace)
+        result=run(argv)
+        if batch:
+            outcomes,errors=queue._parse_batch_envelopes(result.stdout)
+            assert not errors,errors
+        else:
+            outcomes={paths[0]:result}
+        for path,trace in traces.items():
+            outcome=outcomes.get(path)
+            trace.update({'finished_at':case.clock[0].isoformat(),
+                'batch_returncode':result.returncode,'wall_finished':time.perf_counter(),
+                'missing_envelope':outcome is None})
+            if outcome is not None:
+                trace.update({'returncode':outcome.returncode,'stdout':outcome.stdout,
+                    'stderr':outcome.stderr,'response':json.loads(outcome.stdout) if outcome.stdout else {}})
+        return result
+    monkeypatch.setattr(queue,'_run_command',observe)
+
+
+def _observe_capture_probability_preparation(case,monkeypatch):
+    """Observe all normal probability uses without supplying a witness or q."""
+    from copy import deepcopy
+    import threading
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine import current_day0_observation as current_source
+    from src.engine import global_auction_universe as universe
+    prepare=adapter._prepare_current_global_probability_family
+    rebind=adapter._rebind_current_actuation_probability_tokens
+    compare=adapter._global_probability_action_content_mismatches
+    current_event=current_source.current_wrh_probability_event
+    bind_monitor_tokens=universe._rebind_probability_witness_tokens
+    case.capture_preparations=[]
+    case.capture_rebindings=[]
+    case.capture_comparisons=[]
+    case.capture_monitor_token_rebindings=[]
+    case.capture_actual_monitors=[]
+    observed=threading.local()
+    def witness_fields(witness):
+        return {key:getattr(witness,key,None) for key in (
+            'witness_identity','q_version','source_truth_identity','posterior_identity_hash',
+            'probability_content_identity')}
+    def observe_event(*args,**kwargs):
+        event=current_event(*args,**kwargs)
+        stack=getattr(observed,'stack',[])
+        if stack:
+            stack[-1].append({'type':event.event_type,'causal_snapshot_id':event.causal_snapshot_id,
+                'payload':json.loads(event.payload_json)})
+        return event
+    monkeypatch.setattr(current_source,'current_wrh_probability_event',observe_event)
+    def observe(*args,**kwargs):
+        if not hasattr(observed,'stack'):observed.stack=[]
+        source_reads=[]
+        observed.stack.append(source_reads)
+        try:
+            prepared=prepare(*args,**kwargs)
+        finally:
+            observed.stack.pop()
+        payload=kwargs.get('day0_payload_out') or {}
+        carrier=payload.get('_edli_day0_source_clock_carrier_provenance') or {}
+        witness=prepared.probability_witness
+        case.capture_preparations.append({
+            'at':kwargs['decision_time'].isoformat(),
+            'use':str(kwargs.get('probability_use',adapter._CurrentProbabilityUse.ENTRY)),
+            'posterior_id':prepared.posterior_id,'authority':prepared.probability_authority,
+            'witness':witness_fields(witness),'qualified_source_reads':source_reads,
+            'yes_point_q':list(getattr(witness,'yes_point_q',())),
+            'bin_ids':list(getattr(witness,'bin_ids',())),
+            'bindings':[{key:getattr(binding,key) for key in (
+                'bin_id','condition_id','yes_token_id','no_token_id')}
+                for binding in getattr(witness,'bindings',())],
+            'source_clock_carrier':{key:deepcopy(carrier[key]) for key in (
+                'posterior_id','probability_base_identity','carrier_written_inputs',
+                'remaining_content_identity','remaining_carrier_probability_cutoff_utc') if key in carrier},
+            'current_revision':payload.get('_edli_day0_current_temperature_source_revision_identity'),
+            'direct_current':payload.get('_edli_day0_direct_current_redecision_authority'),
+            'scope':payload.get('_edli_day0_redecision_authority_scope'),
+            'pinned_reason':payload.get('_edli_day0_held_pinned_fallback_reason'),
+        })
+        return prepared
+    monkeypatch.setattr(adapter,'_prepare_current_global_probability_family',observe)
+    def observe_rebind(current,selected,**kwargs):
+        result=rebind(current,selected,**kwargs)
+        case.capture_rebindings.append({'at':case.clock[0].isoformat(),
+            'required_token_id':kwargs.get('required_token_id'),
+            'before':witness_fields(current),'selected':witness_fields(selected),
+            'after':witness_fields(result)})
+        return result
+    monkeypatch.setattr(adapter,'_rebind_current_actuation_probability_tokens',observe_rebind)
+    def observe_comparison(current,selected):
+        result=compare(current,selected)
+        case.capture_comparisons.append({'at':case.clock[0].isoformat(),
+            'current':witness_fields(current),'selected':witness_fields(selected),
+            'mismatches':list(result)})
+        return result
+    monkeypatch.setattr(adapter,'_global_probability_action_content_mismatches',observe_comparison)
+    def observe_monitor_tokens(witness,**kwargs):
+        result=bind_monitor_tokens(witness,**kwargs)
+        case.capture_monitor_token_rebindings.append({'at':case.clock[0].isoformat(),
+            'before':witness_fields(witness),'after':witness_fields(result),
+            'token_map':dict(kwargs['token_map_by_condition'])})
+        return result
+    monkeypatch.setattr(universe,'_rebind_probability_witness_tokens',observe_monitor_tokens)
+
+
+def _install_unreadable_capture(case,record_property):
+    """A private filesystem fault, introduced after the lawful initial HOLD."""
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    requests=case.queue_config['request_dir']
+    capture=requests.parent/queue._REQUEST_ALIAS_DIR/'.capture.scheduled-isolation'
+    payload=capture/queue._CAPTURE_PAYLOAD_DIR
+    payload.mkdir(parents=True)
+    target=case.tmp_path/'unreadable-capture-target'
+    target.write_bytes(b'capture isolation must never follow this alias')
+    entry=payload/'bad.json'
+    entry.symlink_to(target)
+    fault={'capture':capture,'entry':entry,'target':target,'target_bytes':target.read_bytes(),
+        'capture_inode':capture.stat().st_ino,'entry_inode':entry.lstat().st_ino,
+        'blocked':capture,'restore_mode':0o700,'at':case.clock[0].isoformat(),
+        'posterior_ids':{row[0] for row in case.forecasts.execute('SELECT posterior_id FROM forecast_posteriors')},
+        'cli_index':len(case.materializer_input_trace)}
+    case.capture_fault=fault
+    owned,snapshot=read_current_noaa_wrh_snapshot(case.forecasts,city=case.city,
+        target_date=str(case.request.target_date),as_of=case.clock[0])
+    assert owned and snapshot is not None
+    fault['prior_source']=snapshot.provenance()
+    capture.chmod(0)
+    assert not os.access(capture,os.R_OK), 'principal permission fault must be effective'
+    for apply in (False,True):
+        report=queue.reconcile_inflight_for_migration(request_path=requests,apply=apply)
+        assert (capture.name,'unknown') in report.unsettled_captures
+        assert not report.quiescent and not queue._capture_settled(capture)
+    record_property('capture_fault_installed',json.dumps({
+        'at':fault['at'],'capture_inode':fault['capture_inode'],'entry_inode':fault['entry_inode'],
+        'classification':'UNKNOWN','after_initial_hold':True,'mode':0}))
+
+
+def _record_capture_delivery_cut(case,venue,record_property):
+    """Distinguish observed request→commit linkage from persisted source proof."""
+    from pathlib import Path
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    fault=case.capture_fault
+    owned,snapshot=read_current_noaa_wrh_snapshot(case.forecasts,city=case.city,
+        target_date=str(case.request.target_date),as_of=case.clock[0])
+    assert owned and snapshot is not None
+    revision=snapshot.response_sha256
+    traces=case.materializer_input_trace[fault['cli_index']:]
+    matched_post=next(post for post in reversed(venue.posts)
+        if post['side']=='SELL' and post['token_id']==venue.held_token and Decimal(post['filled_size'])>0)
+    candidates=[]
+    forecast_path=Path(case.forecasts.execute('PRAGMA database_list').fetchone()[2])
+    with sqlite3.connect(forecast_path.as_uri()+'?mode=ro',uri=True) as conn:
+        conn.row_factory=sqlite3.Row
+        for trace in traces:
+            response=trace.get('response',{})
+            identity=trace['input'].get('day0_current_temperature_state') or {}
+            pid=response.get('posterior_id')
+            if trace.get('returncode')!=0 or not response.get('committed') or pid is None:
+                continue
+            if datetime.fromisoformat(trace['finished_at'])>datetime.fromisoformat(matched_post['at']):
+                continue  # A later commit is not contemporaneous action evidence.
+            if pid in fault['posterior_ids']:
+                continue
+            # The scalar route does not consume current-temperature R. Match
+            # its real scalar input here; actual action R is proved separately.
+            if trace['input'].get('day0_observed_extreme_source')!=snapshot.source:
+                continue
+            if trace['input'].get('day0_observed_extreme_c')!=snapshot.extreme('high').value:
+                continue
+            if identity:
+                assert identity.get('source_revision_identity')==revision
+            row=conn.execute('SELECT posterior_id,computed_at,q_json,posterior_identity_hash,provenance_json FROM forecast_posteriors WHERE posterior_id=?',(pid,)).fetchone()
+            assert row is not None, 'CLI success must be visible through a separate reader'
+            provenance=json.loads(row['provenance_json'])
+            conditioning=provenance.get('day0_conditioning') or {}
+            consumed=[item for item in response['consumed_inputs']['files'] if item['role']=='request']
+            assert len(consumed)==1 and consumed[0]['sha256']==trace['input_sha256']
+            assert consumed[0]['path']==trace['input_path']
+            assert response['forecast_family']==[case.city.name,str(case.request.target_date),'high']
+            for key in ('observed_extreme_c','source','observation_time','sample_count','unit'):
+                input_key='day0_'+key if key=='observed_extreme_c' else 'day0_observed_extreme_'+key
+                assert conditioning[key]==trace['input'][input_key]
+            assert snapshot.received_at<=datetime.fromisoformat(row['computed_at'])<=datetime.fromisoformat(trace['finished_at'])
+            assert datetime.fromisoformat(trace['finished_at'])<=datetime.fromisoformat(matched_post['at'])
+            persisted=(provenance.get('day0_current_temperature_state') or {}).get('source_revision_identity')
+            candidates.append({'trace':trace,'posterior':dict(row),'persisted_source_revision':persisted})
+    report=queue.reconcile_inflight_for_migration(request_path=case.queue_config['request_dir'],apply=True)
+    assert (fault['capture'].name,'unknown') in report.unsettled_captures and not report.quiescent
+    assert fault['capture'].stat().st_ino==fault['capture_inode']
+    assert fault['capture'].stat().st_mode & 0o777==0
+    assert fault['target'].read_bytes()==fault['target_bytes']
+    fault['delivery']={'native_revision':revision,'native_received_at':snapshot.received_at.isoformat(),
+        'request_to_commit':candidates,'preparations':case.capture_preparations,
+        'cli_validation_boundary':case.materializer_boundary_trace,
+        'coverage_attempts':case.materializer_coverage_trace,'rebindings':case.capture_rebindings,
+        'simulated_match_at':matched_post['at'],'bid_window_end':venue.window_end.isoformat(),
+        'attribution':'observed request-to-commit trace; persisted revision binding checked separately',
+        'worker':'unchanged CLI composed synchronously; no OS worker restart claim'}
+    record_property('capture_delivery_cut',json.dumps(fault['delivery'],default=str))
+    assert candidates, 'qualified revision must reach a real successful CLI commit before the match'
+
+
+def _assert_capture_restore(case,record_property):
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    from src.ingest import forecast_live_daemon as daemon
+    fault=case.capture_fault
+    fault['blocked'].chmod(fault['restore_mode'])
+    case.pump.enable(daemon.REPLACEMENT_FORECAST_MATERIALIZE_JOB_ID,at=case.clock[0])
+    case.pump.advance()
+    assert queue._capture_settled(fault['capture'])
+    assert fault['entry'].is_symlink() and fault['entry'].lstat().st_ino==fault['entry_inode']
+    assert fault['target'].read_bytes()==fault['target_bytes']
+    record_property('capture_normal_reset',json.dumps({'at':case.clock[0].isoformat(),
+        'normal_registered_queue_reread':True,'entry_inode_unchanged':True,'alias_target_unchanged':True}))
+
+
+def _assert_capture_reset(case,record_property):
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    _assert_capture_restore(case,record_property)
+    fault=case.capture_fault
+    proof=fault['delivery']
+    from pathlib import Path
+    forecast_path=Path(case.forecasts.execute('PRAGMA database_list').fetchone()[2])
+    coverage=[queue._seed_already_covered(forecast_db=forecast_path,seed=row['trace']['input'])
+        for row in proof['request_to_commit']]
+    committed=min(datetime.fromisoformat(row['trace']['finished_at']) for row in proof['request_to_commit'])
+    later=[row for row in case.materializer_debt_trace
+        if datetime.fromisoformat(row['at'])>committed
+        and row['family']==[case.city.name,str(case.request.target_date),'high']]
+    debt_keys={'day0_current_temperature_state','day0_scalar_conditioning'}
+    repeated=[row for row in later if debt_keys.intersection(row['verdict'].get('changed_input_sources',()))]
+    record_property('capture_materialization_reset',json.dumps({'completed_request_coverage':coverage,
+        'debt_checks_after_commit':later,'repeated_physical_debt':repeated,
+        'sqlite_clock':case.clock[0].isoformat(),'python_clock':case.clock[0].isoformat(),
+        'scope':'unchanged scalar/current inputs only; independent provider/vector obligations remain'}))
+    assert later
+    assert all(coverage), 'the actual completed request must satisfy unchanged authority and readiness coverage'
+    assert not repeated, 'unchanged consumed physical input cannot recreate impossible materialization debt'
+
+
+def _assert_capture_source_correction(case,record_property,reactor_invocations):
+    """A real native correction must redecide before the five-minute fallback."""
+    from pathlib import Path
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.data import replacement_forecast_live_materialization_queue as queue
+    fault=case.capture_fault
+    owned,snapshot=read_current_noaa_wrh_snapshot(case.forecasts,city=case.city,
+        target_date=str(case.request.target_date),as_of=case.clock[0])
+    assert owned and snapshot is not None
+    current=snapshot.provenance()
+    prior=fault['prior_source']
+    assert current['response_sha256']!=prior['response_sha256']
+    assert [row['utc'] for row in current['rows']]==[row['utc'] for row in prior['rows']]
+    expected=26 if case.params['capture_correction']=='revision_only' else 25
+    assert snapshot.extreme('high').value==expected
+    prepared=[row for row in case.capture_preparations
+        if datetime.fromisoformat(row['at'])>=snapshot.received_at
+        and row['use']=='held_monitor'
+        and any(read['causal_snapshot_id']=='current_wrh_product:'+snapshot.response_sha256
+            for read in row['qualified_source_reads'])]
+    assert prepared, 'qualified corrected R must reach a normal probability preparation'
+    assert all(datetime.fromisoformat(row['at'])<=case.clock[0] for row in prepared)
+    monitor_cuts=[]
+    for row in case.trade.execute("SELECT artifact_json FROM decision_log WHERE mode='exit_monitor' AND started_at>=?",
+        (snapshot.received_at.isoformat(),)):
+        artifact=json.loads(row[0])
+        monitor_cuts.extend({'at':artifact['started_at'],**result}
+            for result in artifact.get('monitor_results',[]) if result['position_id']==case.position.trade_id)
+    assert any(row.get('fresh_prob') is not None and row.get('exit_reason')!='EVIDENCE_UNAVAILABLE'
+        for row in monitor_cuts),monitor_cuts
+    position=dict(case.trade.execute('SELECT last_monitor_prob,last_monitor_prob_is_fresh,phase FROM position_current WHERE position_id=?',
+        (case.position.trade_id,)).fetchone())
+    assert position['last_monitor_prob_is_fresh']==1
+    # Preparation precedes the normal monitor's CLOB-token rebinding. Follow
+    # that real before/after identity into the actual consumed monitor witness.
+    matched_monitor=[]
+    matched_cuts=set()
+    for prepared_row in sorted(prepared,key=lambda row:row['at'],reverse=True):
+        rebound=[bound for bound in case.capture_monitor_token_rebindings
+            if bound['before']==prepared_row['witness']
+            and datetime.fromisoformat(prepared_row['at'])<=datetime.fromisoformat(bound['at'])]
+        for actual in case.capture_actual_monitors:
+            if actual['position_id']!=case.position.trade_id or not actual['fresh']:
+                continue
+            actual_bindings=[bound for bound in rebound
+                if bound['after']['witness_identity']==actual['witness_identity']
+                and datetime.fromisoformat(bound['at'])<=datetime.fromisoformat(actual['at'])]
+            if not actual_bindings:
+                continue
+            bindings=[binding for binding in actual['bindings']
+                if binding['condition_id']==case.position.condition_id
+                and binding['no_token_id']==case.position.no_token_id]
+            assert len(bindings)==1
+            held_bin=bindings[0]['bin_id']
+            q=1-actual['yes_point_q'][actual['bin_ids'].index(held_bin)]
+            assert q==pytest.approx(actual['q'],abs=1e-12)
+            bound=max(actual_bindings,key=lambda row:row['at'])
+            for monitor_row in monitor_cuts:
+                key=(actual['position_id'],actual['at'],actual['witness_identity'],monitor_row['at'])
+                if (key not in matched_cuts and actual['at']==monitor_row['at']
+                    and monitor_row.get('fresh_prob') is not None
+                    and q==pytest.approx(monitor_row['fresh_prob'],abs=1e-12)):
+                    matched_cuts.add(key)
+                    matched_monitor.append({'prepared':prepared_row,'token_rebinding':bound,
+                        'consumed':actual,'persisted_monitor':monitor_row})
+    assert matched_monitor, 'the corrected source must be consumed by the same held-monitor cut'
+    traces=[trace for trace in case.materializer_input_trace[fault['cli_index']:]
+        if trace.get('returncode')==0 and trace.get('response',{}).get('committed')
+        and datetime.fromisoformat(trace['finished_at'])>=snapshot.received_at
+        and trace['input'].get('day0_observed_extreme_c')==expected]
+    checks=[row for row in case.materializer_debt_trace
+        if datetime.fromisoformat(row['at'])>=snapshot.received_at
+        and row['family']==[case.city.name,str(case.request.target_date),'high']]
+    report={'prior_source':prior,'corrected_source':current,'preparations':prepared,
+        'held_monitor_cuts':monitor_cuts,'matched_held_monitor':matched_monitor,
+        'current_position':position,'actual_cli':traces,'debt_checks':checks,
+        'reactor_invocations':reactor_invocations,'observed_until':case.clock[0].isoformat(),
+        'scope':'normal registered source/delivery/queue/monitor owners; synchronous CLI; simulated event clock'}
+    record_property('capture_same_clock_correction',json.dumps(report,default=str))
+    assert checks
+    if case.params['capture_correction']=='downward':
+        assert traces, 'same-clock scalar decrease requires a genuine fast successor CLI commit'
+        forecast_path=Path(case.forecasts.execute('PRAGMA database_list').fetchone()[2])
+        with sqlite3.connect(forecast_path.as_uri()+'?mode=ro',uri=True) as reader:
+            for trace in traces:
+                response=trace['response']
+                consumed=[item for item in response['consumed_inputs']['files'] if item['role']=='request']
+                assert len(consumed)==1 and consumed[0]['sha256']==trace['input_sha256']
+                assert consumed[0]['path']==trace['input_path']
+                assert response['forecast_family']==[case.city.name,str(case.request.target_date),'high']
+                row=reader.execute('SELECT computed_at,provenance_json FROM forecast_posteriors WHERE posterior_id=?',
+                    (response['posterior_id'],)).fetchone()
+                assert row is not None
+                conditioning=json.loads(row[1])['day0_conditioning']
+                for key in ('observed_extreme_c','source','observation_time','sample_count','unit'):
+                    input_key='day0_'+key if key=='observed_extreme_c' else 'day0_observed_extreme_'+key
+                    assert conditioning[key]==trace['input'][input_key]
+                assert snapshot.received_at<=datetime.fromisoformat(row[0])<=datetime.fromisoformat(trace['finished_at'])<=case.clock[0]
+        committed={trace['response']['posterior_id'] for trace in traces}
+        assert any(row['posterior_id'] in committed for row in prepared)
+        assert all(queue._seed_already_covered(forecast_db=forecast_path,seed=trace['input']) for trace in traces)
+        assert any('day0_scalar_conditioning' in trace['input'].get('input_revision_sources',()) for trace in traces)
+        assert all(trace['input'].get('day0_current_temperature_state') is None for trace in traces)
+        first_commit=min(datetime.fromisoformat(trace['finished_at']) for trace in traces)
+        checks=[row for row in checks if datetime.fromisoformat(row['at'])>first_commit]
+    assert checks
+    assert not [row for row in checks if {'day0_current_temperature_state','day0_scalar_conditioning'}
+        .intersection(row['verdict'].get('changed_input_sources',()))]
+    classified=queue.reconcile_inflight_for_migration(request_path=case.queue_config['request_dir'],apply=True)
+    assert (fault['capture'].name,'unknown') in classified.unsettled_captures and not classified.quiescent
+    assert fault['capture'].stat().st_mode & 0o777==0
+    assert fault['capture'].stat().st_ino==fault['capture_inode']
+    assert fault['target'].read_bytes()==fault['target_bytes']
+    _assert_capture_restore(case,record_property)
+
+
+def _assert_capture_action_attribution(case,venue,intent,artifact,record_property,*,post=None):
+    """Bind the scalar posterior and independently re-read current source to SELL."""
+    proof=case.capture_fault['delivery']
+    receipt=intent['exit_intent_probability_receipt']
+    capital=intent['exit_intent_capital_certificate']
+    winner=artifact['summary']['proof_counterfactual']['winner']['evaluation']
+    post=post or venue.posts[1]
+    rebindings=[row for row in case.capture_rebindings
+        if row['required_token_id']==venue.held_token
+        and row['selected']['probability_content_identity']==receipt['probability_content_identity']
+        and datetime.fromisoformat(row['at'])<=datetime.fromisoformat(post['at'])]
+    prepared=[row for row in case.capture_preparations
+        if any(row['witness']['witness_identity']==bound['before']['witness_identity'] for bound in rebindings)]
+    pids={row['posterior']['posterior_id'] for row in proof['request_to_commit']}
+    record_property('capture_action_attribution',json.dumps({'receipt':receipt,
+        'rebindings':rebindings,'prepared':prepared,'comparisons':case.capture_comparisons,
+        'committed_posterior_ids':sorted(pids)},default=str))
+    assert rebindings and prepared
+    assert all(any(compared['current']==bound['after'] and compared['selected']==bound['selected']
+        and compared['mismatches']==[] for compared in case.capture_comparisons) for bound in rebindings)
+    assert all(row['posterior_id'] in pids for row in prepared)
+    assert all(any(read['causal_snapshot_id']=='current_wrh_product:'+proof['native_revision']
+        for read in row['qualified_source_reads']) for row in prepared)
+    for row in prepared:
+        index=row['bin_ids'].index(receipt['payoff_q_correction']['bin_id'])
+        assert 1-row['yes_point_q'][index]==pytest.approx(receipt['held_side_probability'],abs=1e-12)
+    assert winner['probability_witness_identity']==receipt['probability_witness_identity']
+    for key in ('probability_content_identity','probability_witness_identity','q_version','source_truth_identity'):
+        assert capital[key]==receipt[key]
+    assert 0<receipt['held_side_probability']<float(venue.bid)
+
+
+def _assert_capture_partial_closure(case,venue,stream,confirmations,record_property):
+    """Observe normal residual ownership after a declared native partial match."""
+    import asyncio
+    from dataclasses import asdict
+    from src.ingest import polymarket_user_channel as user_channel
+    from src.state import db
+    from src.state.fill_dedup import economic_exit_fills_for_position
+    case.pump.run_until(venue.window_end+timedelta(seconds=92))
+    held=[post for post in venue.posts if post['token_id']==venue.held_token and post['side']=='SELL']
+    record_property('capture_partial_transport',json.dumps({'posts':venue.posts,
+        'confirmations':confirmations,'bid_window_end':venue.window_end.isoformat(),
+        'declared_first_match_cap':case.params['first_exit_match_cap'],
+        'native_confirmation_min_delay_seconds':2,'transport_tick_seconds':1,
+        'observed_until':case.clock[0].isoformat()},default=str))
+    assert len(held)==2, 'the actual owners must reauthorize and match the residual within the original window'
+    assert [Decimal(post['filled_size']) for post in held]==[Decimal('5'),Decimal('7.5')]
+    assert [Decimal(post['size']) for post in held]==[Decimal('12.5'),Decimal('7.5')]
+    assert all(datetime.fromisoformat(post['at'])<venue.window_end for post in held)
+    assert all(post['order_type']=='FAK' and not post['post_only'] for post in held)
+    assert not [post for post in venue.posts[1:] if post['side']=='BUY' and post['token_id']==venue.held_token]
+    first=next(row for row in confirmations if row['payload']['taker_order_id']==held[0]['order_id'])
+    assert first['terminal_order']['status']=='CANCELED'
+    assert first['external_inventory'][venue.held_token]=='7.5'
+    assert datetime.fromisoformat(first['at'])<datetime.fromisoformat(held[1]['at'])
+    intermediate=[row for row in case.partial_position_trace
+        if datetime.fromisoformat(first['at'])<=datetime.fromisoformat(row['at'])<datetime.fromisoformat(held[1]['at'])
+        and row['position']['shares']==7.5 and row['position']['phase']!='economically_closed']
+    assert intermediate, 'canonical partial projection must precede normal residual authorization'
+    record_property('capture_partial_intermediate_projection',json.dumps(intermediate))
+    commands=[dict(case.trade.execute('SELECT * FROM venue_commands WHERE command_id=?',
+        (post['command_id'],)).fetchone()) for post in held]
+    assert commands[0]['state'] in {'EXPIRED','CANCELED'}
+    assert commands[1]['state']=='FILLED'
+    economic=economic_exit_fills_for_position(case.trade,case.position.trade_id)
+    assert len(economic)==2 and sum(fill.quantity for fill in economic)==Decimal('12.5')
+    assert {fill.command_id for fill in economic}=={post['command_id'] for post in held}
+    assert {fill.venue_order_id for fill in economic}=={post['order_id'] for post in held}
+    for post in held:
+        native=next(row['payload'] for row in confirmations if row['payload']['taker_order_id']==post['order_id'])
+        fill=next(fill for fill in economic if fill.command_id==post['command_id'])
+        fact=dict(case.trade.execute('SELECT * FROM venue_trade_facts WHERE command_id=? AND trade_id=?',
+            (post['command_id'],native['id'])).fetchone())
+        assert fact['state']=='CONFIRMED' and fact['venue_order_id']==post['order_id']
+        assert fill.trade_id==fact['trade_id']==native['id']
+        assert fill.quantity==Decimal(native['size'])==Decimal(str(fact['filled_size']))==Decimal(post['filled_size'])
+        assert fill.unit_price==Decimal(native['price'])==Decimal(str(fact['fill_price']))==Decimal(post['fill_price'])
+        assert fill.notional==fill.quantity*fill.unit_price
+        assert native['asset_id']==post['token_id'] and native['side']==post['side']
+    position=dict(case.trade.execute('SELECT * FROM position_current WHERE position_id=?',
+        (case.position.trade_id,)).fetchone())
+    assert position['chain_shares']==0 and position['phase']=='economically_closed'
+    record_property('capture_partial_canonical_closure',json.dumps({'commands':commands,
+        'economic_fills':[asdict(fill) for fill in economic],'position':position},default=str))
+    _record_capture_delivery_cut(case,venue,record_property)
+    events=[dict(row) for row in case.trade.execute(
+        'SELECT sequence_no,event_type,payload_json FROM position_events WHERE position_id=? ORDER BY sequence_no',
+        (case.position.trade_id,))]
+    receipts=[]
+    from src.control.live_health import _current_global_auction_candidate_payload
+    for post in held:
+        posted=next(row for row in events if row['event_type']=='EXIT_ORDER_POSTED'
+            and json.loads(row['payload_json']).get('last_exit_command_id')==post['command_id'])
+        intent=json.loads([row for row in events if row['event_type']=='EXIT_INTENT'
+            and row['sequence_no']<posted['sequence_no']][-1]['payload_json'])
+        assert Decimal(str(intent['exit_intent_shares']))==Decimal(post['size'])
+        receipt=intent['exit_intent_capital_certificate']['global_auction_receipt']
+        artifact=json.loads(case.trade.execute('SELECT artifact_json FROM decision_log WHERE id=?',
+            (receipt['decision_log_id'],)).fetchone()[0])
+        capital=intent['exit_intent_capital_certificate']
+        command=next(command for command in commands if command['command_id']==post['command_id'])
+        summary=artifact['summary']
+        candidates=_current_global_auction_candidate_payload(case.trade,summary)
+        selected=next(candidate for candidate in candidates['detailed']
+            if candidate['candidate_id']==receipt['winner_candidate_id'])
+        assert selected['status']=='SELECTED' and selected['action']==capital['action']==command['side']=='SELL'
+        assert selected['token_id']==capital['token_id']==command['token_id']==post['token_id']==venue.held_token
+        assert selected['position_id']==capital['position_id']==command['position_id']==case.position.trade_id
+        assert capital['condition_id']==post['condition_id']==venue.tokens[venue.held_token]
+        assert capital['candidate_id']==receipt['winner_candidate_id']==summary['winner_candidate_id']
+        assert capital['actuation_identity']==receipt['winner_actuation_identity']==summary['winner_actuation_identity']
+        assert receipt['receipt_hash']==summary['receipt_hash']
+        assert receipt['execution_binding_hash']==summary['execution_binding_hash']
+        assert Decimal(capital['selected_shares'])==Decimal(post['size'])==Decimal(str(command['size']))
+        assert Decimal(capital['exact_limit_price'])==Decimal(post['price'])==Decimal(str(command['price']))
+        assert capital['expected_sell_delta_log_wealth']>0 and capital['expected_sell_ev_usd']>0
+        assert capital['held_probability_point']==selected['q_served']==intent['exit_intent_probability_receipt']['held_side_probability']
+        _assert_capture_action_attribution(case,venue,intent,artifact,record_property,post=post)
+        receipts.append(receipt)
+    assert receipts[0]!=receipts[1], 'residual must consume its own normal-owner selection receipt'
+    facts=[tuple(row) for row in case.trade.execute('SELECT * FROM venue_trade_facts ORDER BY trade_fact_id')]
+    command_rows=[tuple(row) for row in case.trade.execute('SELECT * FROM venue_commands ORDER BY command_id')]
+    positions=[tuple(row) for row in case.trade.execute('SELECT * FROM position_current ORDER BY position_id')]
+    event_counts=tuple(case.trade.execute('SELECT (SELECT COUNT(*) FROM venue_command_events),(SELECT COUNT(*) FROM position_events)').fetchone())
+    post_count=len(venue.posts)
+    restarted=user_channel.PolymarketUserChannelIngestor(venue.adapter,sorted(set(venue.tokens.values())),
+        auth=stream.auth,conn_factory=db.get_trade_connection_with_world)
+    for payload in venue.confirmed_trades:
+        late={**payload,'timestamp':str(int(case.clock[0].timestamp()))}
+        assert asyncio.run(stream.handle_raw_message(json.dumps(late)))['reason']=='duplicate_trade_fact'
+        assert asyncio.run(restarted.handle_raw_message(json.dumps(late)))['reason']=='duplicate_trade_fact'
+    assert facts==[tuple(row) for row in case.trade.execute('SELECT * FROM venue_trade_facts ORDER BY trade_fact_id')]
+    assert command_rows==[tuple(row) for row in case.trade.execute('SELECT * FROM venue_commands ORDER BY command_id')]
+    assert positions==[tuple(row) for row in case.trade.execute('SELECT * FROM position_current ORDER BY position_id')]
+    assert event_counts==tuple(case.trade.execute('SELECT (SELECT COUNT(*) FROM venue_command_events),(SELECT COUNT(*) FROM position_events)').fetchone())
+    assert post_count==len(venue.posts)
+    cash_facts=[dict(row) for row in case.trade.execute('SELECT status,reason FROM venue_fill_cash_facts')]
+    assert cash_facts and all(row['status']=='UNKNOWN' for row in cash_facts)
+    assert all(row[0] is None for row in case.trade.execute('SELECT fee_paid_micro FROM venue_trade_facts'))
+    record_property('capture_partial_duplicate_restart',json.dumps({'confirmed_trades':len(venue.confirmed_trades),
+        'canonical_fills_positions_commands_events_unchanged':True,'sdk_posts_unchanged':True,
+        'cash_facts':cash_facts,'scope':'receive-handler memory restart; no daemon or OS restart'}))
+    _assert_capture_reset(case,record_property)
+
+
 def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property):
     import asyncio
     import threading
@@ -938,6 +1541,9 @@ def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
     from src.control import ws_gap_guard
     from src.engine.global_auction_universe import WorkContext,WorkDeferred
     from src.events import reactor
+
+    if case.params.get('capture_fault'):
+        _observe_capture_probability_preparation(case,monkeypatch)
 
     reactor_invocations=[]
     run_reactor=reactor.run_edli_event_reactor_cycle
@@ -986,9 +1592,20 @@ def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
     observed_snapshots=[]
     materialize_probability=monitor_refresh._materialize_current_global_day0_probability
     def observe_probability(position,snapshot):
+        result=None
         try:
-            return materialize_probability(position,snapshot)
+            result=materialize_probability(position,snapshot)
+            return result
         finally:
+            if case.params.get('capture_fault'):
+                witness=snapshot.witness
+                case.capture_actual_monitors.append({'at':case.clock[0].isoformat(),
+                    'position_id':position.trade_id,'witness_identity':witness.witness_identity,
+                    'bindings':[{key:getattr(binding,key) for key in (
+                        'bin_id','condition_id','yes_token_id','no_token_id')} for binding in witness.bindings],
+                    'bin_ids':list(witness.bin_ids),'yes_point_q':list(getattr(witness,'yes_point_q',())),
+                    'q':result[0] if result is not None else None,
+                    'fresh':result[2] if result is not None else False})
             observed_snapshots.append({'authority':snapshot.probability_authority,
                 'binding':snapshot.day0_payload.get('_edli_global_day0_binding'),
                 'bundle':snapshot.day0_payload.get('_edli_day0_causal_evidence_bundle'),
@@ -1072,10 +1689,44 @@ def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
         record_property('prior_local_position_hold',json.dumps({'scope':'local Position HOLD; global full-family preparation separately required',
             'decision':hold,'at':hold_artifact['completed_at'],
             'global_preparation_requested':hold_artifact['summary'].get('monitor_hold_full_family_preparation_requested')}))
-        case.values[0]=(30.,25.)
+        if case.params.get('capture_fault'):
+            _install_unreadable_capture(case,record_property)
+        partial_confirmations=[]
+        if case.params.get('first_exit_match_cap'):
+            delivered=set()
+            case.partial_position_trace=[]
+            def deliver_partial_matches():
+                for post in venue.posts[1:]:
+                    if post['order_id'] in delivered or Decimal(post['filled_size'])<=0:
+                        continue
+                    if case.clock[0]<datetime.fromisoformat(post['at'])+timedelta(seconds=2):
+                        continue
+                    payload=venue.confirm_trade(order_id=post['order_id'])
+                    assert payload['asset_id']==post['token_id'] and payload['side']==post['side']
+                    assert payload['market']==post['condition_id'] and 'fee_paid_micro' not in payload
+                    result=asyncio.run(stream.handle_raw_message(json.dumps(payload)))
+                    terminal=None
+                    if Decimal(post['filled_size'])<Decimal(post['size']):
+                        terminal={**venue.orders[post['order_id']],'event_type':'order','type':'CANCELLATION',
+                            'timestamp':str(int(case.clock[0].timestamp()*1000))}
+                        asyncio.run(stream.handle_raw_message(json.dumps(terminal)))
+                    partial_confirmations.append({'at':case.clock[0].isoformat(),'payload':payload,
+                        'result':result,'terminal_order':terminal,
+                        'external_inventory':{key:str(value) for key,value in venue.inventory.items()}})
+                    delivered.add(post['order_id'])
+                case.partial_position_trace.append({'at':case.clock[0].isoformat(),
+                    'position':dict(case.trade.execute('SELECT shares,chain_shares,phase FROM position_current WHERE position_id=?',
+                        (case.position.trade_id,)).fetchone())})
+            case.pump.transport_ticks.append([case.clock[0]+timedelta(seconds=1),
+                timedelta(seconds=1),deliver_partial_matches])
+        correction=case.params.get('capture_correction')
+        case.values[0]=(26.,24.) if correction=='revision_only' else (25.,24.) if correction=='downward' else (30.,25.)
         case.pump.run_until(day0+timedelta(seconds=120))
         record_property('day0_scheduled_posts',json.dumps(venue.posts))
         record_property('reactor_constructor_deferrals',json.dumps(constructor_deferrals))
+        if correction:
+            _assert_capture_source_correction(case,record_property,reactor_invocations)
+            return
         # Native chain authority can let the scheduled SELL and its MATCHED
         # order-fact projection complete before this observation checkpoint.
         # Read the original canonical history even when it is already closed.
@@ -1098,8 +1749,13 @@ def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
         record_property('full_declared_window',json.dumps({'window_end':venue.window_end.isoformat(),
             'observed_until':case.clock[0].isoformat(),'posts':venue.posts,
             'constructor_deferrals':constructor_deferrals,'reactor_invocations':reactor_invocations}))
+        if case.params.get('first_exit_match_cap'):
+            _assert_capture_partial_closure(case,venue,stream,partial_confirmations,record_property)
+            return
         assert len(venue.posts)==2 and venue.posts[-1]['side']=='SELL',venue.posts
         assert datetime.fromisoformat(venue.posts[-1]['at'])<venue.window_end
+        if case.params.get('capture_fault'):
+            _record_capture_delivery_cut(case,venue,record_property)
         # Preserve the declared late native-confirmation delivery even if
         # additional normal upstream owners enable an earlier legal match.
         case.pump.run_until(day0+timedelta(seconds=152))
@@ -1171,6 +1827,9 @@ def _scheduled_day0_exit(case,monkeypatch,venue,controls,stream,record_property)
         artifact=json.loads(case.trade.execute('SELECT artifact_json FROM decision_log WHERE id=?',(receipt['decision_log_id'],)).fetchone()[0])
         record_property('actual_sell_intent',json.dumps(intent))
         record_property('actual_sell_global_selection',json.dumps(artifact))
+        if case.params.get('capture_fault'):
+            _assert_capture_action_attribution(case,venue,intent,artifact,record_property)
+            _assert_capture_reset(case,record_property)
         if case.params.get('reentry_control'):
             from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
             recovery=main._start_edli_boot_fill_bridge_recovery()

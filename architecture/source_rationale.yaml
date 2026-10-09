@@ -450,7 +450,7 @@ files:
   src/data/replacement_fusion_upgrade_trigger.py:
     zone: K2_runtime
     authority_role: current_fusion_dependency_reseed
-    why: Detects provider growth and exact current-input revision debt and publishes through the existing durable fusion-upgrade marker and normal seed queue. Relevant scope includes configured inputs plus actual typed weighted q dependencies with consumed serving raw IDs; fallback-used IFS cannot disappear behind configuration, while diagnostic-only serving rows cannot create revision debt. Reuses the current reader's authoritative used-weight decoder without changing probability, proof, source-clock, reader gates or cadence. RESET is a newly consumed current input or a lawful new weighted proposal that no longer depends on the old input.
+    why: Detects provider growth and exact current-input revision debt and publishes through the existing durable fusion-upgrade marker and normal seed queue. Relevant scope includes configured inputs plus actual typed weighted q dependencies with consumed serving raw IDs; fallback-used IFS cannot disappear behind configuration, while diagnostic-only serving rows cannot create revision debt. Canonical selected Day0 conditioning chooses scalar versus remaining-carrier debt through the materializer's existing source admission predicate. Scalar debt retains station-priority publication and closes only against its real consumed identity, tradeable grade and unchanged readiness/coverage proof on an owned read-only snapshot. Official WRH current revisions remain independently re-read by action consumers and retain physical wake delivery; they do not invent shared-carrier provenance. Missing canonical qualification cannot establish carrier RESET. Reuses current authority without changing probability, source eligibility, source clocks, queue coverage or cadence. RESET is a newly consumed current input or a lawful new weighted proposal that no longer depends on the old input.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     - STALE_BELIEF_AUTHORITY
@@ -459,6 +459,7 @@ files:
     - src/data/replacement_forecast_materializer.py
     gates:
     - pytest -q tests/data/test_fusion_upgrade_trigger.py
+    - pytest -q tests/data/test_scalar_conditioning_revision_debt.py tests/data/test_wrh_current_membership_identity.py
   src/data/day0_hourly_vectors.py:
     zone: K2_runtime
     authority_role: day0_remaining_window_forecast_vectors

@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-10-06; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Lifecycle: created=2026-10-06; last_reviewed=2026-10-09; last_reused=2026-10-09
 # Purpose: Preserve qualified complete-product revision identity through current-state delivery.
 # Reuse: Run when WRH current membership, current path identity or fusion delivery changes.
 """Real WRH owner/reader identity tests; these do not manufacture a posterior."""
@@ -72,9 +72,9 @@ def test_older_extreme_revision_changes_actual_current_state_delivery(
         assert before["source_revision_identity"] == first.response_sha256
         assert after["source_revision_identity"] == corrected.response_sha256
 
-        # Existing fusion comparison must see a changed revision even with the
-        # same latest point. Carrier admission is fixed here to isolate delivery;
-        # separate relationship tests must prove actual posterior/selector use.
+        # The changed R remains real even when selected scalar conditioning
+        # does not consume it. Prior posterior shape cannot grant carrier
+        # admission; the canonical currently selected source owns that route.
         monkeypatch.setattr(fusion, "_latest_posterior_inputs", lambda *_a, **_k: (
             now.isoformat(), frozenset(), {}, frozenset(), frozenset(), None, (),
             False, False, before, True, False, {}, frozenset(),
@@ -85,7 +85,22 @@ def test_older_extreme_revision_changes_actual_current_state_delivery(
             decision_time=later, changed_sources=("day0_current_temperature_state",),
         )
         assert result["is_upgrade"]
-        assert result["changed_input_revisions"]["day0_current_temperature_state"] == after
+        from src.data.replacement_forecast_seed_discovery import _day0_observed_extreme_seed_payload
+        from src.data.replacement_cycle_advance_trigger import _day0_conditioning_identity
+        from src.events.day0_authority import day0_is_carrier_source
+        payload = _day0_observed_extreme_seed_payload(city=city.name,
+            target_date="2026-10-06", metric="high", computed_at=later)
+        assert payload is not None
+        if day0_is_carrier_source(payload["day0_observed_extreme_source"]):
+            assert result["changed_input_revisions"]["day0_current_temperature_state"] == after
+        else:
+            assert "day0_current_temperature_state" not in result["changed_input_revisions"]
+            assert result["changed_input_revisions"]["day0_scalar_conditioning"] == _day0_conditioning_identity(
+                source=payload["day0_observed_extreme_source"],
+                observation_time=payload["day0_observed_extreme_observation_time"],
+                observed_extreme_c=payload["day0_observed_extreme_c"],
+                unit=payload["day0_observed_extreme_unit"],
+            )
     finally:
         conn.close()
 

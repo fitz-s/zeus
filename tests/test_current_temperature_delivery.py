@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-09-29; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Lifecycle: created=2026-09-29; last_reviewed=2026-10-09; last_reused=2026-10-09
 # Purpose: Protect causal physical revision delivery and restart-safe held wakes.
 # Reuse: Run when physical current publication, source clocks or held wake dispatch changes.
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-06 (offline physical revision delivery and causal availability)
+# Last reused/audited: 2026-10-09 (focused canonical route input; original delivery controls retained)
 # Authority: REQ-20260929-223929-bf51a2; K1/INV-37 and causal source revision delivery.
 """Source revision delivery is not conditional on an incumbent carrier."""
 from datetime import datetime, timedelta, timezone
@@ -44,14 +44,21 @@ def test_current_revision_reaches_every_incumbent_shape(monkeypatch,incumbent,ca
     monkeypatch.setattr(fusion,"_capturable_current_temperature_state",lambda **_:current)
     monkeypatch.setattr(fusion,"_capturable_inputs_for_scope",lambda *_a,**_k:{})
     monkeypatch.setattr("src.data.replacement_input_hwm.latest_eligible_ensemble_input_cycle",lambda *_a,**_k:datetime.fromisoformat(cycle))
+    # Synthetic selected AWC running maximum, preceding the separate FMI
+    # physical point. This supplies the comparison's input route, without
+    # changing the incumbent carrier flag or claiming real source authority.
+    conditioning={"day0_observed_extreme_source":"aviationweather_metar",
+        "day0_observed_extreme_c":16.0,
+        "day0_observed_extreme_observation_time":target+"T09:10:00+00:00",
+        "day0_observed_extreme_sample_count":1,"day0_observed_extreme_unit":"C"}
     conn=sqlite3.connect(":memory:")
-    verdict=fusion.scope_capture_offers_larger_provider_set(conn,city="Helsinki",target_date=target,metric="high",decision_time=now,changed_sources=("day0_current_temperature_state",))
+    verdict=fusion.scope_capture_offers_larger_provider_set(conn,city="Helsinki",target_date=target,metric="high",decision_time=now,changed_sources=("day0_current_temperature_state",),day0_payload=conditioning)
     assert verdict["is_upgrade"]
     assert verdict["source_cycle_time"]==cycle
     assert verdict["changed_input_revisions"]["day0_current_temperature_state"]==current
     if incumbent:
         consumed[0]=current
-        assert not fusion.scope_capture_offers_larger_provider_set(conn,city="Helsinki",target_date=target,metric="high",decision_time=now,changed_sources=("day0_current_temperature_state",))["is_upgrade"]
+        assert not fusion.scope_capture_offers_larger_provider_set(conn,city="Helsinki",target_date=target,metric="high",decision_time=now,changed_sources=("day0_current_temperature_state",),day0_payload=conditioning)["is_upgrade"]
     conn.close()
 
 def test_missing_ensemble_is_not_a_fabricated_first_posterior(monkeypatch):

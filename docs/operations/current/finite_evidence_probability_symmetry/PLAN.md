@@ -23585,3 +23585,91 @@ and tracebacks; they concern anchor transport, blocked-attempt fingerprints,
 freshness row selection and fusion-upgrade fixtures/contracts. They are distinct
 from the previous full-sweep failures and are not repaired or hidden by this
 capture change. Neither bounded diagnostic qualifies the full suite.
+
+### Close only materializable physical-input debt (2026-10-09)
+
+checked=2026-W41; basis=frozen fca30260 scheduled capture replay, actual
+source-routing trace and narrow local-owner alignment; until=recheck-on-use.
+The stronger replay runs the registered acquisition, delivery and queue owners
+with the real materialization CLI composed synchronously. An effective unreadable
+private capture remains UNKNOWN while a healthy request reaches a committed
+posterior. The baseline nevertheless repeats 58 seeds for the same corrected WRH
+revision: it asks for remaining-carrier provenance that this source epoch cannot
+consume. The actual exit still succeeds. This demonstrates unnecessary
+rematerialization and an unclosed producer obligation, not repeated trades or a
+missed exit caused by that obligation.
+
+The existing source law admits official WRH into scalar conditioning and
+independently re-reads its complete current snapshot for action probability.
+It excludes WRH from the provisional shared materializer carrier. Copying an
+unused request revision into posterior provenance would fabricate consumption;
+silently broadening source admission would change policy. Suppressing all WRH
+debt is also wrong: a same-clock scalar correction can require a fresh scalar
+posterior before the current action payload agrees with its base.
+
+The fusion producer now selects its obligation from the same canonical
+conditioning payload used to build the request and the materializer's existing
+source-admission predicate. SCOPE is the selected family/scalar identity or
+eligible carrier revision. DRAIN remains the existing station-priority fusion
+publication, transition CAS and queue; physical wake publication remains
+independent. Scalar RESET requires matching real consumed conditioning, latest
+tradeable grade and unchanged strong readiness/coverage on an owned read-only
+snapshot. Other provider, vector and family obligations remain independent.
+Missing canonical qualification cannot prove carrier RESET. Queue coverage,
+materializer source eligibility, probability mathematics and source clocks are
+unchanged. The inherited wholly absent/errored current-state comparison remains
+outside this bounded repair; these tests do not claim every unknown-source
+recovery path is closed.
+
+The focused relationship suite uses real source owners and materializer commits
+for scalar correction and HIGH/LOW carrier RESET. It also covers invalid,
+expired and unready refusal, A-B-A publication/CAS and revision-only durable wake
+delivery. Independent execution passes 17 cases. Eight existing isolated
+comparison fixtures separately receive their explicitly intended canonical
+carrier inputs, preserving original expectations, carrier=False parameters,
+missing-input rejection and the HKO twin. Independent execution passes all
+eight. These synthetic comparison inputs are not source-authority proofs. The
+complete two-file fixture suite retains exactly its sixteen baseline failures;
+the protected shared materializer helper and parallel native source chains are
+not copied or modified.
+
+Scheduled acceptance binds actual CLI request bytes and family/scalar fields to
+the committed posterior, then follows the independently read physical revision
+through preparation, normal token rebinding and the consumed held witness.
+Every recorded chain requires preparation <= rebinding <= consumption, followed
+by the same-cut persisted held probability. Same-clock downward correction
+requires a real scalar successor and coverage RESET; an unchanged-extrema
+revision must still reach fresh held redecision without impossible carrier debt.
+These are separate obligations, not equality between lane-specific identities.
+
+The declared synthetic bid window ends at 18:02:30 UTC. Full and partial cases
+require actual signed FAK matches before that cut. The first partial match is
+capped externally at five of 12.5 shares; native confirmation and truthful
+terminal remainder feed the real owners, which must separately select and
+authorize the 7.5-share residual. Canonical per-order quantity, price, trade ID,
+position lineage and closure are checked, as are late duplicates and a fresh
+receive-handler instance. Other lawful outcome actions remain permitted.
+Native cash stays UNKNOWN and exact fees remain NULL. SQLite readiness time is
+bound to the declared replay clock without changing its expiry predicate.
+Simulated event-time windows, measured test wall time, synchronous CLI execution
+and receive-handler restart are distinct; no live latency, OS-worker restart,
+deployment readiness or funding-safety claim follows.
+
+Final scheduled acceptance passes all four cases on identical source/test bytes
+in 472.31 seconds of measured wall time. The full match occurs at simulated
+18:01:42.000001, with native confirmation deliberately delayed beyond the bid
+window; the partial case separately matches five and 7.5 shares within that
+same declared window. Actual completed scalar-request coverage is true and
+unchanged physical debt does not recur. The revision-only and downward controls
+bind the corrected source to actual held-monitor consumption before the
+five-minute fallback, with the latter requiring a genuine successor commit.
+No receipt, q, decision, order or canonical fill projection is injected.
+
+Test-quality validation passes. Whole-repository module-boundary, semantic-lint
+and source/test-topology checks remain red with the exact same error sets on
+clean fca30260 under matching example configuration: one boundary error,
+23 semantic findings, 325 source-topology errors and 46 test-topology errors.
+No new finding is attributable to this bounded patch; this is not a global
+static-validation or full-suite pass, and none of those checks is disabled or
+weakened. Existing native-chain alignment and live runtime proof remain separate
+gates before any merge or deployment decision.
