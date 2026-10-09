@@ -2210,7 +2210,9 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
                 fetch_cache[cache_key] = ((), type(exc).__name__)
             logger.warning("PHYSICAL_CURRENT_FETCH_FAILED station=%s error=%s", station_id, type(exc).__name__)
             return {"status": "SOURCE_UNAVAILABLE"}
-    if not prints:
+    # A page view with no official row can still carry ASOS 5-minute samples;
+    # the next tick's window has moved past the oldest of them, so write them now.
+    if not prints and not getattr(prints, "asos5", ()):
         return {"status": "NO_NEW_PRINT"}
 
     mutex = world_write_mutex()
@@ -2261,7 +2263,7 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
                             }, "ADVANCES_SOURCE_FRONTIER" if row_advanced else "BEHIND_SOURCE_FRONTIER"))
                         except Exception:  # noqa: BLE001 - telemetry never changes the write
                             pass
-                if route.provider == "noaa_wrh":
+                if route.provider == "noaa_wrh" and prints:
                     # Evidence only: its failure must not cost the prints above.
                     conn.execute("SAVEPOINT page_print_absence")
                     try:
@@ -2349,6 +2351,9 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
             _physical_current_pending_wakes.discard(wake_key)
         logger.info("PHYSICAL_CURRENT_REDECISION_SEED city=%s station=%s status=%s",
                     city.name, station_id, status)
+    if not prints:
+        # ASOS-only round: the derived channel carries no page identity to trace.
+        return {"status": "COMMITTED", "inserted": 0, "advanced": False, "clock_trace": None}
     sample = max(prints, key=lambda item: item.observed_at)
     input_identity = {
         "source": source_channel,

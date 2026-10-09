@@ -243,6 +243,34 @@ def test_tick_writes_asos5_without_touching_page_counts_or_traces(monkeypatch, t
     assert len(_rows(path, "asos5_kdal")) == len(asos5)
 
 
+def test_asos_only_round_writes_its_rows_and_skips_page_only_work(monkeypatch, tmp_path, caplog):
+    """A page window with no official row (boot, a late hourly) still carries 5-minute
+    samples; the next tick's window has moved past the oldest, so they are written now.
+    The page-only steps (G10 absence, page trace, page wake) have nothing to act on."""
+    caplog.set_level(logging.INFO)
+    recent = _recent()
+    asos_only = adapters.WrhPrints((), recent.asos5)
+    path = _world(tmp_path)
+    result = _tick(monkeypatch, path, asos_only)
+    assert result == {"status": "COMMITTED", "inserted": 0, "advanced": False, "clock_trace": None}
+    assert [(r[0], r[1]) for r in _rows(path, "asos5_kdal")] == [
+        (s.observed_at.isoformat(), s.value_native) for s in recent.asos5]
+    assert _rows(path, "noaa_wrh_kdal") == []
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fact_revocations").fetchone()[0] == 0
+    assert not [r for r in caplog.records if r.getMessage().startswith(
+        ("OBSERVATION_REACTION_TRACE ", "PHYSICAL_CURRENT_CHAIN_TRACE", "PHYSICAL_CURRENT_REDECISION_SEED"))]
+    # The later page-bearing round re-carries the overlap; dedup keeps one row per clock.
+    assert _tick(monkeypatch, path, recent)["status"] == "COMMITTED"
+    assert len(_rows(path, "asos5_kdal")) == len(recent.asos5)
+
+
+def test_empty_round_with_neither_channel_writes_nothing(monkeypatch, tmp_path):
+    path = _world(tmp_path)
+    assert _tick(monkeypatch, path, adapters.WrhPrints((), ())) == {"status": "NO_NEW_PRINT"}
+    assert _rows(path, "asos5_kdal") == [] and _rows(path, "noaa_wrh_kdal") == []
+
+
 def test_g10_absence_judges_page_clocks_only(monkeypatch, tmp_path):
     prints = _recent()
     path = _world(tmp_path)
