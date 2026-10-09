@@ -1,6 +1,6 @@
 # US ASOS 5-minute rows as their own WORLD channel (asos5_<icao>)
 
-Branch: `feat/us-asos5-ingest` (from origin/live 1e3db865f). Status: IN PROGRESS.
+Branch: `feat/us-asos5-ingest` (from origin/live 1e3db865f). Status: IMPLEMENTED on branch; not landed on live.
 Rollback point: 16203945f (anchor). Revert the branch commits; no schema, registry or
 config change ships, so the revert is code-only.
 
@@ -167,12 +167,100 @@ roughly half again over today's ~6,000/day.
 
 ## Tests and evidence
 
-(filled in step 5)
+New antibody: `tests/data/test_asos5_ingest.py` (15 tests, registered in
+architecture/test_topology.yaml). Fixture: `tests/fixtures/noaa_wrh/asos5_batch_kdal_ksea_kmia.json`
+(14.7 KB, sliced from the 2026-10-07 G9 captures: KDAL/KSEA/KMIA windows plus two KDAL
+SPECI cells on the 5-minute grid; only date_time/air_temp/sea_level_pressure/metar kept).
+
+| Requirement | Test |
+|---|---|
+| Parser/writer split, noaa_wrh byte-identical | `test_page_prints_are_byte_identical_to_the_pre_asos5_parser` (digests computed with the origin/live 1e3db865f parser on the fixture, then pinned); `test_asos5_rows_are_exactly_the_off_report_five_minute_rows`; `test_kdal_speci_on_the_grid_stays_on_the_page_channel`; `test_metric_all_view_routes_emit_no_asos5`; `test_asos5_validates_station_identity_with_the_page_route` |
+| No new HTTP request, same receipt | `test_batch_fetch_returns_page_prints_unchanged_and_asos5_from_the_same_receipt` (one MockTransport call serves two stations; page digest == direct parse) |
+| G10 unaffected | `test_g10_absence_judges_page_clocks_only` (no absence row; spy sees page channel + page clocks only) |
+| Savepoint, sqlite and non-sqlite | `test_asos5_failure_never_costs_the_page_prints[OperationalError/ValueError]` (fails on the 3rd asos5 append after 2 written; page prints all kept, asos5 rows 0) |
+| No trace | `test_tick_writes_asos5_without_touching_page_counts_or_traces` (SOURCE_COMMITTED count == page prints, channel set == {noaa_wrh_kdal}; re-poll inserts 0) |
+| Reader isolation | `test_no_reader_admits_asos5_rows` |
+
+Mutation check (each mutant applied, module run, reverted with `git checkout`):
+
+```
+M1 asos5 joins committed_rows (trace emitted):       1 failed, 14 passed
+M2 narrow handler (sqlite3.Error only):              1 failed, 14 passed
+M3 no savepoint rollback:                            2 failed, 13 passed
+M4 asos5 channel under noaa_wrh_ prefix:             6 failed, 9 passed
+M5 asos5 rows also go to page channel:               9 failed, 6 passed
+M6 G10 sees asos5 clocks:                            1 failed, 14 passed
+M7 fact reducer settlement set admits asos5:         1 failed, 14 passed
+M8 current-state reader admits asos5:                1 failed, 14 passed
+M9 residual reads asos5 as fast side:                1 failed, 14 passed
+M10 oracle anomaly reads asos5:                      1 failed, 14 passed
+M11 fact reducer physical set admits asos5:          1 failed, 14 passed
+```
+(M9 first survived; the isolation test then seeded asos5 at every paired residual clock,
+commit 45bfbad13, and M9-M11 were re-run as above.)
+
+Failure-set diff. Module list: every `tests/**/test_*.py` that references
+`station_temperature_adapters` or `ingest_main` (`rg -l`, 56 modules, including the new
+one). Run module by module with a bash `while read` loop over the file, in this tree and in
+a detached origin/live 1e3db865f tree (config/settings.json symlinked), at the same time.
+
+```
+feature tree: 56 modules  passed 3827  failed 213  skipped 4  failing ids 213
+base tree:    56 modules  passed 3821  failed 213  skipped 4  failing ids 213
+NEW (failing in feature, not base): none
+FIXED (failing in base, not feature): none
+base tests/data/test_asos5_ingest.py: "no tests ran" (file absent at base), rc=4
+feature tests/data/test_asos5_ingest.py: 15 passed
+```
+The +6 passed is the new module's 15 tests, net of rc-only noise; the failing-ID sets are
+identical (213 = 213, `comm` empty both ways). Every failure is pre-existing on
+origin/live. The base tree was removed after the run.
+
+Focused re-run in this tree (asos5, G10, adapters, reaction chain, FMI):
+`5 failed, 208 passed in 16.43s`. The 5 failures are
+`test_fmi_airport_temperature.py::test_new_print_uses_world_coordinator_and_wakes_only_helsinki[False]`
+and 4x `test_observation_reaction_chain.py::test_observation_revision_materializes_then_serves[...]`.
+All 5 fail identically on base.
+
+Tick cost: 24-36 new asos5 appends per tick measured at 0.4-1.8 ms warm (27 ms on the
+first cold write of a fresh file), and a re-poll of seen clocks takes 0.28 ms per 24. That is
+well inside the tick's `max_hold_ms=300`.
 
 ## Merge-tree
 
-(filled in step 5)
+`git merge-tree --write-tree origin/fix/physical-evidence-exit-20261007 HEAD`
+(pending tip 20fba0b0c):
+- first run (HEAD 0ad5d577b): `CONFLICT (content): Merge conflict in architecture/test_topology.yaml`,
+  with `src/data/station_temperature_adapters.py` and `src/ingest_main.py` auto-merging. The
+  conflict was my own registry line, placed next to `test_page_print_absence_record.py`
+  inside the block the pending branch rewrites. Fixed by moving **my line only** to an
+  untouched spot (after `tests/test_om9_bounded_station_ground.py`), commit "place the asos5
+  registry line apart...". Nothing was edited toward the pending branch.
+- final run: `exit=0`, tree d35402ffb, no conflicts. In the merged tree the asos5 block sits
+  after G10 inside the same tick, and the pending branch's `if inserted:` wake is unaffected,
+  because asos5 rows never count toward `inserted`.
 
 ## Residuals
 
-(filled in step 5)
+- **Coordinator decision:** the pending branch's second WRH tick
+  (`_day0_current_noaa_wrh_tick` / `iter_current_noaa_wrh_products`, a full-day product
+  for held/resting scopes) also sees 5-minute rows. Whether it should also emit asos5 is
+  not decided here. As built, only the 60 s noaa_wrh route tick writes asos5, with a 3 h
+  window, so a gap longer than ~3 h (daemon down) loses those 5-min rows permanently.
+- asos5 rows are UNVERIFIED as a settlement or belief input. No law consumes them, and
+  admitting them anywhere needs its own reader change and proof.
+- G9 note: a 5-minute record can overwrite a grid-clock SPECI cell on the page (31/31
+  revisions measured). That cell then reaches the page channel as a SPECI print and
+  stays there (`test_kdal_speci_on_the_grid_stays_on_the_page_channel`), so asos5 never
+  holds a clock the page channel also holds in one response. Across responses the
+  asos5 and page channels may both carry the same minute (asos5 before the SPECI lands).
+  They are separate channels, so neither reader conflates them.
+- `raw_report` for asos5 deliberately omits `station_reference` (the ~3.8 KB provider
+  metadata stays on the page prints), saving ~91% of raw_report bytes/row. `payload_sha256`
+  still binds each row to the parsed station body.
+- Not run: the full repo suite. Only the 56 modules that import the changed files ran,
+  in both trees.
+- Live behaviour is UNVERIFIED until a deploy: no daemon restart was made. Expected first-hour
+  signal: about 12 asos5 rows/hour per degF station, and no `ASOS5_PRINTS_UNRECORDED`
+  warnings.
+- Pre-existing, not addressed: 213 failing tests in the 56-module set on origin/live.
