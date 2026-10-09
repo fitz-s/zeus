@@ -1,5 +1,5 @@
 # Created: 2026-09-29
-# Last reused/audited: 2026-10-07 (KNMI key resolver env->config/knmi_secret.json, G3a; WRH batch takes the request slot and 403 stays WrhTokenRefused, G5)
+# Last reused/audited: 2026-10-09 (CURRENT_REUSABLE: noaa_wrh hourly view also returns the dropped ASOS 5-minute rows apart, as asos5_<icao>; page prints unchanged)
 """Fixed-endpoint station observations with independent receipt and valid clocks.
 
 Provider names select parsers, never arbitrary URLs or executable config. Native
@@ -9,7 +9,7 @@ claim. A decimal physical observation is not implicitly a daily extreme.
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -55,6 +55,24 @@ class StationTemperaturePrint:
     @property
     def temperature_c(self) -> float:
         return self.value_native if self.unit == "C" else (self.value_native - 32.0) / 1.8
+
+
+def asos5_channel(station_id: str) -> str:
+    """Channel of the ASOS 5-minute rows the hourly page view drops.
+
+    Never ``noaa_wrh_*``: readers take that prefix as the settlement product.
+    """
+    return "asos5_" + station_id.lower()
+
+
+class WrhPrints(tuple):
+    """A noaa_wrh route's page prints, plus ``asos5``: the same response's
+    5-minute ASOS samples that the route's view does not show."""
+
+    def __new__(cls, prints, asos5=()):
+        self = super().__new__(cls, prints)
+        self.asos5 = tuple(asos5)
+        return self
 
 
 def native_sample_value(sample, unit: str) -> float:
@@ -432,6 +450,7 @@ def parse_station_payload(route, body: bytes, *, received_at: datetime,
     expected = str(route.identity["provider_station"])
     digest = hashlib.sha256(body).hexdigest()
     values = []
+    asos5 = []
     station_reference = None
     if provider in {"mgm_metar", "imd_olbs_metar", "metaviatelecom_metar"}:
         values = _public_metar_values(route, body, received_at)
@@ -446,11 +465,16 @@ def parse_station_payload(route, body: bytes, *, received_at: datetime,
             payload, response_sha256=digest, fetched_at=received_at,
             source_response_sha256=source_response_sha256,
         )
+        asos5_route = replace(route, source_channel=asos5_channel(route.station_id))
         for row in rows:
             if view == "all" or row.is_official_report:
                 # air_temp_set_1 is the page's numeric value. Raw METAR body vs
                 # T-group is not an interchangeable reconstruction of that field.
                 values.append((row.utc, row.air_temp, None))
+            elif row.utc.minute % 5 == 0:
+                # The ASOS 5-minute record (whole degC served in the route unit).
+                # The batch's provider metadata stays on the page prints only.
+                asos5.append(_sample(asos5_route, row.utc, row.air_temp, received_at, digest))
     elif provider == "jma_amedas":
         # The station is bound by the fixed station-specific resource path.
         zone = timezone(timedelta(hours=9))
@@ -518,7 +542,10 @@ def parse_station_payload(route, body: bytes, *, received_at: datetime,
         raise ValueError("STATION_ADAPTER_UNKNOWN")
     samples = [_sample(route, stamp, value, received_at, digest, publication, station_reference)
                for stamp, value, publication in values if value is not None and value != "MSNG"]
-    return tuple(sorted((s for s in samples if s is not None), key=lambda s: s.observed_at))
+    prints = tuple(sorted((s for s in samples if s is not None), key=lambda s: s.observed_at))
+    if provider != "noaa_wrh":
+        return prints
+    return WrhPrints(prints, sorted((s for s in asos5 if s is not None), key=lambda s: s.observed_at))
 
 
 def valid_station_print(route, raw: str, *, observed_at: datetime, value: float) -> bool:
@@ -550,11 +577,12 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
         payload, received = _fetch_wrh_batch(route, client)
         stations = [s for s in payload.get("STATION", []) if s.get("STID") == route.station_id]
         station_payload = {"UNITS": payload.get("UNITS", {}), "STATION": stations}
-        return tuple(s for s in parse_station_payload(
+        prints = parse_station_payload(
             route, json.dumps(station_payload).encode(), received_at=received,
             source_response_sha256=getattr(payload, "response_sha256", None),
         )
-                     if start <= s.observed_at <= min(end,received))
+        return WrhPrints((s for s in prints if start <= s.observed_at <= min(end, received)),
+                         (s for s in prints.asos5 if start <= s.observed_at <= min(end, received)))
     station = route.identity["provider_station"]
     params, headers = {}, {"User-Agent": "zeus-station-observation/2"}
     if route.provider == "jma_amedas":
