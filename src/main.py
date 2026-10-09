@@ -9320,6 +9320,12 @@ _WAL_STARVATION_BACKLOG_BYTES = 512 * 1024 * 1024  # 512 MiB of un-checkpointed 
 # size gets one fail-fast reset attempt.  At most three canonical WALs can hold
 # this maintenance band between the staggered 90-second jobs.
 _WAL_IDLE_TRUNCATE_BYTES = WAL_RETAINED_BYTES
+# Under continuous writes (~500 frames/s on trades) PASSIVE never ends with
+# every frame copied, so requiring log == checkpointed meant TRUNCATE was never
+# attempted and the allocation grew to 24 GB (2026-10-09). A small remainder is
+# copied by TRUNCATE itself; it still fails fast (busy=1) on any reader or
+# writer, so the near-drained bound only decides when an attempt is worth it.
+_WAL_TRUNCATE_MAX_OUTSTANDING_BYTES = 16 * 1024 * 1024
 
 
 def _wal_allocated_bytes(db_path: Path) -> int:
@@ -9431,7 +9437,8 @@ def _make_wal_checkpoint_cycle(db_name: str, *, defer_for_monitor: bool):
         if (
             busy == 0
             and log_frames >= 0
-            and log_frames == ckpt_frames
+            and 0 <= (log_frames - ckpt_frames) * page_size
+            <= _WAL_TRUNCATE_MAX_OUTSTANDING_BYTES
             and wal_bytes >= _WAL_IDLE_TRUNCATE_BYTES
         ):
             truncate_busy, truncate_log, truncate_ckpt = (

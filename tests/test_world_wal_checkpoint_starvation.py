@@ -425,7 +425,7 @@ def test_world_wal_checkpoint_job_runs_and_logs(monkeypatch, caplog) -> None:
     assert "BACKLOG" not in text, "busy=1 must NOT be evaluated as a backlog sample"
 
 
-def test_checkpoint_job_truncates_only_fully_drained_large_wal(
+def test_checkpoint_job_truncates_only_near_drained_large_wal(
     monkeypatch, caplog
 ) -> None:
     import logging
@@ -456,11 +456,22 @@ def test_checkpoint_job_truncates_only_fully_drained_large_wal(
 
     calls.clear()
     caplog.clear()
+    # Continuous writers leave a small remainder after PASSIVE; TRUNCATE copies
+    # it itself, so a near-drained large WAL is still reset.
+    calls.clear()
     monkeypatch.setattr(
         db_module, "checkpoint_wal", lambda _path: (0, 10, 9, 4096), raising=True
     )
     main_module._forecasts_wal_checkpoint_cycle()
-    assert calls == [], "a WAL with any uncheckpointed frame must never truncate"
+    assert len(calls) == 1
+
+    calls.clear()
+    over = main_module._WAL_TRUNCATE_MAX_OUTSTANDING_BYTES // 4096 + 1
+    monkeypatch.setattr(
+        db_module, "checkpoint_wal", lambda _path: (0, over + 5, 5, 4096), raising=True
+    )
+    main_module._forecasts_wal_checkpoint_cycle()
+    assert calls == [], "a WAL with a real backlog must not take TRUNCATE"
 
     monkeypatch.setattr(main_module, "_wal_allocated_bytes", lambda _path: 1)
     monkeypatch.setattr(
