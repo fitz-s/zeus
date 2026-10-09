@@ -313,3 +313,16 @@ Next:
   - 10/10 °F stations writing; 0 ASOS5_PRINTS_UNRECORDED; page rows unaffected.
   - Density: 4–8 new clocks/h, not 12. The gaps are null air_temp cells on the NOAA page itself (KDAL 22:00/05/30/35 carry METAR text with temp null), not drops. Effective density is ~6–8 values/h, about 6× the hourly prints.
   - First-appearance lag: n=62, p50 12.6, p90 18.3, max 20.1 min. Receipt cadence is limited by the physical round plus the 60 s route poll; the G13 fix is in flight.
+- 2026-10-09 23:15Z G13 re-dispatch. The first physical-round agent stalled for 3.5 h with no commit and was stopped. Its replay survives in scratchpad/pr.
+  - Measured: batching N reseed calls into one costs f≈0.6–0.87 of N single calls, so batching alone saves little.
+  - Placement replay (per-route latency, round start → enqueue return, f=0.6), as p50/p90/max seconds:
+
+    | placement | p50 | p90 | max |
+    |---|---|---|---|
+    | current | 80 | 496 | 1189 |
+    | batch at round end | 112 | 702 | 748 |
+    | background worker | 58 | 513 | 664 |
+    | delivery-job drain | 208 | 746 | 1142 |
+
+  - With the background worker, round duration drops to p90 21 s / p99 50 s, from 59 / 443 s.
+  - Decision: background reseed worker (single thread, batch of all pending keys, retry on failsoft) plus a bounded physical WORLD write.
