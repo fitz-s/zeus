@@ -359,3 +359,35 @@ def test_asos5_rows_stay_out_of_the_revision_cohort_until_a_law_consumes_them():
     rows = conn.execute('SELECT source_channel FROM observation_prints' + eval(where),
                         ('2026-10-09T00:00:00+00:00', '2026-10-10T00:00:00+00:00')).fetchall()
     assert sorted(r[0] for r in rows) == ['aviationweather_metar', 'noaa_wrh_kdal']
+
+
+def test_an_asos5_row_adds_no_residual_or_censoring_and_stays_counted():
+    """Sol review (asos5 ingest): one asos5 row must not move residuals or censoring,
+    and must not vanish: it is counted as acquisition-only."""
+
+    source = PATH.read_text()
+    window = source.split("observations=table_rows(conn,'observation_prints',where=")[1].split(",args=")[0]
+    count_sql = source.split("acquisition_only={'asos5':conn.execute(")[1].split(",(start")[0]
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.execute('CREATE TABLE observation_prints (id INTEGER PRIMARY KEY, city TEXT, station_id TEXT, '
+                 'source_channel TEXT, publish_ts_utc TEXT, value_native REAL, unit TEXT, '
+                 'fetched_at_utc TEXT, raw_report TEXT, schema_version INTEGER)')
+    base = observation()
+    conn.execute('INSERT INTO observation_prints (id, city, station_id, source_channel, publish_ts_utc, '
+                 'value_native, unit, fetched_at_utc, raw_report) VALUES (?,?,?,?,?,?,?,?,?)',
+                 tuple(base[k] for k in ('id','city','station_id','source_channel','publish_ts_utc',
+                                          'value_native','unit','fetched_at_utc','raw_report')))
+    span = ('2026-10-05T00:00:00+00:00', '2026-10-06T00:00:00+00:00')
+    before = [dict(r) for r in conn.execute('SELECT * FROM observation_prints' + eval(window), span)]
+    conn.execute('INSERT INTO observation_prints (id, city, station_id, source_channel, publish_ts_utc, '
+                 'value_native, unit, fetched_at_utc, raw_report) VALUES (2,?,?,?,?,?,?,?,?)',
+                 ('Dallas', 'KDAL', 'asos5_kdal', '2026-10-05T08:05:00Z', 80.6, 'F',
+                  '2026-10-05T08:14:00.000000Z', '{}'))
+    after = [dict(r) for r in conn.execute('SELECT * FROM observation_prints' + eval(window), span)]
+    assert after == before
+    assert conn.execute(eval(count_sql), span).fetchone()[0] == 1
+    r_before = a.trace_distributions(before, [], [])
+    r_after = a.trace_distributions(after, [], [])
+    assert r_after['residual_counts'] == r_before['residual_counts']
+    assert r_after['censored_source_revisions_without_lineage'] == r_before['censored_source_revisions_without_lineage']

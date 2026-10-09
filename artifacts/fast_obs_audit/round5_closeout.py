@@ -818,7 +818,7 @@ def start_backlog(queue: Path, start: datetime) -> dict:
 def production(root: Path, out: Path, start: datetime, end: datetime, follow_until: datetime | None = None) -> dict:
     """Source cohort [start, end); every downstream read runs through follow_until."""
     follow_until=end+timedelta(hours=2) if follow_until is None else follow_until
-    stamps={};residuals=[];observations=[];ack=[];reconstruction={};kma={};posts=None;prints=[];decisions={}
+    stamps={};residuals=[];observations=[];acquisition_only={};ack=[];reconstruction={};kma={};posts=None;prints=[];decisions={}
     events,coverage=read_logs(root,start,follow_until)
     try:
         roster=json.loads((root/'config/cities.json').read_text())['cities']
@@ -836,6 +836,7 @@ def production(root: Path, out: Path, start: datetime, end: datetime, follow_unt
                 # asos5_* (5-min whole-degree ASOS rows) is ingested but consumed by no
                 # probability law yet; it enters the revision cohort once the dense law admits it.
                 observations=table_rows(conn,'observation_prints',where=" WHERE julianday(fetched_at_utc)>=julianday(?) AND julianday(fetched_at_utc)<julianday(?) AND source_channel NOT LIKE 'asos5\\_%' ESCAPE '\\'",args=(start.isoformat(),end.isoformat()))
+                acquisition_only={'asos5':conn.execute("SELECT COUNT(*) FROM observation_prints WHERE julianday(fetched_at_utc)>=julianday(?) AND julianday(fetched_at_utc)<julianday(?) AND source_channel LIKE 'asos5\\_%' ESCAPE '\\'",(start.isoformat(),end.isoformat())).fetchone()[0]}
             else:residuals.append('WORLD_OBSERVATION_PRINTS_UNAVAILABLE')
             kma={'by_station':{'RKSI':[],'RKPK':[]},'station_identity_unresolved':[]}
             if columns(conn,'opportunity_events'):
@@ -936,7 +937,10 @@ def production(root: Path, out: Path, start: datetime, end: datetime, follow_unt
         decision_evidence=decisions,start_backlog_cohort=start_backlog(root/'state/replacement_forecast_live',start),
         database_snapshots=stamps,
         snapshot_contract='separate read-only transactions, not a cross-database atomic snapshot',
-        collection_residuals=residuals,log_coverage=coverage,legacy_reference_reconstruction=reconstruction,
+        collection_residuals=residuals,log_coverage=coverage,
+        acquisition_only_prints=acquisition_only,
+        acquisition_only_contract='rows ingested into WORLD that no probability law consumes yet (asos5_*); counted here, '
+            'excluded from the revision cohort, residuals and censoring until a law admits them',legacy_reference_reconstruction=reconstruction,
         production_status='MEASURED_MATCHED_SUBSET' if result['full_ack_chains'] else 'RESIDUAL_NO_PROVED_FULL_CHAIN')
     dump(out/'production_latency.json',result)
     return result
