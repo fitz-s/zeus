@@ -22857,3 +22857,62 @@ hosted checks must accompany publication. Simulated source/account/venue input,
 UNKNOWN native cash, NULL fees and handler-only restart limits remain explicit.
 The other inherited authority/fallback cases and fixture/protocol debts are not
 weakened or declared harmless; failed required release gates remain blocking.
+
+
+### Bounded METAR revision-authority continuation (2026-10-09)
+
+Preserve published 8684 and its independently reviewed source/test/CI evidence.
+This offline continuation addresses only the nine inherited METAR provisional
+revision-authority failures: the partial-exact fallback case and the eight
+full-statistical-family/exact-sibling cases. The original physical-exit objective
+and inclusive price band remain unchanged; no live operation is in scope.
+
+First reproduce the untouched failures and trace the current canonical producer,
+revision owner and reader. Establish the actual station, source role, metric,
+local date, units, causal issue/availability/capture clocks, membership and
+correction identity required by the existing law. Classify missing fixture proof
+separately from a product failure to consume lawful canonical evidence. A faithful
+fixture repair must use real owners and preserve every original HIGH/LOW,
+YES/NO, BUY/SELL, JIT, exact-sibling and economic assertion. Do not inject q,
+revision likelihood, authority/readiness or historical calibration merely to
+satisfy a guard, and do not weaken expected outcomes solely for green tests.
+
+Record the earliest genuine owner-to-reader failure before any production edit.
+A change to source qualification, revision probability or fallback policy requires
+a separate bounded scope decision; stop that dependent work while retaining the
+counterexample. Preserve unreadable, stale, unknown-source, correction and
+mismatched-identity refusals. No broad cleanup of the other inherited CI failures.
+
+Use isolated cloud child worktrees, guarded offline execution, exact source pins
+and paired RED/GREEN evidence. The lead owns this plan and integration; a separate
+reviewer challenges source semantics and the frozen repair before publication.
+The completed outcome must state what is proved by synthetic canonical evidence,
+what remains unavailable, and which live readiness facts were not accessed.
+
+
+#### METAR fixture disposition (2026-10-09)
+
+The nine failures are fixture source-role defects, not demonstrated runtime
+failures. Their handwritten observation_instants do not provide the canonical
+strict-prior AWC-to-later-OGIMET report pairs, and even lawful revision history
+keeps METAR provisional. It cannot alone support the tests' exact sibling.
+
+The fixture-only repair in 9edd9cd8 uses the existing qualified WRH producer and
+real observation reader for those exact-witness scenarios. All original assertions
+and parameterizations are unchanged. The explicit point-vector/READY stubs remain
+isolated witness-selection and JIT test boundaries, not produced-q evidence.
+Separate HIGH/LOW controls pass synthetic AWC responses through its native parser
+and writer, use the OGIMET canonical append owner, and consume the real statistical
+revision reader. Missing ledger/history, foreign station, different report and
+post-cut possession do not fabricate a pair. Valid prior pairs yield the existing
+statistical likelihood; a current physical METAR fact still cannot become exact,
+even with a forged monotone declaration. No production law or source code changes.
+
+Baseline nine cases fail; corrected nine pass. The owner passes 43 focused cases,
+and independent review passes 34 cases including false-finality, source identity,
+future receipt, body/membership, correction/retraction/empty and no-op controls.
+Counts overlap. Independent AST review verifies original assertions/decorators
+and all production source/config/architecture remain unchanged. The earlier
+8684 scheduled/native acceptance is retained with explicit byte identity rather
+than represented as a newly executed run. Publication requires exact tree/ref
+verification and terminal hosted CI; remaining inherited failures stay blocking.

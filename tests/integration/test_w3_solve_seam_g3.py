@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-09 (HKO print-only producer handoff)
+# Last reused/audited: 2026-10-09 (HKO print and qualified exact-source fixtures)
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -8720,17 +8720,15 @@ def test_day0_partial_exact_fallback_rebuilds_when_remaining_vectors_are_unavail
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
-    import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
 
-    fixture = _day0_partial_exact_fixture()
+    fixture = _day0_qualified_exact_fixture()
     bundle = _day0_ready_bundle(fixture)
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
-    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {fixture.city_name: fixture.city})
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
     monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
-        "metric": "high", "source": "ogimet_metar_ltfm",
+        "metric": "high", "source": fixture.fact["observation_source"],
         "observation_time": fixture.fact["observation_time"],
         "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
     })
@@ -9101,29 +9099,23 @@ def test_complete_day0_fact_preserves_exact_payoff_with_ready_forecast(
 @pytest.mark.parametrize("selected_unknown", [False, True])
 def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exists(monkeypatch, metric, point, action, selected_unknown):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
-    import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
     from tests.solve.test_solver_properties import _global_candidate, _global_sell_candidate
     from src.solve.solver import executable_curve_identity, rebind_family_payoff_witness
 
-    fixture = _day0_partial_exact_fixture(metric=metric)
+    fixture = _day0_qualified_exact_fixture(metric=metric)
     bundle = _day0_ready_bundle(fixture)
-    fixture.observations.execute(
-        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ("Istanbul", "2026-07-11", "ogimet_metar_ltfm", "LTFM",
-         "2026-07-11T12:00:00+03:00", fixture.fact["observation_time"], "UTC",
-         30.0, 30.0, "C", fixture.fact["observation_available_at"],
-         "live", "causal", "settlement", 1, "{}"),
-    )
-    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Istanbul": fixture.city})
-    monkeypatch.setattr(target_plan, "_latest_authorized_day0_fact", lambda *_a, **_k: fixture.fact)
+    monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {fixture.city_name: fixture.city})
     monkeypatch.setattr(readiness_reader, "latest_replacement_readiness", lambda *_a, **_k: object())
     monkeypatch.setattr(bundle_reader, "read_replacement_forecast_bundle", lambda *_a, **_k: SimpleNamespace(ok=True, bundle=bundle, reason_code="READY"))
     monkeypatch.setattr(era, "_day0_replacement_conditioning", lambda *_a, **_k: {
-        "metric": metric, "source": "ogimet_metar_ltfm",
+        "metric": metric, "source": fixture.fact["observation_source"],
         "observation_time": fixture.fact["observation_time"],
         "observed_extreme_c": fixture.fact["observed_extreme_native"], "unit": "C",
     })
+    # This test isolates full-versus-exact witness selection and JIT reuse.
+    # The point-vector kernel is an explicit test boundary, not produced-q
+    # evidence; absorbing source authority above comes from the native owner.
     monkeypatch.setattr(era, "_day0_remaining_global_probability_components", lambda *_a, **k: (
         np.asarray([point] * 400, dtype=float),
         np.asarray(point, dtype=float),
@@ -9208,6 +9200,105 @@ def test_day0_full_statistical_family_remains_preferred_when_exact_sibling_exist
     finally:
         fixture.forecast.close()
         fixture.observations.close()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_day0_metar_canonical_revision_history_remains_statistical(metric):
+    from src.config import runtime_cities_by_name
+    from src.data.day0_fast_obs import parse_metar_api_payload, _append_metar_prints_to_ledger
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.events.day0_authority import (
+        DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_PROVISIONAL_CURRENT_SNAPSHOT,
+        day0_evidence_finality,
+    )
+    from src.state.db import init_schema_forecasts, init_schema_world_only
+    from src.state.schema.observation_prints_schema import append_print
+
+    fixture = _day0_partial_exact_fixture(metric=metric)
+    fixture.observations.close()
+    conn = fixture.observations = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    city = runtime_cities_by_name()["Istanbul"]
+    likelihood_args = dict(
+        source="ogimet_metar_ltfm", city=city.name, city_timezone=city.timezone,
+        target_date="2026-07-11", temperature_metric=metric,
+        decision_time=fixture.decision_at, entry_authority=True,
+    )
+    try:
+        with pytest.raises(ValueError, match="METAR_PROVISIONAL_REVISION_AUTHORITY_UNAVAILABLE"):
+            era._provisional_day0_revision_likelihood(conn, **likelihood_args)
+        init_schema_forecasts(conn)
+        init_schema_world_only(conn)
+        with pytest.raises(ValueError, match="NOAA_PRELIMINARY_SURVIVAL_HISTORY_INSUFFICIENT"):
+            era._provisional_day0_revision_likelihood(conn, **likelihood_args)
+
+        # Synthetic native AWC responses enter through its real parser/writer.
+        # They are prior-day reports, not settlement labels or fitted authority.
+        for day in (9, 10):
+            observed = _dt.datetime(2026, 7, day, 9, tzinfo=_dt.timezone.utc)
+            reports = parse_metar_api_payload([{
+                "icaoId": "LTFM", "obsTime": observed.timestamp(),
+                "receiptTime": observed.isoformat(), "temp": 30.0,
+                "metarType": "METAR",
+                "rawOb": f"METAR LTFM {day:02d}0900Z 00000KT 9999 SKC 30/20 Q1010",
+            }], first_seen_at=observed + _dt.timedelta(minutes=1))
+            assert len(reports) == 1
+            assert _append_metar_prints_to_ledger(
+                conn, ((city, SimpleNamespace(station_id="LTFM"), "2026-07-11"),), reports)
+
+        mirror = dict(city=city.name, station_id="LTFM", source_channel="ogimet_metar_ltfm",
+                      publish_ts_utc="2026-07-09T09:00:00+00:00", value_native=30.0,
+                      unit="C", fetched_at_utc="2026-07-09T09:05:00+00:00")
+        # The canonical append owner records these invalid comparands; the
+        # likelihood reader must reject foreign station, different report,
+        # and possession after the decision cut rather than invent a pair.
+        for invalid in (
+            {"station_id": "LTAC"},
+            {"publish_ts_utc": "2026-07-09T09:01:00+00:00"},
+            {"fetched_at_utc": "2026-07-11T12:00:01+00:00"},
+        ):
+            assert append_print(conn, **(mirror | invalid))
+        with pytest.raises(ValueError, match="NOAA_PRELIMINARY_SURVIVAL_HISTORY_INSUFFICIENT"):
+            era._provisional_day0_revision_likelihood(conn, **likelihood_args)
+
+        assert append_print(conn, **mirror)
+        assert append_print(conn, **(mirror | {
+            "publish_ts_utc": "2026-07-10T09:00:00+00:00", "value_native": 29.0,
+            "fetched_at_utc": "2026-07-10T09:05:00+00:00",
+        }))
+        likelihood = era._provisional_day0_revision_likelihood(conn, **likelihood_args)
+        assert likelihood["semantics"] == "same_station_preliminary_report_survival_likelihood_v2"
+        assert len(likelihood["successes"]) == len(likelihood["failures"]) == 1
+        assert likelihood["unconfirmed_awc_ids"] == []
+        assert likelihood["alpha"] == likelihood["beta"] == 1.5
+        assert likelihood["boundary_survival_probability"] == pytest.approx(0.5)
+        assert likelihood["station_id"] == "LTFM"
+        assert likelihood["source_channel_pair"] == {
+            "awc": "aviationweather_metar", "ogimet": "ogimet_metar_ltfm"}
+
+        # A genuine current physical read still cannot supply the exact sibling.
+        assert append_print(conn, **(mirror | {
+            "publish_ts_utc": "2026-07-11T09:00:00+00:00",
+            "fetched_at_utc": "2026-07-11T09:05:00+00:00",
+        }))
+        fact = _latest_authorized_day0_fact(conn, city=city.name, target_date="2026-07-11",
+            temperature_metric=metric, decision_time=fixture.decision_at)
+        assert fact is not None and fact["observation_source"] == "ogimet_metar_ltfm"
+        assert fact["station_id"] == "LTFM" and fact["unit"] == "C"
+        assert fact["observation_available_at"] == "2026-07-11T09:05:00+00:00"
+        assert day0_evidence_finality({
+            "settlement_source": fact["observation_source"],
+            "evidence_finality": DAY0_MONOTONE_SETTLEMENT_BOUND,
+        }) == DAY0_PROVISIONAL_CURRENT_SNAPSHOT
+        assert era._prepare_current_day0_exact_family(
+            fixture.event, family=SimpleNamespace(city=city.name, target_date="2026-07-11", metric=metric),
+            observation_conn=conn, settlement_fact=fact, physical_fact=fact,
+            decision_time=fixture.decision_at, max_age=_dt.timedelta(seconds=30),
+            required_condition_id=None, day0_payload_out=None, cache_metadata_out=None,
+        ) is None
+    finally:
+        fixture.forecast.close()
+        conn.close()
 
 
 @pytest.mark.parametrize(
