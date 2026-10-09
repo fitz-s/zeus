@@ -70,11 +70,100 @@ Storage.
 
 ## Reader inventory
 
-(filled in step 4)
+Method: `rg -n observation_prints src scripts` (26 files), every SQL read traced to the
+`source_channel` value it binds, then the named readers read in full. No reader in src/
+or scripts/ uses a `LIKE`/`NOT IN`/`!=` channel pattern that could match `asos5_*`; the only
+`LIKE` is `ogimet_metar_%` (below). Verdict: **no existing reader admits `asos5_*`**. Three
+non-filtering readers carry no channel predicate: (a), (b) and (c) below.
+
+| Reader | file:line | Channel restriction | asos5 |
+|---|---|---|---|
+| Day0 fact reducer `_latest_authorized_day0_fact` | src/data/replacement_forecast_current_target_plan.py:1482 | `source_channel IN (...)`. The set is `{noaa_wrh_<icao>}` (settlement, :1432) or `{noaa_wrh_<icao>, ogimet_metar_<icao>, aviationweather_metar}` (physical), plus registry routes whose provider is not noaa_wrh (:1457, :1463). | excluded: not a registry route |
+| Current state `read_day0_current_temperature_state` / `day0_current_temperature_channels` | src/data/day0_hourly_vectors.py:4442, :4446 | Fixed noaa tuple plus `route.source_channel` of `physical_current_sources_for_city` | excluded: not a route |
+| Fast residual `build_fast_station_residual_likelihood` | src/data/day0_fast_obs.py:750, :789 | `IN (noaa_wrh_<icao>, aviationweather_metar)` | excluded |
+| `latest_fast_station_extreme_c` | src/data/day0_fast_obs.py:556 | `= FAST_OBS_SOURCE_ID` (`aviationweather_metar`, :99) | excluded |
+| `read_noaa_fast_obs_context_from_ledger` | src/data/day0_fast_obs.py:2611 | `= FAST_OBS_SOURCE_ID` | excluded |
+| fast-obs per-station read | src/data/day0_fast_obs.py:3077 | `IN (aviationweather_metar, ogimet_metar_<icao>)` | excluded |
+| day0_fast_obs city-wide (~3710) | src/data/day0_fast_obs.py:3713, :3835 | `= FAST_OBS_SOURCE_ID` | excluded |
+| day0_fast_obs city-wide (~3936) | src/data/day0_fast_obs.py:3923 (cursor), :3940 | `= FAST_OBS_SOURCE_ID` | excluded |
+| same-station preliminary survival | src/data/day0_observation_reader.py:1017 | `IN (awc, ogimet_<icao>)` plus a Python branch on those two | excluded |
+| hard-fact exit `_durable_fast_tail_hard_fact_evidence` | src/execution/day0_hard_fact_exit.py:1212, ~1238 | `= source.source_id`, which must equal `FAST_OBS_SOURCE_ID` | excluded |
+| oracle anomaly `_page_running_extremes_from_ledger` | src/data/day0_oracle_anomaly.py:641, ~657 | `= noaa_wrh_<icao>` | excluded |
+| trigger `day0_extreme_updated` | src/events/triggers/day0_extreme_updated.py:573, :1056 | Reads through the fact reducer with `require_settlement_channel=True`. `_source_matches_config` (:1056) admits `ogimet_metar_*` / `noaa_wrh_*` only. | excluded at both |
+| finality `day0_evidence_finality` | src/events/day0_authority.py:317 | Prefix `noaa_wrh_` gives MONOTONE; anything else unknown gives UNKNOWN_FINALITY | would not be absorbing even if admitted |
+| adapter fast-residual check (read only) | src/engine/event_reactor_adapter.py:37194 | Python `settlement_channel.startswith("noaa_wrh_")` on the residual dict; that dict's channel comes from :750 | excluded upstream |
+| adapter legacy current temp | src/engine/event_reactor_adapter.py:~48427 | `IN (ogimet_metar_<icao>, aviationweather_metar)` for noaa | excluded |
+| `day0_resolver_terminal_residual` | src/calibration/day0_resolver_terminal_residual.py:697 (`_station_and_channel_source`) | String classifier: hko / `aviationweather_metar` / `ogimet_metar_` prefixes, else None | not a DB read; asos5 returns None |
+| its fitter `read_metar_renderings` | scripts/fit_day0_resolver_terminal_residual.py:221 | `= aviationweather_metar OR LIKE 'ogimet_metar_%'`, plus a Python check | excluded |
+| harvester / settlement truth | src/execution/harvester.py | no `observation_prints` reference | n/a |
+| daily_obs_append | src/data/daily_obs_append.py:2344, :2548 | `print_revisions(match={... source_channel: noaa_wrh_<icao> / hko_rhrread_spot})` | excluded by match |
+| hole_scanner | src/data/hole_scanner.py | reads `observation_instants` only | n/a |
+| etl_temp_persistence | scripts/etl_temp_persistence.py | no `observation_prints` reference | n/a |
+| G10 `record_page_print_absences` | src/state/fact_revocation.py:98 | `= source_channel` argument (the page channel) | excluded; the test also pins `returned_clocks` |
+| ingest tick newest-row read | src/ingest_main.py:2231 | `= route.source_channel` | excluded |
+| HKO replay | src/ingest_main.py:~2891 | `= 'hko_current_1min_mean'` | excluded |
+| `scripts/hko_ingest_tick.py:293` | | `= proof["source"]` (HKO) | excluded |
+| `scripts/audit_page_print_absences.py:25` | | Joins prints from `fact_revocations` rows (PAGE_PRINT_ABSENT); asos5 is never tagged | excluded |
+| trace `_unique_print_reference` / `_consumed_print_reference` | src/runtime/observation_reaction_trace.py:172, :191 | `= state['source']` / an exact carried rowid | excluded |
+
+Known non-filtering readers:
+- (a) `src/ingest/forecast_live_daemon.py:2481` `SELECT COALESCE(MAX(id), 0) FROM
+  observation_prints`. This is a component of the discovery revision key (:2561-2563,
+  "unchanged_discovery_revision" short-circuit). The coordinator measured that the key
+  already changes in 1,346 of 1,440 minutes per day. My read-only check on live WORLD agrees
+  on order: by receipt minute, 1,130 (10-07) and 1,192 (10-08) minutes have at least one new
+  print, while the degF page prints alone touch only 108/131 minutes. asos5 adds rows in
+  minutes where the degF batch delivers a new 5-min record, and those minutes are already
+  almost all covered. Also the key embeds the current hour (:2490), so it changes at least
+  hourly. **No change needed.**
+- (b) `src/runtime/observation_reaction_trace.py:114` `print_revisions` rowid range. Its
+  range callers (ingest_main.py:704, :823, daily_obs_append.py:2344, :2548,
+  scripts/obs_live_tick.py:557) take the high-water inside their own transaction, and the
+  asos5 rows are written only under the WORLD mutex + lease of the physical-current tick,
+  so an asos5 row never falls inside another writer's range under the lock. The two
+  readers that read the high-water outside the lock (daily_obs_append :2344, :2548) filter by
+  `match` on their own channel. The tick itself emits only `committed_rows`, which never
+  contains asos5 (item 5). **Handled.**
+- (c) Data-owned collector artifacts/fast_obs_audit/round5_closeout.py:836, :910 (no channel
+  predicate). Data excludes `asos5_%` on its own branch. **Not touched here.**
+- Analysis scripts that copy every row (artifacts/fast_obs_audit/benchmark_observation_index.py:18,
+  :35) are offline benchmarks with no live consumer.
+
+Test proof: `tests/data/test_asos5_ingest.py::test_no_reader_admits_asos5_rows` seeds page
+prints plus AWC METAR at 20 paired clocks/day for 3 days. It records the fact reducer
+(HIGH/LOW x settlement/physical), the current state (+identity), the fast residual
+(HIGH/LOW) and the oracle anomaly. Then it inserts >500 asos5 rows at 140 F and -40 F on
+every 5-min grid clock of the day and on every paired clock, and asserts the results are
+`==`. Mutation check: adding asos5 to the reducer's settlement set, its physical set, the
+current-state tuple, the residual `IN` or the oracle predicate each fails this test.
 
 ## Storage
 
-(filled in step 4)
+Measured on the saved 5-day degF batch (g9_live_verify_payload.json, 9 stations,
+2026-09-30..10-05). Each row is inserted into a scratch SQLite with the real schema, then
+VACUUM + dbstat:
+- rows: 12,186 asos5 rows; full interior days carry 259-288 per station (mean 284.5),
+  so ~285 rows/station/day, against a 288 maximum. The batch has 11 degF stations
+  (KBKF Denver carried no 5-min rows in the 10-07 capture: 9 rows, all official).
+- rows/day: ~285 x 10-11 stations = **~2,900-3,100 rows/day**. Dedup: `append_print`
+  suppresses a re-receipt of the same clock and value (the 60 s poll sees each 5-min
+  row ~36 times in its 3 h window, and stores it once). A value revision of one clock
+  appends one more row. The tick re-poll test pins `inserted == 0` and no new asos5 rows.
+- bytes/row: raw_report mean 356 B (no station_reference block; the page rows carry ~3.8 KB
+  of it). Table + 2 indexes = **~589 B/row** (dbstat: table 5.56 MB, identity index 1.11 MB,
+  city/publish index 0.49 MB for 12,186 rows).
+- growth: 3,000 x 589 B ~ **1.8 MB/day, ~0.65 GB/year** in WORLD (now 104.9 GB). For scale,
+  WORLD `observation_prints` currently adds ~7.4-8.2k rows/day (all channels).
+- degC routes: the 37 `all`-view routes already store every row the page shows. Read-only
+  check of live WORLD (last ~3M ids): of 22,823 degC channel-hours, the most clocks seen in one
+  hour is 9, and only 1 hour has >=6 five-minute-grid clocks. No 5-minute ASOS cadence
+  exists on those pages, and the asos5 split takes only rows the view does not show, so
+  `all` routes emit nothing (test `test_metric_all_view_routes_emit_no_asos5`).
+
+Trace volume avoided (decision 5): live `zeus-ingest.log` holds 29,788 SOURCE_COMMITTED lines
+since 2026-10-04 16:56 (~5 days), mean 1,136 B/line. Emitting one per asos5 row would add
+~3,000 lines/day (~3.4 MB/day of log) and a matching number of reaction-chain join candidates,
+roughly half again over today's ~6,000/day.
 
 ## Tests and evidence
 
