@@ -28,6 +28,8 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/test_settlement_sigma_floor_current_shape_wiring.py: {created: "2026-09-13", last_used: "2026-10-09", note: "Current-evidence HIGH/LOW q and bounds ignore fitted historical floors; real diagnostic artifacts and canonical HKO fixtures retain independent shoulder integrals, neutral provenance, and actual v2 Day0 carrier simplex/storage checks. Controlled fusion, future-member and likelihood inputs are synthetic test seams, not live calibration evidence."}
+    tests/scripts/test_backfill_widened_observation_instants.py: {created: "2026-07-16", last_used: "2026-10-09", note: "Historical widening-only consumer uses complete captured revision fields and current writer semantics; missing or ambiguous metadata refuses. Public API and CLI operational apply always refuse pending settled/no-live authority. Private fixture transactions retain real BULK lock, single SAVEPOINT, stale-current/audit-collision refusal and full rollback; no production repair authority is established."}
     tests/engine/test_sqlite_work_deadline_deferral.py: {created: "2026-10-09", last_used: "2026-10-09", note: "Real exclusive SQLite contention at the truncated busy-timeout boundary, original exception/code custody, reactor retry and completion-debt retention; early lock and unrelated error controls. Controlled monotonic boundary only; no production state or SQL replay."}
     tests/execution/test_global_sell_publication_deadline.py: {created: "2026-10-08", last_used: "2026-10-08", note: "V4 publication admission preserves aware live deadlines, exact prepared attempt identity and existing active or ambiguous owner fences. Unarmed debt must reach normal preparation; expiry is never publisher-inactivity proof."}
     tests/state/test_unidentified_exit_order_proxy.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Anonymous order-proxy prevention, strict producer-provenance refusal, real partial/full fill conservation, scoped and attached-schema reader parity, and pending-position no-retry on ambiguity. Raw facts remain append-only; historical projections are not rewritten."}
@@ -944,6 +946,7 @@ test_trust_policy:
 
 categories:
   core_law_antibody:
+    - tests/test_settlement_sigma_floor_current_shape_wiring.py
     - tests/engine/test_sqlite_work_deadline_deferral.py
     - tests/test_current_temperature_delivery.py
     - tests/test_fill_cash_proof.py
@@ -1260,6 +1263,7 @@ categories:
     - tests/test_exit_market_anchored_q.py
 
   useful_regression:
+    - tests/scripts/test_backfill_widened_observation_instants.py
     - tests/test_replacement_forecast_materialization_request_builder.py
     - tests/test_bpf_possessed_response_memo.py
     - tests/test_openmeteo_burn_spike_alarm.py
@@ -1882,6 +1886,37 @@ relationship_test_manifests:
       - tests/test_runtime_guards.py
 
 test_metadata:
+  tests/test_settlement_sigma_floor_current_shape_wiring.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/replacement_final_form_2026_06_09.md
+      - docs/authority/regime_unification_2026-06-12.md
+      - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+    notes: >
+      Audited replacement for obsolete fitted-floor live wiring expectations.
+      Canonical HKO fixtures and real materialization preserve HIGH/LOW q, bounds,
+      source identity, neutral floor provenance and Day0 v2 carrier storage across
+      absent, fitted and malformed diagnostic artifacts. Fusion, future members
+      and revision likelihood remain controlled inputs; no live source, model
+      quality or full scheduled producer claim follows from these tests.
+    created: 2026-09-13
+    last_reused_or_audited: 2026-10-09
+  tests/scripts/test_backfill_widened_observation_instants.py:
+    cohort: useful_regression
+    trust: trusted
+    authority_docs:
+      - architecture/db_table_ownership.yaml
+      - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+    notes: >
+      Audited historical extrema-widening consumer in private canonical fixture
+      databases. Exact current-temperature/source-file custody, writer parity,
+      ambiguous metadata refusal, stale-current comparison, audit collision and
+      atomic rollback remain distinct from operational authority. Public API and
+      CLI apply always refuse until settled-only/no-live exposure proof is added
+      in a separately reviewed repair. No production data was used or modified.
+    created: 2026-07-16
+    last_reused_or_audited: 2026-10-09
   tests/engine/test_sqlite_work_deadline_deferral.py:
     cohort: law_antibody
     trust: trusted

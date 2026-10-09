@@ -23424,3 +23424,100 @@ the same draft repair branch, verify exact head/tree and follow all hosted
 checks to terminal. No active user worktree, runtime policy, production database,
 deployment, trade or PR-body edit is in this slice. Offline classifier proof is
 not production execution or funding-readiness evidence.
+
+
+### Repair two inherited full-sweep collection consumers (2026-10-09)
+
+checked=2026-W41; basis=exact-b98 collection, exact-1e3 paired import errors and
+narrow local-owner audit; until=recheck-on-use. Named hosted gates are green,
+but the offline full sweep stops during collection. Seven missing hook files
+are a sparse-checkout issue resolved only from exact tracked blobs. The two
+source/import defects reproduce on unmodified 1e3 and all five implicated files
+are identical between that base and b98. No existing owner fix or dirty overlap
+was found in the current narrow local audit. This scoped continuation addresses
+only those two consumers, not the protected writer/materializer/shared helpers.
+
+Touched paths are scripts/backfill_widened_observation_instants.py,
+tests/scripts/test_backfill_widened_observation_instants.py,
+tests/test_settlement_sigma_floor_current_shape_wiring.py,
+architecture/script_manifest.yaml, architecture/test_topology.yaml and this
+existing PLAN. The two registries harmonize only the changed consumer's actual
+operational boundary and these audited tests; unrelated stale descriptions stay
+outside this slice.
+Preserve MP-EXT-001/002, canonical writer truth/audit ordering and current-evidence
+probability authority. The historical backfill consumer must use the current
+writer's exact field semantics without resurrecting its removed private SQL
+alias or guessing temp_current/source_file from absent revision metadata.
+Preserve default dry-run and the historical extrema-widening candidate universe.
+The prior settled-only/no-live-exposure assertion was prose, not enforced proof;
+both public apply_backfill and CLI --apply must therefore refuse operational
+writes unconditionally. A private fixture kernel retains the actual BULK writer
+lock, single SAVEPOINT, stale-current comparison and per-row audit rollback
+tests without enabling a production apply route. A separate reviewed authority
+contract is required before any operational re-enablement. Derivation that cannot
+be proven safe remains blocked rather than filled with a default. Canonical
+ownership remains WORLD for observation_instants and observation_revisions;
+the initially suspected forecasts retarget was refuted by db_table_ownership and
+is not implemented. No production database operation is part of this work.
+
+The orphan sigma-floor test currently expects a fitted historical floor to
+change current q, contrary to current source law. Replace only that obsolete
+test expectation using the existing genuine qualified fixture: fitted floor
+must not alter current q or its bounds. Preserve real source authority and
+causality; do not restore deleted helper doubles or modify any probability
+algorithm, writer, materializer, cycle-policy or shared equivalence helper.
+
+Separate disjoint implementation and independent review will retain original
+collection REDs, current-producer controls, transactional/metadata negatives and
+runtime-scope limits. Recheck collection without ignoring errors before claiming
+that the full sweep can execute. Publication waits for reviewed frozen evidence
+and the same-task scope check; no native-chain integration, merge, deployment,
+real order, production DB access or PR-body edit is included.
+
+The frozen backfill consumer passes 39 focused cases, independently repeated,
+plus 60 selected unchanged writer controls (62 other writer cases explicitly
+deselected). Two complementary independent probes show a WAL peer commit after
+the candidate reread is not overwritten and a trigger-suppressed audit insert
+rolls back current/history state. The eight original behavioral tests remain;
+missing/duplicate/contradictory snapshot metadata and a mismatched journal
+payload hash refuse rather than invent custody. These counts overlap in scope
+and do not establish operational backfill eligibility. The unchanged diagnostic
+summary still assumes numeric extrema; a nullable extremum can raise TypeError
+in that summary. This inspected pre-existing read-only limitation is deferred,
+not hidden by an operational-repair success claim.
+
+The floor module passes ten focused cases and sixteen independent adjacent
+source/math controls. The former applied-floor/catch-all-cap live expectations
+are retired explicitly; the lawful slack-floor invariance and Day0 neutral
+provenance/storage obligations remain. HIGH/LOW current q and bounds retain the
+physical sigma, an independent HKO shoulder CDF oracle, and an actual v2 carrier
+with 500 coherent stored draws. Existing canonical source fixtures are used
+with controlled fusion, future-member and revision-likelihood inputs; this is
+not a complete scheduled producer or live calibration-quality proof. Both
+independent reviews found no remaining Critical/Important issue in their named
+slices. Protected source writer, materializer and shared helper are unchanged.
+
+Changed-surface classification, invariant coverage, test-quality metadata,
+semantic lint, freshness headers, YAML parsing, planning/map and whitespace
+checks pass. The offline runner uses Python 3.12 and installed dependencies, whereas
+hosted full-sweep uses Python 3.13 plus timeout/rerun plugins. Unavailable package
+and plugin coverage remains explicit; no denied install is retried. Preserve
+the original b98 and 1e3 import REDs and do not bypass collection errors.
+
+The immutable bd8fb032 candidate (tree 35da4f5b, parent b98f993) completed full
+guarded collection: 36,941 collected, 36,921 selected, 20 explicit marker
+exclusions, zero errors, exit 0 in 113.70 seconds. Both repaired modules were
+included. The subsequent bounded sweep stopped at its declared maxfail=20:
+486 passed, 20 failed, four collection-level module skips, 20 deselected, exit 1
+in 312.30 seconds. Three module skips lack eccodes and one lacks a structured
+override catalog; these are not executed selected tests. Only 506 selected nodes
+executed, leaving 36,415 selected tests never executed; this is not a full-suite
+pass. All twenty exact failed nodes reproduce on clean 1e3db865 under the same
+guard in 24.23 seconds, and all six failed test files are byte-identical between
+base and candidate. No candidate-only failure is established in this observed
+set. The failures concern the unreadable-capture lease case, three static
+member-source assertions, two Day0 mixture structure assertions, five historical
+remaining-bias cases, four terminal-residual fingerprints and five EMOS cases.
+Their obligations and owner alignment require separate bounded review; none are
+weakened or omitted here to manufacture a full green result. This final evidence
+append changes only PLAN after the tested candidate, not its source/test bytes.

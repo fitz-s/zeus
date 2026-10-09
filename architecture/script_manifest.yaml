@@ -463,7 +463,26 @@ scripts:
     required_tests: [tests/test_tigge_snapshot_p_raw_backfill.py, tests/test_replay_time_provenance.py]
 
   backfill_truth_metadata.py: {class: etl_writer}
-  backfill_widened_observation_instants.py: {class: repair, dangerous_if_run: true, apply_flag: "--apply", target_db: state/zeus-world.db, dry_run_default: true, read_targets: [state/zeus-world.db], write_targets: [observation_instants, observation_revisions], authority_scope: repair_write, lifecycle: long_lived, status: active, delete_policy: retain_until_superseded, reuse_when: "One-shot backfill of the observation_instants revisions quarantine predating defect-2's monotone-widening fix (f1d135901) — folds each frozen cell's identity-matching wider payload_hash_mismatch revisions into the main row via the SAME _monotone_widening predicate the live writer now applies going forward. Idempotent — rerun after --apply finds nothing left to widen.", do_not_use_when: "The quarantine backlog is already fully folded (dry-run reports zero candidates), or a cell's revisions represent a genuine identity/value disagreement rather than a backfill completion (script correctly skips those on its own).", canonical_command: "python3 scripts/backfill_widened_observation_instants.py [--db PATH] (--dry-run | --apply)", external_inputs: [], promotion_barrier: "Confirmed zero live P&L overlap (all involved markets settled) — training-integrity backfill only, not a live-decision surface.", required_helpers: [src.data.observation_instants_writer._monotone_widening, src.data.observation_instants_writer._insert_revision], required_tests: [tests/scripts/test_backfill_widened_observation_instants.py], unguarded_write_rationale: "--dry-run is default (mode=ro connection, cannot write); --apply writes under db_writer_lock(BULK) with a single SAVEPOINT and an audit revision row per updated cell (reason=backfill_monotone_widening_2026-07-16)."}
+  backfill_widened_observation_instants.py:
+    class: repair
+    dangerous_if_run: true
+    apply_flag: "--apply"
+    target_db: state/zeus-world.db
+    dry_run_default: true
+    read_targets: [state/zeus-world.db]
+    write_targets: [observation_instants, observation_revisions]
+    authority_scope: repair_write
+    lifecycle: long_lived
+    status: active
+    delete_policy: retain_until_superseded
+    reuse_when: "Read-only diagnosis of the historical extrema-widening payload_hash_mismatch backlog with complete, unambiguous revision snapshots. Current-temperature-only revisions do not expand this historical candidate universe."
+    do_not_use_when: "Operational apply is always refused by both the public API and CLI. Missing or ambiguous revision metadata cannot be reconstructed. The private transaction kernel is fixture-tested only and is not an operational repair entry point."
+    canonical_command: "python3 scripts/backfill_widened_observation_instants.py [--db PATH]"
+    external_inputs: []
+    promotion_barrier: "No verified settled-only scope or zero-live-P&L-overlap proof exists. A separately reviewed authority contract must establish both before any operational apply is re-enabled; current code does not grant this permission."
+    required_helpers: [src.data.observation_instants_writer._monotone_widening, src.data.observation_instants_writer._insert_revision, src.data.observation_instants_writer._UPDATE_CURRENT_SQL]
+    required_tests: [tests/scripts/test_backfill_widened_observation_instants.py]
+    unguarded_write_rationale: "Default dry-run opens mode=ro. CLI --apply and public apply_backfill refuse before DB access or mutation. Private fixture transactions retain the real BULK writer lock, single SAVEPOINT, exact eight-field writer update, stale-current comparison and mandatory audit revision, with rollback on any failure. This does not establish production repair authority."
   backfill_wu_daily_all.py:
     class: etl_writer
     required_helpers: [src.contracts.settlement_semantics.SettlementSemantics, src.data.daily_observation_writer, scripts.backfill_completeness]
