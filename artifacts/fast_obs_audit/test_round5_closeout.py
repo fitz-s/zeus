@@ -341,3 +341,21 @@ class AuditTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main(verbosity=2)
+
+
+def test_asos5_rows_stay_out_of_the_revision_cohort_until_a_law_consumes_them():
+    import sqlite3
+
+    conn = sqlite3.connect(':memory:')
+    conn.row_factory = sqlite3.Row
+    conn.execute('CREATE TABLE observation_prints (id INTEGER PRIMARY KEY, source_channel TEXT, fetched_at_utc TEXT)')
+    conn.executemany('INSERT INTO observation_prints (source_channel, fetched_at_utc) VALUES (?, ?)', [
+        ('asos5_kdal', '2026-10-09T12:00:00+00:00'),
+        ('noaa_wrh_kdal', '2026-10-09T12:00:00+00:00'),
+        ('aviationweather_metar', '2026-10-09T12:00:00+00:00'),
+    ])
+    source = Path(__file__).with_name('round5_closeout.py').read_text()
+    where = source.split("observations=table_rows(conn,'observation_prints',where=")[1].split(",args=")[0]
+    rows = conn.execute('SELECT source_channel FROM observation_prints' + eval(where),
+                        ('2026-10-09T00:00:00+00:00', '2026-10-10T00:00:00+00:00')).fetchall()
+    assert sorted(r[0] for r in rows) == ['aviationweather_metar', 'noaa_wrh_kdal']

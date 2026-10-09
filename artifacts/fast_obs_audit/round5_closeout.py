@@ -833,7 +833,9 @@ def production(root: Path, out: Path, start: datetime, end: datetime, follow_unt
         with open_ro(world) as conn:
             stamps['world']=datetime.now(UTC).isoformat()
             if columns(conn,'observation_prints'):
-                observations=table_rows(conn,'observation_prints',where=' WHERE julianday(fetched_at_utc)>=julianday(?) AND julianday(fetched_at_utc)<julianday(?)',args=(start.isoformat(),end.isoformat()))
+                # asos5_* (5-min whole-degree ASOS rows) is ingested but consumed by no
+                # probability law yet; it enters the revision cohort once the dense law admits it.
+                observations=table_rows(conn,'observation_prints',where=" WHERE julianday(fetched_at_utc)>=julianday(?) AND julianday(fetched_at_utc)<julianday(?) AND source_channel NOT LIKE 'asos5\\_%' ESCAPE '\\'",args=(start.isoformat(),end.isoformat()))
             else:residuals.append('WORLD_OBSERVATION_PRINTS_UNAVAILABLE')
             kma={'by_station':{'RKSI':[],'RKPK':[]},'station_identity_unresolved':[]}
             if columns(conn,'opportunity_events'):
