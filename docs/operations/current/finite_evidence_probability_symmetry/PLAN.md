@@ -23268,3 +23268,49 @@ its actual fixed-proposal global scope and add the supplemental module's
 MP-EXT-002 falsifying-proof entry in architecture/test_quality.yaml. The existing
 quality gate, accepted proof types, invariant list and all other entries remain
 unchanged. This is metadata for the reviewed tests, not a new cash policy.
+
+
+### Adopt the existing fused-shape authority fixture owner (2026-10-09)
+
+checked=2026-W41; basis=exact-71374152 owner port, paired offline execution and
+independent review; until=recheck-on-use. Continue alignment with the existing
+local test owner 7460d6d6e5a857a5e96587f7179041f929507627 instead of implementing
+a competing fix or importing its unfinished source chain. This slice touches
+only tests/test_replacement_fused_q_shape.py and this existing record.
+
+Both original failing nodes reproduce the missing required request/conn error
+on the public base. Preserve all existing numerical decomposition, absolute
+center-disagreement, member and probability assertions. Supply a typed request
+and private canonical schema for the offline shapes, and explicitly prove their
+snapshot is absent. A surface hash alone must not authorize a shape with no
+canonical snapshot or current serving originals; the old surface-hash-only True
+expectation therefore becomes False. These no-original fixtures have other
+unqualified inputs and are not claimed as isolated single-fault source cases.
+
+The separate positive uses the already adopted normal Day1 HKO materializer and
+public ENTRY/HELD reader helper. It binds the persisted q vector, posterior
+identity and computation cut, requires live shape authority, removes the real
+anchor body to require refusal, then restores identical bytes and authority
+without changing its artifact row. This exact evidence change discriminates
+custody from numerical shape construction. Controlled canonical ENS and private
+HTTP/market fixtures do not prove native GRIB acquisition or current real-source
+forecast quality. This slice does not exercise the separate pinned JIT reader.
+
+The received owner patch is preserved exactly in the review evidence, with
+original file SHA256 a9f5ac6b54649ee1b6aae0d5bd74b5cc07da1e1af399e2dbe09eda54c98d09c5.
+The only port correction removes /JIT from its coverage comment; ASTs are identical.
+The final file SHA256 is
+47ebc31895625aed306c1bb053b8f17c196103a19a6c6ce92ccd9b3a517c4b7a.
+No shared helper, runtime authority or probability algorithm changes.
+
+Paired local evidence: two original nodes fail before the port; the complete
+owner module and money directory then pass 273 cases (20 fused shape plus 253
+money). After the comment-only correction, all 20 fused-shape cases pass again.
+Counts overlap. Independent review finds no blocking issue in this bounded
+slice and confirms all original math assertions survive. Preserve the original
+REDs, exact owner lineage and the distinction between offline algebra and
+canonical live evidence. Other required CI failures remain unresolved until
+separately dispositioned; this change does not relax KMA fallback or native-token
+policy. Publish an ordinary append to the existing draft repair branch, verify
+its exact tree and follow hosted checks to terminal. No deployment, real trade,
+production database operation or PR-body edit is included.

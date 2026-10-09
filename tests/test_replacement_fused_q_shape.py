@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-19
+# Last reused/audited: 2026-10-08
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md
 """Current-evidence predictive-shape authority antibodies."""
 from __future__ import annotations
@@ -7,11 +7,20 @@ from __future__ import annotations
 import json
 import math
 import statistics
+import sqlite3
+from dataclasses import replace
+from datetime import datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 
 import src.data.replacement_forecast_materializer as mod
+from tests.test_replacement_forecast_materializer import (
+    _hko_native_surfaces,  # noqa: F401 -- dependency of the imported physical fixture
+    _hko_source_surface,  # noqa: F401 -- registered pytest fixture, not an authority mock
+)
 from src.contracts.ensemble_snapshot_provenance import (
     ECMWF_OPENDATA_HIGH_DATA_VERSION,
     GRID_SURFACE_EVIDENCE_REVISION,
@@ -154,7 +163,37 @@ def test_current_ensemble_center_disagreement_stays_in_predictive_shape() -> Non
     assert q_no_11 - 0.27 > 0.0
 
 
-def test_aligned_ensemble_center_preserves_within_between_decomposition() -> None:
+@pytest.fixture
+def _shape_authority_context(tmp_path):
+    """Typed same-family/cut context, deliberately without canonical originals."""
+    from src.state.db import init_schema_forecasts
+    from tests.test_replacement_forecast_materializer import _request
+
+    conn = sqlite3.connect(tmp_path / "shape-forecast.db")
+    conn.row_factory = sqlite3.Row
+    init_schema_forecasts(conn)
+    conn.commit()
+    def context(shape):
+        cycle = datetime.fromisoformat(shape.source_cycle_time)
+        available = datetime.fromisoformat(shape.source_available_at)
+        cut = available + timedelta(minutes=1)
+        request = replace(_request(source_cycle_time=cycle, computed_at=cut,
+            baseline_source_available_at=available, openmeteo_source_available_at=available),
+            target_date=cut.astimezone(ZoneInfo("Asia/Shanghai")).date(),
+            expires_at=cut + timedelta(minutes=15))
+        assert conn.execute("SELECT 1 FROM ensemble_snapshots WHERE snapshot_id=?",
+            (shape.snapshot_id,)).fetchone() is None
+        from src.data.replacement_forecast_source_run_identity import native_coordinate_certificate_reason
+        assert native_coordinate_certificate_reason(conn, shape=shape.as_payload(), city=request.city,
+            target_date=request.target_date, metric=request.temperature_metric) == "REPLACEMENT_CURRENT_COORDINATE_SNAPSHOT_MISSING"
+        return conn, request
+    try:
+        yield context
+    finally:
+        conn.close()
+
+
+def test_aligned_ensemble_center_preserves_within_between_decomposition(_shape_authority_context) -> None:
     raw = tuple(range(-25, 26))
     scale = 0.32530930629305355 / statistics.pstdev(raw)
     members = tuple(11.0204 + value * scale for value in raw)
@@ -184,10 +223,11 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
 
     assert shape.ensemble_center_delta_c == pytest.approx(0.0, abs=1e-12)
     assert shape.predictive_sigma_c == pytest.approx(0.4085217065969294)
+    conn, request = _shape_authority_context(shape)
     # Numerical shape construction is useful offline, but geometry-free math
     # alone is never a live probability witness.
     assert mod._fusion_current_evidence_shape_has_live_authority(
-        SimpleNamespace(current_evidence_shape=shape.as_payload())
+        SimpleNamespace(current_evidence_shape=shape.as_payload()), request=request, conn=conn,
     ) is False
 
     from tests.test_replacement_forecast_materializer import _fixture_ens_surface_provenance
@@ -210,12 +250,14 @@ def test_aligned_ensemble_center_preserves_within_between_decomposition() -> Non
     )
     assert certified.predictive_sigma_c == shape.predictive_sigma_c
     assert certified.shape_hash != shape.shape_hash
+    # A surface hash changes mathematical identity, but does not create its
+    # missing canonical snapshot, current provider bodies or serving witness.
     assert mod._fusion_current_evidence_shape_has_live_authority(
-        SimpleNamespace(current_evidence_shape=certified.as_payload())
-    ) is True
+        SimpleNamespace(current_evidence_shape=certified.as_payload()), request=request, conn=conn,
+    ) is False
 
 
-def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement() -> None:
+def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement(_shape_authority_context) -> None:
     """A location shift cannot turn conflicting live evidence into certainty."""
 
     raw = tuple(range(-25, 26))
@@ -254,9 +296,47 @@ def test_stale_shape_reuse_preserves_raw_members_and_center_disagreement() -> No
         == STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
     )
     assert shape.between_cohort_status == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
+    conn, request = _shape_authority_context(shape)
     assert mod._fusion_current_evidence_shape_has_live_authority(
-        SimpleNamespace(current_evidence_shape=shape.as_payload())
+        SimpleNamespace(current_evidence_shape=shape.as_payload()), request=request, conn=conn,
     ) is False
+
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_normal_public_shape_has_live_authority_and_original_reset(tmp_path, monkeypatch):
+    """Real private producer/public chain, separate from the offline algebra."""
+    from tests.test_replacement_forecast_materializer import _normal_hko_day1_qualified_context
+
+    observed = []
+    def qualified(*, conn, request, bundle):
+        row = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (bundle.posterior_id,)).fetchone()
+        assert row is not None
+        fusion = json.loads(row["provenance_json"])["bayes_precision_fusion"]
+        actual = SimpleNamespace(**{key: fusion[key] for key in
+            ("current_evidence_shape", "current_value_serving", "used_models")})
+        assert bundle.posterior_identity_hash == row["posterior_identity_hash"]
+        assert dict(bundle.q) == pytest.approx(json.loads(row["q_json"]))
+        assert datetime.fromisoformat(row["computed_at"]) == request.computed_at
+        assert mod._fusion_current_evidence_shape_has_live_authority(actual, request=request, conn=conn)
+        artifact = conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",
+            (request.anchor_artifact_id,)).fetchone()
+        assert datetime.fromisoformat(artifact["captured_at"]) <= request.computed_at
+        path = Path(artifact["artifact_path"])
+        original, artifact_before = path.read_bytes(), tuple(artifact)
+        path.unlink()
+        try:
+            assert not mod._fusion_current_evidence_shape_has_live_authority(actual, request=request, conn=conn)
+        finally:
+            path.write_bytes(original)
+        assert mod._fusion_current_evidence_shape_has_live_authority(actual, request=request, conn=conn)
+        assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",
+            (request.anchor_artifact_id,)).fetchone()) == artifact_before
+        observed.append(bundle.posterior_identity_hash)
+    # This helper independently reads ENTRY/HELD, deletes the real anchor
+    # body, rejects, restores those same bytes, and checks the q identity.
+    _normal_hko_day1_qualified_context(tmp_path, monkeypatch, on_qualified_context=qualified)
+    assert len(observed) == 1
 
 
 def _shape_for_cycle_gate(
