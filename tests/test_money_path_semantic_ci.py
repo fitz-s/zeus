@@ -1,6 +1,6 @@
 # Created: 2026-05-21
-# Last reused/audited: 2026-10-06
-# Lifecycle: created=2026-05-21; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Last reused/audited: 2026-10-09
+# Lifecycle: created=2026-05-21; last_reviewed=2026-10-09; last_reused=2026-10-09
 # Purpose: Self-defense tests for money-path semantic CI helper scripts.
 # Reuse: Run when changing scripts/ci money-path classifier/coverage/test-quality gates.
 # Authority basis: architecture/money_path_objects.yaml; architecture/money_path_ci.yaml; architecture/test_quality.yaml
@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import subprocess
 import sys
@@ -19,36 +20,80 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture
+def source_protocol_objects(tmp_path):
+    """Synthetic AST defenses use explicit test declarations, not retired owners."""
+    from scripts.ci.semantic_diff_classifier import load_yaml
+
+    objects = load_yaml(ROOT / "architecture/money_path_objects.yaml")
+    objects["source_protocol_objects"] = {
+        "test_source_diagnostic_reason": {
+            "owner": "src/data/ecmwf_open_data.py",
+            "kind": "source_diagnostic_reason",
+            "values": [
+                "NATIVE_2T_CAPTURE_UNKNOWN",
+                "ROLE_ORIGINAL_CANONICAL_CLOCK_UNKNOWN",
+                "ROLE_ORIGINAL_CANONICAL_CAPTURE_UNKNOWN",
+                "ROLE_ORIGINAL_CANONICAL_IDENTITY_UNKNOWN",
+                "ROLE_ORIGINAL_INDEX_UNKNOWN",
+                "ROLE_ORIGINAL_REPLICA_ORIGIN_UNKNOWN",
+            ],
+            "uses": {
+                "dictionary_fields": ["reason"],
+                "exception_calls": ["ValueError"],
+                "positional_arguments": {"NativeTemperatureSource": 4},
+            },
+        },
+        "test_source_ingest_mode": {
+            "owner": "src/data/ecmwf_open_data.py",
+            "kind": "source_ingest_mode",
+            "values": ["ARCHIVE_BACKFILL", "SCHEDULED_LIVE"],
+            "uses": {
+                "parameter_fields": ["ingest_mode"],
+                "dictionary_get_fields": ["ingest_mode"],
+                "membership_bindings": ["ingest_mode", "mode"],
+            },
+        },
+    }
+    path = tmp_path / "test-source-protocol-objects.json"
+    path.write_text(json.dumps(objects), encoding="utf-8")
+    return path
+
+
 @pytest.mark.parametrize('reason', [
     'ROLE_ORIGINAL_CANONICAL_CLOCK_UNKNOWN', 'ROLE_ORIGINAL_CANONICAL_CAPTURE_UNKNOWN',
     'ROLE_ORIGINAL_CANONICAL_IDENTITY_UNKNOWN', 'ROLE_ORIGINAL_INDEX_UNKNOWN',
     'ROLE_ORIGINAL_REPLICA_ORIGIN_UNKNOWN',
 ])
-def test_paired_original_exception_protocol_cannot_launder_money_states(tmp_path, reason):
-    rc, payload = _source_protocol_classification(tmp_path, 'raise ValueError(' + repr(reason) + ')')
+def test_paired_original_exception_protocol_cannot_launder_money_states(tmp_path, source_protocol_objects, reason):
+    rc, payload = _source_protocol_classification(tmp_path, 'raise ValueError(' + repr(reason) + ')',
+        objects=source_protocol_objects)
     assert rc == 0 and not payload['unregistered_objects']
     for strong in ("status=" + repr(reason),
                    "class Choices(Enum):\n STATE=" + repr(reason),
                    'sql="CHECK(state IN (\'' + reason + '\'))"'):
         rc, payload = _source_protocol_classification(tmp_path,
-            'raise ValueError(' + repr(reason) + ')\n' + strong)
+            'raise ValueError(' + repr(reason) + ')\n' + strong, objects=source_protocol_objects)
         assert rc == 2 and payload['unregistered_objects']
 
 
-def _source_protocol_classification(tmp_path, source, *, owner="src/data/ecmwf_open_data.py"):
+def _source_protocol_classification(tmp_path, source, *, owner="src/data/ecmwf_open_data.py", objects=None):
     diff = tmp_path / "source.patch"
     diff.write_text(f"diff --git a/{owner} b/{owner}\n+++ b/{owner}\n" +
         "\n".join("+" + line for line in source.splitlines()) + "\n")
-    proc = subprocess.run([sys.executable, "scripts/ci/semantic_diff_classifier.py",
-        "--diff-file", str(diff), "--fail-on-unregistered"], cwd=ROOT,
+    command = [sys.executable, "scripts/ci/semantic_diff_classifier.py",
+        "--diff-file", str(diff), "--fail-on-unregistered"]
+    if objects is not None:
+        command.extend(["--objects", str(objects)])
+    proc = subprocess.run(command, cwd=ROOT,
         text=True, capture_output=True)
     return proc.returncode, json.loads(proc.stdout)
 
 
-def test_classifier_routes_declared_source_reason_and_ingest_mode_not_lifecycle(tmp_path):
+def test_classifier_routes_declared_source_reason_and_ingest_mode_not_lifecycle(tmp_path, source_protocol_objects):
     rc, payload = _source_protocol_classification(tmp_path,
         'def capture(ingest_mode="ARCHIVE_BACKFILL"):\n'
-        '    return {"reason": "NATIVE_2T_CAPTURE_UNKNOWN"}\n')
+        '    return {"reason": "NATIVE_2T_CAPTURE_UNKNOWN"}\n', objects=source_protocol_objects)
     assert rc == 0 and not payload["unregistered_objects"]
     assert len(payload["new_source_protocol_values"]) == 2
     assert "ARCHIVE_BACKFILL" not in payload["new_states"]
@@ -56,35 +101,106 @@ def test_classifier_routes_declared_source_reason_and_ingest_mode_not_lifecycle(
     assert {"MP-EXT-001", "MP-EXT-002"} <= set(payload["required_invariants"])
     rc, payload = _source_protocol_classification(tmp_path,
         'def capture(ingest_mode="ARCHIVE_BACKFILL"):\n'
-        '    return {"qualification_status": "UNKNOWN" if ingest_mode == "SCHEDULED_LIVE" else "OFFLINE_ONLY"}\n')
+        '    return {"qualification_status": "UNKNOWN" if ingest_mode == "SCHEDULED_LIVE" else "OFFLINE_ONLY"}\n',
+        objects=source_protocol_objects)
     assert rc == 0 and not payload["unregistered_objects"]
 
 
-def test_classifier_native_21_tokens_have_structural_protocol_proof():
+CURRENT_SOURCE_PROTOCOL_VALUES = {
+    "scripts/check_live_restart_preflight.py": {
+        "PROBABILITY_UPGRADE_CURRENT_INPUT_ROLE_UNKNOWN",
+        "PROBABILITY_UPGRADE_HELD_SCOPE_UNKNOWN",
+    },
+    "scripts/deploy_live.py": {"PROBABILITY_UPGRADE_CODE_IDENTITY_UNKNOWN"},
+}
+
+
+def _assert_active_source_protocol_proof(objects, sources):
     from scripts.ci.semantic_diff_classifier import classify, load_yaml
-    objects = load_yaml(ROOT / "architecture/money_path_objects.yaml")
+
     mapping = load_yaml(ROOT / "architecture/money_path_ci.yaml")
-    declarations = {key: spec for key, spec in objects["source_protocol_objects"].items()
-                    if spec["owner"] in {"src/data/ecmwf_open_data.py", "src/ingest/forecast_live_daemon.py"}}
+    declarations = objects["source_protocol_objects"]
     owners = {spec["owner"] for spec in declarations.values()}
-    sources = {owner: (ROOT / owner).read_text() for owner in owners}
-    # Real producer AST, without a historical git-object dependency in shallow
-    # CI checkouts. The separately captured base->candidate CLI proves routing.
+    declared = {owner: {value for spec in declarations.values() if spec["owner"] == owner
+                        for value in spec["values"]} for owner in owners}
+    # Pin the nonempty current epoch before looking at source. Never filter out
+    # absent literals: a missing declaration or producer must fail this proof.
+    assert declared == CURRENT_SOURCE_PROTOCOL_VALUES
+    expected = set()
     diff = ""
     for owner in sorted(owners):
-        values = {value for spec in declarations.values() if spec["owner"] == owner
-                  for value in spec["values"] if value != "SCHEDULED_LIVE"}
+        constants = [node.value for node in ast.walk(ast.parse(sources[owner]))
+                     if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+        for spec in declarations.values():
+            if spec["owner"] != owner:
+                continue
+            assert spec["values"]
+            for value in spec["values"]:
+                assert value in constants, f"missing producer: {owner}:{value}"
+                expected.add(f'{owner}:{spec["kind"]}:{value}')
         diff += f"diff --git a/{owner} b/{owner}\n+++ b/{owner}\n"
-        diff += "\n".join('+"' + value + '"' for value in sorted(values)) + "\n"
+        diff += "\n".join('+"' + value + '"' for value in sorted(declared[owner])) + "\n"
+    # Full real-owner ASTs prove every occurrence, including mixed illegal uses,
+    # without requiring historical git objects in shallow CI checkouts.
     payload = classify(diff, sorted(owners), objects, mapping, sources=sources).to_dict()
     assert not payload["unregistered_objects"], payload["unregistered_objects"]
-    protocols = {value.rsplit(":", 1)[-1] for value in payload["new_source_protocol_values"]}
-    assert "ARCHIVE_BACKFILL" in protocols
-    assert len([value for value in protocols if value.endswith("_UNKNOWN")]) == 25
-    assert not protocols.intersection(payload["new_states"])
+    assert set(payload["new_source_protocol_values"]) == expected
+    assert {"MP-EXT-001", "MP-EXT-002"} <= set(payload["required_invariants"])
+    assert not payload["new_states"]
 
 
-def test_classifier_source_reason_mixed_with_money_uses_remains_failclosed(tmp_path):
+def test_classifier_all_active_tokens_have_structural_protocol_proof():
+    from scripts.ci.semantic_diff_classifier import load_yaml
+
+    objects = load_yaml(ROOT / "architecture/money_path_objects.yaml")
+    sources = {spec["owner"]: (ROOT / spec["owner"]).read_text(encoding="utf-8")
+               for spec in objects["source_protocol_objects"].values()}
+    _assert_active_source_protocol_proof(objects, sources)
+
+
+@pytest.mark.parametrize("owner,reason", [
+    (owner, reason) for owner, reasons in CURRENT_SOURCE_PROTOCOL_VALUES.items() for reason in sorted(reasons)
+])
+@pytest.mark.parametrize("damage", ["missing_declaration", "missing_literal", "wrong_owner", "mixed_money_use"])
+def test_classifier_active_protocol_proof_rejects_missing_or_mixed_producers(owner, reason, damage):
+    from scripts.ci.semantic_diff_classifier import load_yaml
+
+    objects = load_yaml(ROOT / "architecture/money_path_objects.yaml")
+    sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in CURRENT_SOURCE_PROTOCOL_VALUES}
+    _assert_active_source_protocol_proof(objects, sources)
+    if damage in {"missing_declaration", "wrong_owner"}:
+        for spec in objects["source_protocol_objects"].values():
+            if spec["owner"] == owner and reason in spec["values"]:
+                if damage == "missing_declaration":
+                    spec["values"].remove(reason)
+                else:
+                    spec["owner"] = "scripts/wrong_owner.py"
+    elif damage == "missing_literal":
+        assert sources[owner].count(reason) == 1
+        sources[owner] = sources[owner].replace(reason, "REMOVED_REASON")
+    else:
+        sources[owner] += f'\nstatus = "{reason}"\n'
+    with pytest.raises(AssertionError):
+        _assert_active_source_protocol_proof(objects, sources)
+
+
+@pytest.mark.parametrize("owner,value,source", [
+    ("src/data/ecmwf_open_data.py", "NATIVE_2T_CAPTURE_UNKNOWN",
+     'def capture():\n    return {"reason": "NATIVE_2T_CAPTURE_UNKNOWN"}\n'),
+    ("src/ingest/forecast_live_daemon.py", "NATIVE_2T_TARGET_OR_MANDATORY_PLAN_UNKNOWN",
+     'def capture():\n    return {"reason": "NATIVE_2T_TARGET_OR_MANDATORY_PLAN_UNKNOWN"}\n'),
+    ("src/data/ecmwf_open_data.py", "ARCHIVE_BACKFILL",
+     'def capture(ingest_mode="ARCHIVE_BACKFILL"):\n    return ingest_mode\n'),
+])
+def test_classifier_retired_native_protocol_requires_renewed_registration(tmp_path, owner, value, source):
+    # Deliberately use the real active registry, never the synthetic fixture.
+    rc, payload = _source_protocol_classification(tmp_path, source, owner=owner)
+    assert rc == 2
+    assert f"state:{value}" in payload["unregistered_objects"]
+    assert not payload["new_source_protocol_values"]
+
+
+def test_classifier_source_reason_mixed_with_money_uses_remains_failclosed(tmp_path, source_protocol_objects):
     reason = "NATIVE_2T_CAPTURE_UNKNOWN"
     for use in (f'state = "{reason}"', f'return {{"status": "{reason}"}}',
                 f'return {{"command_state": "{reason}"}}',
@@ -92,7 +208,7 @@ def test_classifier_source_reason_mixed_with_money_uses_remains_failclosed(tmp_p
                 f'return {{"action": "{reason}"}}', f'return {{"side": "{reason}"}}',
                 f'return NativeTemperatureSource("{reason}", None, 0, ())'):
         rc, payload = _source_protocol_classification(tmp_path,
-            f'def capture():\n    report = {{"reason": "{reason}"}}\n    {use}\n')
+            f'def capture():\n    report = {{"reason": "{reason}"}}\n    {use}\n', objects=source_protocol_objects)
         assert rc == 2 and payload["unregistered_objects"], use
         assert not any(value.endswith(reason) for value in payload["new_source_protocol_values"])
 
@@ -112,29 +228,30 @@ def test_classifier_upgrade_refusal_is_reason_not_state(tmp_path, owner, reason,
         assert rc == 2 and payload["unregistered_objects"]
 
 
-def test_classifier_source_declared_literal_enum_or_sql_check_is_not_exempt(tmp_path):
+def test_classifier_source_declared_literal_enum_or_sql_check_is_not_exempt(tmp_path, source_protocol_objects):
     for body in ('from enum import Enum\nclass Kind(Enum):\n    FIELD = "NATIVE_2T_CAPTURE_UNKNOWN"\n',
                  'sql = "CHECK (state IN (\'NATIVE_2T_CAPTURE_UNKNOWN\'))"\n'):
-        rc, payload = _source_protocol_classification(tmp_path, body)
+        rc, payload = _source_protocol_classification(tmp_path, body, objects=source_protocol_objects)
         assert rc == 2 and payload["unregistered_objects"]
         # A separate legitimate reason cannot launder the same SQL/Enum state.
         rc, payload = _source_protocol_classification(tmp_path,
-            'report = {"reason": "NATIVE_2T_CAPTURE_UNKNOWN"}\n' + body)
+            'report = {"reason": "NATIVE_2T_CAPTURE_UNKNOWN"}\n' + body, objects=source_protocol_objects)
         assert rc == 2 and payload["unregistered_objects"]
         assert not payload["new_source_protocol_values"]
 
 
-def test_classifier_source_wrong_owner_unknown_reason_and_mode_fail(tmp_path):
+def test_classifier_source_wrong_owner_unknown_reason_and_mode_fail(tmp_path, source_protocol_objects):
     rc, payload = _source_protocol_classification(tmp_path,
         'def submit():\n    return {"reason": "NATIVE_2T_CAPTURE_UNKNOWN"}\n',
-        owner="src/execution/executor.py")
+        owner="src/execution/executor.py", objects=source_protocol_objects)
     assert rc == 2 and "state:NATIVE_2T_CAPTURE_UNKNOWN" in payload["unregistered_objects"]
     for source in ('def capture(ingest_mode="SURPRISE_PROTOCOL"):\n    return ingest_mode\n',
                    'def capture():\n    return {"reason": "NATIVE_UNDECLARED_UNKNOWN"}\n'):
-        rc, payload = _source_protocol_classification(tmp_path, source)
+        rc, payload = _source_protocol_classification(tmp_path, source, objects=source_protocol_objects)
         assert rc == 2 and payload["unregistered_objects"]
     rc, payload = _source_protocol_classification(tmp_path,
-        'def capture(ingest_mode="SCHEDULED_LIVE"):\n    return {"command_status": "SCHEDULED_LIVE"}\n')
+        'def capture(ingest_mode="SCHEDULED_LIVE"):\n    return {"command_status": "SCHEDULED_LIVE"}\n',
+        objects=source_protocol_objects)
     assert rc == 2 and payload["unregistered_objects"]
 
 

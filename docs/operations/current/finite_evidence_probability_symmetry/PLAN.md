@@ -23360,3 +23360,67 @@ ordinary append to the existing draft repair branch, verify exact tree/head,
 and follow hosted checks to terminal. Red required checks still block release;
 there is no deployment, real order, production database operation, PR-body edit
 or live/funding-readiness claim.
+
+
+### Align source-protocol declarations with the rollback epoch (2026-10-09)
+
+checked=2026-W41; basis=exact-b10e6a5 source inspection and scoped owner audit;
+until=recheck-on-use. Planned surfaces are architecture/money_path_objects.yaml,
+tests/test_money_path_semantic_ci.py, and this existing record. Harmonize the
+active declaration registry with the actual producer epoch while preserving
+MP-EXT-001, MP-EXT-002 and fail-closed classification of unknown money objects.
+The rollback removed the declared ECMWF/forecast-daemon owner uses for
+native_temperature_diagnostic_reason, native_scheduler_diagnostic_reason and
+native_temperature_ingest_mode; keeping their declarations active does not prove
+their structural use. ARCHIVE_BACKFILL and SCHEDULED_LIVE still occur in the
+separate source-run repository/schema contract, which those owner-scoped
+declarations never covered. Those uses remain untouched. No runtime native
+feature or classifier algorithm will be restored or changed for this repair.
+
+Retire only those three stale registry blocks. Replace the historical hard-coded
+native-token count assertion with nonempty proof over all currently active
+source-protocol declarations and every exact owner/token occurrence. The three
+actual upgrade-refusal reasons in the two current owner scripts must all remain
+structurally qualified; filtering missing tokens into an empty pass is forbidden.
+Use the classifier's existing --objects input to give generic synthetic defenses
+an explicit test-only registry. Preserve wrong-owner, mixed money-use, SQL/Enum
+and unknown-mode rejection; prove that reintroducing retired UNKNOWN/BACKFILL
+values without renewed registration fails. Keep original RED evidence, run the
+full classifier/self-defense and static gates, and independently review before
+publication. Later native-chain integration must restore its own qualified
+registration together with its real producers, not transplant a count-only fix.
+Implementation retains the planned three-path scope. The original full
+self-defense module reproduces one obsolete-proof failure and 24 passes. The
+final module has 40 passing cases; the four selected market/schema relationship
+cases also pass, 44 total. Independent review separately runs the same selected
+44 cases successfully and probes all three real active positive tokens, 18
+mutated producer/registry controls and all 26 retired UNKNOWN/BACKFILL values at
+their exact former owners. Each retired reintroduction fails under the real
+active registry, independently of the synthetic registry used for generic AST
+mechanism tests. These counts overlap and are not extra trading replay cases.
+
+Static scoped classification, invariant coverage, test quality, semantic lint,
+YAML exact-retirement comparison and diff checks pass. The registry SHA256 is
+448823bba5684b3bf6bebbbfcfe90fcc6bd52202a891edb9bae548acdd57ffe6;
+the final self-defense test SHA256 is
+42b662715d6f64c0e71dc40259593e47ba55df6ad97894bc927ebf92dcf837ac.
+Independent review reports no remaining Critical/Important finding. Runtime
+owner, source-run repository/schema and classifier implementation bytes remain
+identical to the published base b10e6a5.
+
+Unknown-mode refusal is proven for an explicitly declared protocol in the
+synthetic registry. Neutral SCHEDULED_LIVE/SURPRISE_PROTOCOL spellings alone
+are not newly detected at the retired, now-unregistered ECMWF owner; this slice
+does not invent a repository-wide unknown-mode detector. Any later native
+integration must restore its qualified owner registration with its actual
+producer and re-prove the changed epoch. No source policy or parser fallback
+is relaxed, and no incomplete local native chain is combined here.
+
+The published KMA milestone b10e6a5 is CI-terminal: release 2,759 passed, money
+253 passed, and selected relationships 2,378 passed with the same inherited
+classifier failure. Publish this independently reviewed registry/test alignment
+only by ordinary append to
+the same draft repair branch, verify exact head/tree and follow all hosted
+checks to terminal. No active user worktree, runtime policy, production database,
+deployment, trade or PR-body edit is in this slice. Offline classifier proof is
+not production execution or funding-readiness evidence.
