@@ -7528,6 +7528,7 @@ def _compute_posterior_payload(
     _day0_shared_carrier_station_extremes: tuple[dict[str, object], ...] = ()
     _day0_conditional_high_shape: object | None = None
     _day0_remaining_bias_provenance: dict[str, object] = {}
+    _day0_carrier_inputs_absent: str | None = None
     _day0_shared_carrier_error: str | None = None
     _provisional_extreme_c: float | None = None
     from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE, day0_is_carrier_source
@@ -7614,51 +7615,68 @@ def _compute_posterior_payload(
             if _day0_carrier_extreme_c(request) is not None:
                 if _wu_fast_residual_source and _fast_residual_likelihood is None:
                     raise ValueError("DAY0_WU_CURRENT_CARRIER_RESIDUAL_UNAVAILABLE")
-                (
-                    _carrier_future,
-                    _carrier_path_sigma,
-                    _carrier_cutoff,
-                    _day0_shared_carrier_station_extremes,
-                    _day0_conditional_high_shape,
-                ) = (
-                    _day0_noaa_carrier_future_members(
-                        conn,
-                        request,
-                        metric=metric,
-                        fusion=bayes_precision_fusion_override,
+                try:
+                    (
+                        _carrier_future,
+                        _carrier_path_sigma,
+                        _carrier_cutoff,
+                        _day0_shared_carrier_station_extremes,
+                        _day0_conditional_high_shape,
+                    ) = (
+                        _day0_noaa_carrier_future_members(
+                            conn,
+                            request,
+                            metric=metric,
+                            fusion=bayes_precision_fusion_override,
+                        )
                     )
-                )
-                from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
+                    from src.events.day0_authority import DAY0_REMAINING_CENTER_POLICY
 
-                _day0_remaining_bias_provenance = {
-                    "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
-                    "day0_remaining_center_bias_c": 0.0,
-                    "day0_remaining_bias_status": "unshifted_live_policy",
-                    "day0_remaining_bias_artifact": None,
-                }
-                _day0_shared_carrier, _day0_shared_carrier_likelihood = (
-                    _day0_noaa_preliminary_carrier(
-                        conn,
-                        request,
-                        metric=metric,
-                        future_members_c=_carrier_future,
-                        bins=request.bins,
-                        path_error_sigma_c=_carrier_path_sigma,
-                        final_extreme_centers_c=tuple(
-                            float(evidence["forecast_value_c"])
-                            for evidence in _day0_shared_carrier_station_extremes
-                        ),
-                        remaining_center_bias_c=0.0,
-                        conditional_high_shape_identity=(
-                            None if _day0_conditional_high_shape is None
-                            else _day0_conditional_high_shape.identity
-                        ),
-                        fast_residual_likelihood=(
-                            _fast_residual_likelihood if _wu_fast_residual_source else None
-                        ),
+                    _day0_remaining_bias_provenance = {
+                        "day0_remaining_center_policy": DAY0_REMAINING_CENTER_POLICY,
+                        "day0_remaining_center_bias_c": 0.0,
+                        "day0_remaining_bias_status": "unshifted_live_policy",
+                        "day0_remaining_bias_artifact": None,
+                    }
+                    _day0_shared_carrier, _day0_shared_carrier_likelihood = (
+                        _day0_noaa_preliminary_carrier(
+                            conn,
+                            request,
+                            metric=metric,
+                            future_members_c=_carrier_future,
+                            bins=request.bins,
+                            path_error_sigma_c=_carrier_path_sigma,
+                            final_extreme_centers_c=tuple(
+                                float(evidence["forecast_value_c"])
+                                for evidence in _day0_shared_carrier_station_extremes
+                            ),
+                            remaining_center_bias_c=0.0,
+                            conditional_high_shape_identity=(
+                                None if _day0_conditional_high_shape is None
+                                else _day0_conditional_high_shape.identity
+                            ),
+                            fast_residual_likelihood=(
+                                _fast_residual_likelihood if _wu_fast_residual_source else None
+                            ),
+                        )
                     )
-                )
-                if not str(
+                except ValueError as exc:
+                    from src.events.day0_authority import day0_is_native_report_source
+
+                    # A native report route served before it joined the carrier
+                    # region (fused q, observation as provenance). Its hourly and
+                    # current-state inputs are optional to that service: their
+                    # absence prices the request exactly as before, never a block.
+                    if not (
+                        str(exc) in _DAY0_MISSING_CURRENT_EVIDENCE_REASONS
+                        and day0_is_native_report_source(request.day0_observed_extreme_source)
+                    ):
+                        raise
+                    _day0_carrier_inputs_absent = str(exc)
+                    _day0_shared_carrier_station_extremes = ()
+                    _day0_conditional_high_shape = None
+                    _day0_remaining_bias_provenance = {}
+                if _day0_carrier_inputs_absent is None and not str(
                     _day0_shared_carrier_likelihood.get("identity_hash") or ""
                 ):
                     raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_IDENTITY_MISSING")
@@ -8274,6 +8292,7 @@ def _compute_posterior_payload(
         and bayes_precision_fusion_override is not None
         and bayes_precision_fusion_override.predictive_sigma_c is not None
         and _day0_shared_carrier is None
+        and _day0_carrier_inputs_absent is None
     ):
         raise ValueError(
             _day0_shared_carrier_error

@@ -3413,6 +3413,67 @@ def test_noaa_missing_current_state_blocks_only_one_family_and_drains_on_next_cu
                if row["id"] in committed_prints)
 
 
+@pytest.mark.parametrize("missing", ("current_state", "hourly_vectors"))
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_native_report_without_carrier_inputs_serves_as_before(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, missing: str,
+) -> None:
+    """A native report request (here the registered route for the city's own station) with no current-state
+    print or no hourly vectors serves the live fused q: same q and observation provenance as the source served
+    before it joined the carrier region.  The same request on AWC still blocks; a carrier failure for any
+    other reason still raises."""
+    from src.events import day0_authority
+
+    conn, request = _shanghai_noaa_future_request(
+        tmp_path, monkeypatch, without_current_state=missing == "current_state")
+    if missing == "hourly_vectors":
+        conn.execute("DELETE FROM day0_hourly_vectors")
+        conn.commit()
+    native = "mgm_metar_temperature"
+    native_request = replace(request, day0_observed_extreme_source=native)
+    real_native = day0_authority.day0_is_native_report_source
+
+    def as_native(source, *, station=None):
+        return str(source or "").strip().lower() == native or real_native(source, station=station)
+
+    def outcome(req):
+        try:
+            prepared = materializer_mod.prepare_replacement_forecast_live(conn, req)
+        except ValueError as exc:
+            return f"RAISED:{exc}", None
+        if isinstance(prepared, materializer_mod.ReplacementForecastMaterializeResult):
+            return "BLOCKED:" + ",".join(prepared.reason_codes), None
+        return "PREPARED", prepared.posterior
+
+    awc_outcome, _ = outcome(request)
+    assert awc_outcome in {
+        "BLOCKED:DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING",
+        "BLOCKED:DAY0_NOAA_PRELIMINARY_CARRIER_VECTOR_MISSING",
+    }
+    # Live: the native source is outside the carrier region (no preliminary membership).
+    monkeypatch.setattr(day0_authority, "day0_is_native_report_source", lambda *_a, **_k: False)
+    live_outcome, live_posterior = outcome(native_request)
+    # Branch: the native source is preliminary and a carrier source; its inputs are absent.
+    monkeypatch.setattr(day0_authority, "day0_is_native_report_source", as_native)
+    assert day0_authority.day0_is_carrier_source(native)
+    branch_outcome, branch_posterior = outcome(native_request)
+    assert (live_outcome, branch_outcome) == ("PREPARED", "PREPARED")
+    assert branch_posterior.q == live_posterior.q
+    live_prov, branch_prov = live_posterior.provenance_payload, branch_posterior.provenance_payload
+    assert branch_prov["q_shape"] == live_prov["q_shape"] == "fused_normal_direct"
+    assert branch_prov["replacement_q_mode"] == live_prov["replacement_q_mode"]
+    assert branch_prov["day0_provisional_observation"] == live_prov["day0_provisional_observation"]
+    assert branch_prov["day0_provisional_observation"]["source"] == native
+    assert not any(key.startswith("day0_remaining_carrier") for key in branch_prov)
+
+    # Only absent inputs fall back: any other carrier failure still raises for the native source.
+    def broken(*_args, **_kwargs):
+        raise ValueError("DAY0_NOAA_PRELIMINARY_CARRIER_UNIT_INVALID")
+
+    monkeypatch.setattr(materializer_mod, "_day0_noaa_carrier_future_members", broken)
+    assert outcome(native_request)[0] == "RAISED:DAY0_NOAA_PRELIMINARY_CARRIER_UNIT_INVALID"
+
+
 @pytest.mark.usefixtures("_hko_source_surface")
 def test_noaa_missing_state_boundary_does_not_swallow_unexpected_calculation(
     tmp_path,
