@@ -3711,6 +3711,9 @@ def _emit_monitor_refreshed_canonical_if_available(
                             False,
                         )
                     )
+                    quote_witness = getattr(pos, "_zeus_held_monitor_quote_witness", None)
+                    if isinstance(quote_witness, dict):
+                        payload["held_sell_quote_witness"] = dict(quote_witness)
                     payload["flash_crash_count"] = int(
                         getattr(pos, "flash_crash_count", 0) or 0
                     )
@@ -4024,11 +4027,11 @@ def _refresh_monitor_probability_without_book(
         if action == "EXIT_DEAD_BIN":
             from src.engine.monitor_refresh import refresh_exact_zero_position
 
-            refresh_exact_zero_position(conn, clob, pos, refresh_quote=False)
+            refresh_exact_zero_position(conn, clob, pos, refresh_quote=False, hard_fact_verdict=hard_fact)
         elif action == "HOLD_STRUCTURAL_WIN":
             from src.engine.monitor_refresh import refresh_exact_one_position
 
-            refresh_exact_one_position(pos)
+            refresh_exact_one_position(pos, hard_fact_verdict=hard_fact)
         else:
             from src.engine.monitor_refresh import refresh_position
 
@@ -4432,7 +4435,7 @@ def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
         return False
     fresh_prob = _finite_float_or_none(getattr(exit_context, "fresh_prob", None))
     best_bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
-    if fresh_prob is None or fresh_prob > 1e-12:
+    if fresh_prob is None or fresh_prob != 0.0:
         return False
     if best_bid is None or not 0.05 <= best_bid <= 0.95:
         return False
@@ -4444,7 +4447,7 @@ def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
     except (TypeError, ValueError):
         return False
     return bool(samples) and all(
-        math.isfinite(value) and 0.0 <= value <= 1e-12
+        math.isfinite(value) and value == 0.0
         for value in samples
     )
 
@@ -4605,7 +4608,11 @@ def _day0_hard_fact_position_eligible(pos) -> bool:
     # gate (state == 'quarantined') is now provably unreachable — no writer
     # mints the literal and the DB CHECK no longer admits it post-migration —
     # so the predicate and its supporting helpers have been retired.
-    return _position_state_value(pos) in {"active", "entered", "holding", "day0_window"}
+    # Pending exits still hold exposure. Reobserve their physical evidence
+    # while liquidity/transport/order fences independently govern actuation.
+    return _position_state_value(pos) in {
+        "active", "entered", "holding", "day0_window", "pending_exit",
+    }
 
 
 def _venue_confirmed_local_fill_needs_monitor(pos) -> bool:
@@ -5388,8 +5395,10 @@ def _fresh_local_held_monitor_orderbooks(
     deps,
     deadline_monotonic: float | None = None,
     captured_at_out: list[datetime] | None = None,
+    captured_at_by_token_out: dict[str, datetime] | None = None,
 ) -> dict[str, dict]:
     from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+    from src.engine.monitor_refresh import _liquidity_wait_quote_cutoff
 
     if conn is None:
         return {}
@@ -5409,6 +5418,10 @@ def _fresh_local_held_monitor_orderbooks(
     )
     if not scope:
         return {}
+    liquidity_cutoffs = {
+        _position_held_token_id(pos): cutoff for pos in positions
+        if (cutoff := _liquidity_wait_quote_cutoff(conn, pos)) is not None
+    }
     scope_pairs = [
         (condition_id, token_id)
         for condition_id, token_id, _direction in scope
@@ -5424,6 +5437,8 @@ def _fresh_local_held_monitor_orderbooks(
         books = {token_id: value[1] for token_id, value in candidates.items()}
         if captured_at_out is not None and candidates:
             captured_at_out.append(min(value[0] for value in candidates.values()))
+        if captured_at_by_token_out is not None:
+            captured_at_by_token_out.update({token: value[0] for token, value in candidates.items()})
         summary["held_monitor_orderbooks_market_channel"] = len(
             market_channel_tokens
         )
@@ -5544,10 +5559,16 @@ def _fresh_local_held_monitor_orderbooks(
             ).strip()
             if token_id and asset_id == token_id:
                 captured_at = _parse_utc_timestamp(raw_captured_at)
-                if captured_at is not None:
+                if captured_at is not None and (
+                    token_id not in liquidity_cutoffs or captured_at > liquidity_cutoffs[token_id]
+                ):
                     candidates[token_id] = (captured_at, book)
 
-        snapshot_row_tokens = {str(row[0] or "").strip() for row in snapshot_rows}
+        snapshot_row_tokens = {
+            token for row in snapshot_rows
+            if (token := str(row[0] or "").strip())
+            and (token not in liquidity_cutoffs or token in candidates)
+        }
         # A miss in the current projection may still use a newer causal market-
         # channel quote, but it must not first scan historical snapshots merely
         # to decide whether that lookup is allowed.  The quote query below
@@ -5682,7 +5703,9 @@ def _fresh_local_held_monitor_orderbooks(
                 continue
             book = json.loads(str(row[1]))
             captured_at = _parse_utc_timestamp(row[2])
-            if not isinstance(book, dict) or captured_at is None:
+            if not isinstance(book, dict) or captured_at is None or (
+                token_id in liquidity_cutoffs and captured_at <= liquidity_cutoffs[token_id]
+            ):
                 continue
             try:
                 bid, _bid_size = _top_book_level_decimal(book, "bids")
@@ -5753,6 +5776,8 @@ def _prefetch_held_monitor_orderbooks(
         monitor_orderbook_prefetch_attempted,
         publish_current_monitor_orderbook_batch,
         prefetched_monitor_orderbook,
+        prefetched_monitor_orderbook_timestamp,
+        _liquidity_wait_quote_cutoff,
     )
 
     getter = _configured_batch_orderbook_getter(clob)
@@ -5764,12 +5789,24 @@ def _prefetch_held_monitor_orderbooks(
         )
     )
     existing_books: dict[str, dict] = {}
+    existing_capture_times: dict[str, datetime] = {}
+    liquidity_cutoffs = {
+        _position_held_token_id(pos): cutoff for pos in positions
+        if (cutoff := _liquidity_wait_quote_cutoff(conn, pos)) is not None
+    }
     existing_attempted: set[str] = set()
     if preserve_existing:
         for token_id in token_ids:
             book = prefetched_monitor_orderbook(clob, token_id)
+            captured_at = _parse_utc_timestamp(prefetched_monitor_orderbook_timestamp(clob, token_id))
+            if token_id in liquidity_cutoffs and (
+                captured_at is None or captured_at <= liquidity_cutoffs[token_id]
+            ):
+                continue
             if book is not None:
                 existing_books[token_id] = book
+                if captured_at is not None:
+                    existing_capture_times[token_id] = captured_at
             if monitor_orderbook_prefetch_attempted(clob, token_id):
                 existing_attempted.add(token_id)
     else:
@@ -5795,6 +5832,7 @@ def _prefetch_held_monitor_orderbooks(
         )
         return frozenset()
     local_capture_times: list[datetime] = []
+    local_capture_times_by_token: dict[str, datetime] = {}
     fresh_local_books = _fresh_local_held_monitor_orderbooks(
         conn,
         positions,
@@ -5803,6 +5841,7 @@ def _prefetch_held_monitor_orderbooks(
         deps=deps,
         deadline_monotonic=deadline_monotonic,
         captured_at_out=local_capture_times,
+        captured_at_by_token_out=local_capture_times_by_token,
     )
     local_books = {**existing_books, **fresh_local_books}
     summary["held_monitor_orderbooks_local"] = len(local_books)
@@ -5830,6 +5869,7 @@ def _prefetch_held_monitor_orderbooks(
             local_books,
             attempted_token_ids=attempted,
             merge=preserve_existing,
+            captured_at_by_token={**existing_capture_times, **local_capture_times_by_token},
         )
         summary["held_monitor_orderbook_prefetch_installed"] = installed
         summary["held_monitor_orderbooks_prefetched"] = (
@@ -5841,6 +5881,8 @@ def _prefetch_held_monitor_orderbooks(
     network_unattempted_token_ids: set[str] = set()
     network_terminal_reason = "complete"
     network_captured_at: datetime | None = None
+    network_capture_times: dict[str, datetime] = {}
+    cached_fallback_times: dict[str, datetime | None] = {}
     typed_network_result = False
     from src.data.polymarket_client import (
         HeldOrderbookReadResult,
@@ -5848,6 +5890,7 @@ def _prefetch_held_monitor_orderbooks(
     )
 
     try:
+        network_read_started_at = datetime.now(timezone.utc)
         if deadline_monotonic is not None:
             remaining = float(deadline_monotonic) - time.monotonic()
             if remaining <= 0.0:
@@ -5869,6 +5912,9 @@ def _prefetch_held_monitor_orderbooks(
                     cached = prefetched_monitor_orderbook(clob, token_id)
                     if cached is not None:
                         network_result[token_id] = cached
+                        cached_fallback_times[token_id] = _parse_utc_timestamp(
+                            prefetched_monitor_orderbook_timestamp(clob, token_id)
+                        )
         else:
             network_result = getter(missing_token_ids)
         if isinstance(network_result, HeldOrderbookReadResult):
@@ -5879,7 +5925,11 @@ def _prefetch_held_monitor_orderbooks(
                 network_result.unattempted_token_ids
             )
             network_terminal_reason = network_result.terminal_reason
-            network_captured_at = network_result.captured_at
+            network_capture_times = {
+                token: captured_at for token, captured_at in network_result.captured_at_by_token.items()
+                if token in network_books and token not in cached_fallback_times
+                and getattr(captured_at, "tzinfo", None) is not None
+            }
             if network_terminal_reason != "complete":
                 batch_transport_failed = True
                 summary["held_monitor_orderbook_prefetch_error"] = (
@@ -5892,6 +5942,15 @@ def _prefetch_held_monitor_orderbooks(
                 )
         else:
             network_books = network_result
+            if isinstance(network_books, dict):
+                network_capture_times = {
+                    token: network_read_started_at for token in network_books
+                    if token not in cached_fallback_times
+                }
+        network_capture_times.update({
+            token: captured_at for token, captured_at in cached_fallback_times.items()
+            if captured_at is not None
+        })
     except Exception as exc:  # noqa: BLE001 - one failed batch must not fan out.
         batch_transport_failed = True
         network_terminal_reason = f"batch_error:{type(exc).__name__}"
@@ -5946,9 +6005,12 @@ def _prefetch_held_monitor_orderbooks(
         network_terminal_reason
     )
     books = {**local_books, **network_books}
-    publish_books = {**fresh_local_books, **network_books}
-    if network_books and network_captured_at is None:
-        network_captured_at = datetime.now(timezone.utc)
+    publish_books = {
+        **fresh_local_books,
+        **{token: book for token, book in network_books.items() if token in network_capture_times},
+    }
+    if network_capture_times:
+        network_captured_at = min(network_capture_times.values())
     publish_capture_times = [*local_capture_times]
     if network_captured_at is not None:
         publish_capture_times.append(network_captured_at)
@@ -5965,6 +6027,10 @@ def _prefetch_held_monitor_orderbooks(
         books,
         attempted_token_ids=existing_attempted | network_attempted_token_ids,
         merge=preserve_existing,
+        captured_at_by_token={
+            **existing_capture_times, **local_capture_times_by_token,
+            **network_capture_times,
+        },
     )
     summary["held_monitor_orderbook_prefetch_installed"] = installed
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
@@ -5982,6 +6048,7 @@ def _mark_held_monitor_orderbook_attempted(
         install_monitor_orderbook_prefetch,
         monitor_orderbook_prefetch_attempted,
         prefetched_monitor_orderbook,
+        prefetched_monitor_orderbook_timestamp,
     )
 
     token_ids = {
@@ -6005,6 +6072,10 @@ def _mark_held_monitor_orderbook_attempted(
         clob,
         books,
         attempted_token_ids=attempted,
+        captured_at_by_token={
+            token: captured_at for token in books
+            if (captured_at := _parse_utc_timestamp(prefetched_monitor_orderbook_timestamp(clob, token))) is not None
+        },
     )
 
 
@@ -6484,6 +6555,10 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     pos.last_monitor_market_price_is_fresh = True
     pos.last_monitor_at = source_timestamp
     setattr(pos, _HELD_MONITOR_FULL_DEPTH_ACTION_AUTHORITY_ATTR, True)
+    pos._zeus_held_monitor_quote_witness = {
+        "token_id": str(getattr(quote, "token_id", "") or ""),
+        "observed_at": source_timestamp,
+    }
     return (
         replace(
             exit_context,
@@ -7336,7 +7411,9 @@ def execute_monitoring_phase(
         force_new_generation: bool = False,
         *,
         deadline_monotonic: float | None = None,
-    ) -> bool:
+        prepare_only: bool = False,
+        obligation: dict[str, object] | None = None,
+    ) -> bool | tuple[bool, object | None]:
         """Reserve a durable global cut for a canonical reauction debt."""
 
         request_deadline = (
@@ -7352,7 +7429,8 @@ def execute_monitoring_phase(
                 )
             from src.events.reactor import request_global_auction_completion
 
-            obligation = latest_held_sell_reauction_obligation(read_conn, position)
+            if obligation is None:
+                obligation = latest_held_sell_reauction_obligation(read_conn, position)
             if not isinstance(obligation, dict) or not obligation:
                 obligation = getattr(
                     position,
@@ -7462,6 +7540,18 @@ def execute_monitoring_phase(
                 )
                 try:
                     refresh_position(read_conn, clob, position, quote_conn=conn)
+                    # refresh_position persists the quote only after its I/O.
+                    # Release that transaction before reading the wake queue
+                    # or letting recovery start its separate claim transaction.
+                    if conn is not None and conn.in_transaction:
+                        if not _release_monitor_write_lock_boundary(
+                            conn, summary, deps,
+                            boundary="global_sell_reauction_preparation_quote",
+                            deadline_monotonic=request_deadline,
+                        ):
+                            raise RuntimeError(
+                                "GLOBAL_SELL_REAUCTION_QUOTE_COMMIT_FAILED"
+                            )
                 finally:
                     if previous_deadline is None:
                         try:
@@ -7696,6 +7786,7 @@ def execute_monitoring_phase(
                 schema_version=int(obligation.get("schema_version") or 4),
                 force_new_generation=force_new_generation,
                 return_request=True,
+                prepare_only=prepare_only,
             )
             if not isinstance(request_result, tuple) or len(request_result) != 2:
                 raise ValueError(
@@ -7707,6 +7798,10 @@ def execute_monitoring_phase(
                 raise ValueError(
                     "GLOBAL_SELL_REAUCTION_PREPARED_REQUEST_UNAVAILABLE"
                 )
+            if prepare_only:
+                # Recovery commits a claim for this exact object before its
+                # publisher makes a wake visible. Preparation owns no fence.
+                return durable_request_accepted, prepared_request
             if durable_request_accepted:
                 setattr(
                     position,
@@ -7714,6 +7809,8 @@ def execute_monitoring_phase(
                     arm_global_sell_reauction_obligation(position, prepared_request),
                 )
         except Exception as exc:  # noqa: BLE001 - failed reservation keeps retry pending.
+            if prepare_only and conn is not None and conn.in_transaction:
+                conn.rollback()
             summary["global_sell_snapshot_reauction_request_failed"] = (
                 summary.get(
                     "global_sell_snapshot_reauction_request_failed",
@@ -9768,6 +9865,7 @@ def execute_monitoring_phase(
                         clob,
                         pos,
                         refresh_quote=not local_dead_bin_deadline_rescue,
+                        hard_fact_verdict=_hard_fact,
                     )
                     summary["day0_hard_fact_probability_refresh_bypassed"] = (
                         summary.get(
@@ -9779,7 +9877,7 @@ def execute_monitoring_phase(
                 elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
                     from src.engine.monitor_refresh import refresh_exact_one_position
 
-                    edge_ctx = refresh_exact_one_position(pos)
+                    edge_ctx = refresh_exact_one_position(pos, hard_fact_verdict=_hard_fact)
                     summary["day0_hard_fact_probability_refresh_bypassed"] = (
                         summary.get(
                             "day0_hard_fact_probability_refresh_bypassed",
@@ -10189,6 +10287,7 @@ def execute_monitoring_phase(
             )
             protective_fak_redecision = should_exit and local_exit_trigger in {
                 "RED_FORCE_EXIT", "DAY0_HARD_FACT_BIN_DEAD",
+                "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
             }
             if should_exit:
                 # Global redecision may choose an immediate FAK below the
@@ -10965,7 +11064,9 @@ def execute_monitoring_phase(
                     prepared_request=completion_request,
                 )
                 if published:
-                    reserved = record_global_sell_reauction_reserved(conn, pos)
+                    reserved = record_global_sell_reauction_reserved(
+                        conn, pos, expected_obligation=armed_obligation,
+                    )
                     if reserved:
                         try:
                             conn.commit()
@@ -11039,6 +11140,21 @@ def execute_monitoring_phase(
                 )
                 if (
                     pending_exit_monitor_only
+                    and protective_fak_redecision
+                    and check_pending_retries(
+                        pos, conn=conn, current_min_order_size=Decimal("0.01"),
+                    )
+                ):
+                    # A new in-band book may discharge liquidity-only debt.
+                    # The helper retains command/unknown/transport fences; the
+                    # direct authority and fresh JIT book are rechecked below.
+                    pending_exit_monitor_only = False
+                    portfolio_dirty = True
+                    summary["monitor_released_exit_retry_for_current_liquidity"] = (
+                        summary.get("monitor_released_exit_retry_for_current_liquidity", 0) + 1
+                    )
+                if (
+                    pending_exit_monitor_only
                     and not red_force_exit
                 ):
                     summary["pending_exit_exit_signal_already_in_flight"] = (
@@ -11108,11 +11224,12 @@ def execute_monitoring_phase(
                 ) and _drain_same_turn_global_sell_reauction_after_no_fill(
                     pos,
                     conn=conn,
-                    requester=lambda position, force_new: (
+                    requester=lambda position, force_new, **request_options: (
                         request_global_sell_snapshot_reauction(
                             position,
                             force_new,
                             deadline_monotonic=monitor_deadline,
+                            **request_options,
                         )
                     ),
                     deadline_monotonic=monitor_deadline,

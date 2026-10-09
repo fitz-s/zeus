@@ -1,5 +1,5 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-10-07 (DST local-day window)
+# Last reused/audited: 2026-10-07 (DST local-day window, physical revision delivery and causal availability)
 # Lifecycle: created=2026-06-06; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
@@ -39,6 +39,26 @@ def _baseline_high_data_version() -> str:
     version = expected_replacement_dependency_identity_by_role("high")["baseline_b0"].data_version
     assert version is not None
     return version
+
+
+@pytest.fixture(autouse=True)
+def _readable_unclaimed_wrh_owner(monkeypatch):
+    """Legacy print-only fixtures have a readable empty FORECAST truth owner.
+
+    Unknown/unreadable current-product authority is no longer equivalent to
+    proven absence. Supply real empty owner DDL rather than bypass that reader.
+    """
+    from contextlib import contextmanager
+    from src.state import db
+    @contextmanager
+    def owner(**kwargs):
+        conn = sqlite3.connect(":memory:")
+        db._create_observations(conn)
+        try:
+            yield conn
+        finally:
+            conn.close()
+    monkeypatch.setattr(db, "get_forecasts_connection_with_world_read_only", owner)
 
 
 @pytest.mark.parametrize("metric", ("high", "low"))
@@ -4134,6 +4154,98 @@ def test_anchor_local_proof_candidate_set_matches_the_per_row_probe_exactly() ->
     assert {aid for aid in probed if old_probe(aid)} == {aid for aid in probed if aid in candidates}
     assert {1, 101, 102, 104, 109, 111, 112, -113, 114, 115, 1170} <= candidates
     assert not {103, 105, 106, 107, 108, 110, 116} & candidates
+
+
+@pytest.mark.parametrize("metric,original,corrected,frontier", [
+    ("high", 37.0, 34.0, 35.0),
+    ("low", 17.0, 20.0, 19.0),
+])
+def test_ledger_retraction_availability_covers_nonwinning_late_revision(
+    metric, original, corrected, frontier,
+):
+    """The winner's old receipt cannot backdate knowledge of a retracted peak."""
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_table(conn)
+    for published, received, value in (
+        ("10:00:00", "10:01:00", original),
+        ("11:00:00", "11:01:00", frontier),
+        ("10:00:00", "11:30:00", corrected),
+    ):
+        append_print(
+            conn, city="Paris", station_id="LFPB", source_channel="wu_icao_history",
+            publish_ts_utc=f"2026-07-10T{published}+00:00", value_native=value,
+            unit="C", fetched_at_utc=f"2026-07-10T{received}+00:00",
+        )
+    kwargs = dict(city="Paris", target_date="2026-07-10", temperature_metric=metric,
+                  require_settlement_channel=True)
+    before = _latest_authorized_day0_fact(
+        conn, **kwargs, decision_time=datetime(2026, 7, 10, 11, 29, tzinfo=timezone.utc),
+    )
+    after = _latest_authorized_day0_fact(
+        conn, **kwargs, decision_time=datetime(2026, 7, 10, 11, 31, tzinfo=timezone.utc),
+    )
+    assert before["observed_extreme_native"] == original
+    assert after["observed_extreme_native"] == frontier
+    assert after["observation_time"] == "2026-07-10T11:00:00+00:00"
+    assert after["extreme_source_time"] == "2026-07-10T11:00:00+00:00"
+    assert after["observation_available_at"] == "2026-07-10T11:30:00+00:00"
+    conn.close()
+
+
+@pytest.mark.parametrize("metric,first,corrected,other", [
+    ("high", 37.0, 34.0, 35.0), ("low", 17.0, 20.0, 19.0),
+])
+def test_cross_channel_extreme_cannot_precede_retracted_competing_boundary(
+    monkeypatch, metric, first, corrected, other,
+):
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    city = SimpleNamespace(name="fixture", timezone="UTC", settlement_unit="C",
+                           settlement_source_type="wu_icao", wu_station="TEST")
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {city.name: city})
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_table(conn)
+    for channel, published, received, value in (
+        ("wu_icao_history", "10:00:00", "10:01:00", first),
+        ("wu_api", "11:00:00", "11:01:00", other),
+        ("wu_icao_history", "10:00:00", "11:30:00", corrected),
+    ):
+        append_print(conn, city=city.name, station_id="TEST", source_channel=channel,
+                     publish_ts_utc=f"2026-10-06T{published}+00:00", value_native=value,
+                     unit="C", fetched_at_utc=f"2026-10-06T{received}+00:00")
+    fact = _latest_authorized_day0_fact(
+        conn, city=city.name, target_date="2026-10-06", temperature_metric=metric,
+        decision_time=datetime(2026, 10, 6, 12, tzinfo=timezone.utc),
+    )
+    assert fact["observed_extreme_native"] == other
+    assert fact["observation_source"] == "wu_api"
+    assert fact["observation_available_at"] == "2026-10-06T11:30:00+00:00"
+    conn.close()
+
+
+@pytest.mark.parametrize("target,clock,expected", [
+    ("2026-11-01", "2026-11-02T04:30:00+00:00", True),
+    ("2026-03-08", "2026-03-09T04:30:00+00:00", False),
+])
+def test_ledger_local_day_uses_calendar_midnights_across_dst(monkeypatch, target, clock, expected):
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    city = SimpleNamespace(name="fixture", timezone="America/New_York", settlement_unit="C",
+                           settlement_source_type="wu_icao", wu_station="TEST")
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {city.name: city})
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    ensure_table(conn)
+    append_print(conn, city=city.name, station_id="TEST", source_channel="wu_icao_history",
+                 publish_ts_utc=clock, value_native=20.0, unit="C", fetched_at_utc=clock)
+    fact = _latest_authorized_day0_fact(
+        conn, city=city.name, target_date=target, temperature_metric="high",
+        decision_time=datetime.fromisoformat(clock), require_settlement_channel=True,
+    )
+    assert (fact is not None) is expected
+    conn.close()
 
 
 @pytest.mark.parametrize(

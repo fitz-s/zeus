@@ -296,12 +296,189 @@ def canonical_trade_fact_cte(
     """
 
 
+def _exit_order_proxy_economic_guard_sql(
+    *, source_schema: str | None, provenance_available: bool, native_predicate: str,
+) -> str:
+    """A recovery order observation is never an identified economic trade.
+
+    Exact producer-shaped legacy proxies remain raw evidence. Ambiguous
+    producer-shaped records make the scoped read unavailable instead of
+    turning a potentially real fill into either a guessed amount or zero.
+
+    SCOPE: the marked command/order after the consumer's raw scope filter.
+    DRAIN: retrieve the original canonical order/envelope provenance; an
+    actual contradiction needs explicit authentic provenance remediation.
+    RESET: a fully consistent original proof or a canonical fact revision
+    that resolves the ambiguity. Unrelated later trades cannot clear it.
+    """
+    source_table = _venue_trade_facts_table(source_schema)
+    prefix = source_table.removesuffix("venue_trade_facts")
+    raw = "(CASE WHEN json_valid(fact.raw_payload_json) THEN fact.raw_payload_json ELSE '{}' END)"
+    def field(path: str) -> str:
+        return f"json_extract({raw}, '{path}')"
+    def kind(path: str) -> str:
+        return f"json_type({raw}, '{path}')"
+    reason = "exit_order_fact_matched_missing_trade_fact_repair"
+    proof = "matched_exit_order_fact_with_fill_economics"
+    unavailable = (
+        "json_extract('{}', 'UNAVAILABLE_EXIT_ORDER_FACT_PROXY:' || "
+        "COALESCE(fact.command_id, '') || ':' || COALESCE(fact.trade_id, ''))"
+    )
+    point = "$.point_order"
+    envelope = point + "._venue_submission_envelope"
+    identity_keys = (
+        "tradeIDs", "tradeIds", "trade_ids", "associate_trades", "trades", "trade_id",
+        "transactionsHashes", "transactionHashes", "transaction_hashes", "txHashes", "tx_hashes",
+        "transactionHash", "transaction_hash", "tx_hash",
+    )
+    def absent(path: str) -> str:
+        return f"""({kind(path)} IS NULL OR {kind(path)} = 'null'
+            OR ({kind(path)} = 'array' AND json_array_length({raw}, '{path}') = 0)
+            OR ({kind(path)} = 'text' AND TRIM({field(path)}) = ''))"""
+    absent_ids = " AND ".join(absent(point + "." + key) for key in identity_keys)
+    original = field(envelope + ".raw_response_json")
+    safe_original = f"(CASE WHEN json_valid({original}) THEN {original} ELSE '{{}}' END)"
+    original_absence = " AND ".join(
+        f"(json_type({safe_original}, '$.{key}') IS NULL OR json_type({safe_original}, '$.{key}') = 'null' "
+        f"OR (json_type({safe_original}, '$.{key}') = 'array' AND json_array_length({safe_original}, '$.{key}') = 0) "
+        f"OR (json_type({safe_original}, '$.{key}') = 'text' AND TRIM(json_extract({safe_original}, '$.{key}')) = ''))"
+        for key in identity_keys
+    )
+    consistent_identity = " AND ".join(
+        f"COALESCE({field(point + '.' + key)}, {expected}) = {expected}"
+        for key, expected in (
+            *((key, field(envelope + ".selected_outcome_token_id")) for key in ("asset_id", "token_id", "tokenId")),
+            *((key, field(envelope + ".condition_id")) for key in ("market", "condition_id", "conditionId")),
+            *((key, "fact.venue_order_id") for key in ("id", "orderId", "order_id")),
+            ("side", "'SELL'"),
+        )
+    )
+    native_prefix_binding = f"""EXISTS (
+        SELECT 1 FROM {prefix}venue_commands native_command
+        LEFT JOIN {prefix}venue_submission_envelopes native_envelope
+          ON native_envelope.envelope_id = native_command.envelope_id
+        WHERE native_command.command_id = fact.command_id
+          AND native_command.venue_order_id = fact.venue_order_id
+          AND native_command.token_id = {field('$.asset_id')}
+          AND UPPER(native_command.side) = {field('$.side')}
+          AND ({kind('$.market')} IS NULL OR {field('$.market')} = native_envelope.condition_id)
+          AND ({kind('$.condition_id')} IS NULL OR {field('$.condition_id')} = native_envelope.condition_id)
+    )""" if provenance_available else "0"
+    # Strong recovery rows may have the same producer marker but a real
+    # trade/transaction identity. Only anonymous producer-shaped observations
+    # enter this tri-state boundary; a provider ID prefix alone is not a proxy.
+    native_prefix_proved = f"""(
+        {field('$.event_type')} = 'trade'
+        AND {field('$.id')} = fact.trade_id
+        AND {field('$.taker_order_id')} = fact.venue_order_id
+        AND {field('$.asset_id')} <> ''
+        AND {field('$.side')} IN ('BUY', 'SELL')
+        AND UPPER({field('$.status')}) = UPPER(fact.state)
+        AND {field('$.size')} = fact.filled_size
+        AND {field('$.price')} = fact.fill_price
+        AND fact.source IN ('REST', 'WS_USER')
+        AND {native_prefix_binding}
+    )""" if provenance_available else "0"
+    candidate = f"""(
+        (fact.trade_id LIKE 'order_fact:%' AND NOT COALESCE({native_prefix_proved}, 0))
+        OR (({field('$.reason')} = '{reason}' OR {field('$.proof_class')} = '{proof}')
+            AND TRIM(COALESCE(fact.tx_hash, '')) = '' AND {absent_ids}
+            AND COALESCE(json_array_length({raw}, '{envelope}.trade_ids'), 0) = 0
+            AND COALESCE(json_array_length({raw}, '{envelope}.transaction_hashes'), 0) = 0)
+    )"""
+    if not provenance_available:
+        return f"CASE WHEN {candidate} THEN {unavailable} ELSE ({native_predicate}) END"
+    valid = f"""(
+        json_valid(fact.raw_payload_json)
+        AND {field('$.reason')} = '{reason}' AND {field('$.proof_class')} = '{proof}'
+        AND fact.source = 'REST' AND fact.state = 'MATCHED'
+        AND TRIM(COALESCE(fact.tx_hash, '')) = '' AND COALESCE({field('$.tx_hash')}, '') = ''
+        AND {kind('$.order_fact_id')} = 'integer' AND {field('$.order_fact_id')} > 0
+        AND fact.trade_id = 'order_fact:' || {field('$.order_fact_id')}
+        AND {field('$.command_id')} = fact.command_id
+        AND {field('$.venue_order_id')} = fact.venue_order_id
+        AND {field('$.matched_size')} = fact.filled_size AND {field('$.fill_price')} = fact.fill_price
+        AND CAST(fact.filled_size AS REAL) > 0
+        AND CAST(fact.fill_price AS REAL) > 0 AND CAST(fact.fill_price AS REAL) <= 1
+        AND {kind(point)} = 'object' AND {kind(envelope)} = 'object'
+        AND {field(point + '._venue_response_contract')} = 'POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS'
+        AND {field(point + '.status')} = 'MATCHED'
+        AND {field(point + '.orderID')} = fact.venue_order_id
+        AND {field(point + '._v2_matched_size')} = fact.filled_size
+        AND {field(point + '._v2_fill_price')} = fact.fill_price
+        AND {field(point + '.makingAmount')} = fact.filled_size
+        AND CAST({field(point + '.takingAmount')} AS REAL) > 0
+        AND json_extract({safe_original}, '$._v2_matched_size') = fact.filled_size
+        AND json_extract({safe_original}, '$._v2_fill_price') = fact.fill_price
+        AND json_extract({safe_original}, '$.makingAmount') = {field(point + '.makingAmount')}
+        AND json_extract({safe_original}, '$.takingAmount') = {field(point + '.takingAmount')}
+        AND {consistent_identity}
+        AND {field(envelope + '.schema_version')} = 1
+        AND {field(envelope + '.side')} = 'SELL'
+        AND {field(envelope + '.order_id')} = fact.venue_order_id
+        AND {field(envelope + '.selected_outcome_token_id')} <> ''
+        AND {field(envelope + '.condition_id')} <> ''
+        AND {kind(envelope + '.trade_ids')} = 'array'
+        AND json_array_length({raw}, '{envelope}.trade_ids') = 0
+        AND {kind(envelope + '.transaction_hashes')} = 'array'
+        AND json_array_length({raw}, '{envelope}.transaction_hashes') = 0
+        AND json_valid({original}) AND {absent_ids} AND {original_absence}
+        AND EXISTS (
+            SELECT 1 FROM {prefix}venue_order_facts proxy_order
+            JOIN {prefix}venue_commands proxy_command
+              ON proxy_command.command_id = proxy_order.command_id
+             AND proxy_command.venue_order_id = proxy_order.venue_order_id
+            JOIN {prefix}venue_submission_envelopes proxy_envelope
+              ON proxy_envelope.order_id = proxy_order.venue_order_id
+             AND proxy_envelope.selected_outcome_token_id = proxy_command.token_id
+             AND proxy_envelope.side = proxy_command.side
+            JOIN {prefix}venue_submission_envelopes proxy_presign
+              ON proxy_presign.envelope_id = proxy_command.envelope_id
+            WHERE proxy_order.fact_id = {field('$.order_fact_id')}
+              AND proxy_order.command_id = fact.command_id
+              AND proxy_order.venue_order_id = fact.venue_order_id
+              AND proxy_order.source = fact.source
+              AND proxy_order.state = {field('$.order_fact_state')}
+              AND proxy_order.matched_size = fact.filled_size
+              AND julianday(proxy_order.observed_at) <= julianday(fact.observed_at)
+              AND proxy_command.intent_kind = 'EXIT' AND proxy_command.side = 'SELL'
+              AND proxy_command.token_id = {field(envelope + '.selected_outcome_token_id')}
+              AND CAST(proxy_command.size AS REAL) >= CAST(fact.filled_size AS REAL)
+              AND proxy_envelope.condition_id = {field(envelope + '.condition_id')}
+              AND proxy_envelope.canonical_pre_sign_payload_hash <> ''
+              AND proxy_presign.canonical_pre_sign_payload_hash = proxy_envelope.canonical_pre_sign_payload_hash
+              AND proxy_presign.selected_outcome_token_id = proxy_command.token_id
+              AND proxy_presign.side = proxy_command.side
+              AND proxy_presign.condition_id = proxy_envelope.condition_id
+              AND julianday(proxy_presign.captured_at) <= julianday(proxy_envelope.captured_at)
+              AND proxy_envelope.canonical_pre_sign_payload_hash = {field(envelope + '.canonical_pre_sign_payload_hash')}
+              AND proxy_envelope.signed_order_hash = {field(envelope + '.signed_order_hash')}
+              AND proxy_envelope.signed_order_hash <> ''
+              AND proxy_envelope.raw_request_hash = {field(envelope + '.raw_request_hash')}
+              AND proxy_envelope.raw_request_hash <> ''
+              AND proxy_envelope.captured_at = {field(envelope + '.captured_at')}
+              AND julianday(proxy_envelope.captured_at) <= julianday(fact.observed_at)
+              AND proxy_envelope.raw_response_json = {original}
+              AND proxy_envelope.trade_ids_json = '[]'
+              AND proxy_envelope.transaction_hashes_json = '[]'
+              AND json_valid(proxy_order.raw_payload_json)
+              AND json_extract(proxy_order.raw_payload_json, '$.source') = 'place_limit_order_ack'
+              AND json_extract(proxy_order.raw_payload_json, '$.submit_result') = {field(point)}
+        )
+    )"""
+    # A named invalid JSON path raises sqlite3.OperationalError on only this
+    # demanded CASE branch. It must not be replaced with NULL/0: those would
+    # silently turn ambiguous positive exposure into a no-fill observation.
+    return f"CASE WHEN {candidate} THEN CASE WHEN COALESCE({valid}, 0) = 1 THEN 0 ELSE {unavailable} END ELSE ({native_predicate}) END"
+
+
 def economic_trade_fact_cte(
     *,
     canonical_cte_name: str = "canonical_trade_fact",
     cte_name: str = "economic_trade_fact",
     source_schema: str | None = None,
     source_clause_sql: str = "",
+    proxy_provenance_available: bool = True,
 ) -> str:
     """Exclude every derived alias once its source economic fact exists.
 
@@ -313,11 +490,7 @@ def economic_trade_fact_cte(
     """
 
     source_table = _venue_trade_facts_table(source_schema)
-    return f"""
-        {cte_name} AS (
-            SELECT fact.*
-              FROM {canonical_cte_name} fact
-             WHERE NOT (
+    native_predicate = f"""NOT (
                     TRIM(COALESCE(fact.tx_hash, '')) != ''
                 AND LOWER(TRIM(COALESCE(fact.trade_id, '')))
                     = LOWER(TRIM(fact.tx_hash))
@@ -350,7 +523,15 @@ def economic_trade_fact_cte(
                               IN ('MATCHED', 'MINED', 'CONFIRMED')
                           AND CAST(COALESCE(source_fact.filled_size, '0') AS REAL) > 0
                           {source_clause_sql}
-                    )
+                    )"""
+    proxy_guard = _exit_order_proxy_economic_guard_sql(
+        source_schema=source_schema, provenance_available=proxy_provenance_available,
+        native_predicate=native_predicate,
+    )
+    return f"""
+        {cte_name} AS (
+            SELECT fact.* FROM {canonical_cte_name} fact
+            WHERE {proxy_guard}
         )
     """
 

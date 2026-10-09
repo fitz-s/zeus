@@ -1,6 +1,6 @@
 # Created: 2026-04-02
-# Last reused/audited: 2026-08-09
-# Lifecycle: created=2026-04-02; last_reviewed=2026-08-09; last_reused=2026-08-09
+# Last reused/audited: 2026-10-08 (canonical reconciliation fixture and its three callers)
+# Lifecycle: created=2026-04-02; last_reviewed=2026-10-08; last_reused=2026-10-08
 # Purpose: Protect architecture/schema contracts and high-sensitivity DB bootstrap invariants.
 # Reuse: Audit touched assertions against architecture manifests and scoped AGENTS before extending.
 # Authority basis: midstream verdict v2 2026-04-23; Wave26 canonical position event env authority; docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
@@ -1233,8 +1233,8 @@ def _install_current_venue_fact_fixture(conn: sqlite3.Connection) -> None:
 
     The architecture kernel intentionally owns neither trade commands nor their
     append-only venue observations. This fixture mirrors the current fields
-    consumed by ``canonical_trade_fact_cte`` so it cannot pass with a
-    pre-identity ``venue_trade_facts`` shape.
+    consumed by the canonical and economic trade-fact readers, including the
+    original command/order provenance used to distinguish anonymous proxies.
     """
     conn.executescript(
         """
@@ -1248,29 +1248,11 @@ def _install_current_venue_fact_fixture(conn: sqlite3.Connection) -> None:
             state TEXT NOT NULL,
             venue_order_id TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS venue_trade_facts (
-            trade_fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            trade_id TEXT NOT NULL,
-            venue_order_id TEXT NOT NULL,
-            command_id TEXT NOT NULL,
-            state TEXT NOT NULL,
-            filled_size TEXT NOT NULL,
-            fill_price TEXT NOT NULL,
-            fee_paid_micro INTEGER,
-            tx_hash TEXT,
-            block_number INTEGER,
-            confirmation_count INTEGER DEFAULT 0,
-            source TEXT NOT NULL,
-            observed_at TEXT NOT NULL,
-            venue_timestamp TEXT,
-            ingested_at TEXT NOT NULL,
-            local_sequence INTEGER NOT NULL,
-            raw_payload_hash TEXT NOT NULL,
-            raw_payload_json TEXT,
-            UNIQUE (trade_id, local_sequence)
-        );
         """
     )
+    from src.state.db import init_provenance_projection_schema
+
+    init_provenance_projection_schema(conn)
 
 
 def test_lifecycle_builders_map_runtime_states_to_canonical_phases():

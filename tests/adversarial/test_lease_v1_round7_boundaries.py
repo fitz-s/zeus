@@ -1,10 +1,12 @@
 # Created: 2026-10-04
-# Last reused/audited: 2026-10-04
-# Authority basis: lease-v1 round-7 consult; copied unchanged from
+# Last reused/audited: 2026-10-09
+# Purpose: Exercise real capture leases, crash recovery and unreadable-evidence isolation.
+# Reuse: Preserve unreadable-capture UNKNOWN isolation, healthy work and normal reread RESET.
+# Authority basis: lease-v1 round-7 consult, strengthened for queue isolation from
 #   artifacts/merge_safety_lease_v1_round7_review/test_round7_boundaries.py. Run from the checkout root.
 """Independent round-7 crash, UNKNOWN isolation and metadata-layout probes.
 Temporary queues and owned child processes only; no live DB or venue writes.
-Run from the pinned checkout with -p tests.conftest.
+Run from the pinned checkout; the repository conftest supplies isolation.
 """
 from __future__ import annotations
 import errno
@@ -15,6 +17,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 import pytest
 import src.data.replacement_forecast_live_materialization_queue as q
 from tests.adversarial.test_execution_lease_adversaries import _request
@@ -40,14 +43,51 @@ def capture_fixture(tmp_path, *, regular=False, name='bad.json'):
     return requests,capture,entry,target
 
 
-def public_background(requests):
+def public_background(requests, *, runner=None):
     root=requests.parent
     (root/'seeds').mkdir(exist_ok=True)
     return q.process_replacement_forecast_live_materialization_queue(
         request_dir=requests,processed_dir=root/'processed',failed_dir=root/'failed',
         seed_dir=root/'seeds',seed_processed_dir=root/'seed_processed',seed_failed_dir=root/'seed_failed',
         forecast_db=None,seed_limit=1,limit=1,discover=False,lane=q.MATERIALIZATION_LANE_BACKGROUND,
-        runner=lambda argv:subprocess.CompletedProcess(argv,0,'',''))
+        runner=runner or (lambda argv:subprocess.CompletedProcess(argv,0,'','')))
+
+
+def healthy_worker_case(requests):
+    """A fresh queue request and explicit fake worker; no posterior is invented."""
+    now = datetime.now(timezone.utc)
+    payload = _request(
+        target_date=(now + timedelta(days=1)).date().isoformat(),
+        source_cycle_time=now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+        computed_at=now.isoformat(),
+        expires_at=(now + timedelta(hours=6)).isoformat(),
+    )
+    healthy = requests / 'London.json'
+    q._write_request(healthy, payload)
+    calls = []
+
+    def worker(argv):
+        path = Path(argv[argv.index('--input-json') + 1])
+        calls.append(json.loads(path.read_text()))
+        return subprocess.CompletedProcess(argv, 0, '', '')
+
+    return healthy, payload, calls, worker
+
+
+def assert_healthy_completed(reports, healthy, payload, calls):
+    assert calls == [payload], 'fresh healthy request must reach the worker exactly once'
+    assert sum(report.started_count for report in reports) == 1
+    assert sum(report.completed_count for report in reports) == 1
+    assert sum(report.processed_count for report in reports) == 1
+    assert sum(report.failed_count for report in reports) == 0
+    assert sum(report.committed_posterior_count for report in reports) == 0
+    assert not healthy.exists()
+    receipts = [Path(path) for report in reports for path in report.processed_files]
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt['status'] == 'SUCCEEDED'
+    assert receipt['computed_at'] == payload['computed_at']
+    assert receipt['result_evidence']['committed_posterior'] is False
 
 
 @pytest.mark.parametrize('cut',[
@@ -149,13 +189,15 @@ def test_unreadable_final_is_isolated_and_not_deleted(tmp_path,monkeypatch,kind)
             if Path(p)==control:raise OSError(errno.EIO,'injected receipt read error')
             return real(p)
         monkeypatch.setattr(q,'read_regular_request',fail)
-    healthy=requests/'London.json';q._write_request(healthy,_request())
+    healthy,payload,calls,worker=healthy_worker_case(requests)
     try:
-        reports=[public_background(requests) for _ in range(2)]
+        reports=[public_background(requests,runner=worker) for _ in range(2)]
+        dry=q.reconcile_inflight_for_migration(request_path=requests,apply=False)
         result=q.reconcile_inflight_for_migration(request_path=requests,apply=True)
+        assert dry.unsettled_captures == result.unsettled_captures
         assert (capture.name,'unknown') in result.unsettled_captures and not result.quiescent
         assert os.path.samestat(before,control.lstat())
-        assert not healthy.exists(), 'unrelated healthy work never passed queue preflight'
+        assert_healthy_completed(reports,healthy,payload,calls)
         assert target.read_bytes()==b'NEVER READ OR WRITE'
         print('PROBE',json.dumps({'kind':kind,'unknown_isolated':True,'statuses':[r.status for r in reports],'unsettled':result.unsettled_captures}))
     finally:
@@ -164,20 +206,91 @@ def test_unreadable_final_is_isolated_and_not_deleted(tmp_path,monkeypatch,kind)
 
 def test_unreadable_capture_directory_does_not_poison_queue(tmp_path):
     requests,capture,entry,target=capture_fixture(tmp_path)
-    healthy=requests/'London.json';q._write_request(healthy,_request())
+    healthy,payload,calls,worker=healthy_worker_case(requests)
+    capture_before,entry_before=capture.lstat(),entry.lstat()
     capture.chmod(0)
     if os.access(capture,os.R_OK):
         capture.chmod(0o700);pytest.skip('uid bypasses permission bits')
-    errors=[];report=None
     try:
-        for _ in range(2):
-            try:public_background(requests)
-            except OSError as exc:errors.append(type(exc).__name__)
-        try:report=q.reconcile_inflight_for_migration(request_path=requests,apply=True)
-        except OSError as exc:errors.append(type(exc).__name__)
-        print('PROBE',json.dumps({'case':'unreadable_capture_dir','errors':errors,'healthy_pending':healthy.exists(),'report':None if report is None else report.quiescent}))
-        assert not errors and report is not None and not report.quiescent
+        reports=[public_background(requests,runner=worker) for _ in range(2)]
+        dry=q.reconcile_inflight_for_migration(request_path=requests,apply=False)
+        report=q.reconcile_inflight_for_migration(request_path=requests,apply=True)
+        assert dry.unsettled_captures == report.unsettled_captures == ((capture.name,'unknown'),)
+        assert not dry.quiescent and not report.quiescent
+        assert not q._capture_settled(capture)
+        assert os.path.samestat(capture_before,capture.lstat())
+        assert capture.lstat().st_mode & 0o777 == 0
+        assert target.read_bytes()==b'NEVER READ OR WRITE'
+        assert_healthy_completed(reports,healthy,payload,calls)
     finally:capture.chmod(0o700)
+    # Only the fixture restores access. Normal recovery rereads the same entry.
+    dry=q.reconcile_inflight_for_migration(request_path=requests,apply=False)
+    assert dry.quiescent and dry.settled_captures == 0
+    assert not q._capture_settled(capture)
+    public_background(requests,runner=worker)
+    assert q._capture_settled(capture)
+    assert os.path.samestat(entry_before,entry.lstat()) and entry.is_symlink()
+    assert target.read_bytes()==b'NEVER READ OR WRITE'
+    assert q.reconcile_inflight_for_migration(request_path=requests,apply=True).quiescent
+    assert calls == [payload]
+
+
+def test_unreadable_receipt_normal_reread_resets_after_permission_restore(tmp_path):
+    requests,capture,entry,target=capture_fixture(tmp_path)
+    assert q._settle_free_capture(capture,requests) == 'settled'
+    control=capture/q._ALIAS_RECEIPT_NAME
+    original=control.read_bytes(); identity=control.lstat(); entry_identity=entry.lstat()
+    control.chmod(0)
+    try:
+        if os.access(control,os.R_OK):pytest.skip('uid bypasses permission bits')
+        for apply in (False,True):
+            report=q.reconcile_inflight_for_migration(request_path=requests,apply=apply)
+            assert report.unsettled_captures == ((capture.name,'unknown'),)
+            assert not report.quiescent and not q._capture_settled(capture)
+        assert os.path.samestat(identity,control.lstat())
+    finally:control.chmod(0o600)
+    assert q._capture_settled(capture)
+    for apply in (False,True):
+        assert q.reconcile_inflight_for_migration(request_path=requests,apply=apply).quiescent
+    assert os.path.samestat(identity,control.lstat()) and control.read_bytes()==original
+    assert os.path.samestat(entry_identity,entry.lstat()) and entry.is_symlink()
+    assert target.read_bytes()==b'NEVER READ OR WRITE'
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'fifo'])
+def test_unsearchable_entry_metadata_cannot_prove_terminal_receipt(tmp_path, kind):
+    requests,capture,entry,target=capture_fixture(tmp_path)
+    if kind == 'fifo':
+        entry.unlink()
+        os.mkfifo(entry)
+    assert q._settle_free_capture(capture,requests) == 'settled'
+    control=capture/q._ALIAS_RECEIPT_NAME
+    original=control.read_bytes(); control_identity=control.lstat(); entry_identity=entry.lstat()
+    healthy,payload,calls,worker=healthy_worker_case(requests)
+    directory=entry.parent
+    directory.chmod(0o400)
+    try:
+        if os.access(directory,os.X_OK):pytest.skip('uid bypasses permission bits')
+        assert os.listdir(directory) == [entry.name]
+        with pytest.raises(PermissionError):os.lstat(entry)
+        assert not q._capture_settled(capture), 'unreadable metadata is not proof of a nonregular entry'
+        reports=[public_background(requests,runner=worker) for _ in range(2)]
+        for apply in (False,True):
+            report=q.reconcile_inflight_for_migration(request_path=requests,apply=apply)
+            assert report.unsettled_captures == ((capture.name,'unknown'),)
+            assert not report.quiescent and report.settled_captures == 0
+        assert directory.lstat().st_mode & 0o777 == 0o400
+        assert os.path.samestat(control_identity,control.lstat()) and control.read_bytes()==original
+        assert_healthy_completed(reports,healthy,payload,calls)
+    finally:directory.chmod(0o700)
+    # Readability is restored only by the fixture; normal reread proves the same alias.
+    public_background(requests,runner=worker)
+    assert q._capture_settled(capture)
+    for apply in (False,True):
+        assert q.reconcile_inflight_for_migration(request_path=requests,apply=apply).quiescent
+    assert os.path.samestat(control_identity,control.lstat()) and control.read_bytes()==original
+    assert os.path.samestat(entry_identity,entry.lstat())
+    assert target.read_bytes()==b'NEVER READ OR WRITE' and calls == [payload]
 
 
 @pytest.mark.parametrize('layout',['new','old_lease_v1','legacy'])

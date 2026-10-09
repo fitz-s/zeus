@@ -255,6 +255,7 @@ def _capture_held_point_base(vector, mixture, *, payload=None) -> None:
                 "observation_time", "observation_available_at", "raw_payload_sha256",
                 "_edli_day0_current_temperature_native", "_edli_day0_current_temperature_source",
                 "_edli_day0_current_temperature_observed_at_utc", "posterior_id",
+                "_edli_day0_current_temperature_source_revision_identity",
                 "_edli_day0_remaining_provider_source_cycle_time_utc",
             ) if key in payload and not isinstance(payload[key], (Mapping, list, tuple))}
             binding = payload.get("_edli_global_day0_binding")
@@ -9693,6 +9694,30 @@ def event_bound_live_adapter_from_trade_conn(
             return _held_point_traces_for_cut(_probabilities, selection_at)
 
         def _prepare_current_scope_event(event, at):
+            from src.engine.current_day0_observation import current_wrh_probability_event
+            from src.contracts.exceptions import ObservationUnavailableError
+
+            try:
+                probability_event = current_wrh_probability_event(
+                    calibration_conn, event, decision_time=at,
+                )
+            except ObservationUnavailableError as exc:
+                return EventSubmissionReceipt(
+                    False, event.event_id, event.causal_snapshot_id,
+                    reason=f"GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:{type(exc).__name__}:{exc}",
+                    proof_accepted=False,
+                )
+            receipt = _prepare_current_probability_scope_event(probability_event, at)
+            if probability_event is event:
+                return receipt
+            # Queue/claim ownership stays with the caller's immutable event;
+            # its probability witness independently binds the current product.
+            return dataclass_replace(
+                receipt, event_id=event.event_id,
+                causal_snapshot_id=event.causal_snapshot_id,
+            )
+
+        def _prepare_current_probability_scope_event(event, at):
             payload = _payload(event)
             if event.event_type in _FORECAST_DECISION_EVENT_TYPES:
                 phase_evidence = _edli_forecast_lane_phase_evidence(
@@ -9731,11 +9756,13 @@ def event_bound_live_adapter_from_trade_conn(
             except (TypeError, ValueError):
                 family_key = ""
             force_refresh = (
-                probability_refresh_family_keys is None
+                event.event_type == "DAY0_EXTREME_UPDATED"
+                or probability_refresh_family_keys is None
                 or family_key in probability_refresh_family_keys
             )
             if force_refresh:
                 cached_ineligible = (
+                    None if event.event_type == "DAY0_EXTREME_UPDATED" else
                     _probe_global_probability_family_ineligible_cache(
                         probability_cache_namespace,
                         family_key=family_key,
@@ -9828,6 +9855,7 @@ def event_bound_live_adapter_from_trade_conn(
         def _prepare_held_current_scope_event(event, at):
             """Prepare current held q without granting entry authority."""
 
+            from src.contracts.exceptions import ObservationUnavailableError
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
             )
@@ -9845,11 +9873,18 @@ def event_bound_live_adapter_from_trade_conn(
                     ),
                     proof_accepted=False,
                 )
-            held_event = _latest_causal_day0_family_event(
-                calibration_conn,
-                event=event,
-                decision_time=at,
-            ) or event
+            try:
+                held_event = _latest_causal_day0_family_event(
+                    calibration_conn,
+                    event=event,
+                    decision_time=at,
+                ) or event
+            except ObservationUnavailableError as exc:
+                return EventSubmissionReceipt(
+                    False, event.event_id, event.causal_snapshot_id,
+                    reason=f"GLOBAL_HELD_PROBABILITY_PREPARE_FAILED:{type(exc).__name__}:{exc}",
+                    proof_accepted=False,
+                )
             held_is_day0 = held_event.event_type == "DAY0_EXTREME_UPDATED"
             held_is_forecast_lane = (
                 held_event.event_type in _FORECAST_DECISION_EVENT_TYPES
@@ -14752,6 +14787,7 @@ def _revalidate_global_sell_calibration(
         CanonicalMarketAnchoredFitProvider,
         HeldSourceIdentityBinding,
         HeldSourceIdentityCohortBinding,
+        HeldExactPayoffEntryBinding,
         load_held_entry_calibration,
     )
     from src.solve.solver import family_payoff_point_q
@@ -14768,6 +14804,28 @@ def _revalidate_global_sell_calibration(
         side=candidate.side,
         world_conn=world_conn,
     )
+    exact_entry = isinstance(binding, HeldExactPayoffEntryBinding)
+    if exact_entry:
+        provider = CanonicalMarketAnchoredFitProvider(
+            lambda: (world_conn, trade_conn, forecast_conn),
+            city_timezones={city: config.timezone for city, config in runtime_cities_by_name().items()},
+        )
+        binding = binding.at_decision(
+            provider, decision_at=actuation.decision_at_utc,
+            current_raw_revision=current_raw_revision,
+            deadline_monotonic=deadline_monotonic,
+        )
+    if exact_entry and binding.source_only:
+        reproduced = binding.bind_current(
+            witness=actuation.probability_witness,
+            raw_revision=current_raw_revision, raw_q=raw_q, p0=correction.p0,
+        )
+        terminal = decision.expected_terminal_wealth
+        if (reproduced != correction or terminal is None or not math.isclose(
+            terminal.held_probability_mean, raw_q, rel_tol=0.0, abs_tol=1e-12,
+        )):
+            raise ValueError("GLOBAL_SELL_ENTRY_CALIBRATION_SUPERSEDED")
+        return
     if isinstance(binding, (HeldSourceIdentityBinding, HeldSourceIdentityCohortBinding)):
         binding = binding.at_decision(
             None, decision_at=actuation.decision_at_utc,
@@ -14794,10 +14852,11 @@ def _revalidate_global_sell_calibration(
             lambda: (world_conn, trade_conn, forecast_conn),
             city_timezones={city: config.timezone for city, config in runtime_cities_by_name().items()},
         )
-    binding = binding.at_decision(
-        provider, decision_at=actuation.decision_at_utc, current_raw_revision=current_raw_revision,
-        deadline_monotonic=deadline_monotonic,
-    )
+    if not exact_entry:
+        binding = binding.at_decision(
+            provider, decision_at=actuation.decision_at_utc, current_raw_revision=current_raw_revision,
+            deadline_monotonic=deadline_monotonic,
+        )
     reproduced = binding.corrected_probability(
         family_key=candidate.family_key,
         bin_id=candidate.bin_id,
@@ -17118,9 +17177,9 @@ def _global_current_state_execution_economics(
     # check below on the raw value — the correction cannot mask a stale q.
     q_correction = getattr(decision, "payoff_q_correction", None)
     if q_correction is not None:
-        from src.contracts.payoff_q_correction import SourceIdentityBaseline
+        from src.contracts.payoff_q_correction import SourceIdentityBaseline, ExactPayoffEntryPolicy
 
-        if isinstance(q_correction, SourceIdentityBaseline) and not q_correction.matches_witness(witness):
+        if isinstance(q_correction, (SourceIdentityBaseline, ExactPayoffEntryPolicy)) and not q_correction.matches_witness(witness):
             raise ValueError("GLOBAL_CURRENT_STATE_SOURCE_IDENTITY_SUPERSEDED")
         if not math.isclose(
             float(q_correction.raw_q),
@@ -19260,6 +19319,12 @@ def _current_global_actuation_prepared_family(
                 revalidation_time = stamp
     else:
         revalidation_time = decision_time
+    from src.engine.current_day0_observation import current_wrh_probability_replay_event
+
+    event = current_wrh_probability_replay_event(
+        observation_conn, event, selected_at=revalidation_time,
+        decision_time=decision_time,
+    )
     pinned_complete_bundle = _rehydrate_held_pinned_bundle_for_actuation(
         event,
         selected=selected,
@@ -38991,6 +39056,7 @@ def _global_day0_execution_payload(
                 ("value_native", "_edli_day0_current_temperature_native"),
                 ("observed_at_utc", "_edli_day0_current_temperature_observed_at_utc"),
                 ("source", "_edli_day0_current_temperature_source"),
+                ("source_revision_identity", "_edli_day0_current_temperature_source_revision_identity"),
             ):
                 if field in current_state:
                     payload[destination] = current_state[field]
@@ -39187,6 +39253,10 @@ def _global_day0_probability_authority_payload(
             (
                 "current_temperature_source",
                 "_edli_day0_current_temperature_source",
+            ),
+            (
+                "current_temperature_source_revision_identity",
+                "_edli_day0_current_temperature_source_revision_identity",
             ),
             (
                 "conditional_high_shape_identity",
@@ -39658,6 +39728,9 @@ def _global_final_daily_probability_payload(
         "settlement_unit": str(final_observation.unit),
         "source_available_at": final_observation.fetched_at.isoformat(),
         "probability_base_identity": probability_base_identity,
+        "source_evidence_identity": str(
+            getattr(final_observation, "source_evidence_identity", "") or ""
+        ),
         "final_daily": True,
     }
     return {
@@ -40418,6 +40491,13 @@ def _latest_causal_day0_family_event(
 
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_HELD_DAY0_EVENT_DECISION_TIME_NAIVE")
+    from src.engine.current_day0_observation import current_wrh_probability_event
+
+    current_event = current_wrh_probability_event(
+        conn, event, decision_time=decision_time,
+    )
+    if current_event is not event:
+        return current_event
     payload = _payload(event)
     city = str(payload.get("city") or "").strip()
     target_date = str(payload.get("target_date") or "").strip()
@@ -40938,6 +41018,14 @@ def _prepare_current_global_probability_family(
         raise GlobalValueFault("GLOBAL_PROVISIONAL_DAY0_REPLACEMENT_POLICY_INVALID")
     if not isinstance(probability_use, _CurrentProbabilityUse):
         raise GlobalValueFault("GLOBAL_PROBABILITY_USE_INVALID")
+    from src.engine.current_day0_observation import current_wrh_probability_event
+
+    # The event may only be the durable wake/claim carrier. Reproduce the
+    # current native product on every ENTRY, held and submit-time probability
+    # read, including when the selected target retained a forecast event type.
+    event = current_wrh_probability_event(
+        observation_conn or forecast_conn, event, decision_time=decision_time,
+    )
     if not isinstance(_force_day0_redecision_fallback, bool):
         raise GlobalValueFault("GLOBAL_DAY0_REDECISION_FALLBACK_POLICY_INVALID")
     entry_authority = probability_use is _CurrentProbabilityUse.ENTRY
@@ -42781,6 +42869,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_current_temperature_native",
             "_edli_day0_current_temperature_observed_at_utc",
             "_edli_day0_current_temperature_source",
+            "_edli_day0_current_temperature_source_revision_identity",
             "_edli_day0_trajectory_conditioning_basis",
             "_edli_day0_model_innovations_c",
             "_edli_day0_current_state_innovation_e_fold_hours",
@@ -42879,6 +42968,9 @@ def _prepare_current_global_probability_family(
             "current_temperature_source": payload.get(
                 "_edli_day0_current_temperature_source"
             ),
+            **({"current_temperature_source_revision_identity": payload[
+                "_edli_day0_current_temperature_source_revision_identity"]}
+               if "_edli_day0_current_temperature_source_revision_identity" in payload else {}),
             "conditional_high_shape_identity": payload.get(
                 "_edli_day0_conditional_high_shape_identity"
             ),
@@ -48516,9 +48608,12 @@ def _latest_day0_current_temperature_native(
     world_conn: sqlite3.Connection,
     family,
     decision_time: datetime,
+    identity_out: dict[str, object] | None = None,
 ) -> tuple[float, datetime, str] | None:
     """Compatibility wrapper around the shared Day0 current-state reader."""
 
+    if identity_out is not None:
+        identity_out.clear()
     city = runtime_cities_by_name().get(str(family.city))
     if city is None:
         return None
@@ -48532,6 +48627,8 @@ def _latest_day0_current_temperature_native(
     )
     if state is None:
         return None
+    if identity_out is not None:
+        identity_out.update(state.identity())
     return state.value_native, state.observed_at, state.source
 
 
@@ -48660,18 +48757,8 @@ def _day0_carrier_written_inputs(payload: Mapping[str, object]) -> dict[str, obj
     written = payload.get("_edli_day0_carrier_written_inputs")
     if isinstance(written, Mapping):
         return dict(written)
-    value = payload.get("_edli_day0_current_temperature_native")
-    observed_at = payload.get("_edli_day0_current_temperature_observed_at_utc")
-    source = payload.get("_edli_day0_current_temperature_source")
     return {
-        "current_path_state": (
-            None if value is None or observed_at is None or source is None
-            else {
-                "value_native": float(value),
-                "observed_at_utc": str(observed_at),
-                "source": str(source),
-            }
-        ),
+        "current_path_state": _day0_current_temperature_identity(payload),
         "conditional_high_shape_identity": payload.get(
             "_edli_day0_conditional_high_shape_identity"
         ),
@@ -48680,6 +48767,31 @@ def _day0_carrier_written_inputs(payload: Mapping[str, object]) -> dict[str, obj
         ),
         "remaining_variance_basis": payload.get("_edli_day0_remaining_variance_basis"),
     }
+
+
+def _day0_current_temperature_identity(payload: Mapping[str, object]) -> dict[str, object] | None:
+    """Preserve the current state's optional qualified product dependency."""
+    value = payload.get("_edli_day0_current_temperature_native")
+    observed_at = payload.get("_edli_day0_current_temperature_observed_at_utc")
+    source = payload.get("_edli_day0_current_temperature_source")
+    if value is None or observed_at is None or source is None:
+        return None
+    identity = {
+        "value_native": float(value),
+        "observed_at_utc": str(observed_at),
+        "source": str(source),
+    }
+    revision = payload.get("_edli_day0_current_temperature_source_revision_identity")
+    if revision is not None:
+        from src.data.day0_hourly_vectors import Day0CurrentTemperatureState
+
+        qualified = Day0CurrentTemperatureState(
+            value_native=float(value),
+            observed_at=datetime.fromisoformat(str(observed_at).replace("Z", "+00:00")),
+            source=str(source), source_revision_identity=revision,
+        ).identity()
+        identity["source_revision_identity"] = qualified["source_revision_identity"]
+    return identity
 
 
 def _bind_day0_carrier_written_inputs(payload: dict[str, object]) -> None:
@@ -48723,6 +48835,10 @@ def _snapshot_day0_source_clock_carrier_provenance(
         for field in carrier_fields
         if field in payload
     }
+    written = payload.get("_edli_day0_carrier_written_inputs")
+    current_state = written.get("current_path_state") if isinstance(written, Mapping) else None
+    if isinstance(current_state, Mapping) and current_state.get("source_revision_identity") is not None:
+        provenance["carrier_written_inputs"] = deepcopy(written)
     binding = payload.get("_edli_global_day0_binding")
     for field in ("posterior_id", "probability_base_identity"):
         value = payload.get(field)
@@ -48905,21 +49021,9 @@ def _rebuild_decision_time_day0_carrier(
         station_id=configured_station,
         preliminary_survival_identity=likelihood_identity,
     )
-    current_value = payload.get("_edli_day0_current_temperature_native")
-    current_observed_at = payload.get(
-        "_edli_day0_current_temperature_observed_at_utc"
-    )
-    current_source = payload.get("_edli_day0_current_temperature_source")
-    if (
-        current_value is not None
-        and current_observed_at is not None
-        and current_source is not None
-    ):
-        identity_inputs["current_path_state"] = {
-            "value_native": float(current_value),
-            "observed_at_utc": str(current_observed_at),
-            "source": str(current_source),
-        }
+    current_identity = _day0_current_temperature_identity(payload)
+    if current_identity is not None:
+        identity_inputs["current_path_state"] = current_identity
     conditional_high = payload.get("_edli_day0_conditional_high_shape")
     if conditional_high is not None:
         identity_inputs["conditional_high_shape_identity"] = (
@@ -49663,10 +49767,12 @@ def _day0_direct_entry_source_clock_carrier(
     city = runtime_cities_by_name().get(str(getattr(family, "city", "") or ""))
     if city is None:
         return None
+    current_state_identity: dict[str, object] = {}
     current_state = _latest_day0_current_temperature_native(
         world_conn=world_conn or forecast_conn,
         family=family,
         decision_time=decision_time,
+        identity_out=current_state_identity,
     )
     if current_state is None:
         return None
@@ -49806,6 +49912,8 @@ def _day0_direct_entry_source_clock_carrier(
         "current_temperature_native": float(current_native),
         "current_temperature_observed_at_utc": current_observed_at.isoformat(),
         "current_temperature_source": str(current_source),
+        **({"current_temperature_source_revision_identity": current_state_identity["source_revision_identity"]}
+           if "source_revision_identity" in current_state_identity else {}),
         "future_extremes_c": [float(value) for value in values.tolist()],
         "vector_witness": dict(witness),
     }
@@ -50120,11 +50228,13 @@ def _day0_remaining_day_members(
             payload["_edli_day0_remaining_unavailable_reason"] = "city_config_missing_for_hourly_bundle"
             return None
         current_state: tuple[float, datetime, str] | None = None
+        current_state_identity: dict[str, object] = {}
         if world_conn is not None:
             current_state = _latest_day0_current_temperature_native(
                 world_conn=world_conn,
                 family=family,
                 decision_time=decision_time,
+                identity_out=current_state_identity,
             )
             if current_state is None:
                 payload["_edli_day0_remaining_unavailable_reason"] = (
@@ -50345,6 +50455,11 @@ def _day0_remaining_day_members(
                 current_observed_at.isoformat()
             )
             payload["_edli_day0_current_temperature_source"] = current_source
+            payload.pop("_edli_day0_current_temperature_source_revision_identity", None)
+            if "source_revision_identity" in current_state_identity:
+                payload["_edli_day0_current_temperature_source_revision_identity"] = (
+                    current_state_identity["source_revision_identity"]
+                )
             payload["_edli_day0_trajectory_conditioning_basis"] = (
                 "current_state_exponential_residual_decay_v1"
             )
@@ -50397,6 +50512,7 @@ def _day0_remaining_day_members(
                 current_state=Day0CurrentTemperatureState(
                     value_native=float(current_state[0]),
                     observed_at=current_state[1], source=str(current_state[2]),
+                    source_revision_identity=current_state_identity.get("source_revision_identity"),
                 ),
                 provider_vectors=complete_provider_vectors,
             )
@@ -50451,6 +50567,8 @@ def _day0_remaining_day_members(
                 )
                 or carrier_current_source
                 != str(payload.get("_edli_day0_current_temperature_source"))
+                or entry_carrier.get("current_temperature_source_revision_identity")
+                != payload.get("_edli_day0_current_temperature_source_revision_identity")
             ):
                 raise ValueError(
                     "DAY0_DIRECT_ENTRY_SOURCE_CLOCK_CARRIER_MISMATCH"

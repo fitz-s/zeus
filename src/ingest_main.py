@@ -2179,6 +2179,143 @@ def _day0_fmi_temperature_tick() -> dict[str, object]:
     return reports[0] if len(reports) == 1 else {"status": "SOURCE_ROUND", "reports": reports}
 
 
+# Fairness only: no source, completion, or decision authority; restart wraps to oldest.
+_WRH_OLD_OWNER_CURSOR: tuple[str, str] | None = None
+
+
+@_scheduler_job("ingest_day0_noaa_wrh_current")
+def _day0_current_noaa_wrh_tick() -> dict[str, object]:
+    global _WRH_OLD_OWNER_CURSOR
+    from src.config import runtime_cities_by_name
+    from src.data.physical_current_delivery import current_temperature_priority_families, publish_current_temperature_wakes
+    from src.data.station_temperature_adapters import iter_current_noaa_wrh_products, iter_noaa_wrh_completed_owner_recovery
+    from src.data.daily_obs_append import append_current_noaa_wrh_product, prepare_current_noaa_wrh_product
+    from src.state.db import (get_forecasts_connection_with_world,
+                              get_forecasts_connection_with_world_read_only)
+
+    cities = runtime_cities_by_name()
+    scope_keys = {
+        (name, target) for name, target, metric in current_temperature_priority_families()
+        if name in cities and str(cities[name].settlement_source_type).lower() == "noaa"
+    }
+    oldest_unfinished = None
+    next_unfinished = None
+    stages = []
+    received_scopes = set()
+    # Complete only our recently-created intraday owners, even after exposure
+    # closes. Generic historical rows never enter replacement authority. This
+    # uses the same bounded <=7-day, at-most-two-unit-group request budget.
+    try:
+        with get_forecasts_connection_with_world_read_only(
+                deadline_monotonic=time.monotonic() + 0.05) as reader:
+            for city in cities.values():
+                if str(city.settlement_source_type).lower() != "noaa":
+                    continue
+                today = datetime.now(timezone.utc).astimezone(ZoneInfo(city.timezone)).date()
+                deadline = time.monotonic() + 0.05
+                reader.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+                try:
+                    rows = reader.execute(
+                        "SELECT target_date FROM observations WHERE city=? AND source=? "
+                        "AND target_date BETWEEN ? AND ? AND rebuild_run_id LIKE 'noaa_wrh_current_%' "
+                        "AND (high_temp IS NULL OR low_temp IS NULL OR CASE WHEN json_valid(high_provenance_metadata) THEN "
+                        "COALESCE(json_extract(high_provenance_metadata,'$.wrh_current_snapshot.complete_day'),0)=0 "
+                        "ELSE 1 END) ORDER BY target_date DESC LIMIT 7",
+                        (city.name, f"noaa_wrh_{city.wu_station.lower()}", (today-timedelta(days=6)).isoformat(), today.isoformat()),
+                    ).fetchall()
+                    scope_keys.update((city.name, str(row[0])) for row in rows)
+                    old_sql = (
+                        "SELECT target_date FROM observations WHERE city=? AND source=? "
+                        "AND target_date<? AND rebuild_run_id LIKE 'noaa_wrh_current_%' "
+                        "AND (high_temp IS NULL OR low_temp IS NULL OR CASE WHEN json_valid(high_provenance_metadata) THEN "
+                        "COALESCE(json_extract(high_provenance_metadata,'$.wrh_current_snapshot.complete_day'),0)=0 "
+                        "ELSE 1 END) "
+                    )
+                    old_parameters = (city.name, f"noaa_wrh_{city.wu_station.lower()}", (today-timedelta(days=6)).isoformat())
+                    old = reader.execute(old_sql+"ORDER BY target_date LIMIT 1", old_parameters).fetchone()
+                    if old is not None:
+                        candidate = (str(old[0]), city.name)
+                        oldest_unfinished = min(oldest_unfinished or candidate, candidate)
+                    if _WRH_OLD_OWNER_CURSOR is not None:
+                        after = ">=" if city.name > _WRH_OLD_OWNER_CURSOR[1] else ">"
+                        old = reader.execute(old_sql+f"AND target_date{after}? ORDER BY target_date LIMIT 1",
+                                             (*old_parameters, _WRH_OLD_OWNER_CURSOR[0])).fetchone()
+                        if old is not None:
+                            candidate = (str(old[0]), city.name)
+                            next_unfinished = min(next_unfinished or candidate, candidate)
+                except Exception as exc:
+                    logger.warning("WRH_CURRENT_COMPLETION_SCOPE_DEFERRED city=%s error=%s", city.name, type(exc).__name__)
+                    stages.append({"label": "completion_scope", "ok": False, "error": type(exc).__name__})
+                finally:
+                    reader.set_progress_handler(None, 0)
+    except Exception as exc:
+        logger.warning("WRH_CURRENT_COMPLETION_READ_DEFERRED error=%s", type(exc).__name__)
+        stages.append({"label": "completion_read", "ok": False, "error": type(exc).__name__})
+    scopes = tuple((cities[name], target) for name, target in sorted(scope_keys))
+    # Each product is acquired before its writer lease. Streaming prevents a
+    # slow second unit/provider from delaying a product already received.
+    from itertools import chain
+    selected_old = next_unfinished or oldest_unfinished
+    recovery = (cities[selected_old[1]], selected_old[0]) if selected_old else None
+    products = chain(iter_current_noaa_wrh_products(scopes), iter_noaa_wrh_completed_owner_recovery(recovery))
+    committed = 0
+    for city, target, product in products:
+        received_scopes.add((city.name, target))
+        as_of = datetime.now(timezone.utc)
+        try:
+            with get_forecasts_connection_with_world_read_only(
+                    deadline_monotonic=time.monotonic() + 0.05) as reader:
+                prepared = prepare_current_noaa_wrh_product(
+                    reader, city=city, target_date=target, product=product, as_of=as_of,
+                )
+        except Exception as exc:
+            logger.warning("WRH_CURRENT_PRODUCT_PREPARE_DEFERRED city=%s error=%s", city.name, type(exc).__name__)
+            stages.append({"label": "received_product_prepare", "ok": False, "error": type(exc).__name__})
+            continue
+        changed = False
+        try:
+            # This owner acquires FORECAST then WORLD writer flocks together.
+            # The legacy world mutex already owns that same WORLD flock;
+            # nesting it here makes our own nonblocking writer defer forever.
+            # SCOPE: this received product. DRAIN: the next scheduled poll.
+            # RESET: the canonical dual-DB lease becomes available.
+            with get_forecasts_connection_with_world(write_class="live", blocking=False) as conn:
+                conn.execute("PRAGMA busy_timeout = 100")
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    status = append_current_noaa_wrh_product(
+                        conn, city=city, target_date=target, product=product, as_of=as_of, prepared=prepared,
+                    )
+                    conn.commit()
+                    changed = status in {"inserted", "revision"} or (status == "noop" and prepared.custody_restore_receipt is not None)
+                except Exception:
+                    conn.rollback()
+                    raise
+        except Exception as exc:
+            logger.warning("WRH_CURRENT_PRODUCT_WRITE_DEFERRED city=%s error=%s", city.name, type(exc).__name__)
+            stages.append({"label": "received_product_commit", "ok": False, "error": type(exc).__name__})
+        if changed:
+            committed += 1
+            wake = publish_current_temperature_wakes(
+                cities=(city,), scopes=tuple((city.name, target, metric) for metric in ("high", "low")),
+                now=datetime.now(timezone.utc), committed=True,
+            )
+            if wake["status"] == "WAKE_DEFERRED":
+                stages.append({"label": "committed_product_wake", "ok": False, "error": "WAKE_DEFERRED"})
+    if selected_old is not None:
+        # An unavailable/refused old day must not monopolize this recovery slot.
+        _WRH_OLD_OWNER_CURSOR = selected_old
+    expected = {(city.name, target) for city, target in scopes}
+    if recovery:
+        expected.add((recovery[0].name, recovery[1]))
+    unavailable = expected - received_scopes
+    if unavailable:
+        stages.append({"label": "source_acquisition", "ok": False, "error": "QUALIFIED_PRODUCT_UNAVAILABLE"})
+    return {"status": "WRH_CURRENT_PRODUCT_DEFERRED" if stages else "WRH_CURRENT_PRODUCT_PASS",
+            "committed": committed, "received": len(received_scopes), "source_unavailable": len(unavailable),
+            "stages": stages}
+
+
 def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> dict[str, object]:
     """HTTP before WORLD lease; committed physical evidence before any reseed."""
     from src.data.station_temperature_adapters import fetch_station_temperature, native_sample_value
@@ -2302,7 +2439,10 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
 
     wake_status = "NO_NEW_SOURCE_REVISION"
     wake_key = (city.name, station_id, source_channel)
-    if advanced:
+    # An older source-clock correction can retract the day extreme without
+    # moving the current-temperature frontier. Every committed revision owes
+    # physical redecision, not only the newest observed instant.
+    if inserted:
         _physical_current_pending_wakes.add(wake_key)
     if wake_key in _physical_current_pending_wakes:
         from src.data.replacement_forecast_production import (
@@ -2314,14 +2454,27 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         # The existing fusion input-revision marker owns durable per-family
         # publication and periodic catch-up if this immediate scoped pass fails.
         decision_time = datetime.now(timezone.utc)
-        from src.data.physical_current_delivery import current_temperature_delivery_scopes
-        affected_scopes = current_temperature_delivery_scopes((city,), now=decision_time)
-        report = _enqueue_fusion_upgrade_reseeds_if_needed(
-            _replacement_forecast_live_materialization_queue_config(),
-            scopes=affected_scopes,
-            changed_sources=("day0_current_temperature_state",),
-            computed_at=decision_time,
+        from src.data.physical_current_delivery import (
+            current_temperature_delivery_scopes, publish_current_temperature_wakes,
         )
+        affected_scopes = current_temperature_delivery_scopes((city,), now=decision_time)
+        publish_current_temperature_wakes(
+            cities=(city,), scopes=affected_scopes, now=decision_time, committed=bool(inserted),
+        )
+        try:
+            report = _enqueue_fusion_upgrade_reseeds_if_needed(
+                _replacement_forecast_live_materialization_queue_config(),
+                scopes=affected_scopes,
+                changed_sources=("day0_current_temperature_state",),
+                computed_at=decision_time,
+            )
+        except Exception as exc:
+            # Truth is already committed and the independent wake is durable.
+            # SCOPE: this source's seed debt. DRAIN: the next source tick or
+            # periodic reconciliation. RESET: a successful queue publication.
+            logger.warning("PHYSICAL_CURRENT_RESEED_DEFERRED city=%s error=%s",
+                           city.name, type(exc).__name__)
+            report = None
         status = (report or {}).get("status")
         wake_status = status or "ENQUEUE_UNAVAILABLE"
         if report is not None and status != "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED":
@@ -6284,6 +6437,9 @@ def _ingest_main_job_specs() -> list[tuple]:
         (_current_temperature_delivery_tick, "interval", dict(seconds=1,
             id="ingest_current_temperature_delivery", max_instances=1, coalesce=True,
             misfire_grace_time=5, next_run_time=now)),
+        (_day0_current_noaa_wrh_tick, "interval", dict(seconds=_physical_current_poll_seconds(),
+            id="ingest_day0_noaa_wrh_current", max_instances=1, coalesce=True,
+            misfire_grace_time=120, next_run_time=now)),
         (_day0_fmi_temperature_tick, "interval", dict(seconds=_physical_current_poll_seconds(),
             id="ingest_day0_fmi_temperature", max_instances=1, coalesce=True,
             misfire_grace_time=120, next_run_time=now)),

@@ -1,7 +1,7 @@
 # Created: 2026-04-27
 # Last reused/audited: 2026-10-08
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-30; last_reused=2026-09-30
-# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+# Lifecycle: created=2026-04-27; last_reviewed=2026-10-08; last_reused=2026-10-08
+# Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md (2026-10-06 cloud-only physical-evidence exit repair)
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
 """R3 M4 exit-safety antibodies for cancel/replace and exit mutex behavior."""
@@ -38,6 +38,15 @@ def conn():
     init_collateral_schema(c)
     yield c
     c.close()
+
+
+@pytest.fixture(autouse=True)
+def fake_public_funder_identity_for_exit_safety_tests(monkeypatch):
+    """Fake venue tests must not depend on a developer's host keychain."""
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "0x0000000000000000000000000000000000000001",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -358,6 +367,197 @@ def _snapshot_hash(c, snapshot_id: str) -> str:
     snapshot = get_snapshot(c, snapshot_id)
     assert snapshot is not None
     return snapshot.executable_snapshot_hash
+
+
+def _install_current_exit_capture(
+    conn, monkeypatch, *, bid="0.10", condition_id="condition-test",
+):
+    """Fake only public market transport; keep native capture and its checks."""
+    from src.data import market_scanner
+    from src.execution import exit_lifecycle
+
+    class CaptureClockType(type):
+        def __instancecheck__(cls, value):
+            return isinstance(value, datetime)
+
+    class CaptureClock(datetime, metaclass=CaptureClockType):
+        @classmethod
+        def now(cls, tz=None):
+            now = exit_lifecycle._utcnow()
+            return now if tz else now.replace(tzinfo=None)
+
+    monkeypatch.setattr(market_scanner, "datetime", CaptureClock)
+
+    market = {
+        "condition_id": condition_id, "market_id": condition_id,
+        "question_id": "question-test", "token_id": YES_TOKEN,
+        "no_token_id": NO_TOKEN, "tokens": [YES_TOKEN, NO_TOKEN],
+        "active": True, "closed": False, "archived": False, "accepting_orders": True,
+        "enable_orderbook": True, "enable_order_book": True, "feesEnabled": False,
+        "tick_size": "0.01", "min_order_size": "5", "neg_risk": False,
+    }
+    market["gamma_market_raw"] = dict(market)
+    calls = []
+
+    def market_info(_clob, selected_condition_id):
+        assert selected_condition_id == condition_id
+        assert not conn.in_transaction
+        calls.append("market")
+        return dict(market)
+
+    def book(_clob, token_id):
+        assert token_id in (YES_TOKEN, NO_TOKEN)
+        assert not conn.in_transaction
+        calls.append(token_id)
+        return {
+            "asset_id": token_id, "tick_size": "0.01",
+            "min_order_size": "5", "neg_risk": False,
+            "bids": [] if bid is None else [{"price": bid, "size": "20"}],
+            "asks": [{"price": "0.99", "size": "20"}],
+        }
+
+    monkeypatch.setattr(market_scanner, "get_sibling_outcomes", lambda _: [dict(market)])
+    monkeypatch.setattr(market_scanner, "get_last_scan_authority", lambda: "VERIFIED")
+    monkeypatch.setattr(market_scanner, "_fetch_clob_market_info", market_info)
+    monkeypatch.setattr(market_scanner, "_fetch_orderbook_snapshot", book)
+    monkeypatch.setattr(market_scanner, "_fetch_fee_details", lambda _clob, token: {
+        "source": "test_fee_transport", "token_id": token,
+        "fee_rate_fraction": 0.0, "fee_rate_bps": 0.0,
+        "fee_rate_source_field": "fee_rate_fraction", "fee_rate_raw_unit": "fraction",
+    })
+    return calls
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("bid", ("0.05", "0.10", "0.95", "0.04", "0.96", None))
+def test_protective_capture_replaces_live_selection_cache_with_native_book(
+    conn, monkeypatch, direction, bid,
+):
+    from src.execution import exit_lifecycle
+    from src.state.snapshot_repo import get_snapshot
+
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    position = SimpleNamespace(
+        trade_id="capture-held", market_id="condition-test", condition_id="condition-test",
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN, direction=direction,
+    )
+    calls = _install_current_exit_capture(conn, monkeypatch, bid=bid)
+    _ensure_snapshot(
+        conn, snapshot_id="still-fresh-selection", selected_outcome_token_id=token,
+        captured_at=_NOW - timedelta(seconds=1),
+        freshness_deadline=_NOW + timedelta(seconds=179),
+    )
+    conn.commit()
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: _NOW)
+    def capture():
+        return exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn, object(), position, token, require_fresh_capture=True,
+            # Protective pricing cannot inherit caller-supplied old book/time.
+            now=_NOW - timedelta(seconds=1), prefetched_orderbook={"bids": [{"price": "0.49"}]},
+        )
+    if bid is None:
+        with pytest.raises(exit_lifecycle._ExitCaptureNoBid):
+            capture()
+        assert calls == ["market", token]
+        assert conn.execute("SELECT count(*) FROM executable_market_snapshots").fetchone()[0] == 1
+        return
+    context = capture()
+    assert calls == ["market", token]
+    assert context["executable_snapshot_id"] != "still-fresh-selection"
+    assert context["executable_snapshot_orderbook_top_bid"] == bid
+    snapshot = get_snapshot(conn, context["executable_snapshot_id"])
+    assert snapshot.captured_at == _NOW
+    assert snapshot.freshness_deadline == _NOW + timedelta(seconds=180)
+    assert conn.execute(
+        "SELECT capture_trigger FROM executable_market_snapshots WHERE snapshot_id=?",
+        (snapshot.snapshot_id,),
+    ).fetchone()[0] == "JIT_SUBMIT"
+    assert not conn.in_transaction
+
+
+@pytest.mark.parametrize("old_bid", ("0.49", None))
+@pytest.mark.parametrize("case", (
+    "transport", "source", "empty", "network", "denied", "same_row",
+    "older_concurrent", "valid_concurrent", "no_bid_concurrent", "future",
+    "expired", "invalidated", "wrong_token", "wrong_pair", "uncommitted",
+    "expired_during_capture",
+))
+def test_protective_capture_failure_never_revives_prior_authority(
+    conn, monkeypatch, old_bid, case,
+):
+    from src.data import market_scanner
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+    from src.execution import exit_lifecycle
+    from src.state.snapshot_repo import record_snapshot_invalidation
+
+    position = SimpleNamespace(
+        trade_id="capture-race", market_id="condition-test", condition_id="condition-test",
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN, direction="buy_yes",
+    )
+    _install_current_exit_capture(conn, monkeypatch)
+    # Same-clock old rows must also be excluded from admission-denial fallback.
+    _ensure_snapshot(
+        conn, snapshot_id="old-capture", captured_at=_NOW,
+        freshness_deadline=_NOW + timedelta(seconds=180), orderbook_top_bid=old_bid,
+    )
+    conn.commit()
+    clock = [_NOW]
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: clock[0])
+    denied_until = _NOW + timedelta(seconds=10)
+
+    def fail_capture(conn_arg, **kwargs):
+        assert not conn_arg.in_transaction
+        if case == "empty":
+            return {}
+        if case == "network":
+            raise RuntimeError("book unavailable")
+        if case not in {"denied", "same_row"}:
+            clock[0] += timedelta(seconds=1)
+            captured_at = (
+                _NOW - timedelta(seconds=1) if case == "older_concurrent"
+                else clock[0] + timedelta(seconds=1) if case == "future"
+                else clock[0]
+            )
+            _ensure_snapshot(
+                conn_arg, snapshot_id="new-capture", captured_at=captured_at,
+                freshness_deadline=clock[0] if case == "expired" else clock[0] + timedelta(seconds=180),
+                selected_outcome_token_id=NO_TOKEN if case == "wrong_token" else YES_TOKEN,
+                no_token_id="foreign-no" if case == "wrong_pair" else NO_TOKEN,
+                orderbook_top_bid=None if case == "no_bid_concurrent" else "0.10",
+            )
+            if case == "invalidated":
+                record_snapshot_invalidation(
+                    conn_arg, condition_id="condition-test", token_id=YES_TOKEN,
+                    reason="current-correction", invalidated_at=clock[0],
+                )
+            if case != "uncommitted":
+                conn_arg.commit()
+            if case in {"expired", "expired_during_capture"}:
+                clock[0] += timedelta(seconds=181)
+            if case == "expired_during_capture":
+                return {"executable_snapshot_id": "new-capture"}
+        raise RequestAdmissionDenied(f"POLYMARKET_REQUEST_IN_FLIGHT:{denied_until.isoformat()}")
+
+    monkeypatch.setattr(market_scanner, "capture_executable_market_snapshot", fail_capture)
+    if case == "source":
+        monkeypatch.setattr(market_scanner, "get_last_scan_authority", lambda: "UNKNOWN")
+    if case == "transport":
+        monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client",
+                            lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    denial = {}
+    context = exit_lifecycle._latest_or_capture_exit_snapshot_context(
+        conn, None if case == "transport" else object(), position, YES_TOKEN,
+        require_fresh_capture=True, request_denial_sink=denial,
+    )
+    if case in {"valid_concurrent", "no_bid_concurrent"}:
+        assert context["executable_snapshot_id"] == "new-capture"
+        assert context["executable_snapshot_orderbook_top_bid"] == (
+            "ABSENT" if case == "no_bid_concurrent" else "0.10"
+        )
+    else:
+        assert context == {}
+    if case in {"denied", "same_row", "valid_concurrent"}:
+        assert denial == {"retry_at": denied_until}
 
 
 def _ensure_envelope(
@@ -9480,13 +9680,10 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
         day0_active=True,
     )
 
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_held_monitor_clob_client",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("fresh no-bid must not trigger transport recovery")
-        ),
-    )
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
+    recovered = []
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client",
+                        lambda: recovered.append(True) or object())
     monkeypatch.setattr(
         exit_lifecycle,
         "_refresh_exit_collateral_snapshot_for_submit",
@@ -9524,6 +9721,7 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
     )
 
     assert outcome == "exit_blocked: no_executable_bid"
+    assert recovered == [True]
     assert position.state == "pending_exit"
     assert position.exit_state == "retry_pending"
     assert position.exit_retry_count == 0
@@ -9627,6 +9825,8 @@ def test_hard_fact_exit_with_zero_snapshot_bid_falls_to_liquidity_wait_not_autho
         "_hard_fact_sell_authority_valid",
         lambda *args, **kwargs: True,
     )
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client", lambda: object())
 
     outcome = exit_lifecycle.execute_exit(
         portfolio,
@@ -9654,147 +9854,41 @@ def test_hard_fact_exit_uses_fresh_bid_protective_fak(
     conn, monkeypatch, direction, expected_token
 ):
     from src.execution import exit_lifecycle
-    from src.state.portfolio import ExitContext, PortfolioState, Position
-
-    position = Position(
-        trade_id="pos-hard-fact-protective-fak",
-        market_id="condition-test",
-        condition_id="condition-test",
-        city="Manila",
-        cluster="asia",
-        target_date="2026-07-02",
-        bin_label="32C",
-        direction=direction,
-        token_id=YES_TOKEN,
-        no_token_id=NO_TOKEN,
-        entry_price=0.71,
-        size_usd=7.1,
-        shares=10.0,
-        chain_shares=10.0,
-        cost_basis_usd=7.1,
-        state="day0_window",
-        chain_state="synced",
-        strategy_key="forecast_qkernel_entry",
-        env="live",
-    )
-    submitted = {}
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_hard_fact_sell_authority_valid",
-        lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_latest_or_capture_exit_snapshot_context",
-        lambda *_args, **_kwargs: {
-            "executable_snapshot_id": "snapshot-hard-fact-protective",
-            "executable_snapshot_hash": "hash-hard-fact-protective",
-            "executable_snapshot_orderbook_top_bid": 0.18,
-            "executable_snapshot_min_order_size": 0.01,
-        },
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "check_sell_collateral",
-        lambda *_args, **_kwargs: (True, ""),
-    )
-
+    from src.state.portfolio import PortfolioState
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction)
+    context, verdict = _bind_canonical_hard_fact_case(conn, position, context, now)
+    submitted = []
     def return_pending(**kwargs):
-        submitted.update(kwargs)
-        return exit_lifecycle.OrderResult(
-            trade_id=position.trade_id,
-            status="pending",
-            order_id="ord-hard-fact-protective",
-            external_order_id="ord-hard-fact-protective",
-        )
-
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(trade_id=position.trade_id, status="pending", order_id="hard-fact")
     monkeypatch.setattr(exit_lifecycle, "place_sell_order", return_pending)
-
-    class Clob:
-        @staticmethod
-        def get_order_status(_order_id):
-            return {"status": "OPEN"}
-
     outcome = exit_lifecycle.execute_exit(
-        PortfolioState(positions=[position]),
-        position,
-        ExitContext(
-            exit_reason="DAY0_HARD_FACT_BIN_DEAD",
-            probability_receipt={
-                "probability_authority": "day0_absorbing_hard_fact",
-                "hard_fact_evidence": {"source": "test-final-observation"},
-            },
-            current_market_price=0.22,
-            current_market_price_is_fresh=False,
-            best_bid=0.20,
-            hours_to_settlement=0.5,
-            day0_active=True,
-        ),
-        clob=Clob(),
-        conn=conn,
-        hard_fact_authority=object(),
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, hard_fact_authority=verdict,
     )
-
-    assert outcome.startswith("sell_pending: order=ord-hard-fact-protective")
-    assert submitted["submit_order_type"] == "FAK"
-    assert submitted["exact_limit_price"] == 0.18
-    authority = submitted["protective_sell_execution_authority"]
+    assert outcome.startswith("sell_pending:"), outcome
+    assert submitted[0]["submit_order_type"] == "FAK"
+    assert submitted[0]["exact_limit_price"] == 0.10
+    authority = submitted[0]["protective_sell_execution_authority"]
     assert authority.kind == "DAY0_HARD_FACT_BIN_DEAD"
     assert authority.token_id == expected_token
-    assert authority.best_bid == "0.18"
 
 
 _ZERO_SUPPORT_REASON = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
 
 
-def _zero_support_sell_fixture(*, direction="buy_yes", shares=5.0):
-    """Miami 10-07 shape: exact zero support, bid 0.06, ask 0.10, hold value 0."""
+def _zero_support_sell_fixture(conn, monkeypatch, *, direction="buy_yes", shares=5.0):
+    """Current source-bound exact zero, canonical monitor, and fresh 0.06 bid."""
     from src.execution import exit_lifecycle
-    from src.state.portfolio import ExitContext, PortfolioState, Position
+    from src.state.portfolio import PortfolioState
 
-    position = Position(
-        trade_id="pos-zero-support-sell",
-        market_id="condition-test",
-        condition_id="condition-test",
-        city="Miami",
-        cluster="southeast",
-        target_date="2026-10-07",
-        bin_label="88-89F",
-        direction=direction,
-        token_id=YES_TOKEN,
-        no_token_id=NO_TOKEN,
-        entry_price=0.30,
-        size_usd=shares * 0.30,
-        shares=shares,
-        chain_shares=shares,
-        cost_basis_usd=shares * 0.30,
-        state="day0_window",
-        chain_state="synced",
-        strategy_key="forecast_qkernel_entry",
-        env="live",
+    position, context, _ = _exact_zero_exit_case(
+        conn, monkeypatch, direction=direction, shares=shares,
     )
-    position.last_monitor_at = "2026-10-07T14:58:05+00:00"
-    position._current_global_held_probability_samples = (0.0, 0.0)
-    context = ExitContext(
-        exit_reason=_ZERO_SUPPORT_REASON,
-        fresh_prob=0.0,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.06,
-        current_market_price_is_fresh=True,
-        best_bid=0.06,
-        best_ask=0.10,
-        probability_receipt={
-            "probability_authority": "day0_deterministic_bin_payoff_v1",
-            "probability_content_identity": "zero-support-content",
-            "probability_witness_identity": "zero-support-witness",
-        },
-        hours_to_settlement=2.0,
-        position_state="day0_window",
-        day0_active=True,
-    )
-    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(
-        position, context
-    )
+    context = replace(context, current_market_price=0.06, best_bid=0.06, best_ask=0.10)
+    _install_current_exit_capture(conn, monkeypatch, bid="0.06")
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
     return position, PortfolioState(positions=[position]), context, authority
 
 
@@ -9802,42 +9896,39 @@ def _zero_support_sell_fixture(*, direction="buy_yes", shares=5.0):
     ("direction", "expected_token"),
     (("buy_yes", YES_TOKEN), ("buy_no", NO_TOKEN)),
 )
+@pytest.mark.parametrize("canonical_shares,submitted_shares", ((5.009, 5.0), (4.999, 4.99)))
 def test_zero_support_branchwise_sell_crosses_fresh_bid_with_fak(
-    conn, monkeypatch, direction, expected_token
+    conn, monkeypatch, direction, expected_token, canonical_shares, submitted_shares
 ):
     """Zero support sells at the fresh top bid, never rests above it as GTC."""
     from src.execution import exit_lifecycle
 
     # 5.009 held: the submitted quantity is the 0.01-floored canonical 5.00.
     position, portfolio, context, authority = _zero_support_sell_fixture(
-        direction=direction, shares=5.009
+        conn, monkeypatch, direction=direction, shares=5.009
     )
-    snapshot_id = _ensure_snapshot(
-        conn,
-        token_id=YES_TOKEN,
-        no_token_id=NO_TOKEN,
-        selected_outcome_token_id=expected_token,
-        snapshot_id="snap-zero-support-sell",
-        freshness_deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
-        orderbook_top_bid=Decimal("0.06"),
-        orderbook_top_ask=Decimal("0.10"),
-    )
-    snapshot_hash = _snapshot_hash(conn, snapshot_id)
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_latest_or_capture_exit_snapshot_context",
-        lambda *_args, **_kwargs: {
-            "executable_snapshot_id": snapshot_id,
-            "executable_snapshot_hash": snapshot_hash,
-            "executable_snapshot_orderbook_top_bid": 0.06,
-            "executable_snapshot_orderbook_top_ask": 0.10,
-            "executable_snapshot_min_order_size": 5.0,
-        },
-    )
+    # A concurrent canonical chain refresh can lower sellable inventory after
+    # intent persistence. Preserve the real book capture and all source checks.
+    capture = exit_lifecycle._latest_or_capture_exit_snapshot_context
+    def capture_then_refresh_chain(*args, **kwargs):
+        snapshot = capture(*args, **kwargs)
+        conn.execute("UPDATE position_current SET chain_shares=? WHERE position_id=?",
+                     (canonical_shares, position.trade_id))
+        conn.commit()
+        return snapshot
+    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context",
+                        capture_then_refresh_chain)
     submitted = {}
 
     def return_pending(**kwargs):
         submitted.update(kwargs)
+        protective = kwargs["protective_sell_execution_authority"]
+        assert exit_lifecycle._protective_sell_execution_authority_error(
+            protective, conn=conn, trade_id=position.trade_id,
+            token_id=expected_token, shares=kwargs["shares"],
+            limit_price=kwargs["exact_limit_price"],
+            snapshot_id=protective.snapshot_id, snapshot_hash=protective.snapshot_hash,
+        ) is None
         return exit_lifecycle.OrderResult(
             trade_id=position.trade_id,
             status="pending",
@@ -9867,23 +9958,16 @@ def test_zero_support_branchwise_sell_crosses_fresh_bid_with_fak(
     assert submitted["exact_limit_price"] == 0.06
     assert submitted["best_bid"] == 0.06
     assert submitted["current_price"] == 0.06
-    assert submitted["shares"] == pytest.approx(5.0)
+    assert submitted["shares"] == pytest.approx(submitted_shares)
+    assert submitted["shares"] <= canonical_shares
     protective = submitted["protective_sell_execution_authority"]
     assert protective.kind == _ZERO_SUPPORT_REASON
     assert protective.token_id == expected_token
     assert protective.best_bid == "0.06"
-    assert Decimal(protective.shares) == Decimal("5.00")
-    # The executor re-derives the same authority at the final submit seam.
-    assert exit_lifecycle._protective_sell_execution_authority_error(
-        protective,
-        conn=conn,
-        trade_id=position.trade_id,
-        token_id=expected_token,
-        shares=submitted["shares"],
-        limit_price=submitted["exact_limit_price"],
-        snapshot_id=snapshot_id,
-        snapshot_hash=snapshot_hash,
-    ) is None
+    assert Decimal(protective.shares) == Decimal(str(submitted_shares))
+    assert position.effective_shares == pytest.approx(5.009)
+    assert conn.execute("SELECT shares FROM position_current WHERE position_id=?",
+                        (position.trade_id,)).fetchone()[0] == pytest.approx(5.009)
 
 
 def test_zero_support_branchwise_sell_without_bid_falls_to_liquidity_wait(
@@ -9892,20 +9976,8 @@ def test_zero_support_branchwise_sell_without_bid_falls_to_liquidity_wait(
     """No executable bid is a liquidity fact, not a capital-authority failure."""
     from src.execution import exit_lifecycle
 
-    position, portfolio, context, authority = _zero_support_sell_fixture()
-    fresh_now = datetime.now(timezone.utc)
-    _ensure_snapshot(
-        conn,
-        token_id=YES_TOKEN,
-        no_token_id=NO_TOKEN,
-        selected_outcome_token_id=YES_TOKEN,
-        outcome_label="YES",
-        snapshot_id="snap-zero-support-no-bid",
-        captured_at=fresh_now,
-        freshness_deadline=fresh_now + timedelta(minutes=5),
-        orderbook_top_bid=None,
-        orderbook_top_ask=Decimal("0.10"),
-    )
+    position, portfolio, context, authority = _zero_support_sell_fixture(conn, monkeypatch)
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
     for name in ("place_sell_order", "execute_exit_order"):
         monkeypatch.setattr(
             exit_lifecycle,
@@ -9929,72 +10001,74 @@ def test_zero_support_branchwise_sell_without_bid_falls_to_liquidity_wait(
     assert position.last_exit_error == "exit_no_executable_bid"
 
 
+def test_zero_support_no_bid_rechecks_support_after_native_capture(conn, monkeypatch):
+    """A book miss cannot suppress support revocation during the capture."""
+    from src.execution import exit_lifecycle
+
+    position, portfolio, context, authority = _zero_support_sell_fixture(conn, monkeypatch)
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
+    capture = exit_lifecycle._latest_or_capture_exit_snapshot_context
+    def capture_then_change_support(*args, **kwargs):
+        try:
+            return capture(*args, **kwargs)
+        finally:
+            position._current_global_held_probability_samples = (0.0, 1e-13)
+    monkeypatch.setattr(exit_lifecycle, "_latest_or_capture_exit_snapshot_context",
+                        capture_then_change_support)
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order",
+                        lambda **kwargs: pytest.fail("changed support reached venue"))
+
+    outcome = exit_lifecycle.execute_exit(
+        portfolio, position, context, clob=None, conn=conn,
+        branchwise_sell_authority=authority,
+    )
+    assert outcome == "exit_blocked: branchwise_dominant_sell_authority_invalid"
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize(
     "overrides",
     (
         {"exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL"},
         {"exit_intent_fresh_prob": 0.01},
+        {"exit_intent_fresh_prob": 1e-13},
         {"exit_intent_fresh_prob_is_fresh": False},
         {"exit_intent_probability_receipt": {"probability_authority": "day0_remaining_day_global_probability_v1"}},
     ),
 )
 def test_zero_support_protective_receipt_requires_exact_zero_support_evidence(
-    conn, overrides
+    conn, monkeypatch, overrides
 ):
     """Only a persisted zero-support, fresh, exact-payoff EXIT_INTENT mints the kind."""
     from src.execution import exit_lifecycle
 
-    _seed_canonical_position_identity(
-        conn, position_id="pos-zero-receipt", token_id=YES_TOKEN, shares=5.0
-    )
-    conn.execute(
-        "UPDATE position_current SET chain_shares = 5.0 WHERE position_id = ?",
-        ("pos-zero-receipt",),
-    )
-    payload = {
-        "exit_intent_reason": _ZERO_SUPPORT_REASON,
-        "exit_intent_token_id": YES_TOKEN,
-        "exit_intent_shares": 5.0,
-        "exit_intent_decision_id": "decision-zero-receipt",
-        "exit_intent_fresh_prob": 0.0,
-        "exit_intent_fresh_prob_is_fresh": True,
-        "exit_intent_probability_receipt": {
-            "probability_authority": "day0_deterministic_bin_payoff_v1"
-        },
-    }
+    position, _, context, authority = _zero_support_sell_fixture(conn, monkeypatch)
+    intent = exit_lifecycle.build_exit_intent(position, context)
+    assert exit_lifecycle._record_exit_intent_before_execution_gates(conn, position, intent)
 
     def receipt():
         return exit_lifecycle._protective_sell_semantic_receipt(
-            conn,
-            position_id="pos-zero-receipt",
-            token_id=YES_TOKEN,
-            shares=5.0,
-            kind=_ZERO_SUPPORT_REASON,
+            conn, position_id=position.trade_id, token_id=YES_TOKEN,
+            shares=5.0, kind=_ZERO_SUPPORT_REASON,
+            source_receipt_json=authority.source_receipt_json,
         )
 
-    def seed(sequence_no, body):
-        conn.execute(
-            """
-            INSERT INTO position_events (
-                event_id, position_id, event_version, sequence_no, event_type,
-                occurred_at, phase_before, phase_after, strategy_key,
-                decision_id, source_module, payload_json, env
-            ) VALUES (?, 'pos-zero-receipt', 1, ?, 'EXIT_INTENT', ?,
-                      'day0_window', 'pending_exit', 'center_buy',
-                      'decision-zero-receipt', 'src.execution.exit_lifecycle',
-                      ?, 'live')
-            """,
-            (
-                f"pos-zero-receipt:{sequence_no}",
-                sequence_no,
-                _NOW.isoformat(),
-                json.dumps(body, sort_keys=True),
-            ),
-        )
-
-    seed(1, payload)
     assert receipt() is not None
-    seed(2, {**payload, **overrides})
+    row = conn.execute(
+        "SELECT event_id,payload_json FROM position_events WHERE position_id=? "
+        "AND event_type='EXIT_INTENT' ORDER BY sequence_no DESC LIMIT 1",
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(row["payload_json"])
+    conn.execute(
+        "INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,"
+        "occurred_at,phase_before,phase_after,strategy_key,decision_id,source_module,payload_json,env) "
+        "SELECT event_id || ':changed',position_id,event_version,sequence_no+1,event_type,"
+        "occurred_at,phase_before,phase_after,strategy_key,decision_id,source_module,?,env "
+        "FROM position_events WHERE event_id=?",
+        (json.dumps({**payload, **overrides}, sort_keys=True), row["event_id"]),
+    )
+    conn.commit()
     assert receipt() is None
 
 
@@ -10004,7 +10078,7 @@ def test_branchwise_sell_with_changed_support_stays_blocked_without_protective_a
     """Support that is no longer exactly zero is never promoted to a FAK."""
     from src.execution import exit_lifecycle
 
-    position, portfolio, context, authority = _zero_support_sell_fixture()
+    position, portfolio, context, authority = _zero_support_sell_fixture(conn, monkeypatch)
     position._current_global_held_probability_samples = (0.0, 1e-6)
     monkeypatch.setattr(
         exit_lifecycle,
@@ -10822,6 +10896,8 @@ def test_live_exit_sub_floor_bid_waits_without_submit_or_retry_budget(conn, monk
         "_hard_fact_sell_authority_valid",
         lambda *args, **kwargs: True,
     )
+    _install_current_exit_capture(conn, monkeypatch, bid="0.01")
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client", lambda: object())
 
     outcome = exit_lifecycle.execute_exit(
         PortfolioState(positions=[position]),
@@ -10945,7 +11021,7 @@ def test_backoff_exhausted_sub_floor_rejection_reenters_liquidity_wait(conn):
     assert position.last_exit_error == "exit_no_in_band_bid"
 
 
-def test_backoff_exhausted_legacy_favorable_bid_reenters_global_auction(conn):
+def test_backoff_exhausted_legacy_favorable_bid_reenters_global_auction(conn, monkeypatch):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position
@@ -11020,9 +11096,9 @@ def test_backoff_exhausted_legacy_favorable_bid_reenters_global_auction(conn):
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
-        requester=lambda released, force_new: (
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: (
             requested.append((released.trade_id, force_new)) or True
-        ),
+        )),
     ) is True
     assert requested == [(position.trade_id, True)]
 
@@ -11969,7 +12045,7 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
     assert loaded["exit_state"] == "backoff_exhausted"
 
 
-def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypatch):
+def test_live_exit_concurrent_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel
     from src.state.portfolio import ExitContext, PortfolioState, Position
@@ -12034,6 +12110,25 @@ def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypat
         "execute_exit_order",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("dust must not submit")),
     )
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
+    monkeypatch.setattr(exit_lifecycle, "_held_monitor_clob_client", lambda: object())
+
+    def concurrent_no_bid(conn_arg, **_kwargs):
+        from src.data.polymarket_request_governor import RequestAdmissionDenied
+
+        captured_at = exit_lifecycle._utcnow()
+        _ensure_snapshot(
+            conn_arg, snapshot_id="current-concurrent-no-bid", captured_at=captured_at,
+            freshness_deadline=captured_at + timedelta(seconds=180),
+            selected_outcome_token_id=NO_TOKEN, min_order_size="5",
+            orderbook_top_bid=None, orderbook_top_ask="0.001",
+        )
+        conn_arg.commit()
+        raise RequestAdmissionDenied(
+            "POLYMARKET_REQUEST_IN_FLIGHT:" + (captured_at + timedelta(seconds=10)).isoformat()
+        )
+
+    monkeypatch.setattr("src.data.market_scanner.capture_executable_market_snapshot", concurrent_no_bid)
     exit_intent = exit_lifecycle.ExitIntent(
         trade_id=position.trade_id,
         reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
@@ -14601,7 +14696,7 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
     assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
-        requester=lambda *_args: blocked_requests.append(True) or True,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda *_args: blocked_requests.append(True) or True),
     )
     assert blocked_requests == []
     conn.execute(
@@ -14612,7 +14707,7 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
     assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
-        requester=lambda *_args: blocked_requests.append(True) or True,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda *_args: blocked_requests.append(True) or True),
     )
     assert blocked_requests == []
     conn.execute(
@@ -14640,18 +14735,18 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
-        requester=request_reauction,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, request_reauction),
     )
     assert requests == [(position.trade_id, True)]
     assert requested_obligations[0]["schema_version"] == 4
     assert requested_obligations[0]["held_token_id"] == NO_TOKEN
-    assert requested_obligations[0]["book_state"] == "UNKNOWN"
+    assert requested_obligations[0]["book_state"] == "EXECUTABLE"
     assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
     assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
     assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
-        requester=request_reauction,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, request_reauction),
     )
     assert requests == [(position.trade_id, True)]
     assert len(requested_obligations) == 1
@@ -14930,7 +15025,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,
-        requester=request_reauction,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, request_reauction),
     ) is True
     assert requested == [position.trade_id]
     released_event = conn.execute(
@@ -14968,9 +15063,11 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     lineage_fields = {'selection_epoch_identity', 'sell_book_witness_identity',
                       'debt_event_id', 'monitor_event_id'}
     assert len(requested_obligations) == 1
-    assert {k: v for k, v in requested_obligations[0].items() if k not in lineage_fields} == {
-        k: v for k, v in obligation.items() if k not in lineage_fields
-    }
+    for key in ('schema_version', 'scope_identity', 'generation', 'position_id', 'held_token_id'):
+        assert requested_obligations[0][key] == obligation[key]
+    assert requested_obligations[0]['book_state'] == 'EXECUTABLE'
+    assert 'completion_deadline_at' not in obligation
+    assert requested_obligations[0]['attempt_identity']
     assert all(requested_obligations[0][key] for key in lineage_fields)
     assert position.state == "holding"
     assert position.order_status == "filled"
@@ -15068,7 +15165,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         failed_wake,
         conn=conn,
-        requester=recover_reauction,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, recover_reauction),
     ) is True
     assert recovery_requests == [(failed_wake.trade_id, True)]
     assert (
@@ -15112,7 +15209,7 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         runtime_only,
         conn=conn,
-        requester=lambda *_args: runtime_only_requests.append(True) or True,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda *_args: runtime_only_requests.append(True) or True),
     ) is False
     assert runtime_only_requests == []
     assert conn.execute(
@@ -15227,31 +15324,11 @@ def test_restart_republishes_unbound_v4_residual_with_same_generation_until_term
     monkeypatch.setattr(reactor_wake, "publish_reactor_wake", publish)
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     try:
-        def publish_after_restart(released, force_new_generation):
-            restored = getattr(released, "_held_sell_reauction_obligation")
-            return reactor.request_global_auction_completion(
-                reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
-                position_id=released.trade_id,
-                family=(released.city, released.target_date, released.temperature_metric),
-                probability_content_identity=(
-                    restored["probability_content_identity"]
-                    or released._day0_monitor_probability_receipt[
-                        "probability_content_identity"
-                    ]
-                ),
-                held_token_id=restored["held_token_id"],
-                held_best_bid=restored["held_best_bid"],
-                bid_observed_at=restored["bid_observed_at"],
-                book_state=restored["book_state"],
-                selection_epoch_identity=restored["selection_epoch_identity"],
-                sell_book_witness_identity=restored["sell_book_witness_identity"],
-                debt_event_id=restored["debt_event_id"],
-                monitor_event_id=restored["monitor_event_id"],
-                generation=restored["generation"],
-                scope_identity=restored["scope_identity"],
-                wake_path=wake_path,
-                force_new_generation=force_new_generation,
-            )
+        publish_after_restart = _prepared_reauction_requester_for_test(
+            conn, monkeypatch, wake_path=wake_path,
+            probability_content_identity='q-karachi-restarted-current',
+            book_state='UNKNOWN', held_best_bid=None, bid_observed_at='',
+        )
 
         assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
             restarted,
@@ -15280,6 +15357,7 @@ def test_restart_republishes_unbound_v4_residual_with_same_generation_until_term
             economic_cut_completed=True,
             outcome="CAPITAL_REJECTED",
             terminal_no_trade_reason="GLOBAL_AUCTION_NO_TRADE:CASH_DOMINATES",
+            request_bindings=(request,),
         )
         receipts = reactor._held_sell_reauction_receipts_from_global_cut(
             requests=(request,),
@@ -15472,39 +15550,17 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
     )
 
     wake_path = tmp_path / f"{position_id}-wake.json"
-    requests = []
 
-    def publish_current_reauction(released, force_new_generation):
-        obligation = exit_lifecycle.latest_held_sell_reauction_obligation(
-            conn,
-            released,
-        )
-        assert obligation is not None
-        result = reactor.request_global_auction_completion(
-            reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
-            position_id=released.trade_id,
-            family=(released.city, released.target_date, released.temperature_metric),
-            probability_content_identity="q-after-fak-no-fill",
-            held_token_id=token_id,
-            held_best_bid=0.06,
-            bid_observed_at=(now + timedelta(seconds=1)).isoformat(),
-            probability_observed_at=(now + timedelta(seconds=1)).isoformat(),
-            completion_deadline_at=(now - timedelta(seconds=1)).isoformat(),
-            book_state="EXECUTABLE",
-            selection_epoch_identity=obligation["selection_epoch_identity"],
-            sell_book_witness_identity=obligation["sell_book_witness_identity"],
-            debt_event_id=obligation["debt_event_id"],
-            monitor_event_id=obligation["monitor_event_id"] or monitor_event_id,
-            generation=str(obligation["generation"]),
-            scope_identity=str(obligation["scope_identity"]),
-            wake_path=wake_path,
-            force_new_generation=force_new_generation,
-            return_request=True,
-        )
-        accepted, request = result
-        if request is not None:
-            requests.append(request)
-        return bool(accepted)
+    def published_current_reauction(released, force_new_generation):
+        assert force_new_generation
+        return True
+
+    publish_current_reauction = _prepared_reauction_requester_for_test(
+        conn, monkeypatch, published_current_reauction, wake_path=wake_path,
+        probability_content_identity='q-after-fak-no-fill', held_best_bid=0.06,
+        bid_observed_at=(now + timedelta(seconds=1)).isoformat(),
+        probability_observed_at=(now + timedelta(seconds=1)).isoformat(),
+    )
 
     # The rejected FAK's canonical retry and outbox are still uncommitted here.
     # The production seam must commit them and publish in this same turn;
@@ -15515,8 +15571,10 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
         requester=publish_current_reauction,
         deadline_monotonic=exit_lifecycle._time_module.monotonic() + 5.0,
     ) is True
-    assert len(requests) == 1
-    request = requests[0]
+    published_wake = reactor_wake.read_reactor_wake(path=wake_path)
+    assert published_wake is not None
+    assert len(published_wake.held_sell_reauction_requests) == 1
+    request = published_wake.held_sell_reauction_requests[0]
     assert request.probability_content_identity == "q-after-fak-no-fill"
     assert request.book_state == "EXECUTABLE"
     assert not reactor_wake.held_sell_reauction_requests_completed(
@@ -15536,10 +15594,12 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
     assert selected.held_sell_reauction_requests == (request,)
 
 
+@pytest.mark.parametrize('refresh', ['canonical', 'quote', 'quote_commit_failure'])
 def test_execute_monitoring_phase_force_new_uses_latest_canonical_monitor_lineage(
     conn,
     monkeypatch,
     tmp_path,
+    refresh,
 ):
     """The real cycle-runtime debt requester refreshes only the monitor witness."""
     import logging
@@ -15574,6 +15634,9 @@ def test_execute_monitoring_phase_force_new_uses_latest_canonical_monitor_lineag
         entered_at="2026-08-24T11:00:00+00:00",
     )
     upsert_position_current(conn, build_position_current_projection(position))
+    current_at = datetime.now(timezone.utc).isoformat()
+    if refresh != 'canonical':
+        position.last_monitor_at = current_at
     old_at = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
     _seed_v4_monitor_lineage(
         conn,
@@ -15606,7 +15669,8 @@ def test_execute_monitoring_phase_force_new_uses_latest_canonical_monitor_lineag
     ) is True
     conn.commit()
 
-    new_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+    new_at = (current_at if refresh != 'canonical' else
+              (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat())
     position._day0_monitor_probability_receipt = {
         "probability_content_identity": "q-cycle-new"
     }
@@ -15619,11 +15683,39 @@ def test_execute_monitoring_phase_force_new_uses_latest_canonical_monitor_lineag
         occurred_at=new_at,
     )
     conn.commit()
+    refresh_calls = []
+    if refresh != 'canonical':
+        from src.engine import monitor_refresh
+        def refresh_with_quote(read_conn, clob, refreshed, *, quote_conn):
+            assert not quote_conn.in_transaction
+            assert refreshed is position
+            refresh_calls.append(refreshed.trade_id)
+            position.last_monitor_at = new_at
+            position.last_monitor_prob_is_fresh = True
+            position.last_monitor_market_price_is_fresh = True
+            monitor_refresh._persist_monitor_quote(quote_conn, position,
+                monitor_refresh.HeldTokenMonitorQuote(
+                    token_id=position.token_id, best_bid=.30, best_ask=.31,
+                    bid_size=10, ask_size=10, mark_price=.30, source_timestamp=new_at,
+                ))
+            assert quote_conn.in_transaction
+        monkeypatch.setattr(monitor_refresh, 'refresh_position', refresh_with_quote)
+        if refresh == 'quote_commit_failure':
+            original_boundary = cycle_runtime._release_monitor_write_lock_boundary
+            def fail_quote_commit(write_conn, summary, deps, *, boundary, **kwargs):
+                if boundary == 'global_sell_reauction_preparation_quote':
+                    write_conn.rollback()
+                    return False
+                return original_boundary(write_conn, summary, deps, boundary=boundary, **kwargs)
+            monkeypatch.setattr(cycle_runtime, '_release_monitor_write_lock_boundary', fail_quote_commit)
     wake_path = tmp_path / "cycle-runtime-force-new-wake.json"
     captured: list[object] = []
     real_request = reactor.request_global_auction_completion
 
     def request_with_test_path(**kwargs):
+        assert kwargs['prepare_only'] is True
+        assert kwargs['return_request'] is True
+        assert conn.in_transaction is False
         kwargs["wake_path"] = wake_path
         result = real_request(**kwargs)
         captured.append(result[1] if isinstance(result, tuple) else None)
@@ -15641,14 +15733,21 @@ def test_execute_monitoring_phase_force_new_uses_latest_canonical_monitor_lineag
         lambda *_args, **_kwargs: exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEBT,
     )
 
-    def recover_with_real_nested_request(position, *, conn, requester, **_kwargs):
-        return requester(position, True)
+    real_publisher = reactor.publish_prepared_global_auction_completion
 
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "recover_global_sell_snapshot_reauction_debt",
-        recover_with_real_nested_request,
-    )
+    def publish_exact_request(**kwargs):
+        assert conn.in_transaction is False
+        assert kwargs['prepared_request'] is captured[-1]
+        claim = json.loads(conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id=? "
+            "AND event_type='EXIT_RETRY_RELEASED' ORDER BY sequence_no DESC LIMIT 1",
+            (position.trade_id,),
+        ).fetchone()[0])
+        assert claim['global_sell_reauction_status'] == 'publish_claimed'
+        assert claim['held_sell_reauction_obligation']['attempt_identity'] == captured[-1].attempt_identity
+        return real_publisher(**kwargs, wake_path=wake_path)
+
+    monkeypatch.setattr(reactor, 'publish_prepared_global_auction_completion', publish_exact_request)
     deps = type(
         "Deps",
         (),
@@ -15679,6 +15778,18 @@ def test_execute_monitoring_phase_force_new_uses_latest_canonical_monitor_lineag
         held_position_monitor_budget_seconds=2.0,
     )
 
+    if refresh != 'canonical':
+        assert refresh_calls
+        assert not conn.in_transaction
+    if refresh == 'quote_commit_failure':
+        assert captured == []
+        assert not wake_path.exists()
+        assert conn.execute("SELECT COUNT(*) FROM position_events WHERE venue_status='publish_claimed'").fetchone()[0] == 0
+        assert conn.execute('SELECT COUNT(*) FROM token_price_log').fetchone()[0] == 0
+        assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+        return
+    if refresh == 'quote':
+        assert conn.execute('SELECT COUNT(*) FROM token_price_log').fetchone()[0] >= 1
     request = captured[-1]
     assert request is not None
     assert request.probability_content_identity == "q-cycle-new"
@@ -16166,91 +16277,37 @@ def test_same_turn_reauction_rejects_ordinary_snapshot_debt(monkeypatch):
     assert published == []
 
 
-def test_reauction_deadline_expires_before_external_publish(monkeypatch, caplog):
-    from contextlib import nullcontext
-    from types import SimpleNamespace
-
+def test_reauction_deadline_expires_before_external_publish(conn, monkeypatch, caplog):
     from src.execution import executor, exit_lifecycle
 
-    position = SimpleNamespace(trade_id="deadline-before-publish")
-    checkpoints = []
+    position = _seed_pending_lineage_debt(conn, lineage={
+        'selection_epoch_identity': 'epoch', 'sell_book_witness_identity': 'book',
+    })
+    monkeypatch.setattr(exit_lifecycle, '_utcnow', lambda: _NOW)
+    elapsed = [0.0]
+    monkeypatch.setattr(exit_lifecycle._time_module, 'monotonic', lambda: elapsed[0])
+    original_lease = executor._canonical_trade_write_lease
 
-    class Conn:
-        in_transaction = False
+    @contextmanager
+    def expire_after_claim(*args, **kwargs):
+        with original_lease(*args, **kwargs) as lease:
+            yield lease
+        elapsed[0] = 6.0
 
-        def execute(self, statement):
-            assert statement == 'BEGIN IMMEDIATE'
-            assert not self.in_transaction
-            checkpoints.append('begin')
-            self.in_transaction = True
-
-        def commit(self):
-            checkpoints.append('commit')
-            self.in_transaction = False
-
-        def rollback(self):
-            checkpoints.append('rollback')
-            self.in_transaction = False
-
-    conn = Conn()
-    monotonic = iter((0.0, 0.0, 0.0, 0.0, 0.0, 6.0))
-    monkeypatch.setattr(
-        exit_lifecycle._time_module,
-        "monotonic",
-        lambda: next(monotonic),
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "needs_global_sell_snapshot_reauction",
-        lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "latest_held_sell_reauction_obligation",
-        # Complete lineage: only a complete claim can reach external publish.
-        lambda *_args, **_kwargs: {
-            "schema_version": 4,
-            "generation": "deadline-generation",
-            "selection_epoch_identity": "epoch",
-            "sell_book_witness_identity": "book",
-            "debt_event_id": "debt",
-            "monitor_event_id": "monitor",
-        },
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_pending_exit_no_order_waits_for_liquidity",
-        lambda *_args, **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_canonical_global_sell_command_ownership",
-        lambda *_args, **_kwargs: "GLOBAL_NO_COMMAND",
-    )
-    def claim(claim_conn, *_args):
-        assert claim_conn.in_transaction
-        checkpoints.append('claim')
-        return True
-
-    monkeypatch.setattr(exit_lifecycle, "_record_global_sell_reauction_publish_claim", claim)
-    monkeypatch.setattr(
-        executor,
-        "_canonical_trade_write_lease",
-        lambda *_args, **_kwargs: nullcontext(),
-    )
+    monkeypatch.setattr(executor, '_canonical_trade_write_lease', expire_after_claim)
     published = []
-
     assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
-        position,
-        conn=conn,
-        requester=lambda *_args: published.append(True) or True,
-        deadline_monotonic=5.0,
+        position, conn=conn, deadline_monotonic=5.0,
+        requester=_prepared_reauction_requester_for_test(
+            conn, monkeypatch, lambda *_args: published.append(True) or True,
+        ),
     )
     assert published == []
     assert 'reason=DEADLINE_EXPIRED_AFTER_CLAIM' in caplog.text
     assert 'PUBLISH_CLAIM_FAILED' not in caplog.text
-    assert checkpoints == ['begin', 'claim', 'commit']
+    assert conn.execute("SELECT COUNT(*) FROM position_events WHERE venue_status='publish_claimed'").fetchone()[0] == 1
     assert not conn.in_transaction
+
 
 def test_persisted_exit_envelope_rejects_non_maker_non_fak_mode(conn):
     from src.state.venue_command_repo import insert_command
@@ -18749,9 +18806,10 @@ def test_pending_exit_fallback_order_id_is_not_projected_on_unknown_truth(conn):
     'selection_epoch_identity', 'sell_book_witness_identity',
     'debt_event_id', 'monitor_event_id',
 ])
-def test_unarmed_v4_publish_claim_does_not_own_exit_and_can_complete(conn, direction, missing):
+def test_unarmed_v4_publish_claim_does_not_own_exit_and_can_complete(conn, direction, missing, monkeypatch):
     from src.execution import exit_lifecycle
     from src.execution.exit_safety import global_sell_reauction_publish_claim_blocks_exit_command
+    monkeypatch.setattr(exit_lifecycle, '_utcnow', lambda: _NOW)
 
     position_id = 'unarmed-v4-claim'
     held_token = NO_TOKEN if direction == 'buy_no' else YES_TOKEN
@@ -18772,6 +18830,7 @@ def test_unarmed_v4_publish_claim_does_not_own_exit_and_can_complete(conn, direc
         'scope_identity': 'scope', 'generation': 'generation',
         'selection_epoch_identity': 'epoch', 'sell_book_witness_identity': 'book',
         'debt_event_id': 'debt', 'monitor_event_id': 'monitor',
+        'completion_deadline_at': (_NOW + timedelta(minutes=1)).isoformat(),
     }
     incomplete = {k: v for k, v in obligation.items() if k != missing}
     payload = {
@@ -18792,7 +18851,14 @@ def test_unarmed_v4_publish_claim_does_not_own_exit_and_can_complete(conn, direc
     assert conn.execute('SELECT count(*) FROM position_events').fetchone()[0] == 1
     assert exit_lifecycle._record_global_sell_reauction_publish_claim(conn, position, obligation)
     assert global_sell_reauction_publish_claim_blocks_exit_command(conn, position_id)
-    assert exit_lifecycle.record_global_sell_reauction_reserved(conn, position)
+    assert not exit_lifecycle.record_global_sell_reauction_reserved(conn, position)
+    claim_event_id = conn.execute(
+        "SELECT event_id FROM position_events WHERE position_id=? ORDER BY sequence_no DESC LIMIT 1",
+        (position_id,),
+    ).fetchone()[0]
+    assert exit_lifecycle.record_global_sell_reauction_reserved(
+        conn, position, expected_claim_event_id=claim_event_id, expected_obligation=obligation,
+    )
     assert not global_sell_reauction_publish_claim_blocks_exit_command(conn, position_id)
     assert conn.execute('SELECT count(*) FROM venue_commands').fetchone()[0] == 0
 
@@ -18844,6 +18910,11 @@ def _seed_pending_lineage_debt(conn, *, position_id='pending-lineage', lineage=N
         'monitor_event_id': f'{position_id}:monitor_refreshed:0',
         **(lineage or {}),
     }
+    from src.runtime.reactor_wake import held_sell_reauction_scope_identity
+    obligation['scope_identity'] = held_sell_reauction_scope_identity(
+        position_id=position_id, family=tuple(obligation['family']),
+        probability_content_identity='', held_token_id=YES_TOKEN, schema_version=4,
+    )
     payload = {
         'status': 'ready', 'release_reason': 'GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED',
         'error': 'global_sell_exit_executable_snapshot_unavailable',
@@ -18963,7 +19034,7 @@ def test_pending_lineage_monitor_is_rechecked_in_claim_transaction(
     monkeypatch.setattr(exit_lifecycle, '_latest_post_debt_monitor', read_monitor)
     result = exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position, conn=conn,
-        requester=lambda *_a: requested.append(True) or True,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda *_a: requested.append(True) or True),
     )
     changed = interleaving != 'unchanged'
     if changed:
@@ -19121,7 +19192,7 @@ def test_pending_lineage_debt_binds_fresh_monitor_lineage_and_publishes(conn, mo
         return True
 
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
-        position, conn=conn, requester=requester,
+        position, conn=conn, requester=_prepared_reauction_requester_for_test(conn, monkeypatch, requester),
     )
     assert preparations == []
     [(force_new, claim)] = claims
@@ -19148,8 +19219,8 @@ def test_complete_lineage_debt_publishes_without_rebinding(conn, monkeypatch):
 
     assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position, conn=conn,
-        requester=lambda released, force_new: requested.append(
-            dict(released._held_sell_reauction_obligation)) or True,
+        requester=_prepared_reauction_requester_for_test(conn, monkeypatch, lambda released, force_new: requested.append(
+            dict(released._held_sell_reauction_obligation)) or True),
     )
     assert preparations == []
     assert requested[0]['selection_epoch_identity'] == 'epoch-old'
@@ -19319,8 +19390,9 @@ def test_unarmed_claim_with_missing_canonical_no_token_stays_fenced(conn, missin
 
 @pytest.mark.parametrize('phase', ['active', 'day0_window', 'pending_exit'])
 @pytest.mark.parametrize('mismatch', ['direction', 'token'])
-def test_publish_claim_rejects_runtime_canonical_identity_mismatch(conn, phase, mismatch):
+def test_publish_claim_rejects_runtime_canonical_identity_mismatch(conn, phase, mismatch, monkeypatch):
     from src.execution import exit_lifecycle
+    monkeypatch.setattr(exit_lifecycle, '_utcnow', lambda: _NOW)
 
     _seed_canonical_position_identity(conn, position_id='identity-claim', token_id=YES_TOKEN,
                                       no_token_id=NO_TOKEN, shares=10)
@@ -19333,6 +19405,7 @@ def test_publish_claim_rejects_runtime_canonical_identity_mismatch(conn, phase, 
         'scope_identity': 'scope', 'generation': 'generation',
         'selection_epoch_identity': 'epoch', 'sell_book_witness_identity': 'book',
         'debt_event_id': 'debt', 'monitor_event_id': 'monitor',
+        'completion_deadline_at': (_NOW + timedelta(minutes=1)).isoformat(),
     }
     assert exit_lifecycle._record_global_sell_reauction_publish_claim(conn, position, obligation)
     count = conn.execute('SELECT count(*) FROM position_events').fetchone()[0]
@@ -19609,3 +19682,1208 @@ def test_exit_absence_debt_resolves_from_later_chain_proof(conn, monkeypatch, un
         ("RESOLVED","src.execution.exit_lifecycle.chain_truth")]
     if units:
         assert position in portfolio.positions and position.state=="day0_window"
+
+
+def _bind_exact_zero_source_receipt(conn, position, now):
+    """Bind a NOAA print with the real source reader and receipt compactor.
+
+    ``conn`` owns the temporary observation ledger, not a production trade DB.
+    The caller owns canonical position/monitor publication separately.
+    """
+    from src.config import runtime_cities_by_name
+    city = runtime_cities_by_name()[position.city]
+    station = city.wu_station
+    direction = position.direction
+    metric = position.temperature_metric
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.engine.monitor_refresh import _compact_monitor_probability_receipt
+
+    ensure_table(conn)
+    append_print(conn, city=position.city, station_id=station, source_channel="noaa_wrh_" + station.lower(),
+                 publish_ts_utc=now.isoformat(), value_native=32.0, unit="C",
+                 fetched_at_utc=now.isoformat(), raw_report="accepted NOAA page 32C")
+    fact = _latest_authorized_day0_fact(conn, city=position.city, target_date=position.target_date,
+                                      temperature_metric=metric, decision_time=now, require_settlement_channel=True)
+    assert fact is not None
+    full_receipt = {
+        "probability_authority": "day0_deterministic_bin_payoff_v1",
+        "probability_content_identity": "exact-zero-content",
+        "probability_witness_identity": "exact-zero-witness",
+        "source_truth_identity": "accepted-observation-snapshot",
+        "q_version": "exact-zero-q", "held_direction": direction,
+        "held_side_probability": 0.0, "metric": metric,
+        "band": {"basis": "day0_deterministic_bin_payoff_v1", "sample_count": 2},
+        "observation": {
+            "city": position.city, "target_date": position.target_date, "metric": metric,
+            **{key: fact[value] for key, value in {
+                "settlement_source": "observation_source", "station_id": "station_id",
+                "settlement_unit": "unit", "observed_extreme_native": "observed_extreme_native",
+                "observation_time": "observation_time", "observation_available_at": "observation_available_at",
+                "raw_payload_sha256": "raw_payload_sha256", "sample_count": "sample_count",
+            }.items()},
+        },
+    }
+    receipt = _compact_monitor_probability_receipt(full_receipt)
+    position._day0_monitor_probability_receipt = full_receipt
+    position._monitor_probability_receipt = receipt
+    return receipt
+
+
+def _exact_zero_exit_case(conn, monkeypatch, *, direction="buy_yes", shares=10.0, metric="high"):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, Position
+
+    now = datetime.now(timezone.utc)
+    from zoneinfo import ZoneInfo
+    position = Position(
+        trade_id="exact-zero-exit", market_id="condition-test",
+        condition_id="condition-test", city="London", cluster="europe",
+        target_date=now.astimezone(ZoneInfo("Europe/London")).date().isoformat(), bin_label=(
+            ("30°C or below" if direction == "buy_yes" else "31°C or higher") if metric == "high"
+            else ("34°C or higher" if direction == "buy_yes" else "33°C or below")
+        ), direction=direction, temperature_metric=metric,
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN, entry_price=0.40,
+        size_usd=shares * 0.40, cost_basis_usd=shares * 0.40,
+        shares=shares, chain_shares=shares, chain_state="synced",
+        state="day0_window", env="live", strategy_key="center_buy",
+        last_monitor_at=now.isoformat(), last_monitor_prob=0.0,
+        last_monitor_prob_is_fresh=True,
+    )
+    position._current_global_held_probability_samples = (0.0, 0.0)
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    receipt = _bind_exact_zero_source_receipt(conn, position, now)
+    _seed_canonical_position_identity(
+        conn, position_id=position.trade_id, shares=shares, direction=direction,
+        token_id=YES_TOKEN, no_token_id=NO_TOKEN,
+    )
+    conn.execute(
+        "UPDATE position_current SET city=?,target_date=?,bin_label=?,condition_id=?,market_id=?,unit='C',temperature_metric=? WHERE position_id=?",
+        (position.city, position.target_date, position.bin_label, position.condition_id, position.market_id, metric, position.trade_id),
+    )
+    conn.execute(
+        "INSERT INTO position_events(event_id, position_id, event_version, "
+        "sequence_no, event_type, occurred_at, phase_before, phase_after, "
+        "source_module, env, payload_json) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', "
+        "?, 'day0_window', 'day0_window', 'src.engine.cycle_runtime', 'live', ?)",
+        ("exact-zero-monitor", position.trade_id, now.isoformat(), json.dumps({
+            "monitor_probability_receipt": receipt,
+            "last_monitor_prob": 0.0, "last_monitor_prob_is_fresh": True,
+            "held_sell_full_depth_action_authority": True,
+            "direction": direction,
+        })),
+    )
+    _ensure_snapshot(
+        conn, snapshot_id="exact-zero-book", selected_outcome_token_id=token,
+        outcome_label="YES" if direction == "buy_yes" else "NO",
+        captured_at=now, freshness_deadline=now + timedelta(seconds=180),
+        orderbook_top_bid="0.10", orderbook_top_ask="0.12", min_order_size="5",
+    )
+    conn.commit()
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    _install_current_exit_capture(conn, monkeypatch)
+    context = ExitContext(
+        exit_reason="POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
+        fresh_prob=0.0, fresh_prob_is_fresh=True,
+        probability_receipt=receipt, current_market_price=0.10,
+        current_market_price_is_fresh=True, best_bid=0.10, best_ask=0.12,
+        hours_to_settlement=1.0, day0_active=True,
+    )
+    return position, context, now
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("shares", (10.0, 2.0))
+def test_exact_zero_exit_crosses_bid_with_distinct_protected_authority(
+    conn, monkeypatch, direction, shares,
+):
+    from src.execution import exit_lifecycle, executor
+    from src.state.portfolio import PortfolioState
+
+    position, context, _ = _exact_zero_exit_case(
+        conn, monkeypatch, direction=direction, shares=shares,
+    )
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    submitted = []
+
+    def submit(**kwargs):
+        submitted.append(kwargs)
+        assert kwargs["submit_order_type"] == "FAK"
+        assert kwargs["exact_limit_price"] == 0.10
+        proof = kwargs["protective_sell_execution_authority"]
+        assert proof.kind == "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+        assert executor._marketable_sell_certificate_error(
+            conn, SimpleNamespace(
+                protective_sell_execution_authority=proof,
+                trade_id=position.trade_id, token_id=kwargs["token_id"],
+                executable_snapshot_id=proof.snapshot_id,
+                executable_snapshot_hash=proof.snapshot_hash,
+            ), limit_price=0.10, shares=shares,
+        ) is None
+        return exit_lifecycle.OrderResult(
+            trade_id=position.trade_id, status="pending", order_id="exact-zero-order",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit)
+    result = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, branchwise_sell_authority=authority,
+    )
+    assert result.startswith("sell_pending:"), result
+    assert len(submitted) == 1
+    assert submitted[0]["shares"] == shares
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("kind", ("hard_fact", "exact_zero"))
+def test_qualified_protective_exit_refreshes_live_selection_price(
+    conn, monkeypatch, direction, kind,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction)
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    _ensure_snapshot(
+        conn, snapshot_id="selection-priced-old", selected_outcome_token_id=token,
+        captured_at=now, freshness_deadline=now + timedelta(seconds=180),
+        orderbook_top_bid="0.49", orderbook_top_ask="0.51",
+    )
+    conn.commit()
+    if kind == "hard_fact":
+        context, authority = _bind_canonical_hard_fact_case(conn, position, context, now)
+        authority_kwargs = {"hard_fact_authority": authority}
+    else:
+        authority_kwargs = {"branchwise_sell_authority":
+            exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)}
+    submitted = []
+
+    def submit(**kwargs):
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=position.trade_id, status="pending", order_id="current-book-order",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit)
+    result = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, **authority_kwargs,
+    )
+    assert result.startswith("sell_pending:"), result
+    assert len(submitted) == 1
+    assert submitted[0]["exact_limit_price"] == .10
+    assert submitted[0]["protective_sell_execution_authority"].snapshot_id != "selection-priced-old"
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_protective_native_empty_book_keeps_liquidity_retry_drainable(
+    conn, monkeypatch, direction,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction)
+    context, authority = _bind_canonical_hard_fact_case(conn, position, context, now)
+    _install_current_exit_capture(conn, monkeypatch, bid=None)
+    before = conn.execute("SELECT count(*) FROM executable_market_snapshots").fetchone()[0]
+    result = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=object(), conn=conn, hard_fact_authority=authority,
+    )
+    assert result == "exit_blocked: no_executable_bid"
+    assert position.last_exit_error == "exit_no_executable_bid"
+    assert position.exit_retry_count == 0
+    assert conn.execute("SELECT count(*) FROM executable_market_snapshots").fetchone()[0] == before
+    assert conn.execute("SELECT count(*) FROM venue_commands").fetchone()[0] == 0
+    conn.commit()
+    later = now + timedelta(seconds=5)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    # The normal monitor's later current full-depth bid discharges only the
+    # liquidity debt; the next submit still needs its own native JIT capture.
+    row = conn.execute(
+        "SELECT payload_json FROM position_events WHERE position_id=? "
+        "AND event_type='MONITOR_REFRESHED' ORDER BY sequence_no DESC LIMIT 1",
+        (position.trade_id,),
+    ).fetchone()
+    payload = json.loads(row[0])
+    payload.update(direction=direction, last_monitor_best_bid=.10,
+                   last_monitor_market_price_is_fresh=True,
+                   held_sell_full_depth_action_authority=True,
+                   held_sell_quote_witness={
+                       "token_id": YES_TOKEN if direction == "buy_yes" else NO_TOKEN,
+                       "observed_at": later.isoformat(),
+                   })
+    conn.execute(
+        "INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,"
+        "occurred_at,phase_before,phase_after,source_module,env,payload_json) "
+        "SELECT 'restored-bid-monitor',?,1,MAX(sequence_no)+1,'MONITOR_REFRESHED',?,"
+        "'pending_exit','pending_exit','src.engine.cycle_runtime','live',? "
+        "FROM position_events WHERE position_id=?",
+        (position.trade_id, later.isoformat(), json.dumps(payload), position.trade_id),
+    )
+    conn.commit()
+    assert exit_lifecycle.check_pending_retries(position, conn=conn)
+    assert not exit_lifecycle.is_exit_cooldown_active(position)
+    assert position.exit_retry_count == 0
+
+
+@pytest.mark.parametrize("tiny", (1e-13, 1e-100))
+def test_exact_zero_authority_never_promotes_tiny_numeric_probability(conn, monkeypatch, tiny):
+    from src.execution import exit_lifecycle
+
+    position, context, _ = _exact_zero_exit_case(conn, monkeypatch)
+    position._current_global_held_probability_samples = (tiny, tiny)
+    with pytest.raises(ValueError, match="CURRENT_EVIDENCE_INVALID|SUPPORT_NOT_ZERO"):
+        exit_lifecycle.BranchwiseDominantSellAuthority.from_current(
+            position, replace(context, fresh_prob=tiny),
+        )
+
+
+def test_fresh_liquidity_change_releases_retry_before_deadline(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+
+    position, _, now = _exact_zero_exit_case(conn, monkeypatch)
+    position.state = "pending_exit"
+    position.pre_exit_state = "day0_window"
+    position.exit_reason = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+    position.exit_trigger = position.exit_reason
+    exit_lifecycle._mark_exit_retry(
+        position, reason=position.exit_reason, error="exit_no_executable_bid", conn=conn,
+    )
+    deadline = position.next_exit_retry_at
+    later = now + timedelta(seconds=10)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    _ensure_snapshot(
+        conn, snapshot_id="returned-liquidity", selected_outcome_token_id=YES_TOKEN,
+        captured_at=later, freshness_deadline=later + timedelta(seconds=180),
+        orderbook_top_bid="0.10", orderbook_top_ask="0.12", min_order_size="5",
+    )
+    assert later < datetime.fromisoformat(deadline)
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is True
+    assert position.exit_state == ""
+    assert position.state == "day0_window"
+
+
+@pytest.mark.parametrize("mutation", ("stale", "receipt", "wrong_token", "untyped"))
+def test_exact_zero_protected_gateway_rejects_unbound_evidence(conn, monkeypatch, mutation):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch)
+    typed = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    proofs = []
+
+    def submit(**kwargs):
+        proofs.append(kwargs["protective_sell_execution_authority"])
+        return exit_lifecycle.OrderResult(trade_id=position.trade_id, status="pending", order_id="proof-order")
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit)
+    assert exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, branchwise_sell_authority=typed,
+    ).startswith("sell_pending:")
+    proof = proofs[0]
+    if mutation == "stale":
+        monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now + timedelta(seconds=181))
+    elif mutation == "receipt":
+        conn.execute(
+            "INSERT INTO position_events(event_id, position_id, event_version, sequence_no, "
+            "event_type, occurred_at, phase_before, phase_after, source_module, env, payload_json) "
+            "SELECT 'superseding-monitor', position_id, 1, "
+            "(SELECT MAX(sequence_no)+1 FROM position_events WHERE position_id=?), "
+            "'MONITOR_REFRESHED', occurred_at, 'pending_exit', 'pending_exit', source_module, env, '{}' "
+            "FROM position_events WHERE event_id='exact-zero-monitor'", (position.trade_id,),
+        )
+    elif mutation == "wrong_token":
+        fields = {key: value for key, value in vars(proof).items() if key != "authority_identity"}
+        fields["token_id"] = NO_TOKEN
+        proof = replace(proof, token_id=NO_TOKEN,
+                        authority_identity=exit_lifecycle._protective_sell_authority_identity(**fields))
+    else:
+        proof = dict(vars(proof))
+    assert exit_lifecycle._protective_sell_execution_authority_error(
+        proof, conn=conn, trade_id=position.trade_id, token_id=YES_TOKEN,
+        shares=10.0, limit_price=0.10, snapshot_id=proofs[0].snapshot_id,
+        snapshot_hash=proofs[0].snapshot_hash,
+    ) is not None
+
+
+@pytest.mark.parametrize("block", ("unchanged_book", "transport", "unknown", "outside_band"))
+def test_liquidity_wake_retains_order_and_transport_fences(conn, monkeypatch, block):
+    from src.execution import exit_lifecycle
+
+    position, _, now = _exact_zero_exit_case(conn, monkeypatch)
+    position.state = "pending_exit"
+    position.pre_exit_state = "day0_window"
+    position.exit_trigger = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+    exit_lifecycle._mark_exit_retry(
+        position, reason=position.exit_trigger,
+        error="exit_no_executable_bid" if block != "transport" else "network_timeout",
+        conn=conn,
+    )
+    later = now + timedelta(seconds=10)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    if block != "unchanged_book":
+        _ensure_snapshot(
+            conn, snapshot_id="liquidity-block-book", selected_outcome_token_id=YES_TOKEN,
+            captured_at=later, freshness_deadline=later + timedelta(seconds=180),
+            orderbook_top_bid="0.04" if block == "outside_band" else "0.10",
+            orderbook_top_ask="0.12", min_order_size="5",
+        )
+    if block == "unknown":
+        _insert_exit_command(conn, command_id="unknown-exit", position_id=position.trade_id,
+                             token_id=YES_TOKEN, size=10.0, price=0.10)
+        from src.state.venue_command_repo import append_event
+        append_event(conn, command_id="unknown-exit", event_type="SUBMIT_REQUESTED",
+                     occurred_at=now.isoformat(), payload={})
+        append_event(conn, command_id="unknown-exit", event_type="SUBMIT_TIMEOUT_UNKNOWN",
+                     occurred_at=now.isoformat(), payload={"reason": "network_timeout"})
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    assert position.exit_state == "retry_pending"
+
+
+@pytest.mark.parametrize("corruption", ("missing_source_truth", "wrong_direction"))
+def test_exact_zero_matching_canonical_receipt_requires_source_and_held_side(conn, monkeypatch, corruption):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch)
+    receipt = dict(context.probability_receipt)
+    if corruption == "missing_source_truth":
+        receipt.pop("source_truth_identity")
+    else:
+        receipt["held_direction"] = "buy_no"
+    context = replace(context, probability_receipt=receipt)
+    conn.execute(
+        "INSERT INTO position_events(event_id, position_id, event_version, sequence_no, "
+        "event_type, occurred_at, phase_before, phase_after, source_module, env, payload_json) "
+        "VALUES ('malformed-current-monitor', ?, 1, 2, 'MONITOR_REFRESHED', ?, 'day0_window', "
+        "'day0_window', 'src.engine.cycle_runtime', 'live', ?)",
+        (position.trade_id, now.isoformat(), json.dumps({
+            "monitor_probability_receipt": receipt, "last_monitor_prob": 0.0,
+            "last_monitor_prob_is_fresh": True, "held_sell_full_depth_action_authority": True,
+        })),
+    )
+    with pytest.raises(ValueError, match="BRANCHWISE_SELL_SOURCE_BINDING_REQUIRED"):
+        exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("response", (
+    "open", "terminal_partial", "matched_without_economics", "superseded_before_sdk", "deadline_during_source_read",
+))
+@pytest.mark.parametrize("held_shares", (2.0, 2.009))
+def test_exact_zero_exit_real_executor_persists_fak_before_fake_sdk(
+    conn, monkeypatch, direction, response, held_shares,
+):
+    import inspect
+    from src.execution import exit_lifecycle, executor
+    from src.state.portfolio import PortfolioState
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction, shares=held_shares)
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    _enable_exit_submit_prereqs(conn, monkeypatch, ctf_shares=held_shares)
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={token: held_shares}))
+    configure_global_ledger(ledger)
+    # A fixed public test identity replaces host keychain discovery only.
+    # All real authority, command, collateral and envelope checks remain live.
+    monkeypatch.setattr("src.data.polymarket_client.resolve_funder_address",
+                        lambda: "0x0000000000000000000000000000000000000001")
+    calls = []
+    source_read_armed = [False]
+    if response == "deadline_during_source_read":
+        from src.data import replacement_forecast_current_target_plan as source_reader
+        real_reader = source_reader._latest_authorized_day0_fact
+        clock = [now]
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock[0] if tz else clock[0].replace(tzinfo=None)
+        monkeypatch.setattr(executor, "datetime", Clock)
+        monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: clock[0])
+        def read_then_cross_deadline(*args, **kwargs):
+            result = real_reader(*args, **kwargs)
+            if source_read_armed[0]:
+                clock[0] = now + timedelta(seconds=11)
+            return result
+        monkeypatch.setattr(source_reader, "_latest_authorized_day0_fact", read_then_cross_deadline)
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return self
+
+        def get_ctf_collateral_payload(self, *, token_ids):
+            assert token_ids == [token]
+            return _fresh_exit_collateral_payload(token_id=token, shares=held_shares)
+
+        def get_collateral_payload(self):
+            return _fresh_exit_collateral_payload(token_id=token, shares=held_shares)
+
+        def bind_submission_envelope(self, envelope):
+            self.envelope = envelope
+            source_read_armed[0] = True
+            if response == "superseded_before_sdk":
+                conn.execute(
+                    "INSERT INTO position_events(event_id, position_id, event_version, sequence_no, "
+                    "event_type, occurred_at, phase_before, phase_after, source_module, env, payload_json) "
+                    "SELECT 'superseded-before-sdk', position_id, 1, "
+                    "(SELECT MAX(sequence_no)+1 FROM position_events WHERE position_id=?), "
+                    "'MONITOR_REFRESHED', occurred_at, 'pending_exit', 'pending_exit', source_module, env, '{}' "
+                    "FROM position_events WHERE event_id='exact-zero-monitor'", (position.trade_id,),
+                )
+                conn.commit()
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.persister = persister
+
+        def place_limit_order(self, **kwargs):
+            calls.append(kwargs)
+            command = conn.execute(
+                "SELECT state, price, size FROM venue_commands WHERE position_id=?", (position.trade_id,),
+            ).fetchone()
+            assert command["state"] == "SUBMITTING"
+            assert command["price"] == pytest.approx(0.10)
+            assert command["size"] == pytest.approx(2.0)
+            assert command["size"] <= held_shares
+            assert self.envelope.size == Decimal("2.00")
+            assert self.envelope.order_type == "FAK"
+            assert self.envelope.post_only is False
+            assert self.envelope.min_order_size == Decimal("5")
+            if response == "open":
+                return _fake_submit_result(self.envelope, order_id="real-executor-test")
+            raw = {
+                "success": True, "status": "MATCHED", "orderID": "real-executor-test",
+                "size_matched": "1", "avgPrice": "0.10",
+                "tradeIDs": ["synthetic-exit-trade"], "transactionHashes": ["0xsynthetic"],
+            }
+            if response == "terminal_partial":
+                raw["remaining_size"] = "0"
+            else:
+                for field in ("size_matched", "avgPrice", "tradeIDs", "transactionHashes"):
+                    raw.pop(field)
+            final = self.envelope.with_updates(
+                raw_response_json=json.dumps(raw, sort_keys=True, separators=(",", ":")),
+                order_id=raw["orderID"],
+            )
+            return {**raw, "_venue_submission_envelope": final.to_dict()}
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClient)
+    intent_fields = inspect.signature(executor.create_exit_order_intent).parameters
+
+    def submit_with_test_connection(**kwargs):
+        if response == "deadline_during_source_read":
+            kwargs["execution_authority_deadline_utc"] = (now + timedelta(seconds=10)).isoformat()
+        intent = executor.create_exit_order_intent(**{k: v for k, v in kwargs.items() if k in intent_fields})
+        return executor.execute_exit_order(
+            intent, conn=conn, decision_id=kwargs["decision_id"], q_version=kwargs["q_version"],
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit_with_test_connection)
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    try:
+        result = exit_lifecycle.execute_exit(
+            PortfolioState(positions=[position]), position, context,
+            clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+            conn=conn, branchwise_sell_authority=authority,
+        )
+        if response in {"superseded_before_sdk", "deadline_during_source_read"}:
+            assert calls == []
+            expected_error = ("exit_execution_authority_expired_before_venue_submit"
+                              if response == "deadline_during_source_read"
+                              else "protective_sell_authority_revoked_pre_venue")
+            assert result == "sell_error: " + expected_error
+            command_id = conn.execute(
+                "SELECT command_id FROM venue_commands WHERE position_id=?", (position.trade_id,),
+            ).fetchone()[0]
+            assert exit_lifecycle._command_terminally_rejected_without_venue_order(
+                conn, command_id, position_id=position.trade_id,
+            )
+            return
+        assert len(calls) == 1, result
+        assert calls[0]["order_type"] == "FAK"
+        assert calls[0]["price"] == pytest.approx(0.10)
+        assert calls[0]["token_id"] == token
+        if response == "terminal_partial":
+            assert result.startswith("position_reduced:"), result
+            assert position.effective_shares == pytest.approx(held_shares - 1.0)
+            assert position.exit_state == ""
+            assert position.last_exit_order_id == ""
+        elif response == "matched_without_economics":
+            assert position.exit_state in {"sell_placed", "sell_pending"}, result
+            assert position.effective_shares == pytest.approx(held_shares)
+        else:
+            assert result.startswith("sell_pending:"), result
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("bid,allowed", (("0.05", True), ("0.95", True), ("0.04", False), ("0.96", False)))
+def test_exact_zero_jit_bid_keeps_absolute_band(conn, monkeypatch, direction, bid, allowed):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction)
+    _install_current_exit_capture(conn, monkeypatch, bid=bid)
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    later = now + timedelta(seconds=1)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    _ensure_snapshot(
+        conn, snapshot_id="new-jit-band-book", selected_outcome_token_id=token,
+        outcome_label="YES" if direction == "buy_yes" else "NO",
+        captured_at=later, freshness_deadline=later + timedelta(seconds=180),
+        orderbook_top_bid=bid, orderbook_top_ask="0.98", min_order_size="5",
+    )
+    submitted = []
+
+    def submit(**kwargs):
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(trade_id=position.trade_id, status="pending", order_id="band-order")
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", submit)
+    result = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context,
+        clob=SimpleNamespace(get_order_status=lambda _: {"status": "OPEN"}),
+        conn=conn, branchwise_sell_authority=authority,
+    )
+    if allowed:
+        assert result.startswith("sell_pending:"), result
+        assert submitted[0]["exact_limit_price"] == float(bid)
+    else:
+        assert result == "exit_blocked: no_in_band_bid"
+        assert submitted == []
+
+
+@pytest.mark.parametrize("state,eligible", (
+    ("pending_exit", True), ("day0_window", True), ("holding", True),
+    ("economically_closed", False), ("settled", False), ("pending_tracked", False),
+))
+def test_hard_fact_reobservation_retains_pending_exposure(state, eligible):
+    from src.engine.cycle_runtime import _day0_hard_fact_position_eligible
+
+    assert _day0_hard_fact_position_eligible(SimpleNamespace(state=state)) is eligible
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("quote_kind", (
+    "fresh_depth", "bba_only", "stale", "wrong_direction", "wrong_writer", "outside_band",
+    "old_quote", "missing_quote", "future_quote", "wrong_token", "naive_quote",
+))
+def test_liquidity_recovery_accepts_only_current_canonical_full_depth_monitor(
+    conn, monkeypatch, direction, quote_kind,
+):
+    from src.execution import exit_lifecycle
+
+    position, _, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction, shares=2.0)
+    # The failed JIT saw no bid. Only a later canonical monitor quote returns;
+    # no executable snapshot will exist until the released retry reaches JIT.
+    token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+    failed_at = now + timedelta(seconds=1)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: failed_at)
+    _ensure_snapshot(
+        conn, snapshot_id="failed-jit-no-bid", selected_outcome_token_id=token,
+        outcome_label="YES" if direction == "buy_yes" else "NO",
+        captured_at=failed_at, freshness_deadline=failed_at + timedelta(seconds=180),
+        orderbook_top_bid=None, orderbook_top_ask="0.12", min_order_size="5",
+    )
+    position.state = "pending_exit"
+    position.pre_exit_state = "day0_window"
+    position.exit_trigger = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+    exit_lifecycle._mark_exit_retry(
+        position, reason=position.exit_trigger, error="exit_no_executable_bid", conn=conn,
+    )
+    later = now + timedelta(seconds=10)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: later)
+    seq = conn.execute("SELECT MAX(sequence_no)+1 FROM position_events").fetchone()[0]
+    conn.execute(
+        "INSERT INTO position_events(event_id, position_id, event_version, sequence_no, "
+        "event_type, occurred_at, phase_before, phase_after, source_module, env, payload_json) "
+        "VALUES ('returned-monitor-book', ?, 1, ?, 'MONITOR_REFRESHED', ?, 'pending_exit', "
+        "'pending_exit', ?, 'live', ?)",
+        (position.trade_id, seq, later.isoformat(),
+         "untrusted.writer" if quote_kind == "wrong_writer" else "src.engine.cycle_runtime",
+         json.dumps({
+             "direction": "unknown" if quote_kind == "wrong_direction" else direction,
+             "last_monitor_market_price_is_fresh": quote_kind != "stale",
+             "held_sell_full_depth_action_authority": quote_kind != "bba_only",
+             "last_monitor_best_bid": 0.04 if quote_kind == "outside_band" else 0.10,
+             "held_sell_quote_witness": None if quote_kind == "missing_quote" else {
+                 "token_id": "other-token" if quote_kind == "wrong_token" else token,
+                 "observed_at": (
+                     now if quote_kind == "old_quote"
+                     else later + timedelta(seconds=1) if quote_kind == "future_quote"
+                     else later.replace(tzinfo=None) if quote_kind == "naive_quote"
+                     else later
+                 ).isoformat(),
+             },
+         })),
+    )
+    assert exit_lifecycle.check_pending_retries(
+        position, conn=conn, current_min_order_size=Decimal("0.01"),
+    ) is (quote_kind == "fresh_depth")
+
+
+def test_monitor_prefetch_preserves_each_tokens_native_capture_time(conn, monkeypatch):
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.execution import exit_lifecycle
+
+    now = _NOW
+    clock = [now - timedelta(seconds=30)]
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: clock[0])
+    _install_current_exit_capture(conn, monkeypatch)
+    positions = []
+    for direction, age in (("buy_yes", 30), ("buy_no", 1)):
+        clock[0] = now - timedelta(seconds=age)
+        token = YES_TOKEN if direction == "buy_yes" else NO_TOKEN
+        pos = SimpleNamespace(
+            trade_id=direction, direction=direction, condition_id="condition-test",
+            market_id="condition-test", token_id=YES_TOKEN, no_token_id=NO_TOKEN,
+            state="day0_window",
+        )
+        positions.append(pos)
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn, object(), pos, token, require_fresh_capture=True,
+        )
+    clock[0] = now
+    clob = SimpleNamespace()
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        conn, clob, positions, {}, now_utc=now,
+        deps=SimpleNamespace(logger=SimpleNamespace(warning=lambda *args: None)),
+        local_only=True,
+    )
+    for pos, age in zip(positions, (30, 1)):
+        quote = monitor_refresh.monitor_quote_refresh(conn, clob, pos)
+        assert quote is not None
+        assert quote.source_timestamp == (now - timedelta(seconds=age)).isoformat()
+        monitor_refresh._persist_monitor_quote(None, pos, quote)
+        assert pos._zeus_held_monitor_quote_witness == {
+            "token_id": quote.token_id, "observed_at": quote.source_timestamp,
+        }
+
+
+@pytest.mark.parametrize("case", ("mixed_network", "cached_clock", "cached_missing", "typed_missing"))
+def test_network_monitor_prefetch_preserves_token_and_cached_clocks(monkeypatch, case):
+    import time
+    from src.data.polymarket_client import HeldOrderbookReadResult
+    from src.engine import cycle_runtime, monitor_refresh
+
+    old = _NOW - timedelta(seconds=30)
+    new = _NOW - timedelta(seconds=1)
+    books = {token: {"asset_id": token,
+                    "bids": [{"price": ".10", "size": "20"}],
+                    "asks": [{"price": ".12", "size": "20"}]}
+             for token in (YES_TOKEN, NO_TOKEN)}
+    positions = [SimpleNamespace(trade_id=token, token_id=token, no_token_id="unused",
+                                 direction="buy_yes", state="day0_window")
+                 for token in books]
+    monkeypatch.setattr(cycle_runtime, "_fresh_local_held_monitor_orderbooks", lambda *args, **kwargs: {})
+
+    def fetch(tokens):
+        assert set(tokens) == set(books)
+        if case.startswith("cached"):
+            monitor_refresh.install_monitor_orderbook_prefetch(
+                clob, {YES_TOKEN: books[YES_TOKEN]},
+                captured_at_by_token={YES_TOKEN: old} if case == "cached_clock" else {},
+            )
+            return HeldOrderbookReadResult(
+                {NO_TOKEN: books[NO_TOKEN]}, attempted_token_ids=tokens,
+                terminal_reason="complete", captured_at=new,
+                captured_at_by_token={NO_TOKEN: new},
+            )
+        return HeldOrderbookReadResult(
+            books, attempted_token_ids=tokens, terminal_reason="complete", captured_at=old,
+            captured_at_by_token={YES_TOKEN: old, **({NO_TOKEN: new} if case == "mixed_network" else {})},
+        )
+
+    clob = SimpleNamespace(get_orderbook_snapshots=fetch)
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        None, clob, positions, {}, now_utc=_NOW, deadline_monotonic=time.monotonic() + 10,
+        deps=SimpleNamespace(logger=SimpleNamespace(warning=lambda *args: None)),
+    )
+    expected = {YES_TOKEN: "" if case == "cached_missing" else old.isoformat(),
+                NO_TOKEN: "" if case == "typed_missing" else new.isoformat()}
+    for pos in positions:
+        quote = monitor_refresh.monitor_quote_refresh(None, clob, pos)
+        assert quote is not None
+        assert quote.source_timestamp == expected[pos.token_id]
+    published = monitor_refresh.current_monitor_orderbook_batch(
+        books, checked_at_utc=_NOW, max_age=timedelta(seconds=180),
+    )
+    assert published is not None
+    assert set(published[0]) == {token for token, stamp in expected.items() if stamp}
+
+
+@pytest.mark.parametrize("has_token_clock", (True, False))
+def test_singular_typed_monitor_read_keeps_its_token_clock(has_token_clock):
+    import time
+    from src.data.polymarket_client import HeldOrderbookReadResult
+    from src.engine import monitor_refresh
+
+    captured_at = _NOW - timedelta(seconds=1)
+    book = {"asset_id": YES_TOKEN, "bids": [{"price": ".10", "size": "20"}],
+            "asks": [{"price": ".12", "size": "20"}]}
+    clob = SimpleNamespace(get_held_orderbook_snapshots_hard_deadline=lambda *args, **kwargs:
+        HeldOrderbookReadResult(
+            {YES_TOKEN: book}, terminal_reason="complete", captured_at=captured_at,
+            captured_at_by_token={YES_TOKEN: captured_at} if has_token_clock else {},
+        ))
+    pos = SimpleNamespace(token_id=YES_TOKEN, no_token_id=NO_TOKEN, direction="buy_yes",
+                          state="day0_window", _zeus_held_monitor_deadline_monotonic=time.monotonic() + 10)
+    quote = monitor_refresh.monitor_quote_refresh(None, clob, pos)
+    assert quote is not None
+    assert quote.source_timestamp == (captured_at.isoformat() if has_token_clock else "")
+
+
+def test_old_quote_cannot_release_liquidity_wait_before_periodic_retry(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+
+    position, _, now = _exact_zero_exit_case(conn, monkeypatch)
+    position.state = "pending_exit"
+    position.pre_exit_state = "day0_window"
+    position.exit_trigger = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+    exit_lifecycle._mark_exit_retry(
+        position, reason=position.exit_trigger, error="exit_no_executable_bid", conn=conn,
+    )
+    conn.commit()
+    retry_at = datetime.fromisoformat(position.next_exit_retry_at)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now + timedelta(seconds=5))
+    assert not exit_lifecycle.check_pending_retries(position, conn=conn)
+    assert position.next_exit_retry_at == retry_at.isoformat()
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: retry_at + timedelta(microseconds=1))
+    assert exit_lifecycle.check_pending_retries(position, conn=conn)
+    assert position.exit_retry_count == 0
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+@pytest.mark.parametrize("authority_kind,source_change", [
+    (kind, change) for kind in ("branchwise", "hard_fact", "final_daily")
+    for change in ("unchanged", "correction", "unreadable")
+] + [("final_daily", "body_revision"), ("legacy_hko", "unchanged")])
+def test_source_only_correction_revokes_real_exact_exit_before_sdk(conn, monkeypatch, direction, source_change, authority_kind):
+    """Real source reader/exact-family/materialization, real command gateway, fake SDK only."""
+    import inspect
+    from src.execution import exit_lifecycle, executor
+    from src.engine import event_reactor_adapter as era, monitor_refresh as mr
+    from src.events.day0_authority import DAY0_LIVE_AUTHORITY_MATCHES
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.config import runtime_cities_by_name
+    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+    from src.state.portfolio import PortfolioState
+
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, shares=2.0, direction=direction)
+    condition = '0x' + 'a' * 64
+    position.condition_id = condition
+    position.market_id = condition
+    _install_current_exit_capture(conn, monkeypatch, condition_id=condition)
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+    old_book = get_snapshot(conn, 'exact-zero-book')
+    insert_snapshot(conn, replace(old_book, snapshot_id='source-bound-book', condition_id=condition))
+    conn.execute('UPDATE position_current SET condition_id=?,market_id=? WHERE position_id=?', (condition,condition,position.trade_id))
+    position.city = 'Singapore'
+    position.bin_label = '30°C or below' if direction == 'buy_yes' else '31°C or higher'
+    position.unit = 'C'
+    target = now.astimezone(__import__('zoneinfo').ZoneInfo('Asia/Singapore')).date().isoformat()
+    position.target_date = target
+    conn.execute('UPDATE position_current SET city=?,target_date=?,unit=?,bin_label=? WHERE position_id=?',
+                 ('Singapore', target, 'C', position.bin_label, position.trade_id))
+    ensure_table(conn)
+    observed = now
+    append_print(conn, city='Singapore', station_id='WSSS', source_channel='noaa_wrh_wsss',
+                 publish_ts_utc=observed.isoformat(), value_native=32.0, unit='C',
+                 fetched_at_utc=now.isoformat(), raw_report='canonical native page 32')
+    conn.commit()
+    family = SimpleNamespace(city='Singapore', target_date=target, metric='high',
+        family_id=f'Singapore|{target}|high', binding_hash='source-only-family', candidates=(
+            SimpleNamespace(condition_id=condition, yes_token_id=position.token_id, no_token_id=position.no_token_id,
+                            bin=SimpleNamespace(low=None if direction == 'buy_yes' else 31.0, high=30.0 if direction == 'buy_yes' else None, unit='C', label=position.bin_label)),
+            SimpleNamespace(condition_id='condition-above', yes_token_id='above-yes', no_token_id='above-no',
+                            bin=SimpleNamespace(low=31.0 if direction == 'buy_yes' else None, high=None if direction == 'buy_yes' else 30.0, unit='C', label='complement'))))
+    event = SimpleNamespace(event_id='source-only-event', event_type='DAY0_EXTREME_UPDATED',
+        causal_snapshot_id='source-only-event-cut', payload_json=json.dumps({**DAY0_LIVE_AUTHORITY_MATCHES,
+        'city':'Singapore','target_date':target,'metric':'high','settlement_source':'noaa_wrh_wsss'}))
+    def prepare(at):
+        fact = _latest_authorized_day0_fact(conn, city='Singapore', target_date=target,
+                temperature_metric='high', decision_time=at, require_settlement_channel=True)
+        payload = {}
+        prepared = era._prepare_current_day0_exact_family(event, family=family,
+            observation_conn=conn, settlement_fact=fact, physical_fact=fact, decision_time=at,
+            max_age=timedelta(seconds=180), required_condition_id=condition,
+            day0_payload_out=payload, cache_metadata_out={})
+        return prepared, payload
+    prepared, payload = prepare(now)
+    assert prepared is not None
+    witness = prepared.probability_witness
+    snapshot = mr._CurrentGlobalDay0FamilySnapshot(witness=witness,
+        token_pairs=tuple((b.condition_id,b.yes_token_id,b.no_token_id) for b in witness.bindings),
+        deterministic_condition_ids=frozenset((condition,)), day0_payload=payload,
+        metric='high', probability_authority='day0_deterministic_bin_payoff_v1')
+    probability, refreshed, fresh = mr._materialize_current_global_day0_probability(position, snapshot)
+    assert probability == 0.0 and fresh
+    position.__dict__.update(refreshed.__dict__)
+    receipt = mr._compact_monitor_probability_receipt(position._day0_monitor_probability_receipt)
+    context = replace(context, fresh_prob=probability, probability_receipt=receipt)
+    conn.execute("INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,occurred_at,phase_before,phase_after,source_module,env,payload_json) VALUES ('real-source-monitor',?,1,2,'MONITOR_REFRESHED',?,'day0_window','day0_window','src.engine.cycle_runtime','live',?)",
+                 (position.trade_id,now.isoformat(),json.dumps({'direction':direction,'monitor_probability_receipt':receipt,'last_monitor_prob':0.0,'last_monitor_prob_is_fresh':True,'held_sell_full_depth_action_authority':True})))
+    conn.commit()
+    hard_fact_authority = None
+    if authority_kind == "hard_fact":
+        context, hard_fact_authority = _bind_canonical_hard_fact_case(conn, position, context, now)
+    if authority_kind in {"final_daily", "legacy_hko"}:
+        context = _bind_canonical_final_daily_case(conn, position, context, now,
+            legacy_hko=authority_kind == "legacy_hko")
+        receipt = context.probability_receipt
+        conn.execute("INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,occurred_at,phase_before,phase_after,source_module,env,payload_json) VALUES ('real-final-monitor',?,1,3,'MONITOR_REFRESHED',?,'day0_window','day0_window','src.engine.cycle_runtime','live',?)", (position.trade_id, now.isoformat(), json.dumps({
+            'direction':direction,'monitor_probability_receipt':receipt,'last_monitor_prob':0.0,
+            'last_monitor_prob_is_fresh':True,'held_sell_full_depth_action_authority':True,
+        })))
+        conn.commit()
+    _enable_exit_submit_prereqs(conn,monkeypatch,ctf_shares=2.0)
+    monkeypatch.setattr('src.data.polymarket_client.resolve_funder_address',lambda:'0x'+'1'*40)
+    from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+    token = position.token_id if direction == 'buy_yes' else position.no_token_id
+    ledger = CollateralLedger(conn)
+    ledger.set_snapshot(_snapshot(pusd=1_000_000_000, ctf={token: 2.0}))
+    configure_global_ledger(ledger)
+    calls=[]
+    source_changed=[]
+    class FakeClient:
+        def _ensure_v2_adapter(self):return self
+        def get_ctf_collateral_payload(self, *, token_ids):return _fresh_exit_collateral_payload(token_id=token,shares=2.0)
+        def get_collateral_payload(self):return _fresh_exit_collateral_payload(token_id=token,shares=2.0)
+        def bind_signed_submission_identity_persister(self,persister):pass
+        def bind_submission_envelope(self,envelope):
+            self.envelope=envelope
+            if source_changed:
+                return
+            # Only canonical source changes after command preparation. No new monitor.
+            changed = now + timedelta(seconds=1)
+            monkeypatch.setattr(exit_lifecycle, '_utcnow', lambda: changed)
+            if source_change == "correction":
+                assert append_print(conn, city='Singapore', station_id='WSSS', source_channel='noaa_wrh_wsss',
+                    publish_ts_utc=observed.isoformat(), value_native=29.0, unit='C',
+                    fetched_at_utc=changed.isoformat(), raw_report='canonical correction 29')
+                conn.commit()
+                if authority_kind == "final_daily":
+                    conn.execute("UPDATE observations SET high_temp=29.0,fetched_at=?", (changed.isoformat(),))
+                    conn.commit()
+                elif authority_kind == "hard_fact":
+                    conn.execute("UPDATE observations SET high_temp=29.0,high_fetch_utc=?,fetched_at=?", (changed.isoformat(), changed.isoformat()))
+                    conn.commit()
+                    from src.config import runtime_cities_by_name
+                    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+                    current = evaluate_hard_fact_exit(position=position, city=runtime_cities_by_name()[position.city], now=changed, world_conn=conn, durable_only=True)
+                    assert current is None or current.action != "EXIT_DEAD_BIN"
+                else:
+                    current, _ = prepare(changed)
+                    assert current is None, 'current exact family no longer proves held bin dead'
+            elif source_change == "unreadable":
+                conn.execute("DROP TABLE " + ("observation_prints" if authority_kind == "branchwise" else "observations"))
+                conn.commit()
+            elif source_change == "body_revision":
+                # Existing native provenance changes without value/time changes.
+                metadata = json.loads(conn.execute("SELECT high_provenance_metadata FROM observations ORDER BY id DESC LIMIT 1").fetchone()[0])
+                metadata["payload_hash"] = "sha256:" + "b" * 64
+                conn.execute("UPDATE observations SET high_provenance_metadata=?", (json.dumps(metadata),))
+                conn.commit()
+                from src.config import runtime_cities_by_name
+                from src.execution.day0_hard_fact_exit import _final_daily_observation_extreme
+                current = _final_daily_observation_extreme(
+                    city=runtime_cities_by_name()[position.city], target_date=position.target_date,
+                    metric="high", now=changed, conn=conn)
+                assert current is not None and current.settled_extreme == 32.0
+            source_changed.append(True)
+            assert conn.execute("SELECT COUNT(*) FROM position_events WHERE event_type='MONITOR_REFRESHED'").fetchone()[0] == (3 if authority_kind in {"final_daily", "legacy_hko"} else 2)
+        def place_limit_order(self,**kwargs):
+            calls.append(kwargs)
+            return _fake_submit_result(self.envelope,order_id='source-race-order')
+    monkeypatch.setattr('src.data.polymarket_client.PolymarketClient',FakeClient)
+    fields=inspect.signature(executor.create_exit_order_intent).parameters
+    def submit(**kwargs):
+        intent=executor.create_exit_order_intent(**{k:v for k,v in kwargs.items() if k in fields})
+        return executor.execute_exit_order(intent,conn=conn,decision_id=kwargs['decision_id'],q_version=kwargs['q_version'])
+    monkeypatch.setattr(exit_lifecycle,'place_sell_order',submit)
+    authority = (exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position,context)
+                 if authority_kind != "hard_fact" else None)
+    try:
+        result=exit_lifecycle.execute_exit(PortfolioState(positions=[position]),position,context,
+            clob=SimpleNamespace(get_order_status=lambda _: {'status':'OPEN'}),conn=conn,branchwise_sell_authority=authority,hard_fact_authority=hard_fact_authority)
+        if authority_kind == "legacy_hko":
+            assert calls == [], result
+            assert source_changed == [], result
+            assert result == "exit_blocked: protective_authority_unavailable"
+            assert not exit_lifecycle._protective_source_receipt_current(
+                conn, position_id=position.trade_id, receipt=context.probability_receipt,
+                source_receipt_json=authority.source_receipt_json)
+            assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0] == 0
+            return
+        assert source_changed == [True], result
+        if source_change == "unchanged":
+            assert len(calls) == 1, result
+            assert calls[0]["order_type"] == "FAK" and calls[0]["price"] == pytest.approx(0.10)
+        else:
+            assert calls == [], result
+            assert result == "sell_error: protective_sell_authority_revoked_pre_venue"
+            command_id = conn.execute("SELECT command_id FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0]
+            assert exit_lifecycle._command_terminally_rejected_without_venue_order(conn, command_id, position_id=position.trade_id)
+            assert position.exit_retry_count == 0
+            assert not exit_lifecycle.is_exit_cooldown_active(position)
+            assert not exit_lifecycle.check_pending_retries(position, conn=conn, current_min_order_size=Decimal("0.01"))
+            assert calls == []  # Unchanged stale monitor cannot hot-loop another command.
+            sequence = conn.execute("SELECT MAX(sequence_no)+1 FROM position_events WHERE position_id=?", (position.trade_id,)).fetchone()[0]
+            stale_payload = {"direction": direction, "monitor_probability_receipt": context.probability_receipt,
+                             "last_monitor_prob": 0.0, "last_monitor_prob_is_fresh": True,
+                             "held_sell_full_depth_action_authority": True}
+            conn.execute("INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,occurred_at,phase_before,phase_after,source_module,env,payload_json) VALUES ('replayed-stale-monitor',?,1,?,'MONITOR_REFRESHED',?,'pending_exit','pending_exit','src.engine.cycle_runtime','live',?)",
+                         (position.trade_id, sequence, (now+timedelta(seconds=1)).isoformat(), json.dumps(stale_payload)))
+            conn.commit()
+            assert not exit_lifecycle.check_pending_retries(position, conn=conn, current_min_order_size=Decimal("0.01"))
+            assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0] == 1
+            if source_change == "correction" and authority_kind != "final_daily":
+                restored_at = now + timedelta(seconds=2)
+                monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: restored_at)
+                append_print(conn, city='Singapore', station_id='WSSS', source_channel='noaa_wrh_wsss',
+                    publish_ts_utc=observed.isoformat(), value_native=32.0, unit='C',
+                    fetched_at_utc=restored_at.isoformat(), raw_report='canonical restored 32')
+                if authority_kind == "hard_fact":
+                    conn.execute("UPDATE observations SET high_temp=32.0,high_fetch_utc=?,fetched_at=?", (restored_at.isoformat(), restored_at.isoformat()))
+                    conn.commit()
+                    hard_fact_authority = evaluate_hard_fact_exit(position=position, city=runtime_cities_by_name()[position.city], now=restored_at, world_conn=conn, durable_only=True)
+                    new_receipt = {"probability_authority": "day0_absorbing_hard_fact", "hard_fact_evidence": hard_fact_authority.evidence.as_dict()}
+                else:
+                    conn.commit()
+                    prepared, payload = prepare(restored_at)
+                    assert prepared is not None
+                    refreshed_snapshot = replace(snapshot, witness=prepared.probability_witness, day0_payload=payload)
+                    probability, refreshed, fresh = mr._materialize_current_global_day0_probability(position, refreshed_snapshot)
+                    assert fresh and probability == 0.0
+                    position.__dict__.update(refreshed.__dict__)
+                    new_receipt = mr._compact_monitor_probability_receipt(position._day0_monitor_probability_receipt)
+                context = replace(context, probability_receipt=new_receipt)
+                position.last_monitor_at = restored_at.isoformat()
+                sequence = conn.execute("SELECT MAX(sequence_no)+1 FROM position_events WHERE position_id=?", (position.trade_id,)).fetchone()[0]
+                conn.execute("INSERT INTO position_events(event_id,position_id,event_version,sequence_no,event_type,occurred_at,phase_before,phase_after,source_module,env,payload_json) VALUES ('restored-source-monitor',?,1,?,'MONITOR_REFRESHED',?,'pending_exit','pending_exit','src.engine.cycle_runtime','live',?)", (
+                    position.trade_id, sequence, restored_at.isoformat(), json.dumps({
+                        'direction': direction, 'monitor_probability_receipt': new_receipt,
+                        'last_monitor_prob': 0.0, 'last_monitor_prob_is_fresh': True,
+                        'held_sell_full_depth_action_authority': True,
+                    })))
+                insert_snapshot(conn, replace(old_book, snapshot_id='restored-source-book', condition_id=condition,
+                    captured_at=restored_at, freshness_deadline=restored_at+timedelta(seconds=180)))
+                conn.commit()
+                assert exit_lifecycle.check_pending_retries(position, conn=conn, current_min_order_size=Decimal("0.01"))
+                authority = (exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position,context)
+                             if authority_kind != "hard_fact" else None)
+                result = exit_lifecycle.execute_exit(PortfolioState(positions=[position]),position,context,
+                    clob=SimpleNamespace(get_order_status=lambda _: {'status':'OPEN'}), conn=conn,
+                    branchwise_sell_authority=authority, hard_fact_authority=hard_fact_authority)
+                assert result.startswith("sell_pending:"), result
+                assert len(calls) == 1
+                assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0] == 2
+    finally:
+        _clear_exit_submit_prereqs()
+
+
+def _bind_canonical_hard_fact_case(conn, position, context, now):
+    """Real resolver-product reader and verdict; no execution authority is mocked."""
+    import hashlib
+    from src.config import runtime_cities_by_name
+    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+    city = runtime_cities_by_name()[position.city]
+    station = city.wu_station
+    provenance = {
+        "upstream": "weather.gov_wrh_timeseries", "station": station,
+        "settlement_page_view": "all", "payload_hash": "sha256:" + hashlib.sha256(b"canonical WRH page 32").hexdigest(),
+        "high_local_timestamp": (now-timedelta(seconds=2)).isoformat(),
+        "low_local_timestamp": (now-timedelta(seconds=2)).isoformat(),
+    }
+    conn.execute("""CREATE TABLE IF NOT EXISTS observations (
+        id INTEGER PRIMARY KEY, city TEXT, target_date TEXT, source TEXT,
+        station_id TEXT, unit TEXT, authority TEXT, high_temp REAL, low_temp REAL,
+        high_provenance_metadata TEXT, low_provenance_metadata TEXT,
+        high_fetch_utc TEXT, low_fetch_utc TEXT, fetched_at TEXT)""")
+    conn.execute("INSERT INTO observations (id,city,target_date,source,station_id,unit,authority,high_temp,low_temp,high_provenance_metadata,low_provenance_metadata,high_fetch_utc,low_fetch_utc,fetched_at) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        position.city, position.target_date, "noaa_wrh_" + station.lower(), station, "C", "VERIFIED",
+        32.0, 27.0, json.dumps(provenance), json.dumps(provenance),
+        (now-timedelta(seconds=1)).isoformat(), (now-timedelta(seconds=1)).isoformat(),
+        (now-timedelta(seconds=1)).isoformat(),
+    ))
+    conn.commit()
+    verdict = evaluate_hard_fact_exit(position=position, city=city, now=now, world_conn=conn, durable_only=True)
+    assert verdict is not None and verdict.action == "EXIT_DEAD_BIN"
+    return replace(context, exit_reason="DAY0_HARD_FACT_BIN_DEAD", probability_receipt={
+        "probability_authority": "day0_absorbing_hard_fact", "hard_fact_evidence": verdict.evidence.as_dict(),
+    }), verdict
+
+
+def _bind_canonical_final_daily_case(conn, position, context, now, *, legacy_hko=False):
+    from zoneinfo import ZoneInfo
+    from src.config import runtime_cities_by_name
+    from src.engine.event_reactor_adapter import _global_final_daily_probability_payload
+    from src.engine.monitor_refresh import _compact_monitor_probability_receipt
+    from src.execution.day0_hard_fact_exit import FinalDailyObservation, _final_daily_observation_extreme, final_observed_bin_verdict
+    position.city = "Hong Kong" if legacy_hko else "Singapore"
+    zone = ZoneInfo("Asia/Hong_Kong" if legacy_hko else "Asia/Singapore")
+    position.target_date = (now.astimezone(zone).date() - timedelta(days=1)).isoformat()
+    conn.execute("UPDATE position_current SET city=?,target_date=? WHERE position_id=?", (position.city,position.target_date,position.trade_id))
+    source, station = ("hko_daily_api", "HKO") if legacy_hko else ("noaa_wrh_wsss", "WSSS")
+    provenance = {"payload_hash": "sha256:" + "a" * 64}
+    if not legacy_hko:
+        provenance.update(upstream="weather.gov_wrh_timeseries", station=station,
+            settlement_page_view="all", high_local_timestamp=position.target_date + "T12:00:00+08:00",
+            low_local_timestamp=position.target_date + "T06:00:00+08:00")
+    conn.execute("INSERT INTO observations (city,target_date,source,station_id,unit,authority,high_temp,low_temp,fetched_at,high_provenance_metadata,low_provenance_metadata,high_fetch_utc,low_fetch_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (position.city,position.target_date,source,station,"C","VERIFIED",32.0,27.0,now.isoformat(),json.dumps(provenance),json.dumps(provenance),now.isoformat(),now.isoformat()))
+    conn.commit()
+    if legacy_hko:
+        # Recreate the persisted receipt shape emitted by the previous reader.
+        # No source or execution guard is mocked: current reproof must revoke it.
+        from src.decision_kernel.canonicalization import stable_hash
+        from src.contracts.settlement_semantics import settlement_source_publication_grade
+        assert settlement_source_publication_grade(city=position.city, target_date=position.target_date,
+            temperature_metric="high", market_slug=None, settlement_source=source,
+            provenance=provenance)["source_grade"] == "UNKNOWN"
+        identity = stable_hash({"city":position.city,"target_date":position.target_date,"metric":"high",
+            "source":source,"station_id":station,"unit":"C","raw_extreme":32.0,"settled_extreme":32.0,
+            "fetched_at":now.isoformat(),"native_payload_sha256":"a"*64})
+        final = FinalDailyObservation(raw_extreme=32.,settled_extreme=32.,source=source,
+            station_id=station,unit="C",fetched_at=now,source_evidence_identity=identity)
+    else:
+        final = _final_daily_observation_extreme(city=runtime_cities_by_name()[position.city], target_date=position.target_date, metric="high", now=now, conn=conn)
+    assert final is not None
+    low, high = (None,30.0) if position.direction == "buy_yes" else (31.0,None)
+    assert final_observed_bin_verdict(metric="high",direction=position.direction,bin_low=low,bin_high=high,final_extreme=final.settled_extreme).action == "EXIT_DEAD_BIN"
+    payload = _global_final_daily_probability_payload(family=SimpleNamespace(city=position.city,target_date=position.target_date,metric="high"),final_observation=final,probability_base_identity="canonical-final-daily")
+    full = {**position._day0_monitor_probability_receipt,
+            "probability_authority": payload["probability_authority"],
+            "observation": payload["_edli_global_day0_binding"]}
+    full["band"] = {"basis": payload["probability_authority"], "sample_count": 2}
+    position._day0_monitor_probability_receipt = full
+    receipt = _compact_monitor_probability_receipt(full)
+    return replace(context, probability_receipt=receipt)
+
+
+@pytest.mark.parametrize("case", ("transaction", "deadline", "mutated_full_receipt", "different_source_role"))
+def test_exact_source_binding_does_not_renew_or_mutate_original_proof(conn, monkeypatch, case):
+    from src.execution import exit_lifecycle
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch)
+    proof = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    frozen = proof.source_receipt_json
+    assert exit_lifecycle._protective_source_receipt_current(conn, position_id=position.trade_id,
+        receipt=context.probability_receipt, source_receipt_json=frozen)
+    if case == "transaction":
+        conn.execute("BEGIN IMMEDIATE")
+        assert not exit_lifecycle._protective_source_receipt_current(conn, position_id=position.trade_id,
+            receipt=context.probability_receipt, source_receipt_json=frozen)
+        conn.rollback()
+    elif case == "deadline":
+        assert not exit_lifecycle._protective_source_receipt_current(conn, position_id=position.trade_id,
+            receipt=context.probability_receipt, source_receipt_json=frozen, deadline_utc=now)
+    else:
+        position._day0_monitor_probability_receipt["observation"]["observed_extreme_native"] = 29.0
+        if case == "different_source_role":
+            position._day0_monitor_probability_receipt["observation"]["settlement_source"] = "metar"
+        assert proof.source_receipt_json == frozen
+        with pytest.raises(ValueError, match="BRANCHWISE_SELL_SOURCE_BINDING_REQUIRED"):
+            exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+        assert exit_lifecycle._protective_source_receipt_current(conn, position_id=position.trade_id,
+            receipt=context.probability_receipt, source_receipt_json=frozen)
+
+
+@pytest.mark.parametrize("metric", ("high", "low"))
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_exact_source_correction_before_command_preparation_has_no_command_effect(conn, monkeypatch, direction, metric):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+    from src.state.schema.observation_prints_schema import append_print
+    position, context, now = _exact_zero_exit_case(conn, monkeypatch, direction=direction, metric=metric)
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(position, context)
+    binding = position._day0_monitor_probability_receipt["observation"]
+    append_print(conn, city=position.city, station_id="EGLC", source_channel="noaa_wrh_eglc",
+                 publish_ts_utc=binding["observation_time"], value_native=29.0 if metric == "high" else 35.0, unit="C",
+                 fetched_at_utc=now.isoformat(), raw_report="corrected native page 29")
+    conn.commit()
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", lambda **_: pytest.fail("superseded source prepared command"))
+    result = exit_lifecycle.execute_exit(PortfolioState(positions=[position]), position, context,
+        clob=object(), conn=conn, branchwise_sell_authority=authority)
+    assert result == "exit_blocked: protective_authority_unavailable"
+    assert position.last_exit_error == "protective_source_redecision_required"
+    assert position.exit_retry_count == 0
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands WHERE position_id=?", (position.trade_id,)).fetchone()[0] == 0
+
+
+def _prepared_reauction_requester_for_test(conn, monkeypatch, on_publish=None,
+                                           *, wake_path=None, **evidence):
+    """Exercise real preparation and exact-object publication from unarmed debt."""
+    import tempfile
+    from pathlib import Path
+    from dataclasses import asdict
+    from src.events import reactor
+    from src.execution import exit_lifecycle
+
+    if wake_path is None:
+        wake_path = Path(tempfile.mkdtemp(prefix="zeus-prepared-reauction-")) / "wake.json"
+    prepared = []
+    observed = []
+    publisher = reactor.publish_prepared_global_auction_completion
+    real_publish = getattr(publisher, '_real_prepared_publisher', publisher)
+
+    def prepare(position, force_new, *, prepare_only, obligation):
+        assert prepare_only is True
+        assert conn.in_transaction is False
+        assert not wake_path.exists()
+        now = exit_lifecycle._utcnow()
+        kwargs = {
+            key: obligation.get(key, '') for key in (
+                'position_id', 'scope_identity', 'generation', 'held_token_id',
+                'selection_epoch_identity', 'sell_book_witness_identity',
+                'debt_event_id', 'monitor_event_id',
+            )
+        }
+        kwargs.update(
+            family=tuple(obligation.get('family') or (
+                position.city, position.target_date, position.temperature_metric)),
+            probability_content_identity='q-current-preparation',
+            probability_observed_at=now.isoformat(), held_best_bid=0.50,
+            bid_observed_at=now.isoformat(), book_state='EXECUTABLE',
+            completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+            schema_version=4,
+        )
+        kwargs.update(evidence)
+        result = reactor.request_global_auction_completion(
+            reason='GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED',
+            **kwargs, force_new_generation=force_new, return_request=True,
+            prepare_only=True, wake_path=wake_path,
+        )
+        assert result[0] is True
+        assert not wake_path.exists()
+        prepared.append(result[1])
+        observed.append((position, force_new))
+        return result
+
+    def publish(*, reason, prepared_request):
+        assert prepared_request is prepared[-1]
+        assert conn.in_transaction is False
+        position, force_new = observed[-1]
+        claim = json.loads(conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id=? "
+            "AND event_type='EXIT_RETRY_RELEASED' ORDER BY sequence_no DESC LIMIT 1",
+            (position.trade_id,),
+        ).fetchone()[0])
+        assert claim['global_sell_reauction_status'] == 'publish_claimed'
+        for key, value in asdict(prepared_request).items():
+            assert claim['held_sell_reauction_obligation'][key] == (
+                list(value) if isinstance(value, tuple) else value)
+        if on_publish is not None and not on_publish(position, force_new):
+            return False
+        return real_publish(reason=reason, prepared_request=prepared_request, wake_path=wake_path)
+
+    publish._real_prepared_publisher = real_publish
+    monkeypatch.setattr(reactor, 'publish_prepared_global_auction_completion', publish)
+    return prepare

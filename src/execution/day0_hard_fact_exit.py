@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-10-08
 # Authority basis: adversarial review /tmp/day0_adversarial_review.md MUST-FIX
 #   #1 (hard-fact bin-death exit lane) + #3-wiring (resting-order cancel on bin
 #   death) — operator requirement "新高出现时能否立即drop". Calibration artifact:
@@ -68,6 +68,7 @@ _CURRENT_SOURCE_FETCH_INTERVAL_S = 600.0
 _CURRENT_SOURCE_FAILURE_RETRY_S = 120.0
 SAME_STATION_FAST_TAIL_SOURCE = "same_station_fast_tail"
 COMBINED_WU_FAST_TAIL_SOURCE = f"wu_api+{SAME_STATION_FAST_TAIL_SOURCE}"
+_NOAA_PAGE_BOUND_BASIS = "noaa_page_grid_clock_common_ending_v1"
 _CURRENT_SOURCE_MEMO: dict[
     tuple[str, str, str],
     tuple[
@@ -101,6 +102,10 @@ class HardFactEvidence:
     payload_identity: str
     source_identity: str
     contributor_payload_identities: tuple[str, ...] = ()
+    bound_value: float | None = None
+    bound_raw_value: float | None = None
+    bound_observed_at: str | None = None
+    bound_basis: str | None = None
 
     def is_complete_for(self, city: Any) -> bool:
         expected_station = str(getattr(city, "wu_station", "") or "").strip().upper()
@@ -112,6 +117,18 @@ class HardFactEvidence:
             )
         except (TypeError, ValueError):
             finite_extrema = False
+        bound_fields = (self.bound_value, self.bound_raw_value, self.bound_observed_at, self.bound_basis)
+        try:
+            valid_bound = all(value is None for value in bound_fields) or (
+                all(value is not None for value in bound_fields)
+                and self.bound_basis == _NOAA_PAGE_BOUND_BASIS
+                and self.source.startswith("noaa_wrh_")
+                and math.isfinite(float(self.bound_value))
+                and math.isfinite(float(self.bound_raw_value))
+                and _timestamps_are_ordered(self.bound_observed_at, self.issued_at)
+            )
+        except (TypeError, ValueError):
+            valid_bound = False
         payload_identity = _strict_sha256_digest(self.payload_identity)
         contributor_identities = (
             self.contributor_payload_identities or (self.payload_identity,)
@@ -131,10 +148,11 @@ class HardFactEvidence:
             and payload_identity in normalized_contributor_identities
             and str(self.source_identity or "").strip()
             and finite_extrema
+            and valid_bound
         )
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "source": self.source,
             "station_id": self.station_id,
             "observed_at": self.observed_at,
@@ -147,6 +165,14 @@ class HardFactEvidence:
                 self.contributor_payload_identities
             ),
         }
+        if self.bound_value is not None:
+            result["absorbing_bound"] = {
+                "value": self.bound_value,
+                "raw_value": self.bound_raw_value,
+                "observed_at": self.bound_observed_at,
+                "basis": self.bound_basis,
+            }
+        return result
 
 
 _SHA256_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -240,6 +266,9 @@ class FinalDailyObservation:
     station_id: str
     unit: str
     fetched_at: datetime
+    # Semantic identity of the decisive canonical read, including native body
+    # identity where that source already records it. This adds no source gate.
+    source_evidence_identity: str = ""
 
 
 def _target_local_day_complete(
@@ -451,7 +480,7 @@ def _noaa_wrh_hard_fact_evidence(
     *, city: Any, target_date: str, metric: str, now: datetime,
     world_conn: Any, complete_day: bool = False,
 ) -> HardFactEvidence | None:
-    """Read the resolver page's current, provenance-bound daily extreme.
+    """Read a page-derived absorbing bound or a qualified final daily value.
 
     Raw station feeds and complete hourly mirrors are different products.
     A past-day exact payoff additionally requires a page fetch after day end.
@@ -473,6 +502,58 @@ def _noaa_wrh_hard_fact_evidence(
     except (TypeError, ValueError):
         return None
     source = f"noaa_wrh_{station.lower()}"
+    from src.contracts.settlement_semantics import SettlementSemantics
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.events.day0_authority import noaa_page_absorbing_value_f
+
+    def page_bound(raw: float, observed: datetime) -> float:
+        return (noaa_page_absorbing_value_f(raw, observed_at=observed, metric=metric)
+                if unit == "F" else raw)
+
+    owned, snapshot = read_current_noaa_wrh_snapshot(
+        world_conn, city=city, target_date=target_date, as_of=now,
+    )
+    if owned is not False:
+        if snapshot is None or ((complete_day or now >= end) and not snapshot.complete_day):
+            return None
+        extreme = snapshot.extreme(metric)
+        if extreme is None:
+            return None
+        effective = extreme.value
+        bound_fields = {}
+        if not complete_day:
+            # Transform before reducing: the strongest lawful bound may come
+            # from a different row than the raw extreme. Preserve both clocks.
+            candidates = [
+                (row, page_bound(row.air_temp, row.utc)) for row in snapshot.rows
+                if row.local_date == target_date
+                and (snapshot.view == "all" or row.is_official_report)
+            ]
+            if not candidates:
+                return None
+            selected, effective = (max if metric == "high" else min)(
+                candidates, key=lambda item: item[1],
+            )
+            bound_fields = {
+                "bound_value": effective, "bound_raw_value": selected.air_temp,
+                "bound_observed_at": selected.utc.isoformat(),
+                "bound_basis": _NOAA_PAGE_BOUND_BASIS,
+            }
+        # A qualified complete-day read returns the page's actual final value,
+        # never a directional bound substituted for that settlement value.
+        evidence = HardFactEvidence(
+            source=source, station_id=station,
+            observed_at=datetime.fromisoformat(extreme.local_timestamp).isoformat(),
+            # Legacy field name: this is possessed-at, never a provider-issued
+            # measurement. The current product explicitly preserves UNKNOWN.
+            issued_at=snapshot.received_at.isoformat(), raw_extreme=extreme.value,
+            rounded_extreme=float(SettlementSemantics.for_city(city).round_single(effective)),
+            payload_identity=snapshot.response_sha256,
+            source_identity=f"{source}:{station}:{view}:{target_date}:{metric}",
+            contributor_payload_identities=(snapshot.response_sha256,),
+            **bound_fields,
+        )
+        return evidence if evidence.is_complete_for(city) else None
     try:
         attached = {str(row[1]): str(row[2]) for row in world_conn.execute("PRAGMA database_list")}
     except Exception:  # noqa: BLE001 - unknown truth plane cannot authorize q
@@ -520,9 +601,10 @@ def _noaa_wrh_hard_fact_evidence(
                 or digest is None or not math.isfinite(raw)
             ):
                 return None
-            from src.contracts.settlement_semantics import SettlementSemantics
-
-            rounded = SettlementSemantics.for_city(city).round_single(raw)
+            # A legacy scalar proves this one page print, not unseen members.
+            # Its possibly weaker bound is sufficient only in that direction.
+            effective = raw if complete_day else page_bound(raw, observed)
+            rounded = SettlementSemantics.for_city(city).round_single(effective)
         except (TypeError, ValueError, AttributeError):
             return None
         evidence = HardFactEvidence(
@@ -532,6 +614,11 @@ def _noaa_wrh_hard_fact_evidence(
             payload_identity=digest,
             source_identity=f"{source}:{station}:{view}:{target_date}:{metric}",
             contributor_payload_identities=(digest,),
+            **({} if complete_day else {
+                "bound_value": effective, "bound_raw_value": raw,
+                "bound_observed_at": observed.isoformat(),
+                "bound_basis": _NOAA_PAGE_BOUND_BASIS,
+            }),
         )
         return evidence if evidence.is_complete_for(city) else None
     return None
@@ -548,8 +635,8 @@ def _final_daily_observation_extreme(
     """Read source-correct final daily settlement evidence after local day end.
 
     Daily observations are a separate truth plane from Day0 hourly/current
-    observations. Only VERIFIED rows from the configured settlement family may
-    collapse the held-side probability to an exact outcome.
+    observations. A VERIFIED row must also satisfy its source's publication
+    qualification before it can collapse held-side probability to an exact outcome.
     """
 
     if conn is None or not _target_local_day_complete(city, target_date, now=now):
@@ -562,12 +649,15 @@ def _final_daily_observation_extreme(
         )
         if evidence is None:
             return None
+        from src.decision_kernel.canonicalization import stable_hash
+
         return FinalDailyObservation(
             raw_extreme=evidence.raw_extreme,
             settled_extreme=evidence.rounded_extreme,
             source=evidence.source, station_id=evidence.station_id,
             unit=str(city.settlement_unit).upper(),
             fetched_at=datetime.fromisoformat(evidence.issued_at),
+            source_evidence_identity=stable_hash(evidence.as_dict()),
         )
     field = "high_temp" if metric == "high" else "low_temp" if metric == "low" else ""
     if not field:
@@ -608,6 +698,20 @@ def _final_daily_observation_extreme(
                 continue
             if str(authority or "").strip().upper() != "VERIFIED":
                 continue
+            from src.contracts.settlement_semantics import settlement_source_publication_grade
+
+            publication = settlement_source_publication_grade(
+                city=str(city.name), target_date=str(target_date),
+                temperature_metric=metric, market_slug=None,
+                source_family=str(getattr(city, "settlement_source_type", "") or ""),
+                settlement_source=str(source), qualification_at=now.isoformat(),
+            )
+            if publication is not None and publication.get("source_grade") != "VERIFIED":
+                # SCOPE: this unqualified daily decimal's exact payoff only.
+                # DRAIN: ordinary source/monitor refresh and independent venue
+                # settlement. RESET: the owning publication contract qualifies
+                # the source; a venue integer cannot authenticate this decimal.
+                continue
             if expected_unit and str(unit or "").strip().upper() != expected_unit:
                 continue
             station_norm = str(station or "").strip().upper()
@@ -630,6 +734,30 @@ def _final_daily_observation_extreme(
                 settled_grid = SettlementSemantics.for_city(city).round_single(raw_extreme)
             except Exception:  # noqa: BLE001 - invalid semantics/value cannot authorize q
                 continue
+            # HKO's existing daily writer records the native response digest in
+            # metric provenance. Older admitted rows may lack that metadata;
+            # their canonical decisive values still have a semantic identity.
+            payload_digest = None
+            try:
+                provenance_row = conn.execute(
+                    f"SELECT {metric}_provenance_metadata FROM {table_ref} "
+                    f"WHERE city=? AND target_date=? AND source=? AND station_id=? "
+                    f"AND fetched_at=? AND {field}=? LIMIT 1",
+                    (str(city.name), target_date, source, station, fetched_at_raw, extreme),
+                ).fetchone()
+                if provenance_row is not None:
+                    payload_digest = _provenance_payload_digest(provenance_row[0])
+            except Exception:  # noqa: BLE001 - optional legacy provenance
+                pass
+            from src.decision_kernel.canonicalization import stable_hash
+
+            source_identity = stable_hash({
+                "city": str(city.name), "target_date": target_date, "metric": metric,
+                "source": str(source), "station_id": station_norm,
+                "unit": str(unit).strip().upper(), "raw_extreme": raw_extreme,
+                "settled_extreme": float(settled_grid), "fetched_at": fetched_at.isoformat(),
+                "native_payload_sha256": payload_digest,
+            })
             return FinalDailyObservation(
                 raw_extreme=raw_extreme,
                 settled_extreme=float(settled_grid),
@@ -637,6 +765,7 @@ def _final_daily_observation_extreme(
                 station_id=station_norm,
                 unit=str(unit).strip().upper(),
                 fetched_at=fetched_at,
+                source_evidence_identity=source_identity,
             )
     return None
 

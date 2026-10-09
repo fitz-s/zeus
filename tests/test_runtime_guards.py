@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
 # Lifecycle: created=2026-04-28; last_reviewed=2026-08-31; last_reused=2026-08-31
 # Created: 2026-04-28
-# Last reused/audited: 2026-09-22
+# Last reused/audited: 2026-10-08
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 #                  2026-08-15 economic-ready recent-exit hotfix.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
@@ -12856,6 +12856,58 @@ def test_check_pending_exits_releases_loaded_pre_exit_state_bare_exit_intent_wit
     conn.close()
 
 
+def _observe_prepared_global_sell_publication(conn, monkeypatch, wake_path):
+    """Keep the real typed preparation/publisher across the claim commit."""
+    from dataclasses import asdict
+    from src.events import reactor
+    from src.execution.exit_safety import (
+        global_sell_reauction_publish_claim_blocks_exit_command,
+    )
+
+    requests, prepared, published = [], [], []
+    request = reactor.request_global_auction_completion
+    publish = reactor.publish_prepared_global_auction_completion
+
+    def prepare(**kwargs):
+        assert kwargs["prepare_only"] is True
+        assert kwargs["return_request"] is True
+        assert conn.in_transaction is False
+        assert not global_sell_reauction_publish_claim_blocks_exit_command(
+            conn, kwargs["position_id"],
+        )
+        assert not wake_path.exists()
+        result = request(**kwargs, wake_path=wake_path)
+        assert result[0] is True and result[1] is not None
+        assert not wake_path.exists()
+        requests.append(kwargs)
+        prepared.append(result[1])
+        return result
+
+    def publish_prepared(*, reason, prepared_request):
+        assert prepared_request is prepared[-1]
+        assert conn.in_transaction is False
+        assert global_sell_reauction_publish_claim_blocks_exit_command(
+            conn, prepared_request.position_id,
+        )
+        claim = json.loads(conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id=? "
+            "AND event_type='EXIT_RETRY_RELEASED' ORDER BY sequence_no DESC LIMIT 1",
+            (prepared_request.position_id,),
+        ).fetchone()[0])
+        assert claim["global_sell_reauction_status"] == "publish_claimed"
+        assert all(claim["held_sell_reauction_obligation"][key] == (
+            list(value) if isinstance(value, tuple) else value
+        ) for key, value in asdict(prepared_request).items())
+        result = publish(reason=reason, prepared_request=prepared_request, wake_path=wake_path)
+        assert result is True and wake_path.exists()
+        published.append(prepared_request)
+        return result
+
+    monkeypatch.setattr(reactor, "request_global_auction_completion", prepare)
+    monkeypatch.setattr(reactor, "publish_prepared_global_auction_completion", publish_prepared)
+    return requests, prepared, published
+
+
 @pytest.mark.parametrize(
     ("exit_state", "last_exit_error"),
     [
@@ -12964,24 +13016,71 @@ def test_global_sell_without_command_survives_restart_as_v4_reauction_debt(
     loaded = query_portfolio_loader_view(conn)["positions"][0]
     restarted = _position_from_projection_row(loaded, current_mode="live")
     assert needs_global_sell_snapshot_reauction(restarted, conn) is True
-    requests: list[dict] = []
     from src.execution.exit_safety import (
         global_sell_reauction_publish_claim_blocks_exit_command,
     )
+    debt = exit_lifecycle_module.latest_held_sell_reauction_obligation(conn, restarted)
+    assert debt["book_state"] == "UNKNOWN"
+    assert not debt.get("completion_deadline_at")
+    from src.events import reactor
 
-    def request_reauction(**kwargs):
-        assert global_sell_reauction_publish_claim_blocks_exit_command(
-            conn,
-            pos.trade_id,
-        ) is True
-        requests.append(kwargs)
-        return True
-
-    monkeypatch.setattr(
-        "src.events.reactor.request_global_auction_completion",
-        request_reauction,
-    )
+    family_requests = []
+    request_family = reactor.request_global_auction_completion
     monkeypatch.setattr(cycle_runtime, "_monitoring_phase_positions", lambda *args, **kwargs: [])
+
+    def cold_family_preparation(**kwargs):
+        assert kwargs["reason"] == "GLOBAL_AUCTION_STATISTICAL_SELL_FULL_FAMILY_PREPARATION_REQUIRED"
+        assert "held_token_id" not in kwargs and "prepare_only" not in kwargs
+        assert not global_sell_reauction_publish_claim_blocks_exit_command(conn, pos.trade_id)
+        family_requests.append(kwargs)
+        return request_family(**{**kwargs, "wake_path": tmp_path / "cold-family-wake.json"})
+
+    cold_summary = {"monitors": 0, "exits": 0}
+    with monkeypatch.context() as cold:
+        cold.setattr(reactor, "request_global_auction_completion", cold_family_preparation)
+        cycle_runtime.execute_monitoring_phase(
+            conn=conn, clob=types.SimpleNamespace(),
+            portfolio=PortfolioState(positions=[restarted]),
+            artifact=CycleArtifact(mode="opening_hunt", started_at="2026-08-05T20:00:00Z"),
+            tracker=StrategyTracker(), summary=cold_summary,
+            deps=_monitor_chain_deps(datetime.now(timezone.utc)),
+            run_exit_preflight=False,
+        )
+    assert len(family_requests) == 1 and (tmp_path / "cold-family-wake.json").exists()
+    assert cold_summary.get("global_sell_snapshot_reauction_debts_recovered", 0) == 0
+    assert needs_global_sell_snapshot_reauction(restarted, conn) is True
+    assert exit_lifecycle_module.latest_held_sell_reauction_obligation(conn, restarted) == debt
+    assert not global_sell_reauction_publish_claim_blocks_exit_command(conn, pos.trade_id)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id=?", (pos.trade_id,),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=? "
+        "AND json_extract(payload_json, '$.global_sell_reauction_status')='publish_claimed'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
+    # The restart debt is unarmed. Supply the existing unit fixture's current
+    # monitor cut through its canonical writer before normal preparation.
+    now = datetime.now(timezone.utc)
+    restarted.last_monitor_at = now.isoformat()
+    restarted.last_monitor_prob = restarted.p_posterior
+    restarted.last_monitor_prob_is_fresh = True
+    restarted.last_monitor_market_price = 0.46
+    restarted.last_monitor_market_price_is_fresh = True
+    restarted.last_monitor_best_bid = 0.45
+    restarted.last_monitor_best_ask = 0.47
+    restarted._zeus_held_monitor_full_depth_action_authority = True
+    restarted._monitor_probability_receipt = {"probability_content_identity": "q-current-restart"}
+    restarted._held_sell_reauction_monitor_lineage = {
+        "selection_epoch_identity": "selection-epoch-current-restart",
+        "sell_book_witness_identity": "book-witness-current-restart",
+    }
+    assert cycle_runtime._emit_monitor_refreshed_canonical_if_available(
+        conn, restarted, deps=_monitor_chain_deps(now),
+    )
+    requests, prepared, published = _observe_prepared_global_sell_publication(
+        conn, monkeypatch, tmp_path / "restart-wake.json",
+    )
     summary = {"monitors": 0, "exits": 0}
     cycle_runtime.execute_monitoring_phase(
         conn=conn,
@@ -12990,13 +13089,14 @@ def test_global_sell_without_command_survives_restart_as_v4_reauction_debt(
         artifact=CycleArtifact(mode="opening_hunt", started_at="2026-08-05T20:00:00Z"),
         tracker=StrategyTracker(),
         summary=summary,
-        deps=_monitor_chain_deps(datetime(2026, 8, 5, 20, 1, tzinfo=timezone.utc)),
+        deps=_monitor_chain_deps(now),
         run_exit_preflight=False,
     )
     assert len(requests) == 1
     assert requests[0]["position_id"] == pos.trade_id
     assert requests[0]["force_new_generation"] is True
     assert requests[0]["schema_version"] == 4
+    assert published == prepared and len(published) == 1
     assert summary["global_sell_snapshot_reauction_debts_recovered"] == 1
     assert needs_global_sell_snapshot_reauction(restarted, conn) is False
     assert global_sell_reauction_publish_claim_blocks_exit_command(
@@ -13178,17 +13278,16 @@ def test_pending_exit_global_sell_reauction_claims_with_monitor_priority(
     )
     upsert_position_current(conn, build_position_current_projection(pos))
     conn.commit()
-    obligation = {
-        "schema_version": 4,
-        "position_id": pos.trade_id,
-        "held_token_id": pos.token_id,
-        "scope_identity": "scope-1",
-        "generation": "generation-1",
-        "selection_epoch_identity": "selection-epoch-1",
-        "sell_book_witness_identity": "book-witness-1",
-        "debt_event_id": "debt-event-1",
-        "monitor_event_id": "monitor-event-1",
-    }
+    obligation = exit_lifecycle_module._held_sell_reauction_obligation(
+        pos, generation_material={"event_type": "EXIT_RETRY_RELEASED", "sequence_no": 1},
+        canonical_monitor_lineage={
+            "selection_epoch_identity": "selection-epoch-1",
+            "sell_book_witness_identity": "book-witness-1",
+            "monitor_event_id": "monitor-event-1",
+        },
+    )
+    assert obligation["book_state"] == "UNKNOWN"
+    assert not obligation.get("completion_deadline_at")
     priorities = []
     requests = []
     monkeypatch.setattr(
@@ -13196,10 +13295,11 @@ def test_pending_exit_global_sell_reauction_claims_with_monitor_priority(
         "needs_global_sell_snapshot_reauction",
         lambda *_args, **_kwargs: True,
     )
+    latest_obligation = exit_lifecycle_module.latest_held_sell_reauction_obligation
     monkeypatch.setattr(
         exit_lifecycle_module,
         "latest_held_sell_reauction_obligation",
-        lambda *_args, **_kwargs: obligation,
+        lambda *args, **kwargs: latest_obligation(*args, **kwargs) or obligation,
     )
     monkeypatch.setattr(
         exit_lifecycle_module,
@@ -13218,16 +13318,39 @@ def test_pending_exit_global_sell_reauction_claims_with_monitor_priority(
 
     monkeypatch.setattr(executor_module, "_canonical_trade_write_lease", lease)
 
+    observed, prepared, published = _observe_prepared_global_sell_publication(
+        conn, monkeypatch, tmp_path / "priority-wake.json",
+    )
+
+    def requester(position, force, *, prepare_only, obligation):
+        from src.events import reactor
+
+        assert prepare_only is True and conn.in_transaction is False
+        assert priorities == []
+        requests.append((position.trade_id, force))
+        now = datetime.now(timezone.utc)
+        return reactor.request_global_auction_completion(
+            reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+            **{key: obligation[key] for key in (
+                "position_id", "family", "held_token_id", "scope_identity", "generation",
+                "selection_epoch_identity", "sell_book_witness_identity",
+                "debt_event_id", "monitor_event_id", "schema_version",
+            )},
+            probability_content_identity="q-current-priority",
+            probability_observed_at=now.isoformat(),
+            held_best_bid=0.45, bid_observed_at=now.isoformat(), book_state="EXECUTABLE",
+            completion_deadline_at=(now + timedelta(seconds=30)).isoformat(),
+            force_new_generation=force, return_request=True, prepare_only=prepare_only,
+        )
+
     assert exit_lifecycle_module.recover_global_sell_snapshot_reauction_debt(
         pos,
         conn=conn,
-        requester=lambda position, force: requests.append(
-            (position.trade_id, force)
-        )
-        or True,
+        requester=requester,
     ) is True
-    assert priorities == [WritePriority.MONITOR]
+    assert priorities == [WritePriority.MONITOR, WritePriority.MONITOR]
     assert requests == [(pos.trade_id, True)]
+    assert len(observed) == 1 and published == prepared and len(published) == 1
     statuses = conn.execute(
         "SELECT json_extract(payload_json, '$.global_sell_reauction_status') "
         "FROM position_events WHERE position_id = ? "

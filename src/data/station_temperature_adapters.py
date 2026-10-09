@@ -199,12 +199,13 @@ def _fetch_wrh_batch(route, client):
                         if r.provider == "noaa_wrh" and r.unit == route.unit} | {route.station_id}))
 
     def fetch():
+        token = wrh.fetch_wrh_token()
         wrh._wait_for_request_slot()
         try:
             body = _bounded_body(
                 client, "GET", wrh.WRH_TIMESERIES_URL,
                 params=wrh._query_params(",".join(ids), unit=route.unit, start_utc=None, end_utc=None,
-                                         recent_minutes=180, token=wrh.fetch_wrh_token()),
+                                         recent_minutes=180, token=token),
                 headers=wrh._page_headers(ids[0]), timeout=6)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 403:
@@ -600,3 +601,155 @@ def fetch_station_temperature(route, *, start: datetime, end: datetime, client=h
     received = datetime.now(UTC)
     return tuple(s for s in parse_station_payload(route, body, received_at=received)
                  if start <= s.observed_at <= end)
+
+
+_WRH_CURRENT_PRODUCT_CACHE: dict = {}
+_WRH_CURRENT_PRODUCT_LOCK = threading.Lock()
+
+
+def _current_wrh_cached_fetch(key, fetch, *, prefix):
+    """Bound dynamic native-body custody to 4 entries / 20 MB in memory.
+
+    The dedicated serial lane already owns WRH acquisition. This separate lock
+    makes cache eviction safe for direct callers without holding the generic
+    provider cache lock over network I/O or accumulating dynamic key locks.
+    """
+    key = ("wrh_current_snapshot", key)
+    with _WRH_CURRENT_PRODUCT_LOCK:
+        try:
+            return _cached_fetch(_WRH_CURRENT_PRODUCT_CACHE, key, fetch,
+                                 prefix=prefix, retry_floor=60.0)
+        finally:
+            with _FETCH_CACHE_LOCK:
+                now = time.monotonic()
+                for old, entry in tuple(_WRH_CURRENT_PRODUCT_CACHE.items()):
+                    if old != key and entry[0] <= now:
+                        del _WRH_CURRENT_PRODUCT_CACHE[old]
+                        _FETCH_KEY_LOCKS.pop(old, None)
+                def body_bytes():
+                    return sum(len(entry[1][0]) for entry in _WRH_CURRENT_PRODUCT_CACHE.values()
+                               if entry[1] is not None and isinstance(entry[1][0], bytes))
+                while len(_WRH_CURRENT_PRODUCT_CACHE) > 4 or body_bytes() > 20_000_000:
+                    old = next(iter(_WRH_CURRENT_PRODUCT_CACHE))
+                    del _WRH_CURRENT_PRODUCT_CACHE[old]
+                    _FETCH_KEY_LOCKS.pop(old, None)
+                # This wrapper serializes own callers; no waiter can retain an
+                # evicted key lock. Other provider caches are untouched.
+                for old in tuple(_FETCH_KEY_LOCKS):
+                    if old and old[0] == "wrh_current_snapshot" and old not in _WRH_CURRENT_PRODUCT_CACHE:
+                        _FETCH_KEY_LOCKS.pop(old, None)
+
+
+def iter_current_noaa_wrh_products(scopes, *, client=httpx):
+    """Bounded full-page requests for held/resting scopes only, grouped by unit.
+
+    Existing fast rolling-tail acquisition is unchanged. There is at most one
+    request per unit/station-set per minute, using the same body/deadline caps;
+    a malformed/failed product never becomes an explicit empty publication.
+    """
+    from src.data import noaa_wrh_timeseries as wrh
+    from zoneinfo import ZoneInfo
+    from dataclasses import replace
+    import math
+
+    groups = {}
+    now = datetime.now(UTC)
+    for city, target in scopes:
+        try:
+            day = datetime.fromisoformat(target).date()
+            local_start = datetime.combine(day, datetime.min.time(), ZoneInfo(city.timezone)).astimezone(UTC)
+            if (str(city.settlement_source_type).lower() != "noaa" or local_start > now
+                    or now - local_start > timedelta(days=wrh.MAX_REQUEST_WINDOW_DAYS, minutes=-180)):
+                continue
+            groups.setdefault(city.settlement_unit, []).append((city, target, local_start))
+        except (ValueError, AttributeError):
+            continue
+    for unit, group in sorted(groups.items()):
+        ids = tuple(sorted({city.wu_station.upper() for city, target, start in group}))
+        key = (unit, ids, tuple(sorted({target for city, target, start in group})), id(client))
+        earliest = min(start for city, target, start in group)
+        def fetch():
+            token = wrh.fetch_wrh_token()
+            wrh._wait_for_request_slot()
+            started = datetime.now(UTC)
+            minutes = math.ceil((started - earliest).total_seconds() / 60) + 180
+            if minutes > wrh.MAX_REQUEST_WINDOW_DAYS * 24 * 60:
+                raise ValueError("WRH_CURRENT_PRODUCT_WINDOW_EXPIRED")
+            try:
+                body = _bounded_body(
+                    client, "GET", wrh.WRH_TIMESERIES_URL,
+                    params=wrh._query_params(",".join(ids), unit=unit, start_utc=None, end_utc=None,
+                                             recent_minutes=minutes, token=token),
+                    headers=wrh._page_headers(ids[0]), timeout=6)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 403:
+                    raise wrh.WrhTokenRefused("WRH current product refused (HTTP 403)") from None
+                raise
+            return body, started, started - timedelta(minutes=minutes)
+        try:
+            (body, started, coverage_start), received = _current_wrh_cached_fetch(
+                key, fetch, prefix="WRH_CURRENT_PRODUCT_DEFERRED:",
+            )
+        except ValueError:
+            continue
+        for city, target, _start in group:
+            try:
+                product = replace(wrh.product_from_response(
+                    body, city.wu_station.upper(), unit=unit, fetched_at=received,
+                    source_response_sha256=hashlib.sha256(body).hexdigest(), request_station_ids=ids,
+                ), request_started_at=started, coverage_start_utc=coverage_start, coverage_end_utc=started)
+                wrh.current_snapshot_from_product(product, city=city, target_date=target, as_of=received)
+            except (ValueError, wrh.WrhError):
+                continue
+            yield city, target, product
+
+
+
+def fetch_current_noaa_wrh_products(scopes, *, client=httpx):
+    """Compatibility collection; ingest streams each unit's qualified products."""
+    return tuple(iter_current_noaa_wrh_products(scopes, client=client))
+
+
+def iter_noaa_wrh_completed_owner_recovery(scope, *, client=httpx):
+    """At most one bounded explicit-day request for an already-typed old owner.
+
+    The caller selects it after current held work. Provider refusals or malformed
+    bodies remain unavailable; this never changes generic backfill eligibility.
+    """
+    if scope is None:
+        return
+    from dataclasses import replace
+    from zoneinfo import ZoneInfo
+    from src.data import noaa_wrh_timeseries as wrh
+    city, target = scope
+    day = datetime.fromisoformat(target).date()
+    zone = ZoneInfo(city.timezone)
+    start = datetime.combine(day, datetime.min.time(), zone).astimezone(UTC)
+    end = datetime.combine(day + timedelta(days=1), datetime.min.time(), zone).astimezone(UTC)
+    if end > datetime.now(UTC) or end-start > timedelta(days=wrh.MAX_REQUEST_WINDOW_DAYS):
+        return
+    key = ("completed_owner", city.wu_station, city.settlement_unit, target, id(client))
+    def fetch():
+        token = wrh.fetch_wrh_token()
+        wrh._wait_for_request_slot()
+        started = datetime.now(UTC)
+        try:
+            body = _bounded_body(client, "GET", wrh.WRH_TIMESERIES_URL,
+                params=wrh._query_params(city.wu_station, unit=city.settlement_unit,
+                                         start_utc=start, end_utc=end, recent_minutes=None, token=token),
+                headers=wrh._page_headers(city.wu_station), timeout=6)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 403:
+                raise wrh.WrhTokenRefused("WRH completed owner recovery refused (HTTP 403)") from None
+            raise
+        return body, started
+    try:
+        (body, started), received = _current_wrh_cached_fetch(key, fetch,
+            prefix="WRH_COMPLETED_OWNER_RECOVERY_DEFERRED:")
+        product = replace(wrh.product_from_response(body, city.wu_station, unit=city.settlement_unit,
+            fetched_at=received, source_response_sha256=hashlib.sha256(body).hexdigest()),
+            request_started_at=started, coverage_start_utc=start, coverage_end_utc=end)
+        wrh.current_snapshot_from_product(product, city=city, target_date=target, as_of=received)
+    except (ValueError, wrh.WrhError):
+        return
+    yield city, target, product

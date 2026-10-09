@@ -7210,6 +7210,7 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     forecast_wake = wake.reason == "forecast_posterior_advanced"
+    physical_current_wake = wake.reason == "current_temperature_print_committed"
     price_wake = wake.reason == "market_price_advanced"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
     position_fill_wake = wake.reason == "position_fill_projected"
@@ -7375,7 +7376,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         monitor_wake_families = tuple(_price_wake_target_families(wake_event_ids) or ())
     forecast_monitor_families = (
         _forecast_wake_held_families(monitor_wake_families)
-        if (forecast_wake or price_wake) and monitor_wake_families
+        if (forecast_wake or price_wake or physical_current_wake) and monitor_wake_families
         else frozenset()
     )
     if forecast_monitor_families:
@@ -10456,8 +10457,15 @@ def _exit_monitor_cycle(
         current_overdue = _canonical_overdue_monitor_families(
             require_fresh_inputs=False,
         )
+        # A cold wake already admits its target families before the lazy
+        # canonical debt read discovers them. They are work owned by this
+        # claim, not a new outside-scope obligation that should preempt it.
+        # New debt in another family still yields to the existing recovery.
+        admitted_families = absorbed_overdue_families | frozenset(
+            target_families or ()
+        )
         return current_overdue is None or not current_overdue.issubset(
-            absorbed_overdue_families
+            admitted_families
         )
 
     periodic_full_book = target_families is None and not urgent_fact

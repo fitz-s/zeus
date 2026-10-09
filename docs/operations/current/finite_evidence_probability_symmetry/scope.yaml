@@ -8,6 +8,27 @@ frontier:
 - exit economic symmetry
 - current wealth uncertainty representation
 in_scope:
+- requirements.txt
+- tests/money_path/test_finding_b_free_cash_bound.py
+- tests/engine/test_wrh_carrier_revision_identity.py
+- tests/topology/test_structural_blockers.py
+- tests/engine/test_physical_wrh_q_delivery.py
+- architecture/artifact_lifecycle.yaml
+- workspace_map.md
+- tests/test_station_temperature_adapters.py
+- tests/test_scheduler_adapter.py
+- tests/test_noaa_wrh_settlement_product.py
+- tests/engine/test_wrh_current_monitor_redecision.py
+- tests/data/test_wrh_current_membership_identity.py
+- src/data/source_job_registry.py
+- src/data/settlement_observation_selection.py
+- src/data/scheduler_adapter.py
+- src/data/physical_current_delivery.py
+- src/data/station_temperature_adapters.py
+- src/data/noaa_wrh_timeseries.py
+- src/data/daily_observation_writer.py
+- tests/test_current_temperature_delivery.py
+- tests/engine/test_physical_exit_window_acceptance.py
 - .gitattributes
 - AGENTS.md
 - config/AGENTS.md

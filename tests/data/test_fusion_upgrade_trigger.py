@@ -1,8 +1,8 @@
 # Created: 2026-06-11
-# Lifecycle: created=2026-06-11; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Lifecycle: created=2026-06-11; last_reviewed=2026-10-09; last_reused=2026-10-09
 # Purpose: Lock provider-set and exact-input revision reseeding for replacement posteriors.
 # Reuse: Run for fusion upgrade, current-value serving, source callback, or station source changes.
-# Last reused/audited: 2026-10-02 (actual weighted input revision reseeding; CURRENT_REUSABLE)
+# Last reused/audited: 2026-10-09 (focused selected-route fixtures; existing suite failures remain separate)
 # Authority basis: Task #32 (operator 2026-06-11) — PARTIAL-fusion upgrade trigger. Relationship
 #   pins for the SINGLE instrument-set comparison + the idempotency bound:
 #     - a posterior fused from {A,B} with capture later containing {A,B,C} for the SAME cycle ⇒
@@ -2935,12 +2935,22 @@ def test_matching_consumed_state_on_unservable_posterior_stays_owed(monkeypatch)
         conn.commit()
         monkeypatch.setattr(trigger, "_capturable_current_temperature_state", lambda **_k: current)
         monkeypatch.setattr(trigger, "_capturable_inputs_for_scope", lambda *_a, **_k: {})
+        # Synthetic selected conditioning for this comparison-only fixture;
+        # the existing source and publication-authority boundaries stay separate.
+        conditioning = {
+            "day0_observed_extreme_source": "ogimet_metar_eham",
+            "day0_observed_extreme_c": 20.0,
+            "day0_observed_extreme_observation_time": current["observed_at_utc"],
+            "day0_observed_extreme_sample_count": 1,
+            "day0_observed_extreme_unit": "C",
+        }
 
         def verdict():
             return trigger.scope_capture_offers_larger_provider_set(
                 conn, city="Amsterdam", target_date="2026-09-27", metric="high",
                 changed_sources=("day0_current_temperature_state",),
-                decision_time=datetime(2026, 9, 27, 12, 10, tzinfo=UTC))
+                decision_time=datetime(2026, 9, 27, 12, 10, tzinfo=UTC),
+                day0_payload=conditioning)
 
         owed = verdict()
         assert owed["input_revision_changed"] and owed["is_upgrade"]
@@ -2995,10 +3005,21 @@ def test_same_cycle_same_extreme_new_current_temperature_revisions_reseed(
         return sqlite3.connect(world_path)
     monkeypatch.setattr("src.state.db.get_world_connection_read_only", world_reader)
     now = datetime(2026, 9, 27, 12, 25, tzinfo=UTC)
+    # This existing carrier fixture has an AWC running maximum of 16 C;
+    # FMI supplies the separate, later physical level. This is selected input
+    # to the comparison, not a claim that the fixture produced source authority.
+    conditioning = {
+        "day0_observed_extreme_source": "aviationweather_metar",
+        "day0_observed_extreme_c": 16.0,
+        "day0_observed_extreme_observation_time": "2026-09-27T11:50:00+00:00",
+        "day0_observed_extreme_sample_count": 1,
+        "day0_observed_extreme_unit": "C",
+    }
     def verdict(at):
         return scope_capture_offers_larger_provider_set(
             forecast, city="Helsinki", target_date="2026-09-27", metric="high",
             changed_sources=("day0_current_temperature_state",), decision_time=at,
+            day0_payload=conditioning,
         )
     current = verdict(now)
     assert current["input_revision_changed"] is True
@@ -3087,12 +3108,23 @@ def test_non_helsinki_current_state_revisions_bootstrap_and_refresh_posterior(
         "src.state.db.get_world_connection_read_only",
         lambda: sqlite3.connect(world_path),
     )
+    # The two METAR comparison cases retain their original stable extreme
+    # while the physical temperature moves. Keep the HKO source-reader twin
+    # unchanged; it has its own source/qualification contract.
+    conditioning = None if city == "Hong Kong" else {
+        "day0_observed_extreme_source": source,
+        "day0_observed_extreme_c": old if unit == "C" else (old - 32.0) * 5.0 / 9.0,
+        "day0_observed_extreme_observation_time": old_state["observed_at_utc"],
+        "day0_observed_extreme_sample_count": 1,
+        "day0_observed_extreme_unit": unit,
+    }
 
     def verdict(conn, *, scope_city=city, scope_metric=metric, at="12:25:00"):
         return scope_capture_offers_larger_provider_set(
             conn, city=scope_city, target_date=target, metric=scope_metric,
             changed_sources=("day0_current_temperature_state",),
             decision_time=datetime.fromisoformat(f"{target}T{at}+00:00"),
+            day0_payload=conditioning,
         )
 
     # Matching consumed state on a row the held-authority rule rejects stays owed.

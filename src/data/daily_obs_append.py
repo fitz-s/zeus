@@ -1249,6 +1249,7 @@ def _build_atom_pair(
     fetch_utc: datetime | None = None,
     high_local_time: datetime | str | None = None,
     low_local_time: datetime | str | None = None,
+    current_wrh_snapshot=None,
 ) -> tuple[ObservationAtom, ObservationAtom]:
     """Build a (high_atom, low_atom) pair with full K1-C provenance fields.
 
@@ -1324,10 +1325,25 @@ def _build_atom_pair(
     # the WU backfill: TIGGE-derived p01/p99 systematically under-represent
     # observation tails (Sept NYC 84°F false-positive). Layer 4 and 5
     # preserved.
-    _GUARD.check_collection_timing(
-        city=city_name, fetch_utc=fetch_utc, target_date=target_d,
-        peak_hour=peak_hour_raw,
-    )
+    if current_wrh_snapshot is None:
+        _GUARD.check_collection_timing(
+            city=city_name, fetch_utc=fetch_utc, target_date=target_d,
+            peak_hour=peak_hour_raw,
+        )
+    else:
+        # This is an observed current resolver product, not a claim that the
+        # eventual daily maximum already occurred before the usual peak hour.
+        from src.data.noaa_wrh_timeseries import WrhCurrentSnapshot, replay_current_snapshot
+        if not isinstance(current_wrh_snapshot, WrhCurrentSnapshot):
+            raise IngestionRejected("WRH_CURRENT_TYPED_SNAPSHOT_REQUIRED")
+        checked = replay_current_snapshot(current_wrh_snapshot.provenance(), city=city_cfg,
+                                          target_date=target_d.isoformat(), as_of=fetch_utc,
+                                          _native_body=current_wrh_snapshot.native_body)
+        if (checked.source != source or checked.station != station_id
+                or checked.unit != raw_unit or checked.unit != target_unit
+                or checked.extreme("high").value != high_val
+                or checked.extreme("low").value != low_val):
+            raise IngestionRejected("WRH_CURRENT_SNAPSHOT_ATOM_IDENTITY_MISMATCH")
     _GUARD.check_dst_boundary(city=city_name, local_time=local_time)
 
     # Defensive payload_hash synthesis (2026-05-10 emergency fix):
@@ -2775,3 +2791,47 @@ def catch_up_missing(
         totals["noaa_wrh_guard_rejected"] += stats["guard_rejected"]
 
     return totals
+
+
+def prepare_current_noaa_wrh_product(conn, *, city, target_date: str, product, as_of: datetime):
+    """Prepare and retain bounded original evidence before canonical write leases.
+
+    The caller owns the canonical FORECAST/WORLD transaction. Acquisition is
+    always outside its leases. This path does not change disputed backfills.
+    """
+    from src.data.noaa_wrh_timeseries import current_snapshot_from_product, WRH_PAGE_URL
+    from src.data.daily_observation_writer import prepare_current_noaa_wrh_snapshot
+
+    snapshot = current_snapshot_from_product(product, city=city, target_date=target_date, as_of=as_of)
+    high, low = snapshot.extreme("high"), snapshot.extreme("low")
+    atoms = (None, None)
+    if high is not None and low is not None:
+        atoms = _build_atom_pair(
+            city_name=city.name, target_d=date.fromisoformat(target_date),
+            high_val=high.value, low_val=low.value, raw_unit=snapshot.unit, target_unit=snapshot.unit,
+            station_id=snapshot.station, source=snapshot.source,
+            rebuild_run_id="noaa_wrh_current_" + snapshot.response_sha256,
+            data_source_version="noaa_wrh_timeseries_v1",
+            api_endpoint=WRH_PAGE_URL + "?site=" + snapshot.station,
+            provenance={"payload_hash": "sha256:" + snapshot.response_sha256},
+            fetch_utc=snapshot.received_at, high_local_time=high.local_timestamp,
+            low_local_time=low.local_timestamp, current_wrh_snapshot=snapshot,
+        )
+    return prepare_current_noaa_wrh_snapshot(
+        conn, city=city, snapshot=snapshot, atom_high=atoms[0], atom_low=atoms[1], as_of=as_of,
+    )
+
+
+def append_current_noaa_wrh_product(conn, *, city, target_date: str, product, as_of: datetime,
+                                    prepared=None) -> str:
+    """Commit an already prepared product; convenience preparation needs no transaction."""
+    from src.data.daily_observation_writer import write_current_noaa_wrh_snapshot
+    if prepared is None:
+        prepared = prepare_current_noaa_wrh_product(
+            conn, city=city, target_date=target_date, product=product, as_of=as_of,
+        )
+    if prepared.snapshot.target_date != target_date:
+        raise ValueError("WRH_CURRENT_PREPARED_DAY_MISMATCH")
+    return write_current_noaa_wrh_snapshot(
+        conn, city=city, snapshot=prepared.snapshot, as_of=as_of, prepared=prepared,
+    )

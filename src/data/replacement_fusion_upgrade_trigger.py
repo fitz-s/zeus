@@ -37,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 from dataclasses import dataclass
@@ -57,6 +58,7 @@ _RESERVATION_TTL = timedelta(minutes=5)
 _DAY0_HOURLY_VECTOR_SOURCE = "day0_hourly_vectors"
 _DAY0_CAUSAL_BUNDLE_SOURCE = "day0_causal_evidence_bundle"
 _DAY0_CURRENT_TEMPERATURE_SOURCE = "day0_current_temperature_state"
+_DAY0_SCALAR_CONDITIONING_SOURCE = "day0_scalar_conditioning"
 _PARTIAL_CURRENT_PROPOSAL_REVISION = "source_clock_partial_configured_cohort_proof_v2"
 
 
@@ -524,6 +526,72 @@ def _served_current_temperature_state(
     return state if servable else None
 
 
+def _scalar_conditioning_already_served(
+    conn: sqlite3.Connection, *, city: str, target_date: str, metric: str,
+    payload: Mapping[str, object], identity: str | None, decision_time: datetime,
+) -> bool:
+    """Prove this scalar is served, without claiming prospective request coverage.
+
+    The latest dependency roles and unchanged queue coverage are evaluated on
+    one owned read-only snapshot. The queue sets query_only on its connection;
+    it must never receive the fusion publication owner's writer connection.
+    Other provider, vector and family obligations remain separate comparisons.
+    """
+    from src.data.replacement_cycle_advance_trigger import (
+        _latest_posterior_matches_day0_conditioning,
+    )
+    from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
+    from src.data.replacement_forecast_live_materialization_queue import (
+        _queue_read_only_connection, _seed_already_covered,
+    )
+    from src.data.station_ground_evidence import forecast_db_from_connection
+
+    try:
+        if (identity is None
+            or not math.isfinite(float(payload.get("day0_observed_extreme_c")))
+            or str(payload.get("day0_observed_extreme_unit") or "").upper() not in {"C", "F"}
+            or int(payload.get("day0_observed_extreme_sample_count") or 0) <= 0):
+            return False
+        db_path = forecast_db_from_connection(conn)
+        if db_path is None:
+            return False
+        reader = _queue_read_only_connection(db_path)
+        try:
+            reader.execute("BEGIN")
+            row = reader.execute(
+                """SELECT posterior_id, source_cycle_time, dependency_source_run_ids_json
+                     FROM forecast_posteriors
+                    WHERE source_id = ? AND city = ? AND target_date = ?
+                      AND temperature_metric = ? AND runtime_layer = 'live'
+                    ORDER BY computed_at DESC, posterior_id DESC LIMIT 1""",
+                (SOURCE_ID, city, target_date, metric),
+            ).fetchone()
+            if row is None:
+                return False
+            columns = {str(item[1]) for item in reader.execute("PRAGMA table_info(forecast_posteriors)")}
+            grade = tradeable_grade_coverage_sql(posterior_columns=columns, decision_time=decision_time)
+            if reader.execute(
+                f"SELECT 1 FROM forecast_posteriors WHERE posterior_id = ? AND computed_at <= ? {grade}",
+                (row[0], decision_time.isoformat()),
+            ).fetchone() is None or not _latest_posterior_matches_day0_conditioning(
+                reader, city=city, target_date=target_date, metric=metric,
+                identity=identity, target_cycle_iso=str(row[1]), as_of=decision_time,
+            ):
+                return False
+            dependencies = json.loads(row[2])
+            probe = {
+                **payload, "city": city, "target_date": target_date,
+                "temperature_metric": metric, "computed_at": decision_time.isoformat(),
+                "baseline_source_run_id": dependencies["baseline_b0"],
+                "openmeteo_source_run_id": dependencies["openmeteo_ifs9_anchor"],
+            }
+            return _seed_already_covered(forecast_db=db_path, seed=probe, forecast_conn=reader)
+        finally:
+            reader.close()
+    except (OSError, sqlite3.Error, KeyError, TypeError, ValueError):
+        return False
+
+
 def _legacy_partial_current_proposal_needs_recompute(
     conn: sqlite3.Connection,
     *,
@@ -672,6 +740,7 @@ def scope_capture_offers_larger_provider_set(
     metric: str,
     changed_sources: Sequence[str] | None = None,
     decision_time: datetime | None = None,
+    day0_payload: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Return whether a larger family set or changed consumed input requires materialization.
 
@@ -704,7 +773,9 @@ def scope_capture_offers_larger_provider_set(
         None if changed_sources is None
         else frozenset(str(source).strip() for source in changed_sources if str(source).strip())
     )
-    current_requested = requested_sources is None or _DAY0_CURRENT_TEMPERATURE_SOURCE in requested_sources
+    current_requested = requested_sources is None or bool(requested_sources & {
+        _DAY0_CURRENT_TEMPERATURE_SOURCE, _DAY0_SCALAR_CONDITIONING_SOURCE,
+    })
     current_state = None
     if current_requested and decision_time is not None:
         try:
@@ -858,12 +929,42 @@ def scope_capture_offers_larger_provider_set(
             changed_revisions[_DAY0_CAUSAL_BUNDLE_SOURCE] = (
                 current_day0_vector_revision
             )
-    # Input possession, not the previous posterior's shape, creates the debt.
-    # Durable consumed identity closes it; an enqueue or process-local hint does not.
-    if current_state is not None and current_state != consumed_current_temperature_state:
-        changed_inputs.append(_DAY0_CURRENT_TEMPERATURE_SOURCE)
+    if current_state is not None:
+        from src.data.replacement_cycle_advance_trigger import _day0_conditioning_identity
+        from src.data.replacement_forecast_seed_discovery import _day0_observed_extreme_seed_payload
+        from src.events.day0_authority import day0_is_carrier_source
+
+        # The selected conditioning mechanism owns the debt. Official WRH uses
+        # scalar conditioning; its physical print is re-read by action consumers
+        # and is not an input consumed by the remaining-path carrier.
+        if day0_payload is None:
+            day0_payload = _day0_observed_extreme_seed_payload(
+                city=city, target_date=target_date, metric=metric, computed_at=decision_time,
+            )
+        if day0_payload is not None and not day0_is_carrier_source(
+            day0_payload.get("day0_observed_extreme_source")
+        ):
+            identity = _day0_conditioning_identity(
+                source=day0_payload.get("day0_observed_extreme_source"),
+                observation_time=day0_payload.get("day0_observed_extreme_observation_time"),
+                observed_extreme_c=day0_payload.get("day0_observed_extreme_c"),
+                unit=day0_payload.get("day0_observed_extreme_unit"),
+            )
+            # SCOPE: this family's selected scalar identity. DRAIN: the existing
+            # station-priority fusion publication/CAS. RESET: genuine servable,
+            # ready coverage, never identity alone or an enqueue marker.
+            if not _scalar_conditioning_already_served(
+                conn, city=city, target_date=target_date, metric=metric,
+                payload=day0_payload, identity=identity, decision_time=decision_time,
+            ):
+                changed_inputs.append(_DAY0_SCALAR_CONDITIONING_SOURCE)
+                changed_revisions[_DAY0_SCALAR_CONDITIONING_SOURCE] = identity
+        elif day0_payload is None or current_state != consumed_current_temperature_state:
+            # A missing selected route cannot prove queued expansion work done.
+            # The producer still skips unavailable canonical payloads upstream.
+            changed_inputs.append(_DAY0_CURRENT_TEMPERATURE_SOURCE)
+            changed_revisions[_DAY0_CURRENT_TEMPERATURE_SOURCE] = current_state
         changed_inputs.sort()
-        changed_revisions[_DAY0_CURRENT_TEMPERATURE_SOURCE] = current_state
     input_revision_changed = bool(changed_inputs)
     return {
         "is_upgrade": family_upgrade or input_revision_changed,
@@ -1787,6 +1888,7 @@ def enqueue_fusion_upgrade_reseeds(
                     metric=metric,
                     changed_sources=changed_sources,
                     decision_time=now,
+                    day0_payload=day0_payload,
                 )
             except Exception as exc:  # noqa: BLE001 — per-scope fail-soft
                 _LOG.debug("fusion-upgrade comparison failed for %s/%s/%s: %s", city, target_date, metric, exc)
@@ -1839,7 +1941,7 @@ def enqueue_fusion_upgrade_reseeds(
             )
             station_input_revision = revision_update and any(
                 str(source).startswith(("hko_", "cwa_"))
-                or source == _DAY0_CURRENT_TEMPERATURE_SOURCE
+                or source in {_DAY0_CURRENT_TEMPERATURE_SOURCE, _DAY0_SCALAR_CONDITIONING_SOURCE}
                 for source in verdict["changed_input_sources"]
             )
             if station_input_revision:

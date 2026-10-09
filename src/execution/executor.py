@@ -6079,6 +6079,7 @@ def _marketable_sell_certificate_error(
             limit_price=limit_price,
             snapshot_id=str(intent.executable_snapshot_id or ""),
             snapshot_hash=str(intent.executable_snapshot_hash or ""),
+            execution_deadline_utc=str(getattr(intent, "execution_authority_deadline_utc", "") or ""),
         )
 
     from src.execution.exit_lifecycle import (
@@ -8321,6 +8322,16 @@ def execute_exit_order(
             # milliseconds of validity after the initial pre-persist check.
             abort_reason = _exit_execution_authority_deadline_error(intent, conn=conn)
             payload: dict[str, str] = {}
+            if abort_reason is None and intent.protective_sell_execution_authority is not None:
+                # SCOPE: this protective command before its venue side effect.
+                # DRAIN: current canonical evidence and book are rebuilt by the
+                # next monitor turn. RESET: a fresh typed proof passes again.
+                authority_error = _marketable_sell_certificate_error(
+                    conn, intent, limit_price=limit_price, shares=shares,
+                )
+                if authority_error is not None:
+                    abort_reason = "protective_sell_authority_revoked_pre_venue"
+                    payload["authority_error"] = authority_error
             if abort_reason is None and pre_venue_cancelled is not None:
                 try:
                     revoked = pre_venue_cancelled()
@@ -8337,6 +8348,10 @@ def execute_exit_order(
                         "global_final_authority_unavailable_pre_venue:"
                         f"{type(exc).__name__}"
                     )
+            if abort_reason is None:
+                # Bounded current-source reads must not spend the last validity
+                # milliseconds and then submit under an already-expired cut.
+                abort_reason = _exit_execution_authority_deadline_error(intent, conn=conn)
             if abort_reason is None:
                 return None
             append_event(

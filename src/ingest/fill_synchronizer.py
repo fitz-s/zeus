@@ -521,7 +521,14 @@ def _pending_fill_sync_writes(
                 else:
                     classification = "skipped_idempotent"
 
-        if observation_pending or fact_pending:
+        partial_command_pending = False
+        if classification == "skipped_idempotent" and state == "CONFIRMED":
+            from src.execution.command_recovery import confirmed_partial_exit_command_pending
+
+            partial_command_pending = confirmed_partial_exit_command_pending(
+                conn, str(command["command_id"]),
+            )
+        if observation_pending or fact_pending or partial_command_pending:
             pending.append(item)
             continue
 
@@ -562,6 +569,7 @@ def _persist_prepared_fill_sync(
     observation_appended = 0
     observation_skipped_idempotent = 0
     commands_with_new_facts: set[str] = set()
+    commands_with_confirmed_facts: set[str] = set()
 
     for (
         raw,
@@ -648,6 +656,8 @@ def _persist_prepared_fill_sync(
         ):
             unattributable_count += 1
             continue
+        if state == "CONFIRMED":
+            commands_with_confirmed_facts.add(command_id)
         if fact_key in recorded_facts or _fact_already_recorded(
             conn,
             trade_id=trade_id,
@@ -680,6 +690,11 @@ def _persist_prepared_fill_sync(
         commands_with_new_facts.add(command_id)
 
     projected = 0
+    if commands_with_confirmed_facts:
+        from src.execution.command_recovery import reconcile_confirmed_partial_exit_command
+
+        for command_id in sorted(commands_with_confirmed_facts):
+            reconcile_confirmed_partial_exit_command(conn, command_id)
     if commands_with_new_facts:
         from src.execution.command_recovery import (
             reconcile_authenticated_entry_trade_facts,

@@ -1073,9 +1073,12 @@ class Position:
             from src.calibration.market_anchored_live_fit import (
                 HeldSourceIdentityBinding,
                 HeldSourceIdentityCohortBinding,
+                HeldExactPayoffEntryBinding,
             )
 
-            if isinstance(binding, (HeldSourceIdentityBinding, HeldSourceIdentityCohortBinding)):
+            if isinstance(binding, (HeldSourceIdentityBinding, HeldSourceIdentityCohortBinding)) or (
+                isinstance(binding, HeldExactPayoffEntryBinding) and binding.source_only
+            ):
                 # The authenticated ENTRY policy uses current source q. Its
                 # fresh probability/confidence checks ran above; no book price
                 # is a calibration feature of this identity policy.

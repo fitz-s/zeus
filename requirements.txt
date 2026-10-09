@@ -34,6 +34,13 @@ omfiles==1.2.0
 fsspec==2026.4.0
 s3fs==2026.4.0
 
+# --- native ECMWF original decoding/capture ---
+# Added 2026-10-07: retained readers and relationship fixtures import these
+# official packages directly; this does not require native full-Y for v6 serving.
+eccodes==2.49.0
+ecmwf-opendata==0.3.34
+
+
 # --- KNMI 10-minute station observations (added 2026-10-07) ---
 # The Amsterdam EHAM physical-current route parses KNMI's netCDF payload
 # (src/data/station_temperature_adapters.py, provider knmi_observations).

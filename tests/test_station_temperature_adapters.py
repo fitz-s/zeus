@@ -28,6 +28,26 @@ def _wrh_metadata_payload(station, *, unit="C", metadata=None):
                                           "air_temp_set_1": [28.5], "sea_level_pressure_set_1": [1010]}}]}
 
 
+@pytest.fixture(autouse=True)
+def _readable_unclaimed_wrh_owner(monkeypatch):
+    """Legacy print-only fixtures have a readable empty FORECAST truth owner.
+
+    Unknown/unreadable current-product authority is no longer equivalent to
+    proven absence. Supply real empty owner DDL rather than bypass that reader.
+    """
+    from contextlib import contextmanager
+    from src.state import db
+    @contextmanager
+    def owner(**kwargs):
+        conn = sqlite3.connect(":memory:")
+        db._create_observations(conn)
+        try:
+            yield conn
+        finally:
+            conn.close()
+    monkeypatch.setattr(db, "get_forecasts_connection_with_world_read_only", owner)
+
+
 @pytest.mark.parametrize("unit", ["C", "F"])
 @pytest.mark.parametrize("metadata", [None, {"LATITUDE": None, "ELEVATION": {"invalid": True}}])
 def test_wrh_native_metadata_survives_existing_day0_json_and_sqlite(unit, metadata):
@@ -1312,6 +1332,194 @@ def test_audit_reducer_rounds_through_settlement_semantics():
     assert module.contract_value(-0.5, "C", toronto) == 0  # WMO half-up toward +inf
     assert module.contract_value(-1.5, "C", toronto) == -1
     assert module.contract_value(18.5, "C", toronto) == 19
+
+
+def test_current_wrh_native_body_cache_and_dynamic_locks_are_bounded():
+    from src.data import station_temperature_adapters as adapters
+    adapters._WRH_CURRENT_PRODUCT_CACHE.clear()
+    try:
+        for index in range(20):
+            (body, _started), _received = adapters._current_wrh_cached_fetch(
+                ("changing-held-scopes", index), lambda: (b"x" * 6_000_000, "fixture"), prefix="fixture:")
+            assert len(body) == 6_000_000
+            assert len(adapters._WRH_CURRENT_PRODUCT_CACHE) <= 4
+            assert sum(len(entry[1][0]) for entry in adapters._WRH_CURRENT_PRODUCT_CACHE.values()) <= 20_000_000
+            assert sum(1 for key in adapters._FETCH_KEY_LOCKS if key[0] == "wrh_current_snapshot") <= 4
+    finally:
+        adapters._WRH_CURRENT_PRODUCT_CACHE.clear()
+        with adapters._FETCH_CACHE_LOCK:
+            for key in tuple(adapters._FETCH_KEY_LOCKS):
+                if key[0] == "wrh_current_snapshot":
+                    adapters._FETCH_KEY_LOCKS.pop(key)
+
+
+@pytest.fixture
+def _wrh_snapshot_clock(monkeypatch):
+    from src.data import station_temperature_adapters as adapters, noaa_wrh_timeseries as wrh
+    clock = SimpleNamespace(elapsed=0.0, sleeps=[], base=datetime(2026, 10, 7, 12, 59, 59, tzinfo=timezone.utc))
+    clock.fetch_token = wrh.fetch_wrh_token
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock.base + timedelta(seconds=clock.elapsed)
+    def sleep(seconds):
+        clock.sleeps.append(seconds)
+        clock.elapsed += seconds
+    timer = SimpleNamespace(monotonic=lambda: 100.0 + clock.elapsed, sleep=sleep)
+    monkeypatch.setattr(adapters, "datetime", Clock)
+    monkeypatch.setattr(adapters, "time", timer)
+    monkeypatch.setattr(wrh, "time", timer)
+    monkeypatch.setattr(wrh, "_last_request_at", 100.0)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "private-synthetic-token")
+    monkeypatch.setattr(adapters, "_WRH_CURRENT_PRODUCT_CACHE", {})
+    monkeypatch.setattr(adapters, "_WRH_BATCH_CACHE", {})
+    monkeypatch.setattr(adapters, "_FETCH_KEY_LOCKS", {})
+    return clock
+
+
+def _wrh_snapshot_city(unit):
+    return SimpleNamespace(name="Synthetic", settlement_source_type="noaa", settlement_unit=unit,
+                           wu_station="EDDM" if unit == "C" else "KATL", timezone="UTC",
+                           settlement_page_view="all")
+
+
+def _wrh_snapshot_response(request):
+    unit = "F" if request.url.params.get("units", "").startswith("temp|F") else "C"
+    return {"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {"air_temp": "Celsius" if unit == "C" else "Fahrenheit"},
+            "STATION": [{"STID": station, "OBSERVATIONS": {"date_time": [], "air_temp_set_1": []}}
+                        for station in request.url.params["STID"].split(",")]}
+
+
+def _wrh_snapshot_fetch(city, completed, client):
+    from src.data import station_temperature_adapters as adapters
+    target = "2026-10-06" if completed else "2026-10-07"
+    if completed:
+        return tuple(adapters.iter_noaa_wrh_completed_owner_recovery((city, target), client=client))
+    return tuple(adapters.iter_current_noaa_wrh_products(((city, target),), client=client))
+
+
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("unit", ["C", "F"])
+def test_wrh_snapshot_shares_real_batch_slot_before_request_clocks(_wrh_snapshot_clock, completed, unit):
+    """Both snapshot lanes share the limiter; waiting cannot predate native coverage."""
+    import hashlib
+    import math
+    import httpx
+    from src.data import station_temperature_adapters as adapters, noaa_wrh_timeseries as wrh
+    clock = _wrh_snapshot_clock
+    calls = []
+    def handler(request):
+        body = json.dumps(_wrh_snapshot_response(request)).encode()
+        calls.append((clock.elapsed, request, body))
+        return httpx.Response(200, content=body)
+    city = _wrh_snapshot_city(unit)
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh" and r.unit == unit)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        adapters._fetch_wrh_batch(route, client)
+        products = _wrh_snapshot_fetch(city, completed, client)
+        repeated = _wrh_snapshot_fetch(city, completed, client)
+    assert len(calls) == 2 and len(products) == 1 and repeated == products
+    assert clock.sleeps == [wrh._MIN_REQUEST_INTERVAL_SECONDS] * 2
+    assert calls[1][0] - calls[0][0] == wrh._MIN_REQUEST_INTERVAL_SECONDS
+    product = products[0][2]
+    started = clock.base + timedelta(seconds=calls[1][0])
+    assert product.request_started_at == product.station_reference.fetched_at == started
+    assert product.native_body == calls[1][2]
+    assert product.response_sha256 == hashlib.sha256(calls[1][2]).hexdigest()
+    params = calls[1][1].url.params
+    if completed:
+        assert "recent" not in params
+        assert params["start"] == "202610060000" and params["end"] == "202610070000"
+        assert product.coverage_start_utc == datetime(2026, 10, 6, tzinfo=timezone.utc)
+        assert product.coverage_end_utc == datetime(2026, 10, 7, tzinfo=timezone.utc)
+    else:
+        minutes = math.ceil((started - datetime(2026, 10, 7, tzinfo=timezone.utc)).total_seconds() / 60) + 180
+        assert int(params["recent"]) == minutes == 961
+        assert product.coverage_start_utc == started - timedelta(minutes=minutes)
+        assert product.coverage_end_utc == started
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_wrh_cold_token_precedes_shared_slot_for_snapshot_and_batch(_wrh_snapshot_clock, monkeypatch, completed):
+    """Cold apiKey.js I/O cannot consume a request reservation or predate request clocks."""
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import httpx
+    from src.data import station_temperature_adapters as adapters, noaa_wrh_timeseries as wrh
+    clock = _wrh_snapshot_clock
+    token_entered, both_callers, release_token = threading.Event(), threading.Event(), threading.Event()
+    attempts, token_requests, starts = [], [], []
+    def fetch_token():
+        attempts.append(1)
+        if len(attempts) == 2:
+            both_callers.set()
+        return clock.fetch_token()
+    def token_get(url, **kwargs):
+        assert url == wrh.WRH_API_KEY_URL
+        token_requests.append(url)
+        token_entered.set()
+        assert release_token.wait(5)
+        return httpx.Response(200, text='var mesoToken = "abcdef1234567890";')
+    monkeypatch.setattr(wrh, "fetch_wrh_token", fetch_token)
+    monkeypatch.setattr(wrh, "_token_cache", None)
+    monkeypatch.setattr(wrh, "_token_fetched_at", None)
+    monkeypatch.setattr(wrh.httpx, "get", token_get)
+    def handler(request):
+        starts.append((clock.elapsed, request.url.params["STID"]))
+        return httpx.Response(200, json=_wrh_snapshot_response(request))
+    route = next(r for r in load_physical_current_sources()[0] if r.provider == "noaa_wrh" and r.unit == "F")
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            snapshot_future = pool.submit(_wrh_snapshot_fetch, _wrh_snapshot_city("C"), completed, client)
+            try:
+                assert token_entered.wait(5)
+                batch_future = pool.submit(adapters._fetch_wrh_batch, route, client)
+                assert both_callers.wait(5)
+                assert clock.sleeps == [] and starts == []
+            finally:
+                release_token.set()
+            products = snapshot_future.result(timeout=5)
+            batch_future.result(timeout=5)
+    assert len(products) == 1 and len(starts) == 2 and len(token_requests) == 1
+    assert abs(starts[1][0] - starts[0][0]) >= wrh._MIN_REQUEST_INTERVAL_SECONDS
+    snapshot_start, = [elapsed for elapsed, station in starts if station == "EDDM"]
+    assert products[0][2].request_started_at == clock.base + timedelta(seconds=snapshot_start)
+
+
+@pytest.mark.parametrize("completed", [False, True])
+@pytest.mark.parametrize("status,kind,delay", [(403, "WrhTokenRefused", 60), (429, "HTTPStatusError", 120),
+                                             (500, "HTTPStatusError", 60)])
+def test_wrh_snapshot_refusal_is_cached_scoped_and_retryable(_wrh_snapshot_clock, completed, status, kind, delay):
+    """Refusal is UNKNOWN, never an empty product; another unit and later retries remain live."""
+    import httpx
+    from src.data import station_temperature_adapters as adapters
+    clock = _wrh_snapshot_clock
+    calls = []
+    refuse = True
+    def handler(request):
+        calls.append(request)
+        if request.url.params["STID"] == "EDDM" and refuse:
+            return httpx.Response(status, text="private-synthetic-token", headers={"Retry-After": "120"})
+        return httpx.Response(200, json=_wrh_snapshot_response(request))
+    city = _wrh_snapshot_city("C")
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert _wrh_snapshot_fetch(city, completed, client) == ()
+        error_entry, = adapters._WRH_CURRENT_PRODUCT_CACHE.values()
+        assert error_entry[1] is None and error_entry[3] == kind
+        assert error_entry[0] == 100.0 + clock.elapsed + delay
+        assert "private-synthetic-token" not in repr(error_entry)
+        assert _wrh_snapshot_fetch(city, completed, client) == ()
+        assert len(calls) == len(clock.sleeps) == 1
+        assert len(_wrh_snapshot_fetch(_wrh_snapshot_city("F"), completed, client)) == 1
+        assert len(calls) == 2
+        clock.elapsed = error_entry[0] - 100.0 - 0.1
+        refuse = False
+        assert _wrh_snapshot_fetch(city, completed, client) == ()
+        assert len(calls) == 2
+        clock.elapsed += 0.2
+        assert len(_wrh_snapshot_fetch(city, completed, client)) == 1
+        assert len(calls) == 3
+        assert all(entry[3] is None for entry in adapters._WRH_CURRENT_PRODUCT_CACHE.values())
 
 
 # ---------------------------------------------------------------------------

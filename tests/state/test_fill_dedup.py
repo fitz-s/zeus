@@ -142,7 +142,7 @@ def _schema_query(conn: sqlite3.Connection, *, source_schema: str | None) -> lis
         WITH {canonical_trade_fact_cte(
             source_schema=source_schema,
             source_clause_sql="WHERE fact.command_id = 'cmd-schema'",
-        )}, {economic_trade_fact_cte(source_schema=source_schema)}
+        )}, {economic_trade_fact_cte(source_schema=source_schema, proxy_provenance_available=False)}
         SELECT trade_id, filled_size, state
           FROM economic_trade_fact
          ORDER BY trade_id

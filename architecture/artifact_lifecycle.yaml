@@ -96,6 +96,13 @@ artifact_classes:
     archive_paths:
       - docs/archives/work_packets/branches/<branch>/<program_domain>/YYYY-MM-DD_slug/evidence/
     record_required: true
+  - id: current_wrh_native_custody
+    purpose: Immutable native response bytes replayed only through the qualified current WRH owner; neither a blob nor a transport receipt grants source, probability or settlement authority alone.
+    active_paths:
+      - state/noaa_wrh_response_bodies/
+    archive_paths:
+      - not_automatically_archived
+    record_required: false
   - id: scratch_runtime_artifact
     purpose: Runtime scratch output that should be ignored or explicitly classified before use as evidence.
     active_paths:
@@ -115,6 +122,12 @@ artifact_classes:
     record_required: true
 
 classification_rules:
+  - id: current_wrh_native_custody
+    path_globs:
+      - state/noaa_wrh_response_bodies/**
+    artifact_class: current_wrh_native_custody
+    lifecycle: active
+    destination_rule: Preserve referenced immutable originals; bounded custody capacity and integrity refusals remain explicit. Do not treat this directory as disposable runtime scratch or a new truth owner.
   - id: current_operations_package
     path_globs:
       - docs/operations/current/

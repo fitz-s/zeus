@@ -47,6 +47,7 @@ from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 ExecutorClass = Literal[
     "source_clock_db",
     "hko_source_clock_db",
+    "noaa_wrh_source_clock_db",
     "hko_final_source_clock_db",
     "forecast_clock_db",
     "forecast_repair_db",
@@ -92,6 +93,8 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
             "ingest_day0_fmi_temperature",
         }:
             return "source_clock_db"
+        if spec.job_id == "ingest_day0_noaa_wrh_current":
+            return "noaa_wrh_source_clock_db"
         if spec.job_id == "ingest_k2_hko_tick":
             return "hko_source_clock_db"
         if spec.job_id == "ingest_k2_hko_daily_final":
@@ -311,6 +314,7 @@ def registry_executor_pools() -> dict[str, object]:
     return {
         "source_clock_db": ThreadPoolExecutor(max_workers=1),
         "hko_source_clock_db": ThreadPoolExecutor(max_workers=1),
+        "noaa_wrh_source_clock_db": ThreadPoolExecutor(max_workers=1),
         "hko_final_source_clock_db": ThreadPoolExecutor(max_workers=1),
         "forecast_clock_db": ThreadPoolExecutor(max_workers=1),
         "forecast_repair_db": ThreadPoolExecutor(max_workers=1),
@@ -407,6 +411,7 @@ def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[st
             continue
         if s.executor_class in {
             "source_clock_db",
+            "noaa_wrh_source_clock_db",
             "hko_source_clock_db",
             "forecast_clock_db",
             "oracle_guard_db",

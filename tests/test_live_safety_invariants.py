@@ -1,5 +1,5 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-10-06; last_reused=2026-10-06
+# Lifecycle: created=2026-03-31; last_reviewed=2026-10-08; last_reused=2026-10-08
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
 # Last reused/audited: 2026-10-08
@@ -7945,6 +7945,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                     "basis": "test-band",
                 },
             }
+            if posterior_support_zero and outcome == "direct":
+                # Routing-only fixture: preserve the full receipt under its real
+                # compact digest. The fake actuator below cannot validate source.
+                probability_receipt["observation"] = {}
             setattr(
                 position,
                 "_day0_monitor_probability_receipt",
@@ -7953,7 +7957,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             if hold_case:
                 setattr(position, "_monitor_probability_receipt", monitor_refresh._compact_monitor_probability_receipt(probability_receipt))
             elif posterior_support_zero:
-                setattr(position, "_monitor_probability_receipt", probability_receipt)
+                setattr(position, "_monitor_probability_receipt", monitor_refresh._compact_monitor_probability_receipt(probability_receipt))
         if hold_case and fault == "q_receipt_missing":
             delattr(position, "_day0_monitor_probability_receipt")
             delattr(position, "_monitor_probability_receipt")
@@ -8165,9 +8169,14 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         )[-1],
     )
     if request_accepted:
+        def reserve_published_obligation(_conn, position, *, expected_obligation):
+            assert expected_obligation == position._held_sell_reauction_obligation
+            reserved_requests.append(position.trade_id)
+            return True
+
         monkeypatch.setattr(
             "src.execution.exit_lifecycle.record_global_sell_reauction_reserved",
-            lambda _conn, position: reserved_requests.append(position.trade_id) or True,
+            reserve_published_obligation,
         )
 
     def request_global_completion(**kwargs):
@@ -20320,8 +20329,8 @@ def test_local_exit_without_capital_certificate_cannot_reach_venue(monkeypatch):
     assert pos.exit_state == ""
 
 
-def test_zero_support_direct_sell_reaches_venue_with_typed_authority(monkeypatch):
-    """Exact zero support must not be vetoed by the global statistical SELL gate."""
+def test_zero_support_direct_sell_requires_canonical_semantic_receipt(monkeypatch):
+    """An in-memory zero proof cannot replace canonical protective authority."""
     from src.execution import exit_lifecycle
 
     pos = _make_position(
@@ -20352,69 +20361,8 @@ def test_zero_support_direct_sell_reaches_venue_with_typed_authority(monkeypatch
         position_state="day0_window",
         day0_active=True,
     )
-    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(
-        pos,
-        context,
-    )
-    submitted = []
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_latest_or_capture_exit_snapshot_context",
-        lambda *_args, **_kwargs: {
-            "executable_snapshot_id": "snapshot-submit-zero",
-            "executable_snapshot_hash": "hash-submit-zero",
-            "executable_snapshot_orderbook_top_bid": 0.08,
-            "executable_snapshot_orderbook_top_ask": 0.10,
-            "executable_snapshot_min_order_size": 5.0,
-        },
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_record_exit_intent_before_execution_gates",
-        lambda *_args, **_kwargs: True,
-    )
-    # Canonical inventory and semantic-receipt binding are covered against a
-    # real schema in test_exit_safety; this test pins the lifecycle wiring.
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_canonical_protective_sellable_shares",
-        lambda *_args, **_kwargs: Decimal("70.10"),
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_build_protective_sell_execution_authority",
-        lambda **kwargs: SimpleNamespace(kind=kwargs["kind"]),
-    )
-
-    def place(**kwargs):
-        submitted.append(kwargs)
-        return exit_lifecycle.OrderResult(
-            trade_id=pos.trade_id,
-            status="rejected",
-            reason="venue_no_fill",
-        )
-
-    monkeypatch.setattr(exit_lifecycle, "place_sell_order", place)
-
-    outcome = execute_exit(
-        _make_portfolio(pos),
-        pos,
-        context,
-        clob=object(),
-        exit_intent=exit_lifecycle.build_exit_intent(pos, context),
-        branchwise_sell_authority=authority,
-    )
-
-    assert submitted
-    assert submitted[0]["best_bid"] == pytest.approx(0.08)
-    assert submitted[0]["current_price"] == pytest.approx(0.08)
-    assert submitted[0]["exact_limit_price"] == pytest.approx(0.08)
-    assert submitted[0]["submit_order_type"] == "FAK"
-    assert (
-        submitted[0]["protective_sell_execution_authority"].kind
-        == "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
-    )
-    assert outcome == "sell_error: venue_no_fill"
+    with pytest.raises(ValueError, match="BRANCHWISE_SELL_SOURCE_BINDING_REQUIRED"):
+        exit_lifecycle.BranchwiseDominantSellAuthority.from_current(pos, context)
 
 
 def test_zero_support_direct_sell_rejects_changed_probability_support(monkeypatch):
@@ -20435,6 +20383,11 @@ def test_zero_support_direct_sell_rejects_changed_probability_support(monkeypatc
         "probability_content_identity": "zero-content",
         "probability_witness_identity": "zero-witness",
     }
+    # This is a shape-revalidation test: freeze a full receipt through the real
+    # compactor; no canonical source/submit gate is reached after support changes.
+    from src.engine.monitor_refresh import _compact_monitor_probability_receipt
+    pos._day0_monitor_probability_receipt = {**receipt, "observation": {}}
+    receipt = _compact_monitor_probability_receipt(pos._day0_monitor_probability_receipt)
     context = ExitContext(
         exit_reason="POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
         fresh_prob=0.0,

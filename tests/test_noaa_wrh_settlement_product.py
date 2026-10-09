@@ -1,6 +1,6 @@
 # Created: 2026-09-12
-# Last reused/audited: 2026-10-03
-# Lifecycle: created=2026-09-12; last_reviewed=2026-10-03; last_reused=2026-10-03
+# Last reused/audited: 2026-10-07
+# Lifecycle: created=2026-09-12; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Pin the weather.gov/wrh/timeseries settlement product — page render law,
 #   per-city view selection, settlement-source precedence, and the backfill report.
 # Reuse: Read src/data/noaa_wrh_timeseries.py's measured facts and
@@ -1748,5 +1748,1127 @@ def test_pre_fix_outside_window_gap_reopens_for_wrh_only(tmp_path, monkeypatch):
             ("ogimet_metar_khou", "2026-09-11"): "LEGITIMATE_GAP",
             ("noaa_wrh_khou", "2026-09-10"): "LEGITIMATE_GAP",
         }
+    finally:
+        conn.close()
+
+
+def _current_product(*, values=(32.0, 28.0), receipt="2026-10-06T02:00:00+00:00", view="all"):
+    import hashlib
+    from dataclasses import replace
+    from src.data import noaa_wrh_timeseries as wrh
+    body = json.dumps({"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {"air_temp": "Celsius"},
+        "STATION": [{"STID": "WSSS", "OBSERVATIONS": {
+            "date_time": [f"2026-10-06T{hour:02}:00:00+0800" for hour in range(8, 8 + len(values))],
+            "air_temp_set_1": list(values), "sea_level_pressure_set_1": [1010] * len(values),
+        }}]}).encode()
+    received = datetime.fromisoformat(receipt)
+    product = wrh.product_from_response(body, "WSSS", unit="C", fetched_at=received,
+                                       source_response_sha256=hashlib.sha256(body).hexdigest())
+    return replace(product, request_started_at=received - timedelta(seconds=1),
+                   coverage_start_utc=datetime(2026, 10, 5, 15, tzinfo=timezone.utc),
+                   coverage_end_utc=received - timedelta(seconds=1))
+
+
+def test_current_wrh_snapshot_updates_retracts_and_replays_without_forecast(tmp_path):
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.state.schema.observation_prints_schema import ensure_table
+    from types import SimpleNamespace
+    city = cities_by_name["Singapore"]
+    forecasts, world = _live_schema_db_pair(tmp_path)
+    with sqlite3.connect(world) as wc:
+        ensure_table(wc)
+    conn = _attached(forecasts, world)
+    moment = datetime(2026, 10, 6, 2, tzinfo=timezone.utc)
+    position = SimpleNamespace(target_date="2026-10-06", direction="buy_yes", temperature_metric="high",
+                               bin_label="30°C", trade_id="test-current")
+    try:
+        for values, minute, expected in (((32.0, 28.0), 0, 32.0), ((29.0, 28.0), 1, 29.0),
+                                         ((32.0, 28.0), 2, 32.0), ((29.0, 28.0), 3, 29.0),
+                                         ((), 4, None)):
+            now = moment + timedelta(minutes=minute)
+            product = _current_product(values=values, receipt=now.isoformat())
+            status = append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product, as_of=now)
+            conn.commit()
+            assert status == ("inserted" if minute == 0 else "revision")
+            owned, snapshot = read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=now)
+            assert owned is True and snapshot is not None
+            extreme = snapshot.extreme("high")
+            assert (extreme.value if extreme else None) == expected
+            if expected is None:
+                from src.contracts.exceptions import ObservationUnavailableError
+                with pytest.raises(ObservationUnavailableError, match="WRH_CURRENT_SNAPSHOT_UNAVAILABLE"):
+                    _latest_authorized_day0_fact(conn, city=city.name, target_date="2026-10-06",
+                        temperature_metric="high", decision_time=now, require_settlement_channel=True)
+            else:
+                fact = _latest_authorized_day0_fact(conn, city=city.name, target_date="2026-10-06",
+                    temperature_metric="high", decision_time=now, require_settlement_channel=True)
+                assert fact["observed_extreme_native"] == expected
+            verdict = evaluate_hard_fact_exit(position=position, city=city, now=now, world_conn=conn, durable_only=True)
+            assert (verdict.action if verdict else None) == ("EXIT_DEAD_BIN" if expected == 32.0 else None)
+        assert conn.execute("SELECT COUNT(*) FROM world.daily_observation_revisions").fetchone()[0] == 4
+        for minute, expected in ((0, 32.0), (1, 29.0), (2, 32.0), (3, 29.0), (4, None)):
+            owned, snapshot = read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06",
+                                                           as_of=moment + timedelta(minutes=minute))
+            assert owned is True and snapshot is not None
+            value = snapshot.extreme("high")
+            assert (value.value if value else None) == expected
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("mutation", ["station", "unit", "view", "partial", "future", "body_hash", "membership", "official_flag"])
+def test_current_wrh_snapshot_rejects_unbound_product_before_write(tmp_path, mutation):
+    from dataclasses import replace
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data import noaa_wrh_timeseries as wrh
+    city = cities_by_name["Singapore"]
+    product = _current_product()
+    now = product.station_reference.fetched_at
+    if mutation == "station": product = replace(product, station="ZBAA")
+    elif mutation == "unit": product = replace(product, unit="F")
+    elif mutation == "partial": product = replace(product, coverage_start_utc=datetime(2026, 10, 6, 0, tzinfo=timezone.utc))
+    elif mutation == "future": now -= timedelta(seconds=1)
+    elif mutation == "body_hash": product = replace(product, response_sha256="b" * 64)
+    elif mutation == "membership": product = replace(product, rows=[replace(product.rows[0], air_temp=99.0), *product.rows[1:]])
+    elif mutation == "official_flag": product = replace(product, rows=[replace(product.rows[0], is_official_report=False), *product.rows[1:]])
+    else:
+        proof = wrh.current_snapshot_from_product(product, city=city, target_date="2026-10-06", as_of=now).provenance()
+        proof["view"] = "hourly"
+        with pytest.raises(ValueError): wrh.replay_current_snapshot(proof, city=city, target_date="2026-10-06", as_of=now, _native_body=product.native_body)
+        return
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        with pytest.raises((ValueError, wrh.WrhError)):
+            append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product, as_of=now)
+        assert conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_current_wrh_repoll_metadata_change_and_old_receipt_do_not_renew_authority(tmp_path):
+    import hashlib
+    from dataclasses import replace
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.config import state_path
+    city = cities_by_name["Singapore"]
+    first = _current_product()
+    now = first.station_reference.fetched_at
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        assert append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=first, as_of=now) == "inserted"
+        payload = json.loads(first.native_body)
+        payload["SUMMARY"]["response_duration"] = 0.25
+        body = json.dumps(payload).encode()
+        newer = replace(wrh.product_from_response(body, "WSSS", unit="C", fetched_at=now + timedelta(minutes=1),
+                                                  source_response_sha256=hashlib.sha256(body).hexdigest()),
+                        request_started_at=now + timedelta(seconds=59), coverage_start_utc=first.coverage_start_utc,
+                        coverage_end_utc=now + timedelta(seconds=59))
+        assert append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=newer, as_of=now + timedelta(minutes=1)) == "noop"
+        assert conn.execute("SELECT fetched_at FROM observations").fetchone()[0] == now.isoformat()
+        assert not (state_path("noaa_wrh_response_bodies") / (newer.response_sha256 + ".zlib")).exists()
+        receipt = json.loads(conn.execute("SELECT high_provenance_metadata FROM observations").fetchone()[0])["wrh_latest_confirmation"]
+        assert receipt["retained_semantic_body_sha256"] == first.response_sha256
+        assert receipt["validated_response_sha256"] == newer.response_sha256
+        assert "rows" not in receipt and "native_body_ref" not in receipt
+        assert conn.execute("SELECT COUNT(*) FROM world.daily_observation_revisions").fetchone()[0] == 0
+        late = _current_product(values=(31.0, 28.0), receipt=(now - timedelta(seconds=1)).isoformat())
+        assert append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=late, as_of=now + timedelta(minutes=1)) == "older_or_ambiguous_receipt"
+        assert conn.execute("SELECT high_temp FROM observations").fetchone()[0] == 32.0
+    finally:
+        conn.close()
+
+
+def test_current_wrh_source_body_corruption_and_missing_body_do_not_resurrect_ledger(tmp_path):
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.config import state_path
+    product = _current_product(values=(33.2, 27.1))
+    city = cities_by_name["Singapore"]
+    now = product.station_reference.fetched_at
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product, as_of=now)
+        path = state_path("noaa_wrh_response_bodies") / (product.response_sha256 + ".zlib")
+        original = path.read_bytes()
+        try:
+            path.write_bytes(b"corrupt fixture")
+            assert read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=now) == (True, None)
+            path.unlink()
+            assert read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=now) == (True, None)
+        finally:
+            path.write_bytes(original)
+    finally:
+        conn.close()
+
+
+def test_current_wrh_empty_and_deleted_latest_cannot_resurrect_point_or_extreme(tmp_path):
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
+    from src.state.schema.observation_prints_schema import ensure_table, append_print
+    city = cities_by_name["Singapore"]
+    forecasts, world = _live_schema_db_pair(tmp_path)
+    with sqlite3.connect(world) as wc:
+        ensure_table(wc)
+        append_print(wc, city=city.name, station_id="WSSS", source_channel="noaa_wrh_wsss",
+                     publish_ts_utc="2026-10-06T01:00:00+00:00", value_native=35.0, unit="C",
+                     fetched_at_utc="2026-10-06T01:01:00+00:00", raw_report="old page projection")
+    conn = _attached(forecasts, world)
+    try:
+        for minute, values, expected in ((0, (29.0,), 29.0), (1, (), None)):
+            now = datetime(2026, 10, 6, 2, minute, tzinfo=timezone.utc)
+            append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06",
+                                           product=_current_product(values=values, receipt=now.isoformat()), as_of=now)
+            conn.commit()
+            if expected is None:
+                from src.contracts.exceptions import ObservationUnavailableError
+                with pytest.raises(ObservationUnavailableError, match="WRH_CURRENT_SNAPSHOT_UNAVAILABLE"):
+                    read_day0_current_temperature_state(conn=conn, city=city, target_date="2026-10-06", decision_time=now)
+                with pytest.raises(ObservationUnavailableError, match="WRH_CURRENT_SNAPSHOT_UNAVAILABLE"):
+                    _latest_authorized_day0_fact(conn, city=city.name, target_date="2026-10-06",
+                        temperature_metric="high", decision_time=now, require_settlement_channel=True)
+            else:
+                point = read_day0_current_temperature_state(conn=conn, city=city, target_date="2026-10-06", decision_time=now)
+                fact = _latest_authorized_day0_fact(conn, city=city.name, target_date="2026-10-06",
+                    temperature_metric="high", decision_time=now, require_settlement_channel=True)
+                assert point.value_native == fact["observed_extreme_native"] == expected
+    finally:
+        conn.close()
+
+
+def test_historical_noaa_append_caller_still_quarantines_changed_source_body(tmp_path, monkeypatch):
+    from src.data import daily_obs_append as appender, noaa_wrh_timeseries as wrh
+    # Historical append gets a valid actual body; explicit backfill run remains
+    # the original disputed-write route, even after a newer source receipt.
+    first = _current_product(receipt="2026-10-07T02:00:00+00:00")
+    second = _current_product(values=(29.0, 28.0), receipt="2026-10-07T03:00:00+00:00")
+    chosen = [first]
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "fixture-token")
+    monkeypatch.setattr(appender, "_fetch_wrh_product_with_token_refresh", lambda *a, **kw: chosen[0])
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        for product in (first, second):
+            chosen[0] = product
+            appender.append_noaa_wrh_city("Singapore", [date(2026, 10, 6)], conn,
+                rebuild_run_id="explicit_historical_backfill", now_utc=product.station_reference.fetched_at)
+        assert conn.execute("SELECT high_temp FROM observations").fetchone()[0] == 32.0
+        assert conn.execute("SELECT COUNT(*) FROM world.daily_observation_revisions").fetchone()[0] == 1
+        assert "wrh_current_snapshot" not in conn.execute("SELECT high_provenance_metadata FROM observations").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_current_wrh_body_capacity_and_db_failure_preserve_prior_state(tmp_path, monkeypatch):
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    first = _current_product(values=(32.41, 27.43))
+    now = first.station_reference.fetched_at
+    try:
+        append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=first, as_of=now)
+        conn.commit()
+        second = _current_product(values=(30.41, 27.43), receipt="2026-10-06T02:01:00+00:00")
+        monkeypatch.setattr(wrh, "_CURRENT_BODY_MAX_FILES", 0)
+        with pytest.raises(ValueError, match="BODY_CAPACITY"):
+            append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=second,
+                                           as_of=second.station_reference.fetched_at)
+        assert conn.execute("SELECT high_temp FROM observations").fetchone()[0] == 32.41
+        assert conn.execute("SELECT COUNT(*) FROM world.daily_observation_revisions").fetchone()[0] == 0
+        monkeypatch.setattr(wrh, "_CURRENT_BODY_MAX_FILES", 65536)
+        conn.execute("CREATE TEMP TRIGGER test_snapshot_failure BEFORE UPDATE ON observations BEGIN SELECT RAISE(ABORT, 'fixture update failed'); END")
+        with pytest.raises(sqlite3.IntegrityError, match="fixture update failed"):
+            append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=second,
+                                           as_of=second.station_reference.fetched_at)
+        assert conn.execute("SELECT high_temp FROM observations").fetchone()[0] == 32.41
+        assert conn.execute("SELECT COUNT(*) FROM world.daily_observation_revisions").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_current_wrh_late_older_request_cannot_overwrite_newer_correction(tmp_path):
+    from dataclasses import replace
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        newer = _current_product(values=(29.2, 28.0), receipt="2026-10-06T02:01:00+00:00")
+        assert append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=newer,
+                                             as_of=newer.station_reference.fetched_at) == "inserted"
+        older = replace(_current_product(values=(33.0, 28.0), receipt="2026-10-06T02:02:00+00:00"),
+                        request_started_at=datetime(2026, 10, 6, 2, tzinfo=timezone.utc),
+                        coverage_end_utc=datetime(2026, 10, 6, 2, tzinfo=timezone.utc))
+        assert append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=older,
+                                             as_of=older.station_reference.fetched_at) == "older_or_ambiguous_receipt"
+        assert conn.execute("SELECT high_temp FROM observations").fetchone()[0] == 29.2
+        assert conn.execute("SELECT COUNT(*) FROM world.daily_observation_revisions").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_current_wrh_empty_stops_real_q_adapter_from_reusing_old_event(tmp_path):
+    from types import SimpleNamespace
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.engine.event_reactor_adapter import _global_day0_execution_payload
+    from src.events.day0_authority import DAY0_LIVE_AUTHORITY_MATCHES
+    from src.contracts.exceptions import ObservationUnavailableError
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    product = _current_product(values=())
+    now = product.station_reference.fetched_at
+    try:
+        append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product, as_of=now)
+        event = SimpleNamespace(payload_json=json.dumps({**DAY0_LIVE_AUTHORITY_MATCHES,
+            "city": city.name, "target_date": "2026-10-06", "metric": "high",
+            "settlement_source": "noaa_wrh_wsss", "station_id": "WSSS",
+            "raw_value": 35.0, "rounded_value": 35, "observation_time": "2026-10-06T01:00:00+00:00"}))
+        with pytest.raises(ObservationUnavailableError, match="WRH_CURRENT_SNAPSHOT_UNAVAILABLE"):
+            _global_day0_execution_payload(event,
+                family=SimpleNamespace(city=city.name, target_date="2026-10-06", metric="high"),
+                resolution=SimpleNamespace(measurement_unit="C", station_id="WSSS"),
+                conditioning=None, observation_conn=conn, decision_time=now, posterior_id="old-carrier")
+    finally:
+        conn.close()
+
+
+def test_current_wrh_noop_confirmation_fences_late_older_changed_request(tmp_path):
+    from dataclasses import replace
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        first = _current_product(values=(29.1, 28.0), receipt="2026-10-06T02:00:00+00:00")
+        confirmed = _current_product(values=(29.1, 28.0), receipt="2026-10-06T02:02:00+00:00")
+        older = replace(_current_product(values=(35.0, 28.0), receipt="2026-10-06T02:03:00+00:00"),
+                        request_started_at=datetime(2026, 10, 6, 2, 1, tzinfo=timezone.utc),
+                        coverage_end_utc=datetime(2026, 10, 6, 2, 1, tzinfo=timezone.utc))
+        for product, status in ((first, "inserted"), (confirmed, "noop"), (older, "older_or_ambiguous_receipt")):
+            assert append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product,
+                                                 as_of=product.station_reference.fetched_at) == status
+        value, receipt, metadata = conn.execute("SELECT high_temp,fetched_at,high_provenance_metadata FROM observations").fetchone()
+        assert value == 29.1 and receipt == first.station_reference.fetched_at.isoformat()
+        assert json.loads(metadata)["wrh_latest_confirmation"]["received_at"] == confirmed.station_reference.fetched_at.isoformat()
+        assert conn.execute("SELECT COUNT(*) FROM world.daily_observation_revisions").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("module_name", ["src.execution.harvester", "src.ingest.harvester_truth_writer"])
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_current_wrh_cannot_enter_either_settlement_reader_before_complete_day(tmp_path, monkeypatch, module_name, metric):
+    import importlib
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data import settlement_observation_selection as selection
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    day = "2026-10-06"
+    final = _current_product(values=(34.0, 26.0), receipt="2026-10-07T02:00:00+00:00")
+    now = final.station_reference.fetched_at
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None): return now
+    monkeypatch.setattr(selection, "datetime", Clock)
+    lookup = importlib.import_module(module_name)._lookup_settlement_obs
+    try:
+        first = _current_product()
+        append_current_noaa_wrh_product(conn, city=city, target_date=day, product=first,
+                                       as_of=first.station_reference.fetched_at)
+        assert conn.execute("SELECT authority FROM observations").fetchone()[0] == "UNVERIFIED"
+        assert lookup(conn, city, day, temperature_metric=metric) is None
+        append_current_noaa_wrh_product(conn, city=city, target_date=day, product=final, as_of=now)
+        conn.commit()
+        assert conn.execute("SELECT authority FROM observations").fetchone()[0] == "VERIFIED"
+        found = lookup(conn, city, day, temperature_metric=metric)
+        assert found is not None and found["observed_temp"] == (34.0 if metric == "high" else 26.0)
+        empty = _current_product(values=(), receipt="2026-10-07T02:01:00+00:00")
+        now = empty.station_reference.fetched_at
+        append_current_noaa_wrh_product(conn, city=city, target_date=day, product=empty, as_of=now)
+        assert lookup(conn, city, day, temperature_metric=metric) is None
+    finally:
+        conn.close()
+
+
+def test_current_wrh_same_body_refetch_repairs_custody_without_reclocking(tmp_path):
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.data.physical_current_delivery import _current_noaa_snapshot_revision
+    from src.config import state_path
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    first = _current_product(values=(32.14, 27.42))
+    now = first.station_reference.fetched_at
+    try:
+        append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=first, as_of=now)
+        before = _current_noaa_snapshot_revision(conn, city=city, target="2026-10-06", now=now)
+        path = state_path("noaa_wrh_response_bodies") / (first.response_sha256 + ".zlib")
+        for minute, broken in ((1, "missing"), (2, "corrupt")):
+            if broken == "missing": path.unlink()
+            else: path.write_bytes(b"corrupt fixture body")
+            assert read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=now) == (True, None)
+            newer = _current_product(values=(32.14, 27.42), receipt=(now + timedelta(minutes=minute)).isoformat())
+            assert append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=newer,
+                                                 as_of=newer.station_reference.fetched_at) == "noop"
+            owned, restored = read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06",
+                                                           as_of=newer.station_reference.fetched_at)
+            assert owned is True and restored.received_at == now
+            after = _current_noaa_snapshot_revision(conn, city=city, target="2026-10-06", now=newer.station_reference.fetched_at)
+            assert after != before  # transport recovery hint, never a renewed source receipt
+            before = after
+            assert restored.response_sha256 == first.response_sha256
+    finally:
+        conn.close()
+
+
+def test_current_wrh_two_city_native_batch_acquisition_replays_both_owners(tmp_path, monkeypatch):
+    import httpx
+    import hashlib
+    from zoneinfo import ZoneInfo
+    from src.data import station_temperature_adapters as adapters, noaa_wrh_timeseries as wrh
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.config import state_path
+    cities = (cities_by_name["Singapore"], cities_by_name["Tokyo"])
+    now = datetime(2026, 10, 6, 3, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None): return now
+    monkeypatch.setattr(adapters, "datetime", Clock)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "fixture-token")
+    stations = []
+    for index, city in enumerate(cities):
+        observed = datetime(2026, 10, 6, 1, tzinfo=timezone.utc).astimezone(ZoneInfo(city.timezone))
+        stations.append({"STID": city.wu_station, "OBSERVATIONS": {"date_time": [observed.isoformat()],
+            "air_temp_set_1": [27.25 + index], "sea_level_pressure_set_1": [1010]}})
+    body = json.dumps({"SUMMARY": {"RESPONSE_CODE": 1}, "UNITS": {"air_temp": "Celsius"}, "STATION": stations}).encode()
+    seen = []
+    def handler(request):
+        seen.append(request)
+        assert set(request.url.params["STID"].split(",")) == {city.wu_station for city in cities}
+        assert int(request.url.params["recent"]) > 180
+        return httpx.Response(200, content=body)
+    adapters._WRH_CURRENT_PRODUCT_CACHE.clear()
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            products = adapters.fetch_current_noaa_wrh_products(tuple((city, "2026-10-06") for city in cities), client=client)
+            repeated = adapters.fetch_current_noaa_wrh_products(tuple((city, "2026-10-06") for city in cities), client=client)
+        assert len(seen) == 1 and len(products) == len(repeated) == 2
+        for city, day, product in products:
+            assert product.native_body == body and product.response_sha256 == hashlib.sha256(body).hexdigest()
+            append_current_noaa_wrh_product(conn, city=city, target_date=day, product=product, as_of=now)
+            owned, snapshot = read_current_noaa_wrh_snapshot(conn, city=city, target_date=day, as_of=now)
+            assert owned is True and snapshot is not None
+            assert snapshot.extreme("high").value == (27.25 if city.name == "Singapore" else 28.25)
+        assert len(list(state_path("noaa_wrh_response_bodies").glob(hashlib.sha256(body).hexdigest() + ".zlib"))) == 1
+    finally:
+        adapters._WRH_CURRENT_PRODUCT_CACHE.clear()
+        conn.close()
+
+
+@pytest.mark.parametrize("values", [(32.0, 28.0), (31.0, 28.0)])
+def test_current_wrh_prepared_cas_has_no_body_io_inside_transaction(tmp_path, monkeypatch, values):
+    from src.data.daily_obs_append import append_current_noaa_wrh_product, prepare_current_noaa_wrh_product
+    from src.data import noaa_wrh_timeseries as wrh
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    first = _current_product()
+    try:
+        for index, product in enumerate((first, _current_product(values=values, receipt="2026-10-06T02:01:00+00:00"))):
+            now = product.station_reference.fetched_at
+            prepared = prepare_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product, as_of=now)
+            with monkeypatch.context() as patch:
+                patch.setattr(wrh, "persist_current_snapshot_body", lambda *a, **k: pytest.fail("body write under canonical transaction"))
+                patch.setattr(wrh, "read_current_snapshot_body", lambda *a, **k: pytest.fail("body read under canonical transaction"))
+                conn.execute("BEGIN IMMEDIATE")
+                result = append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product,
+                                                        as_of=now, prepared=prepared)
+                conn.commit()
+                assert result == ("inserted" if index == 0 else "noop" if values == (32.0, 28.0) else "revision")
+        stale = prepare_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=first,
+                                                as_of=first.station_reference.fetched_at + timedelta(hours=1))
+        conn.execute("UPDATE observations SET data_source_version='concurrent_writer'")
+        conn.commit()
+        with pytest.raises(ValueError, match="WRH_CURRENT_PREPARED_ROW_CHANGED"):
+            append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=first,
+                                           as_of=stale.as_of, prepared=stale)
+    finally:
+        conn.close()
+
+
+def test_current_wrh_empty_snapshot_wake_is_independent_of_raw_scan_failure(tmp_path, monkeypatch):
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data import physical_current_delivery as delivery
+    city = cities_by_name["Singapore"]
+    forecasts_path, world_path = _live_schema_db_pair(tmp_path)
+    conn = _attached(forecasts_path, world_path)
+    product = _current_product(values=())
+    now = product.station_reference.fetched_at
+    try:
+        append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product, as_of=now)
+    finally:
+        conn.close()
+    monkeypatch.setattr("src.state.db.get_world_connection_read_only", lambda **k: sqlite3.connect(world_path))
+    monkeypatch.setattr("src.state.db.get_forecasts_connection_read_only", lambda **k: sqlite3.connect(forecasts_path))
+    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
+    def unavailable(*a, **k):
+        raise TimeoutError("raw ledger busy")
+    monkeypatch.setattr(delivery, "_current_temperature_ledger_revision", unavailable)
+    result = delivery.publish_current_temperature_wakes(cities=(city,), scopes=((city.name, "2026-10-06", "high"),), now=now)
+    assert result["published"] == 1
+    assert result["status"] == "WAKE_DEFERRED"
+
+
+def _current_wrh_ingest_fixture(monkeypatch, tmp_path, *, now):
+    import threading
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    import src.ingest_main as ingest
+    from src.state import db, write_coordinator as coordinator
+    from src.data import physical_current_delivery as delivery, replacement_forecast_production as production
+    from src.state.schema.observation_prints_schema import ensure_table
+    paths = _live_schema_db_pair(tmp_path)
+    with sqlite3.connect(paths[1]) as conn:
+        ensure_table(conn)
+    mutex = threading.Lock()
+    @contextmanager
+    def attached(**kwargs):
+        conn = _attached(*paths)
+        try:
+            yield conn
+        finally:
+            conn.close()
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None): return now
+    class Lease:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def record_commit(self, **kwargs): pass
+    monkeypatch.setattr(ingest, "datetime", Clock)
+    monkeypatch.setattr(db, "get_forecasts_connection_with_world", attached)
+    monkeypatch.setattr(db, "get_forecasts_connection_with_world_read_only", attached)
+    monkeypatch.setattr(db, "get_world_connection", lambda **kw: sqlite3.connect(paths[1]))
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda **kw: sqlite3.connect(paths[1]))
+    monkeypatch.setattr(db, "world_write_mutex", lambda: mutex)
+    monkeypatch.setattr(coordinator, "default_runtime_write_coordinator", lambda: SimpleNamespace(lease=lambda *a, **kw: Lease()))
+    monkeypatch.setattr("src.config.state_path", lambda name: tmp_path / name)
+    monkeypatch.setattr(delivery, "current_temperature_priority_families", lambda: {})
+    monkeypatch.setattr(production, "_replacement_forecast_live_materialization_queue_config", lambda: {})
+    monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed", lambda *a, **kw: {})
+    return paths, mutex
+
+
+def test_current_wrh_scheduled_completion_drains_only_its_unfinished_owner(tmp_path, monkeypatch):
+    import src.ingest_main as ingest
+    from src.data import daily_obs_append as appender, station_temperature_adapters as adapters
+    city = cities_by_name["Singapore"]
+    first = _current_product()
+    final = _current_product(values=(34.4, 25.5), receipt="2026-10-07T02:00:00+00:00")
+    now = final.station_reference.fetched_at
+    paths, mutex = _current_wrh_ingest_fixture(monkeypatch, tmp_path, now=now)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {city.name: city})
+    with _attached(*paths) as conn:
+        appender.append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=first,
+                                               as_of=first.station_reference.fetched_at)
+    scopes_seen = []
+    def products(scopes):
+        scopes_seen.extend(scopes)
+        yield city, "2026-10-06", final
+    monkeypatch.setattr(adapters, "iter_current_noaa_wrh_products", products)
+    assert ingest._day0_current_noaa_wrh_tick.__wrapped__()["committed"] == 1
+    assert scopes_seen == [(city, "2026-10-06")]
+    with _attached(*paths) as conn:
+        assert tuple(conn.execute("SELECT high_temp,low_temp,authority FROM observations").fetchone()) == (34.4, 25.5, "VERIFIED")
+
+
+@pytest.mark.parametrize("slow", ["wrh", "other"])
+def test_current_wrh_provider_lanes_commit_and_wake_before_unrelated_response(tmp_path, monkeypatch, slow):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    import src.ingest_main as ingest
+    from src.data import station_temperature_adapters as adapters, physical_current_sources as routes, physical_current_delivery as delivery
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.runtime import reactor_wake
+    from src.data.scheduler_adapter import executor_class_for
+    from src.data.source_job_registry import JOB_REGISTRY
+    city, other = cities_by_name["Singapore"], cities_by_name["Helsinki"]
+    now = datetime(2026, 10, 6, 2, tzinfo=timezone.utc)
+    paths, mutex = _current_wrh_ingest_fixture(monkeypatch, tmp_path, now=now)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {city.name: city, other.name: other})
+    monkeypatch.setattr(delivery, "current_temperature_priority_families", lambda: {(city.name, "2026-10-06", "high"): 0})
+    route = next(r for r in routes.load_physical_current_sources()[0] if r.provider == "fmi" or r.source_channel == "fmi_airport_temperature")
+    monkeypatch.setattr(routes, "physical_current_sources_for_city", lambda selected: (route,) if selected.name == other.name else ())
+    entered, release = threading.Event(), threading.Event()
+    received, wakes = [], []
+    def pause(name):
+        if name == slow:
+            entered.set()
+            assert release.wait(5)
+        received.append(name)
+    def products(scopes):
+        pause("wrh")
+        yield city, "2026-10-06", _current_product()
+    def sample(*args, **kwargs):
+        pause("other")
+        from src.data.fmi_airport_temperature import FmiTemperaturePrint
+        return (FmiTemperaturePrint(now-timedelta(minutes=1), now, 10.0, "fixture FMI"),)
+    monkeypatch.setattr(adapters, "iter_current_noaa_wrh_products", products)
+    monkeypatch.setattr(adapters, "fetch_station_temperature", sample)
+    original_persist, original_read = wrh.persist_current_snapshot_body, wrh.read_current_snapshot_body
+    def unlocked(fn):
+        def wrapped(*args, **kwargs):
+            assert not mutex.locked(), "native body I/O under WORLD mutex"
+            return fn(*args, **kwargs)
+        return wrapped
+    monkeypatch.setattr(wrh, "persist_current_snapshot_body", unlocked(original_persist))
+    monkeypatch.setattr(wrh, "read_current_snapshot_body", unlocked(original_read))
+    original_publish = reactor_wake.publish_reactor_wake
+    def publish(**kwargs):
+        family = kwargs["forecast_families"][0]
+        with _attached(*paths) as conn:
+            table = "observations" if family[0] == city.name else "world.observation_prints"
+            assert conn.execute(f"SELECT COUNT(*) FROM {table} WHERE city=?", (family[0],)).fetchone()[0] == 1
+        assert not mutex.locked()
+        result = original_publish(**kwargs)
+        wakes.append("wrh" if family[0] == city.name else "other")
+        return result
+    monkeypatch.setattr(reactor_wake, "publish_reactor_wake", publish)
+    assert executor_class_for(JOB_REGISTRY["ingest_day0_noaa_wrh_current"]) != executor_class_for(JOB_REGISTRY["ingest_day0_fmi_temperature"])
+    functions = {"wrh": ingest._day0_current_noaa_wrh_tick.__wrapped__, "other": ingest._day0_fmi_temperature_tick.__wrapped__}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        blocked = pool.submit(functions[slow])
+        try:
+            assert entered.wait(5)
+            fast = "other" if slow == "wrh" else "wrh"
+            pool.submit(functions[fast]).result(5)
+            assert received == [fast] and fast in wakes and slow not in wakes
+        finally:
+            release.set()
+        blocked.result(5)
+
+
+def test_current_wrh_different_body_recovers_lost_custody_and_preserves_new_receipt(tmp_path):
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.config import state_path
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    first, newer = _current_product(), _current_product(values=(30.0, 28.0), receipt="2026-10-06T02:01:00+00:00")
+    try:
+        append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=first, as_of=first.station_reference.fetched_at)
+        (state_path("noaa_wrh_response_bodies") / (first.response_sha256 + ".zlib")).unlink()
+        assert read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=newer.station_reference.fetched_at) == (True, None)
+        assert append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=newer, as_of=newer.station_reference.fetched_at) == "revision"
+        owned, recovered = read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=newer.station_reference.fetched_at)
+        assert owned is True and recovered.received_at == newer.station_reference.fetched_at
+        assert recovered.extreme("high").value == 30.0
+    finally:
+        conn.close()
+
+
+def test_current_wrh_prepared_values_cannot_be_changed_after_native_validation(tmp_path):
+    from dataclasses import replace
+    from src.data.daily_obs_append import append_current_noaa_wrh_product, prepare_current_noaa_wrh_product
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    product = _current_product()
+    now = product.station_reference.fetched_at
+    try:
+        prepared = prepare_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product, as_of=now)
+        incoming = json.loads(prepared.incoming_json)
+        incoming["high_temp"] = 40
+        prepared = replace(prepared, incoming_json=json.dumps(incoming))
+        with pytest.raises(ValueError, match="WRH_CURRENT_PREPARED_CONTENT_MISMATCH"):
+            append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=product, as_of=now, prepared=prepared)
+        assert conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_current_wrh_old_absence_cannot_revive_after_nonempty_owner_loses_body(tmp_path, monkeypatch):
+    from src.data import settlement_observation_selection as selection
+    from src.state import data_coverage
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.config import state_path
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    after = datetime(2026, 10, 8, 4, 10, tzinfo=timezone.utc)
+    try:
+        empty = _current_product(values=(), receipt=after.isoformat())
+        monkeypatch.setattr(data_coverage, "_now_utc_iso", lambda: after.isoformat())
+        assert selection.record_confirmed_empty(conn, city=city, target_date="2026-10-06", product=empty,
+            request_url="https://www.weather.gov/wrh/timeseries?site=WSSS", retry_after=after+timedelta(minutes=5), now=after)
+        conn.commit()
+        assert selection.observation_selection(conn, city, "2026-10-06", "wu_icao_history", as_of=after) is not None
+        newer = _current_product(values=(33.182, 27.291), receipt=(after+timedelta(minutes=1)).isoformat())
+        append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=newer, as_of=newer.station_reference.fetched_at)
+        assert selection.observation_selection(conn, city, "2026-10-06", "wu_icao_history", as_of=newer.station_reference.fetched_at) is None
+        (state_path("noaa_wrh_response_bodies") / (newer.response_sha256+".zlib")).unlink()
+        assert selection.observation_selection(conn, city, "2026-10-06", "wu_icao_history", as_of=newer.station_reference.fetched_at) is None
+        later = after+timedelta(minutes=2)
+        latest_empty = _current_product(values=(), receipt=later.isoformat())
+        append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=latest_empty, as_of=later)
+        assert selection.observation_selection(conn, city, "2026-10-06", "wu_icao_history", as_of=later) is None
+        monkeypatch.setattr(data_coverage, "_now_utc_iso", lambda: later.isoformat())
+        assert selection.record_confirmed_empty(conn, city=city, target_date="2026-10-06", product=latest_empty,
+            request_url="https://www.weather.gov/wrh/timeseries?site=WSSS", retry_after=later+timedelta(minutes=5), now=later)
+        assert selection.observation_selection(conn, city, "2026-10-06", "wu_icao_history", as_of=later) is not None
+    finally:
+        conn.close()
+
+
+def test_current_wrh_restart_recovers_one_aged_typed_owner_without_backfill_promotion(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import src.ingest_main as ingest
+    from src.data import daily_obs_append as appender, station_temperature_adapters as adapters
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    city = cities_by_name["Singapore"]
+    now = datetime(2026, 10, 20, 2, tzinfo=timezone.utc)
+    paths, mutex = _current_wrh_ingest_fixture(monkeypatch, tmp_path, now=now)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {city.name: city})
+    first = _current_product()
+    with _attached(*paths) as conn:
+        appender.append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06", product=first, as_of=first.station_reference.fetched_at)
+        conn.execute("INSERT INTO observations(city,target_date,source,high_temp,low_temp,unit,station_id,fetched_at,authority,rebuild_run_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     (city.name,"2026-10-05", "noaa_wrh_wsss",30,25,"C","WSSS",first.station_reference.fetched_at.isoformat(),"QUARANTINED","legacy_backfill"))
+    final = replace(_current_product(values=(34.4, 25.5), receipt=now.isoformat()),
+                    coverage_start_utc=datetime(2026,10,5,16,tzinfo=timezone.utc),
+                    coverage_end_utc=datetime(2026,10,6,16,tzinfo=timezone.utc))
+    order = []
+    def current(scopes):
+        order.append("current_complete")
+        return iter(())
+    def old(scope):
+        assert order == ["current_complete"]
+        assert scope == (city, "2026-10-06")
+        yield city, "2026-10-06", final
+    monkeypatch.setattr(adapters, "iter_current_noaa_wrh_products", current)
+    monkeypatch.setattr(adapters, "iter_noaa_wrh_completed_owner_recovery", old)
+    assert ingest._day0_current_noaa_wrh_tick.__wrapped__()["committed"] == 1
+    with _attached(*paths) as conn:
+        owned, result = read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=now)
+        assert owned is True and result.complete_day and result.received_at == now
+        _, prior = read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=now-timedelta(seconds=1))
+        assert prior.received_at == first.station_reference.fetched_at and not prior.complete_day
+        assert conn.execute("SELECT authority FROM observations WHERE target_date='2026-10-05'").fetchone()[0] == "QUARANTINED"
+
+
+def test_current_wrh_aged_recovery_uses_bounded_explicit_day_request(monkeypatch):
+    import httpx
+    from src.data import station_temperature_adapters as adapters, noaa_wrh_timeseries as wrh
+    city = cities_by_name["Singapore"]
+    now = datetime(2026, 10, 20, 2, tzinfo=timezone.utc)
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None): return now
+    monkeypatch.setattr(adapters, "datetime", Clock)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "fixture")
+    body = _current_product().native_body
+    calls = []
+    def handler(request):
+        calls.append(request)
+        assert "recent" not in request.url.params
+        assert request.url.params["start"] == "202610051600"
+        assert request.url.params["end"] == "202610061600"
+        return httpx.Response(200, content=body)
+    adapters._WRH_CURRENT_PRODUCT_CACHE.clear()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        products = tuple(adapters.iter_noaa_wrh_completed_owner_recovery((city,"2026-10-06"), client=client))
+    assert len(calls) == len(products) == 1
+    snapshot = wrh.current_snapshot_from_product(products[0][2], city=city, target_date="2026-10-06", as_of=now)
+    assert snapshot.complete_day and snapshot.received_at == now
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_current_wrh_real_slot_and_request_precede_every_db_lease(tmp_path, monkeypatch, completed):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    import httpx
+    import src.ingest_main as ingest
+    from src.state import db
+    from src.data import station_temperature_adapters as adapters, noaa_wrh_timeseries as wrh
+    from src.data import daily_obs_append as appender, physical_current_delivery as delivery
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    city = cities_by_name["Singapore"]
+    first = _current_product()
+    now = datetime(2026, 10, 20, 2, tzinfo=timezone.utc) if completed else first.station_reference.fetched_at
+    paths, mutex = _current_wrh_ingest_fixture(monkeypatch, tmp_path, now=now)
+    monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {city.name: city})
+    if completed:
+        with _attached(*paths) as conn:
+            appender.append_current_noaa_wrh_product(conn, city=city, target_date="2026-10-06",
+                product=first, as_of=first.station_reference.fetched_at)
+    else:
+        monkeypatch.setattr(delivery, "current_temperature_priority_families",
+                            lambda: {(city.name, "2026-10-06", "high"): ()})
+    active = []
+    def track(factory):
+        @contextmanager
+        def connection(**kwargs):
+            with factory(**kwargs) as conn:
+                active.append(conn)
+                try:
+                    yield conn
+                finally:
+                    active.remove(conn)
+        return connection
+    for name in ("get_forecasts_connection_with_world", "get_forecasts_connection_with_world_read_only"):
+        monkeypatch.setattr(db, name, track(getattr(db, name)))
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None): return now
+    monkeypatch.setattr(adapters, "datetime", Clock)
+    elapsed, sleeps, requests = [100.0], [], []
+    def sleep(seconds):
+        assert not active and not mutex.locked()
+        sleeps.append(seconds)
+        elapsed[0] += seconds
+    monkeypatch.setattr(wrh, "time", SimpleNamespace(monotonic=lambda: elapsed[0], sleep=sleep))
+    monkeypatch.setattr(wrh, "_last_request_at", 100.0)
+    monkeypatch.setattr(wrh, "fetch_wrh_token", lambda: "synthetic")
+    monkeypatch.setattr(adapters, "_WRH_CURRENT_PRODUCT_CACHE", {})
+    def handler(request):
+        assert not active and not mutex.locked()
+        requests.append(request)
+        return httpx.Response(200, content=first.native_body)
+    bounded_body = adapters._bounded_body
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        monkeypatch.setattr(adapters, "_bounded_body", lambda ignored, *a, **kw: bounded_body(client, *a, **kw))
+        assert ingest._day0_current_noaa_wrh_tick.__wrapped__()["committed"] == 1
+    assert sleeps == [wrh._MIN_REQUEST_INTERVAL_SECONDS] and len(requests) == 1
+    with _attached(*paths) as conn:
+        owned, snapshot = read_current_noaa_wrh_snapshot(conn, city=city, target_date="2026-10-06", as_of=now)
+        assert owned and snapshot.complete_day is completed
+
+
+def test_current_wrh_missing_semantic_body_is_not_masked_by_readable_noop_confirmation(tmp_path):
+    import hashlib
+    from dataclasses import replace
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.config import state_path
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    first = _current_product()
+    def metadata_only(minute):
+        data = json.loads(first.native_body)
+        data["SUMMARY"]["RESPONSE_TIME"] = minute
+        body = json.dumps(data).encode()
+        received = first.station_reference.fetched_at+timedelta(minutes=minute)
+        parsed = wrh.product_from_response(body,"WSSS",unit="C",fetched_at=received,source_response_sha256=hashlib.sha256(body).hexdigest())
+        return replace(parsed,request_started_at=received-timedelta(seconds=1),
+                       coverage_start_utc=first.coverage_start_utc,coverage_end_utc=received-timedelta(seconds=1))
+    try:
+        append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=first,as_of=first.station_reference.fetched_at)
+        confirmation = metadata_only(1)
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=confirmation,as_of=confirmation.station_reference.fetched_at) == "noop"
+        (state_path("noaa_wrh_response_bodies")/(first.response_sha256+".zlib")).unlink()
+        incoming = metadata_only(2)
+        assert read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=incoming.station_reference.fetched_at) == (True,None)
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=incoming,as_of=incoming.station_reference.fetched_at) == "revision"
+        owned, result = read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=incoming.station_reference.fetched_at)
+        assert owned is True and result.response_sha256 == incoming.response_sha256
+    finally:
+        conn.close()
+
+
+def test_current_wrh_malformed_native_station_scope_returns_claimed_unavailable(tmp_path):
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    city = cities_by_name["Singapore"]
+    conn = _attached(*_live_schema_db_pair(tmp_path))
+    first = _current_product()
+    now = first.station_reference.fetched_at
+    try:
+        append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=first,as_of=now)
+        metadata = json.loads(conn.execute("SELECT high_provenance_metadata FROM observations").fetchone()[0])
+        metadata["wrh_current_snapshot"]["request_station_ids"] = ["ZBAA"]
+        encoded = json.dumps(metadata)
+        conn.execute("UPDATE observations SET high_provenance_metadata=?,low_provenance_metadata=?",(encoded,encoded))
+        assert read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=now) == (True,None)
+    finally:
+        conn.close()
+
+
+def test_current_wrh_duplicate_ticks_do_not_overlap_in_registered_pool(tmp_path, monkeypatch):
+    import threading
+    import src.ingest_main as ingest
+    from src.data import station_temperature_adapters as adapters, physical_current_delivery as delivery
+    from src.data.scheduler_adapter import registry_executor_pools
+    city = cities_by_name["Singapore"]
+    now = datetime(2026,10,6,2,tzinfo=timezone.utc)
+    _current_wrh_ingest_fixture(monkeypatch,tmp_path,now=now)
+    monkeypatch.setattr("src.config.runtime_cities_by_name",lambda:{city.name:city})
+    monkeypatch.setattr(delivery,"current_temperature_priority_families",lambda:{(city.name,"2026-10-06","high"):0})
+    entered, release = threading.Event(), threading.Event()
+    calls=[]
+    def products(scopes):
+        calls.append(1)
+        if len(calls)==1:
+            entered.set()
+            assert release.wait(5)
+        yield city,"2026-10-06",_current_product()
+    monkeypatch.setattr(adapters,"iter_current_noaa_wrh_products",products)
+    pools=registry_executor_pools()
+    pool=pools["noaa_wrh_source_clock_db"]._pool
+    try:
+        first=pool.submit(ingest._day0_current_noaa_wrh_tick.__wrapped__)
+        assert entered.wait(5)
+        second=pool.submit(ingest._day0_current_noaa_wrh_tick.__wrapped__)
+        assert not second.done() and len(calls)==1
+        release.set()
+        assert first.result(5)["committed"]==1
+        assert second.result(5)["committed"]==0
+    finally:
+        release.set()
+        for executor in pools.values(): executor.shutdown(wait=True)
+
+
+def test_current_wrh_refused_old_owner_does_not_starve_later_aged_scope(tmp_path, monkeypatch):
+    import hashlib
+    from dataclasses import replace
+    import src.ingest_main as ingest
+    from src.data import daily_obs_append as appender, station_temperature_adapters as adapters, noaa_wrh_timeseries as wrh
+    city = cities_by_name["Singapore"]
+    now = datetime(2026,10,20,2,tzinfo=timezone.utc)
+    paths, _mutex = _current_wrh_ingest_fixture(monkeypatch,tmp_path,now=now)
+    monkeypatch.setattr("src.config.runtime_cities_by_name",lambda:{city.name:city})
+    monkeypatch.setattr(ingest,"_WRH_OLD_OWNER_CURSOR",None)
+    first=_current_product()
+    with _attached(*paths) as conn:
+        appender.append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=first,as_of=first.station_reference.fetched_at)
+        body=first.native_body.replace(b"2026-10-06",b"2026-10-07")
+        received=first.station_reference.fetched_at+timedelta(days=1)
+        second=replace(wrh.product_from_response(body,"WSSS",unit="C",fetched_at=received,source_response_sha256=hashlib.sha256(body).hexdigest()),
+            request_started_at=received-timedelta(seconds=1),coverage_start_utc=first.coverage_start_utc+timedelta(days=1),coverage_end_utc=received-timedelta(seconds=1))
+        appender.append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-07",product=second,as_of=received)
+    seen=[]
+    monkeypatch.setattr(adapters,"iter_current_noaa_wrh_products",lambda scopes: iter(()))
+    def refused(scope):
+        seen.append(scope[1])
+        return iter(())
+    monkeypatch.setattr(adapters,"iter_noaa_wrh_completed_owner_recovery",refused)
+    for _ in range(3):
+        result=ingest._day0_current_noaa_wrh_tick.__wrapped__()
+        assert result["source_unavailable"]==1 and result["committed"]==0
+    assert seen==["2026-10-06","2026-10-07","2026-10-06"]
+
+
+def test_current_wrh_complete_empty_owner_retries_until_later_nonempty_without_exposure(tmp_path, monkeypatch):
+    import src.ingest_main as ingest
+    from src.data import daily_obs_append as appender, station_temperature_adapters as adapters
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    city=cities_by_name["Singapore"]
+    empty=_current_product(values=(),receipt="2026-10-07T02:00:00+00:00")
+    final=_current_product(values=(34.4,25.5),receipt="2026-10-07T03:00:00+00:00")
+    now=final.station_reference.fetched_at
+    paths,_mutex=_current_wrh_ingest_fixture(monkeypatch,tmp_path,now=now)
+    monkeypatch.setattr("src.config.runtime_cities_by_name",lambda:{city.name:city})
+    with _attached(*paths) as conn:
+        appender.append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=empty,as_of=empty.station_reference.fetched_at)
+        _,snapshot=read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=now)
+        assert snapshot.complete_day is True and snapshot.extreme("high") is None
+    seen=[]
+    def products(scopes):
+        seen.extend(scopes)
+        yield city,"2026-10-06",final
+    monkeypatch.setattr(adapters,"iter_current_noaa_wrh_products",products)
+    assert ingest._day0_current_noaa_wrh_tick.__wrapped__()["committed"]==1
+    assert seen==[(city,"2026-10-06")]
+    with _attached(*paths) as conn:
+        assert conn.execute("SELECT authority FROM observations").fetchone()[0]=="VERIFIED"
+
+
+def _wrh_metadata_only_product(first, minute):
+    import hashlib
+    from dataclasses import replace
+    from src.data import noaa_wrh_timeseries as wrh
+    data = json.loads(first.native_body)
+    data["SUMMARY"]["RESPONSE_TIME"] = minute
+    body = json.dumps(data).encode()
+    received = first.station_reference.fetched_at + timedelta(minutes=minute)
+    parsed = wrh.product_from_response(body,"WSSS",unit="C",fetched_at=received,
+                                       source_response_sha256=hashlib.sha256(body).hexdigest())
+    return replace(parsed,request_started_at=received-timedelta(seconds=1),
+                   coverage_start_utc=first.coverage_start_utc,coverage_end_utc=received-timedelta(seconds=1))
+
+
+def test_current_wrh_noop_order_receipts_do_not_consume_semantic_custody_capacity(tmp_path, monkeypatch):
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    from src.data.physical_current_delivery import _current_noaa_snapshot_revision
+    from src.execution.day0_hard_fact_exit import _noaa_wrh_hard_fact_evidence
+    monkeypatch.setattr("src.config.state_path",lambda name:tmp_path/name)
+    monkeypatch.setattr(wrh,"_CURRENT_BODY_MAX_FILES",3)
+    city=cities_by_name["Singapore"]
+    paths=_live_schema_db_pair(tmp_path)
+    conn=_attached(*paths)
+    first=_current_product()
+    now=first.station_reference.fetched_at
+    try:
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=first,as_of=now)=="inserted"
+        before_wake=_current_noaa_snapshot_revision(conn,city=city,target="2026-10-06",now=now)
+        before_q=_noaa_wrh_hard_fact_evidence(city=city,target_date="2026-10-06",metric="high",now=now,world_conn=conn).as_dict()
+        for minute in range(1,12):
+            current=_wrh_metadata_only_product(first,minute)
+            assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=current,as_of=current.station_reference.fetched_at)=="noop"
+            conn.close()  # Restart from durable receipts, not a process-local floor.
+            conn=_attached(*paths)
+            owned,snapshot=read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=current.station_reference.fetched_at)
+            assert owned is True and snapshot.received_at==now and snapshot.response_sha256==first.response_sha256
+            assert _current_noaa_snapshot_revision(conn,city=city,target="2026-10-06",now=current.station_reference.fetched_at)==before_wake
+            assert _noaa_wrh_hard_fact_evidence(city=city,target_date="2026-10-06",metric="high",now=current.station_reference.fetched_at,world_conn=conn).as_dict()==before_q
+        assert len(list((tmp_path/"noaa_wrh_response_bodies").glob("*.zlib")))==1
+        assert conn.execute("SELECT COUNT(*) FROM world.daily_observation_revisions").fetchone()[0]==0
+        correction=_current_product(values=(29.0,28.0),receipt="2026-10-06T02:12:00+00:00")
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=correction,as_of=correction.station_reference.fetched_at)=="revision"
+        assert len(list((tmp_path/"noaa_wrh_response_bodies").glob("*.zlib")))==2
+        _,snapshot=read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=now)
+        assert snapshot.response_sha256==first.response_sha256
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("mutation", ["scope", "identity", "source_body", "content", "order", "naive", "digest", "authority_fields"])
+def test_current_wrh_noop_control_mutations_cannot_become_source_authority(tmp_path, mutation):
+    import hashlib
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot, _json_dumps
+    city=cities_by_name["Singapore"]
+    conn=_attached(*_live_schema_db_pair(tmp_path))
+    first=_current_product()
+    second=_wrh_metadata_only_product(first,1)
+    now=second.station_reference.fetched_at
+    try:
+        append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=first,as_of=first.station_reference.fetched_at)
+        append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=second,as_of=now)
+        metadata=json.loads(conn.execute("SELECT high_provenance_metadata FROM observations").fetchone()[0])
+        receipt=metadata["wrh_latest_confirmation"]
+        if mutation=="scope": receipt["scope"]["station"]="ZBAA"
+        elif mutation=="identity": receipt["semantic_snapshot_identity"]="b"*64
+        elif mutation=="source_body": receipt["retained_semantic_body_sha256"]="b"*64
+        elif mutation=="content": receipt["semantic_content_identity"]="b"*64
+        elif mutation=="order": receipt["request_started_at"]="2026-10-06T01:00:00+00:00"
+        elif mutation=="naive": receipt["received_at"]="2026-10-06T02:01:00"
+        elif mutation=="digest": receipt["validated_response_sha256"]="not-a-digest"
+        else: receipt.update(rows=first.rows,complete_day=True,native_body_ref=first.response_sha256)
+        if mutation=="authority_fields": receipt["rows"]=[]
+        # Even recomputing the control checksum cannot grant a mismatched scope,
+        # noncausal order, or an authoritative field outside its typed schema.
+        receipt["receipt_identity"]=hashlib.sha256(_json_dumps({k:v for k,v in receipt.items() if k!="receipt_identity"}).encode()).hexdigest()
+        encoded=json.dumps(metadata)
+        conn.execute("UPDATE observations SET high_provenance_metadata=?,low_provenance_metadata=?",(encoded,encoded))
+        conn.commit()
+        assert read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=now)==(True,None)
+        with pytest.raises(ValueError,match="WRH_ACQUISITION_CONTROL"):
+            append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=_wrh_metadata_only_product(first,2),as_of=now+timedelta(minutes=1))
+    finally:
+        conn.close()
+
+
+def test_current_wrh_legacy_full_confirmation_retains_body_and_request_fence(tmp_path,monkeypatch):
+    from dataclasses import replace
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    monkeypatch.setattr("src.config.state_path",lambda name:tmp_path/name)
+    city=cities_by_name["Singapore"]
+    conn=_attached(*_live_schema_db_pair(tmp_path))
+    first=_current_product()
+    confirmation=_wrh_metadata_only_product(first,2)
+    try:
+        append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=first,as_of=first.station_reference.fetched_at)
+        legacy=wrh.current_snapshot_from_product(confirmation,city=city,target_date="2026-10-06",as_of=confirmation.station_reference.fetched_at)
+        wrh.persist_current_snapshot_body(confirmation.native_body)
+        metadata=json.loads(conn.execute("SELECT high_provenance_metadata FROM observations").fetchone()[0])
+        metadata["wrh_latest_confirmation"]=legacy.provenance()
+        encoded=json.dumps(metadata)
+        conn.execute("UPDATE observations SET high_provenance_metadata=?,low_provenance_metadata=?",(encoded,encoded))
+        conn.commit()
+        owned,current=read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=confirmation.station_reference.fetched_at)
+        assert owned is True and current.response_sha256==first.response_sha256
+        late=replace(_current_product(values=(35,28),receipt="2026-10-06T02:03:00+00:00"),request_started_at=first.station_reference.fetched_at+timedelta(seconds=30))
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=late,as_of=late.station_reference.fetched_at)=="older_or_ambiguous_receipt"
+        changed=_current_product(values=(29,28),receipt="2026-10-06T02:04:00+00:00")
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=changed,as_of=changed.station_reference.fetched_at)=="revision"
+        assert (tmp_path/"noaa_wrh_response_bodies"/(confirmation.response_sha256+".zlib")).exists()
+        _,prior=read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=confirmation.station_reference.fetched_at)
+        assert prior.response_sha256==first.response_sha256
+        history=json.loads(conn.execute("SELECT existing_row_json FROM world.daily_observation_revisions").fetchone()[0])
+        assert json.loads(history["high_provenance_metadata"])["wrh_latest_confirmation"]==legacy.provenance()
+    finally:
+        conn.close()
+
+
+def test_current_wrh_legacy_confirmation_upgrades_without_deleting_or_bypassing_capacity(tmp_path,monkeypatch):
+    from dataclasses import replace
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+    monkeypatch.setattr("src.config.state_path",lambda name:tmp_path/name)
+    monkeypatch.setattr(wrh,"_CURRENT_BODY_MAX_FILES",3)
+    city=cities_by_name["Singapore"]
+    conn=_attached(*_live_schema_db_pair(tmp_path))
+    first=_current_product()
+    legacy=_wrh_metadata_only_product(first,1)
+    try:
+        append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=first,as_of=first.station_reference.fetched_at)
+        wrh.persist_current_snapshot_body(legacy.native_body)
+        metadata=json.loads(conn.execute("SELECT high_provenance_metadata FROM observations").fetchone()[0])
+        metadata["wrh_latest_confirmation"]=wrh.current_snapshot_from_product(legacy,city=city,target_date="2026-10-06",as_of=legacy.station_reference.fetched_at).provenance()
+        encoded=json.dumps(metadata)
+        conn.execute("UPDATE observations SET high_provenance_metadata=?,low_provenance_metadata=?",(encoded,encoded));conn.commit()
+        control=_wrh_metadata_only_product(first,2)
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=control,as_of=control.station_reference.fetched_at)=="noop"
+        assert len(list((tmp_path/"noaa_wrh_response_bodies").glob("*.zlib")))==2
+        late=replace(_current_product(values=(35,28),receipt="2026-10-06T02:03:00+00:00"),request_started_at=first.station_reference.fetched_at+timedelta(seconds=90))
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=late,as_of=late.station_reference.fetched_at)=="older_or_ambiguous_receipt"
+        correction=_current_product(values=(29,28),receipt="2026-10-06T02:04:00+00:00")
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=correction,as_of=correction.station_reference.fetched_at)=="revision"
+        assert len(list((tmp_path/"noaa_wrh_response_bodies").glob("*.zlib")))==3
+        assert (tmp_path/"noaa_wrh_response_bodies"/(legacy.response_sha256+".zlib")).exists()
+        noop=_wrh_metadata_only_product(correction,1)
+        assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=noop,as_of=noop.station_reference.fetched_at)=="noop"
+        excess=_current_product(values=(30,28),receipt="2026-10-06T02:06:00+00:00")
+        with pytest.raises(ValueError,match="WRH_SNAPSHOT_BODY_CAPACITY"):
+            append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=excess,as_of=excess.station_reference.fetched_at)
+        _,current=read_current_noaa_wrh_snapshot(conn,city=city,target_date="2026-10-06",as_of=excess.station_reference.fetched_at)
+        assert current.response_sha256==correction.response_sha256
+    finally:
+        conn.close()
+
+
+def test_current_wrh_quarantined_owner_does_not_retain_uncommittable_bodies(tmp_path,monkeypatch):
+    from src.data import noaa_wrh_timeseries as wrh
+    from src.data.daily_obs_append import append_current_noaa_wrh_product, prepare_current_noaa_wrh_product
+    monkeypatch.setattr("src.config.state_path",lambda name:tmp_path/name)
+    monkeypatch.setattr(wrh,"_CURRENT_BODY_MAX_FILES",3)
+    city=cities_by_name["Singapore"]
+    conn=_attached(*_live_schema_db_pair(tmp_path))
+    try:
+        conn.execute("INSERT INTO observations(city,target_date,source,high_temp,low_temp,unit,station_id,fetched_at,authority,rebuild_run_id) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (city.name,"2026-10-06","noaa_wrh_wsss",30,25,"C","WSSS","2026-10-06T01:50:00+00:00","QUARANTINED","disputed_backfill"))
+        conn.commit()
+        before=tuple(conn.execute("SELECT * FROM observations").fetchone())
+        for minute in range(5):
+            product=_current_product(values=(32+minute,28),receipt=f"2026-10-06T02:0{minute}:00+00:00")
+            assert append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=product,
+                as_of=product.station_reference.fetched_at)=="existing_disputed"
+        assert not list((tmp_path/"noaa_wrh_response_bodies").glob("*.zlib"))
+        assert tuple(conn.execute("SELECT * FROM observations").fetchone())==before
+        assert conn.execute("SELECT COUNT(*) FROM world.daily_observation_revisions").fetchone()[0]==0
+        prepared=prepare_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=product,
+                                                  as_of=product.station_reference.fetched_at)
+        conn.execute("UPDATE observations SET authority='UNVERIFIED'");conn.commit()
+        with pytest.raises(ValueError,match="WRH_CURRENT_PREPARED_ROW_CHANGED"):
+            append_current_noaa_wrh_product(conn,city=city,target_date="2026-10-06",product=product,
+                as_of=product.station_reference.fetched_at,prepared=prepared)
+        assert not list((tmp_path/"noaa_wrh_response_bodies").glob("*.zlib"))
     finally:
         conn.close()

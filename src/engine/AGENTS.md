@@ -24,6 +24,7 @@ evaluation.
 | `cycle_runner.py` | Top-level live cycle orchestration hub | CRITICAL — sequences the entire money path |
 | `evaluator.py` | Signal → calibration → fusion → edge → FDR → sizing → decision | CRITICAL — where trading decisions happen |
 | `monitor_refresh.py` | Monitor and Day0 refresh for held positions | HIGH — Day0 truth plane |
+| `current_day0_observation.py` | Shared read-only current WRH probability carrier for monitor, auction and final replay | HIGH — native current-source authority and correction identity |
 | `lifecycle_events.py` | Lifecycle event bridging between engine and state | HIGH — event emission |
 | `replay.py` | Replay/telemetry path (must maintain parity with live) | HIGH — semantic parity |
 | `cycle_runtime.py` | Runtime sequencing helpers | MEDIUM |

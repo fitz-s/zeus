@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-10-02; last_reused=2026-10-02
+# Lifecycle: created=2026-05-24; last_reviewed=2026-10-07; last_reused=2026-10-07
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-10-02 (station-ground archive; carried RETRY_PENDING debt)
+# Last reused or audited: 2026-10-07 (WRH serial lane and anchor-residual merge preservation)
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -4886,6 +4886,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
         assert j["executor"] in (
             "source_clock_db",
+            "noaa_wrh_source_clock_db",
             "hko_source_clock_db",
             "hko_final_source_clock_db",
             "forecast_clock_db",
@@ -5216,6 +5217,26 @@ def test_changed_non_anchor_source_still_drains_anchor_residual(monkeypatch) -> 
     assert result["source_clock_anchor_residual_download"]["committed_family_count"] == 1
     assert ("anchor", (scope,)) in calls
     assert ("cycle", (scope,)) in calls
+
+
+def test_wrh_current_job_is_single_flight_on_dedicated_serial_writer_lane():
+    import src.ingest_main as ingest
+    from src.data.scheduler_adapter import build_job_specs, job_defs_from_specs, registry_executor_pools
+    from src.data.source_job_registry import JOB_REGISTRY
+    job = JOB_REGISTRY["ingest_day0_noaa_wrh_current"]
+    assert job.owner_daemon == "ingest_main" and job.writes_db and job.role == "live"
+    spec = next(item for item in build_job_specs("ingest_main") if item.job_id == job.job_id)
+    assert spec.executor_class == "noaa_wrh_source_clock_db"
+    assert spec.max_instances == 1 and spec.coalesce is True
+    definitions = job_defs_from_specs(ingest._ingest_main_job_specs())
+    assert definitions[job.job_id][0] is ingest._day0_current_noaa_wrh_tick
+    pools = registry_executor_pools()
+    try:
+        assert pools[spec.executor_class]._pool._max_workers == 1
+        assert pools[spec.executor_class] is not pools["source_clock_db"]
+    finally:
+        for pool in pools.values():
+            pool.shutdown(wait=False)
 
 
 def _ecmwf_changed_residual_harness(monkeypatch, *, wave_report):

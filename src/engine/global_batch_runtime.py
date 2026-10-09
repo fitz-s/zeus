@@ -7356,7 +7356,7 @@ def _market_anchored_correction_resolver(
     )
     from src.contracts.payoff_q_correction import (
         CalibrationFitScope, PayoffQCorrection, PayoffQCorrectionUnavailable,
-        SourceIdentityBaseline,
+        SourceIdentityBaseline, ExactPayoffEntryPolicy,
     )
     from src.config import runtime_cities_by_name
 
@@ -7513,6 +7513,7 @@ def _market_anchored_correction_resolver(
             from src.calibration.market_anchored_live_fit import (
                 HeldSourceIdentityCohortBinding,
                 HeldSourceIdentityBinding,
+                HeldExactPayoffEntryBinding,
                 load_held_entry_calibration,
             )
 
@@ -7537,7 +7538,9 @@ def _market_anchored_correction_resolver(
                 provider, decision_at=decision_at_utc, current_raw_revision=current_raw_revision,
                 deadline_monotonic=deadline_monotonic,
             )
-            if isinstance(binding, (HeldSourceIdentityBinding, HeldSourceIdentityCohortBinding)):
+            if isinstance(binding, (HeldSourceIdentityBinding, HeldSourceIdentityCohortBinding)) or (
+                isinstance(binding, HeldExactPayoffEntryBinding) and binding.source_only
+            ):
                 try:
                     p0 = float(candidate.economic_sell_curve.levels[0].price)
                 except (AttributeError, IndexError, TypeError, ValueError) as exc:
@@ -7552,6 +7555,17 @@ def _market_anchored_correction_resolver(
                     raw_q=raw_q,
                     p0=p0,
                 )
+                if isinstance(binding, HeldExactPayoffEntryBinding):
+                    record_baseline(candidate, baseline, binding.fit_scope)
+                    if market_anchored_fit_artifact_audit is not None:
+                        market_anchored_fit_artifact_audit.setdefault("held_exact_entry_bindings", {})[
+                            candidate.position_id
+                        ] = {
+                            "entry_certificate_hash": binding.decision_certificate_hash,
+                            "entry_policy_hash": binding.entry_policy.as_cert_fields()["policy_hash"],
+                            "current_scope": binding.fit_scope.as_payload(),
+                            "current_baseline_hash": baseline.as_payload()["baseline_hash"],
+                        }
                 if market_anchored_fit_artifact_audit is not None and isinstance(
                     binding, HeldSourceIdentityCohortBinding
                 ):
@@ -7717,6 +7731,41 @@ def _market_anchored_correction_resolver(
             record_unavailable(candidate, type(exc).__name__)
             raise PayoffQCorrectionUnavailable(type(exc).__name__) from exc
 
+    def exact_entry_policy(candidate, raw_q: float, p0: float, decision_at_utc: datetime):
+        """Seal metadata only: a proved payoff never consults a fit/corpus."""
+        from src.solve.solver import family_exact_yes_payoff
+
+        prepared = prepared_by_family.get(str(candidate.family_key))
+        witness = getattr(prepared, "probability_witness", None)
+        exact_yes = family_exact_yes_payoff(witness, bin_id=candidate.bin_id)
+        scope = calibration_scope_resolver(candidate, prepared)
+        if (provider is None or not isinstance(scope, CalibrationFitScope)
+                or str(getattr(candidate, "action", "BUY")) != "BUY"
+                or scope.execution_mode != candidate.execution_mode
+                or exact_yes is None
+                or raw_q != (exact_yes if candidate.side == "YES" else 1 - exact_yes)):
+            raise PayoffQCorrectionUnavailable("EXACT_ENTRY_POLICY_UNAVAILABLE")
+        exact = getattr(witness, "exact_payoff_witness", None) or witness
+        policy = ExactPayoffEntryPolicy(
+            family_key=candidate.family_key, bin_id=candidate.bin_id,
+            side=candidate.side, token_id=candidate.token_id, raw_q=raw_q, p0=p0,
+            fit_scope=scope, calibration_policy=provider.calibration_policy,
+            q_version=witness.q_version,
+            probability_witness_identity=witness.witness_identity,
+            probability_content_identity=witness.probability_content_identity,
+            source_truth_identity=witness.source_truth_identity,
+            sample_matrix_identity=witness.sample_matrix_identity,
+            exact_payoff_witness_identity=exact.witness_identity,
+            exact_payoff_content_identity=exact.probability_content_identity,
+            decision_at_utc=decision_at_utc.isoformat(),
+        )
+        if market_anchored_fit_artifact_audit is not None:
+            market_anchored_fit_artifact_audit.setdefault("exact_entry_policies", {})[
+                candidate.candidate_id
+            ] = policy.as_cert_fields()
+        return policy
+
+    resolve.exact_entry_policy = exact_entry_policy
     return resolve
 
 

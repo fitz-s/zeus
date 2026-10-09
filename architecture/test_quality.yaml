@@ -96,7 +96,13 @@ tests:
     protects: [MP-ORD-001]
     falsifying_proof:
       type: negative_fixture
-      description: "Injected bankroll with free cash 5 must clamp stake to 5; unresolvable free cash must fault BANKROLL_FREE_CASH_MISSING, never size unclamped."
+      description: "A qualified global winner respects its cash-bound selection; unresolved cash faults BANKROLL_FREE_CASH_MISSING, and a missing current cash binding blocks global actuation."
+  tests/money_path/test_free_cash_owner_binding.py:
+    category: money_path
+    protects: [MP-EXT-002]
+    falsifying_proof:
+      type: negative_fixture
+      description: "The same persisted global winner must reject a finite cash drop below its spend and retain its stake under distinct ample bounds; nonglobal missing maker evidence must refuse before recapture, without claiming legacy cash compatibility."
   tests/money_path/test_finding_c_coverage_failclosed.py:
     category: money_path
     protects: [MP-MD-001]

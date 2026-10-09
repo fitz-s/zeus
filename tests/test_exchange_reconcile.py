@@ -1,7 +1,7 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-09-03
-# Lifecycle: created=2026-04-27; last_reviewed=2026-09-03; last_reused=2026-09-03
-# Authority basis: first-principles command-scoped entry/exit fill aggregation
+# Last reused/audited: 2026-10-07
+# Lifecycle: created=2026-04-27; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Authority basis: command-scoped fill aggregation; INV-01/INV-18 unknown-chain exposure preservation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
 """R3 M5 exchange-reconciliation findings and trade-fact tests."""
@@ -10476,6 +10476,117 @@ def test_terminal_non_pending_redeem_state_does_not_mask_position_drift(conn, se
     evidence = position_findings[0].evidence_json
     assert '"exchange_size":"1.5873"' in evidence
     assert '"expected_wallet_size":"0"' in evidence
+
+
+@pytest.mark.parametrize("exit_state", ["backoff_exhausted", "retry_pending"])
+@pytest.mark.parametrize("missing_proof", ["funder", "rpc"])
+def test_exit_pending_missing_without_chain_proof_preserves_canonical_exposure(
+    conn, monkeypatch, exit_state, missing_proof,
+):
+    """INV-01/INV-18: retry exhaustion and UNKNOWN are never closure evidence."""
+    from src.execution.exit_lifecycle import handle_exit_pending_missing
+    from src.state.portfolio import PortfolioState, Position
+
+    token = "4242001"
+    position_id = "pos-chain-absence-unconfirmed"
+    order_id = "ord-chain-absence-unconfirmed"
+    seed_position_baseline(conn, position_id=position_id, order_id=order_id)
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               chain_state = 'exit_pending_missing',
+               order_status = ?,
+               shares = 4.95,
+               cost_basis_usd = 1.0,
+               entry_price = 0.2,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, exit_state, NOW.isoformat(), position_id),
+    )
+    pos = Position(
+        trade_id=position_id,
+        market_id="condition-m5",
+        city="Karachi",
+        cluster="Karachi",
+        target_date="2026-05-17",
+        bin_label="test-bin",
+        direction="buy_yes",
+        unit="C",
+        env="live",
+        state="pending_exit",
+        exit_state=exit_state,
+        chain_state="exit_pending_missing",
+        token_id=token,
+        no_token_id=f"{token}-no",
+        condition_id="condition-m5",
+        order_id=order_id,
+        order_status=exit_state,
+        last_exit_order_id=order_id,
+        last_exit_error="exit_pending_missing",
+        exit_retry_count=5,
+        next_exit_retry_at=(NOW + timedelta(minutes=5)).isoformat(),
+        shares=4.95,
+        cost_basis_usd=1.0,
+        entry_price=0.2,
+        strategy_key="opening_inertia",
+        strategy="opening_inertia",
+        edge_source="opening_inertia",
+        discovery_mode="opening_hunt",
+        decision_snapshot_id="snap-m5",
+        entered_at=NOW.isoformat(),
+    )
+    portfolio = PortfolioState(positions=[pos])
+    monkeypatch.delenv("POLYMARKET_FUNDER_ADDRESS", raising=False)
+    monkeypatch.delenv("POLYMARKET_PROXY_ADDRESS", raising=False)
+    monkeypatch.setattr(
+        "src.data.polymarket_client.resolve_funder_address",
+        lambda: "" if missing_proof == "funder" else "0x" + "1" * 40,
+    )
+    rpc_calls = []
+
+    def unavailable_rpc(*args):
+        rpc_calls.append(args)
+        raise TimeoutError("synthetic chain observation unavailable")
+
+    position_before = vars(pos).copy()
+    current_sql = "SELECT * FROM position_current WHERE position_id = ?"
+    current_before = dict(conn.execute(current_sql, (position_id,)).fetchone())
+    events_sql = "SELECT * FROM position_events WHERE position_id = ? ORDER BY sequence_no"
+    events_before = [dict(row) for row in conn.execute(events_sql, (position_id,))]
+
+    # A repeated monitor visit must preserve the exposure and its existing
+    # order ownership while keeping just one retryable review item.
+    for _ in range(2):
+        result = handle_exit_pending_missing(portfolio, pos, conn=conn, rpc_call=unavailable_rpc)
+        assert result == {
+            "action": "skip", "position": pos, "reason": "CHAIN_ABSENCE_UNCONFIRMED",
+        }
+        assert vars(pos) == position_before
+        assert portfolio.positions == [pos]
+        assert portfolio.recent_exits == []
+        assert dict(conn.execute(current_sql, (position_id,)).fetchone()) == current_before
+        assert [dict(row) for row in conn.execute(events_sql, (position_id,))] == events_before
+
+    assert len(rpc_calls) == (0 if missing_proof == "funder" else 2)
+    review_items = conn.execute(
+        """
+        SELECT reason_code, status, unbounded, last_error_class, evidence_refs_json
+          FROM review_work_items
+         WHERE subject_id = ?
+        """,
+        (position_id,),
+    ).fetchall()
+    assert len(review_items) == 1
+    assert dict(review_items[0]) == {
+        "reason_code": "TIMEOUT_ABSENCE_UNCONFIRMED",
+        "status": "OPEN",
+        "unbounded": 1,
+        "last_error_class": "CHAIN_ABSENCE_UNCONFIRMED",
+        "evidence_refs_json": json.dumps([position_id, token]),
+    }
 
 
 def test_backoff_exhausted_chain_absence_unknown_preserves_canonical(conn, monkeypatch):

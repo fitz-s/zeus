@@ -530,10 +530,19 @@ def load_replay_corpus(
                   "AND julianday(fact.ingested_at)<julianday(?)")
     source_scope = ("AND julianday(source_fact.observed_at)<julianday(?) "
                     "AND julianday(source_fact.ingested_at)<julianday(?)")
+    trade_tables = {
+        str(row[0]) for row in trade.execute(
+            f"SELECT name FROM {trade_schema}.sqlite_master WHERE type='table'"
+        )
+    }
+    proxy_provenance_available = {
+        "venue_commands", "venue_order_facts", "venue_submission_envelopes",
+    }.issubset(trade_tables)
     fills: dict[str, list[tuple]] = defaultdict(list)
     for command_id, venue_order_id, size, observed, ingested, executed in trade.execute(f"""
         WITH {canonical_trade_fact_cte(source_schema=trade_schema, source_clause_sql=fact_scope)},
-             {economic_trade_fact_cte(source_schema=trade_schema, source_clause_sql=source_scope)}
+             {economic_trade_fact_cte(source_schema=trade_schema, source_clause_sql=source_scope,
+                                      proxy_provenance_available=proxy_provenance_available)}
         SELECT command_id, venue_order_id, filled_size, observed_at, ingested_at, execution_ts
         FROM economic_trade_fact WHERE UPPER(state) = 'CONFIRMED'
     """, (cutoff_text,) * 4):

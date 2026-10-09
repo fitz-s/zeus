@@ -1,5 +1,8 @@
+# Lifecycle: created=2026-06-10; last_reviewed=2026-10-07; last_reused=2026-10-07
+# Purpose: Protect source-bound physical and final-daily exit authority.
+# Reuse: Run when hard-fact source readers or immediate exit evidence changes.
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-20
+# Last reused/audited: 2026-10-07
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -397,51 +400,24 @@ def _final_wu_hourly_observation_conn(
     return conn
 
 
-def test_post_local_day_hko_daily_extract_authorizes_exact_no_win(monkeypatch):
-    conn = _final_daily_observation_conn(high_temp=28.8)
-    final = _final_daily_observation_extreme(
-        city=_hong_kong(),
-        target_date="2026-07-15",
-        metric="high",
-        now=datetime(2026, 7, 15, 22, 0, tzinfo=UTC),
-        conn=conn,
-    )
-    assert final is not None
-    verdict = final_observed_bin_verdict(
-        metric="high",
-        direction="buy_no",
-        bin_low=30.0,
-        bin_high=30.0,
-        final_extreme=final.settled_extreme,
-    )
+@pytest.mark.parametrize("metric", ["high", "low"])
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+@pytest.mark.parametrize("raw_value", [28.8, 30.8, 30.0])
+def test_post_local_day_unknown_hko_publication_cannot_authorize_exact_outcome(metric, direction, raw_value):
+    from src.contracts.settlement_semantics import settlement_source_publication_grade
+    from src.engine.monitor_refresh import _post_local_day_final_daily_verdict
 
-    assert verdict is not None
-    assert verdict.action == "HOLD_STRUCTURAL_WIN"
-    assert verdict.rounded_extreme == 28.0
-    assert final.source == "hko_daily_api"
-
-
-def test_post_local_day_hko_daily_extract_authorizes_exact_no_loss(monkeypatch):
-    conn = _final_daily_observation_conn(high_temp=30.8)
-    final = _final_daily_observation_extreme(
-        city=_hong_kong(),
-        target_date="2026-07-15",
-        metric="high",
-        now=datetime(2026, 7, 15, 22, 0, tzinfo=UTC),
-        conn=conn,
-    )
-    assert final is not None
-    verdict = final_observed_bin_verdict(
-        metric="high",
-        direction="buy_no",
-        bin_low=30.0,
-        bin_high=30.0,
-        final_extreme=final.settled_extreme,
-    )
-
-    assert verdict is not None
-    assert verdict.action == "EXIT_DEAD_BIN"
-    assert verdict.rounded_extreme == 30.0
+    conn = _final_daily_observation_conn(high_temp=raw_value)
+    conn.execute("UPDATE observations SET low_temp=?", (raw_value,))
+    city = _hong_kong()
+    grade = settlement_source_publication_grade(city=city.name, target_date="2026-07-15",
+        temperature_metric=metric, market_slug=None, settlement_source="hko_daily_api")
+    assert grade["source_grade"] == "UNKNOWN" and grade.get("venue_integer_grade") is None
+    assert _final_daily_observation_extreme(city=city, target_date="2026-07-15",
+        metric=metric, now=datetime(2026, 7, 15, 22, tzinfo=UTC), conn=conn) is None
+    assert _post_local_day_final_daily_verdict(pos=_position(direction=direction, bin_label="30°C"),
+        conn=conn, city=city, target_d=Date(2026, 7, 15), metric=metric) is None
+    conn.close()
 
 
 @pytest.mark.parametrize(
@@ -3427,13 +3403,23 @@ def test_resolver_product_drives_held_entry_and_cancel_together(monkeypatch, met
 
 
 @pytest.mark.parametrize("metric,expected",[("high",31.0),("low",27.0)])
-def test_post_day_exact_page_wins_over_complete_raw_product(metric, expected):
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_post_day_exact_page_wins_over_complete_raw_product(metric, expected, direction):
+    from src.engine.monitor_refresh import _post_local_day_final_daily_verdict
+
     conn = _wrh_product_conn(fetched="2026-09-20T17:07:54+00:00")
     final = _final_daily_observation_extreme(city=_singapore_noaa(),target_date="2026-09-20",
         metric=metric, now=datetime(2026,9,20,18,tzinfo=UTC),conn=conn)
     assert final is not None
     assert final.source == "noaa_wrh_wsss"
     assert final.settled_extreme == expected
+    pos = _position(city="Singapore", target_date="2026-09-20", direction=direction,
+        temperature_metric=metric, bin_label=f"{expected:g}°C")
+    probability, refreshed, fresh = _post_local_day_final_daily_verdict(
+        pos=pos, conn=conn, city=_singapore_noaa(), target_d=Date(2026, 9, 20), metric=metric)
+    assert probability == (1.0 if direction == "buy_yes" else 0.0)
+    assert fresh is True
+    assert getattr(refreshed, "_day0_zero_probability_exit_authority") is True
     conn.close()
 
 
@@ -3529,4 +3515,22 @@ def test_broken_canonical_attachment_cannot_use_main_ghost(broken_schema):
         conn.execute("CREATE TABLE forecasts.observations (city TEXT)")
     assert _noaa_wrh_hard_fact_evidence(city=_singapore_noaa(),target_date="2026-09-20",
         metric="high",now=datetime(2026,9,20,7,1,tzinfo=UTC),world_conn=conn) is None
+    conn.close()
+
+
+@pytest.mark.parametrize("metric", ["high", "low"])
+def test_final_hko_capture_digest_cannot_upgrade_unknown_publication(metric):
+    conn = _final_daily_observation_conn()
+    kwargs = dict(city=_hong_kong(), target_date="2026-07-15", metric=metric,
+                  now=datetime(2026, 7, 15, 22, tzinfo=UTC), conn=conn)
+    legacy = _final_daily_observation_extreme(**kwargs)
+    assert legacy is None
+    conn.execute(f"ALTER TABLE observations ADD COLUMN {metric}_provenance_metadata TEXT")
+    conn.execute(f"UPDATE observations SET {metric}_provenance_metadata=?",
+                 (json.dumps({"payload_hash": "sha256:" + "a" * 64}),))
+    first = _final_daily_observation_extreme(**kwargs)
+    assert first is None
+    conn.execute(f"UPDATE observations SET {metric}_provenance_metadata=?",
+                 (json.dumps({"payload_hash": "sha256:" + "b" * 64}),))
+    assert _final_daily_observation_extreme(**kwargs) is None
     conn.close()

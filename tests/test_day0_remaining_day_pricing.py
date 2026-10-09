@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-10-01
-# Lifecycle: created=2026-06-10; last_reviewed=2026-09-30; last_reused=2026-09-30
+# Last reused/audited: 2026-10-08
+# Lifecycle: created=2026-06-10; last_reviewed=2026-10-08; last_reused=2026-10-08
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -344,15 +344,76 @@ def test_kma_window_reaches_current_state_and_extreme_consumers(correction):
 ])
 def test_kma_invalid_evidence_cannot_replace_current_temperature(damage):
     from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.data.day0_fast_obs import _latest_kma_day0_event_state, KmaObservationUnavailable
 
     conn, city, cutoff = _kma_consumer_fixture(damage=damage)
     try:
+        before = tuple(tuple(row) for row in conn.execute("SELECT * FROM observation_prints ORDER BY id"))
+        assert len(before) == 1
+        assert conn.execute("SELECT value_native FROM observation_prints").fetchone()[0] == 29.0
+        expected_reason = {
+            "station_id": "KMA_SOURCE_IDENTITY_UNQUALIFIED",
+            "raw_report_identity": "KMA_SOURCE_CURRENT_OBSERVATION_MISMATCH",
+            "current_observation_temp_c": "KMA_SOURCE_CURRENT_OBSERVATION_MISMATCH",
+            "observation_transport": "KMA_SOURCE_IDENTITY_UNQUALIFIED",
+            "observation_availability_basis": "KMA_SOURCE_IDENTITY_UNQUALIFIED",
+            "observation_available_at": "KMA_SOURCE_CLOCK_NONCAUSAL",
+        }[next(iter(damage))]
+        with pytest.raises(KmaObservationUnavailable, match=f"reason={expected_reason}$"):
+            _latest_kma_day0_event_state(conn, city=city, target_date="2026-09-22",
+                decision_time=cutoff, metric=None)
         state = read_day0_current_temperature_state(
             conn=conn, city=city, target_date="2026-09-22", decision_time=cutoff,
         )
-        assert state is not None
-        assert state.value_native == 29.0
-        assert state.observed_at.hour == 4
+        # An invalid latest KMA frontier is not source absence. The older
+        # same-station AWC print survives, but cannot bypass this typed refusal.
+        assert state is None
+        assert tuple(tuple(row) for row in conn.execute("SELECT * FROM observation_prints ORDER BY id")) == before
+    finally:
+        conn.close()
+
+
+def test_current_temperature_uses_normal_awc_when_kma_frontier_is_absent():
+    from src.data import day0_fast_obs as fast
+    from src.data.day0_hourly_vectors import read_day0_current_temperature_state
+    from src.state.schema.observation_prints_schema import ensure_table
+    from src.state.schema.opportunity_events_schema import ensure_table as ensure_events
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        ensure_table(conn)
+        ensure_events(conn)
+        city = runtime_cities_by_name()["Busan"]
+        observed = datetime(2026, 9, 22, 5, tzinfo=UTC)
+        published = observed + timedelta(seconds=34)
+        received = observed + timedelta(seconds=35)
+        cutoff = observed + timedelta(minutes=1)
+        raw = "METAR RKPK 220500Z 05014KT 9999 FEW050 29/14 Q1016="
+        reports = fast.parse_metar_api_payload([{
+            "icaoId": "RKPK", "obsTime": observed.timestamp(),
+            "receiptTime": published.isoformat(), "temp": 29.0,
+            "metarType": "METAR", "rawOb": raw,
+        }], first_seen_at=received)
+        assert len(reports) == 1
+        source = fast.fast_obs_source_for_city(city, target_date="2026-09-22")
+        assert source is not None and source.station_id == "RKPK"
+        assert fast._append_metar_prints_to_ledger(conn, ((city, source, "2026-09-22"),), reports)
+        assert conn.execute("SELECT 1 FROM opportunity_events").fetchone() is None
+        assert fast._latest_kma_day0_event_state(conn, city=city, target_date="2026-09-22",
+            decision_time=cutoff, metric=None) is None
+        print_row = conn.execute("SELECT * FROM observation_prints").fetchone()
+        assert print_row["raw_report"] == raw
+        assert print_row["unit"] == "C" and print_row["station_id"] == "RKPK"
+        assert datetime.fromisoformat(print_row["publish_ts_utc"]) == published
+        assert datetime.fromisoformat(print_row["fetched_at_utc"]) == received
+        state = read_day0_current_temperature_state(conn=conn, city=city,
+            target_date="2026-09-22", decision_time=cutoff)
+        assert state is not None and state.value_native == 29.0
+        assert state.observed_at == observed
+        assert state.source == "aviationweather_metar"
+        # Physical-current evidence only: no settlement/q authority is minted.
+        assert tuple(conn.execute("SELECT * FROM observation_prints").fetchone()) == tuple(print_row)
     finally:
         conn.close()
 
@@ -2303,6 +2364,7 @@ def test_live_day0_current_state_witness_is_required_by_both_consumers() -> None
     """Neither producer nor held monitor may claim current Day0 authority blind."""
     import src.data.replacement_forecast_materializer as materializer
     import src.engine.event_reactor_adapter as era
+    from src.state.db import init_schema_forecasts
 
     request = SimpleNamespace(
         city="Paris",
@@ -2311,6 +2373,7 @@ def test_live_day0_current_state_witness_is_required_by_both_consumers() -> None
         day0_observed_extreme_observation_time="2026-06-10T13:00:00+00:00",
     )
     conn = sqlite3.connect(":memory:")
+    init_schema_forecasts(conn)
     with pytest.raises(
         ValueError,
         match="DAY0_NOAA_PRELIMINARY_CARRIER_CURRENT_TEMPERATURE_STATE_MISSING",
@@ -15806,9 +15869,9 @@ def test_ordinary_wrh_amber_current_kernel_ignores_age_fit(tmp_path, monkeypatch
     from tests.test_replacement_forecast_materializer import _hko_request_with_owned_anchor
     from src.forecast import posterior_age_inflation as age
     from src.data import replacement_forecast_materializer as materializer, replacement_forecast_bundle_reader as reader
-    from src.events.triggers.day0_extreme_updated import Day0ExtremeUpdatedTrigger
-    from src.events.event_writer import EventWriter
-    from src.events.opportunity_event import OpportunityEvent
+    from src.events.triggers.day0_extreme_updated import build_day0_extreme_updated_event
+    from src.events.day0_authority import DAY0_LIVE_AUTHORITY_MATCHES
+    from src.data.replacement_forecast_current_target_plan import _latest_authorized_day0_fact
     from src.contracts.settlement_semantics import SettlementSemantics
     from src.engine import event_reactor_adapter as era
 
@@ -15826,13 +15889,20 @@ def test_ordinary_wrh_amber_current_kernel_ignores_age_fit(tmp_path, monkeypatch
     observation_source = observation_source[:observation_source.index(
         "    qualified = fast.latest_fast_station_conditioning")] + '''
     latest_report = f"KORD {observed:%d%H%M}Z 00000KT 10SM CLR 19/18 A3005 RMK AO2 T01900180"
-    latest_body = {"STATION":[{"STID":"KORD","OBSERVATIONS":{
+    latest_body = {"SUMMARY":{"RESPONSE_CODE":1},"UNITS":{"air_temp":"Fahrenheit"},
+        "STATION":[{"STID":"KORD","OBSERVATIONS":{
         "date_time":[observed.astimezone(ZoneInfo(city.timezone)).strftime("%Y-%m-%dT%H:%M:%S%z")],
         "air_temp_set_1":[66.2],"sea_level_pressure_set_1":[1013.0],"metar_set_1":[latest_report]}}]}
-    latest = wrh._parse_rows(latest_body,"KORD")
-    assert len(latest) == 1
-    _append_noaa_wrh_prints(conn,city_name=city.name,station="KORD",unit="F",rows=latest,
-        target_date_local=fixture.request.target_date,view=city.settlement_page_view,fetch_utc=current_fetch)
+    conn.commit()
+    from src.data.daily_obs_append import append_current_noaa_wrh_product
+    body = json.dumps(latest_body).encode()
+    product = wrh.product_from_response(body,"KORD",unit="F",fetched_at=current_fetch,
+        source_response_sha256=hashlib.sha256(body).hexdigest())
+    product = replace(product,request_started_at=current_fetch-timedelta(seconds=1),
+        coverage_start_utc=fixture.request.source_cycle_time,
+        coverage_end_utc=current_fetch-timedelta(seconds=1))
+    assert append_current_noaa_wrh_product(conn,city=city,target_date=str(fixture.request.target_date),
+        product=product,as_of=current_fetch) == "inserted"
     conn.commit()
     return cut
 '''
@@ -15854,13 +15924,20 @@ def test_ordinary_wrh_amber_current_kernel_ignores_age_fit(tmp_path, monkeypatch
         from src.events import opportunity_event as event_module
         monkeypatch.setattr(event_module, "datetime", Clock)
         monkeypatch.setattr(reader, "datetime", Clock)
-        trigger = Day0ExtremeUpdatedTrigger(EventWriter(fixture.conn),
-            scan_families=((fixture.city.name, str(fixture.request.target_date), "low"),))
-        assert trigger.scan_settlement_print_rows(observation_conn=fixture.conn,
-            settlement_semantics=SettlementSemantics.for_city(fixture.city),decision_time=cut,received_at=cut.isoformat())
-        row = dict(fixture.conn.execute("SELECT * FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED' "
-            "AND json_extract(payload_json,'$.metric')='low' ORDER BY rowid DESC LIMIT 1").fetchone())
-        event = OpportunityEvent(**{field:row[field] for field in OpportunityEvent.__dataclass_fields__})
+        fact = _latest_authorized_day0_fact(fixture.conn, city=fixture.city.name,
+            target_date=str(fixture.request.target_date), temperature_metric="low",
+            decision_time=cut, require_settlement_channel=True)
+        assert fact is not None and fact["source"] == "current_wrh_product:noaa_wrh_kord"
+        event = build_day0_extreme_updated_event(observation={
+            **DAY0_LIVE_AUTHORITY_MATCHES, "city":fixture.city.name,
+            "target_date":str(fixture.request.target_date), "metric":"low",
+            "settlement_source":fact["observation_source"], "station_id":fact["station_id"],
+            "observation_time":fact["observation_time"],
+            "observation_available_at":fact["observation_available_at"],
+            "raw_value":fact["observed_extreme_native"], "low_so_far":fact["observed_extreme_native"],
+            "observation_context_id":fact["raw_payload_sha256"],
+        }, settlement_semantics=SettlementSemantics.for_city(fixture.city),
+            decision_time=cut, received_at=cut.isoformat())
         payload = json.loads(event.payload_json)
         assert payload["settlement_source"] == "noaa_wrh_kord" and payload["raw_value"] == 66.2
         assert era._held_day0_has_canonical_observation(fixture.conn,event=event,decision_time=cut)

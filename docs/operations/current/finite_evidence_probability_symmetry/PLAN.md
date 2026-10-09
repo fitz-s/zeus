@@ -1,5 +1,475 @@
 # finite_evidence_probability_symmetry -- Plan
 
+## 2026-10-07 HKO final-daily publication qualification adaptation
+
+Bounded source-authority repair on frozen merge `6b37b40a22f42f6e7491e6015a92346407f6e574`.
+The current publication classifier leaves HKO decimal eligibility UNKNOWN, but
+the shared final-daily reader promotes a generic VERIFIED daily row into exact
+q and protective SELL authority. Synthetic caller and fake-SDK proofs reproduce
+the mismatch. Apply the existing qualification law at that shared reader only;
+preserve qualified WRH exact exits, independent venue integer truth, restored v6
+serving, current correction/unreadable-source guards and the inclusive .05 floor.
+
+Before changing runtime code, add failing HIGH/LOW and YES/NO antibodies at the
+source, global/monitor and old-receipt/fake-SDK seams. Replace obsolete positive
+HKO source fixtures with genuinely qualified WRH evidence. Re-run the paired
+focused and affected suites under the existing offline guard. No authority
+classifier mocks, new publication threshold, harvester/writer redesign, live
+state, remote write, install, trade, deploy or restart is in scope. Independent
+review and parent integration follow the isolated repair commit.
+
+Harmonize the existing source_rationale and test_topology entries with this
+INV-06/14/47 source-authority repair; these are the only touched registry
+surfaces. No invariant, publication classifier or provider eligibility law changes.
+
+SCOPE: this HKO city/date/metric's unqualified daily decimal exact authority.
+DRAIN: normal monitor/source refresh and existing independent settlement routes.
+RESET: source eligibility is supported by its owning contract; a separately
+verified venue integer remains a separate fact, never a decimal-publication
+waiver. Existing unknown-final-observation read-only behavior handles absence.
+Rollback is a source/test revert with no canonical-fact deletion.
+
+### Qualification validation record
+
+The guarded pre-fix tests produced 18 failures and 10 passing controls. Both
+legacy-HKO YES/NO cases reached a fake SDK FAK SELL at 0.10; UNKNOWN source,
+digest and global-family tests also reproduced exact authority. With the shared
+reader check, the focused source/caller/gateway set passes 44 cases, including
+qualified WRH HIGH/LOW x YES/NO monitor controls and unchanged/correction/
+unreadable/body-revision gateway controls. Existing independent HKO/Gamma integer
+claim tests pass 76; publication UNKNOWN remains separate from venue integer truth.
+
+The three affected full suites completed with 1792 passed, 44 failed and 11 skipped,
+against 1777 passed, the same 44 failed and 11 skipped on untouched `6b37b40a2`.
+All 44 failure node IDs and exact failure messages match, with no candidate-only
+failure. This is matched baseline debt, not a globally green suite. The final
+focused run also covers the subsequently expanded four-way WRH monitor control
+and verifies that digest-only revision preserves source eligibility while
+revoking the previous proof. Production source did not change after the full run.
+Scoped planning-evidence, freshness and map-maintenance checks pass three checks;
+`git diff --check` is clean. Logs, XML, raw failure bodies and the exact comparison
+are retained in the review handoff. No live or remote action occurred. The earlier
+netCDF4/cftime verification limit remains; no install or alternative route was used.
+
+## 2026-10-07 offline integration of current observation drift
+
+This isolated candidate starts at frozen `47a6cd88f675419f138a5f1c5862613478ac00d0`
+and integrates upstream `e3411078c606ea28e094f4eb1ea9c043d4b9e812` (nine commits
+past `88e0e25e`). Preserve the upstream next-local-midnight geometry, real elapsed
+DST lead times, eligible-family KMA polling, KNMI key resolver and additive parser
+pins. Retain the full physical-exit/WRH custody/optional-carrier repair and native
+role rollback. The inclusive 0.05 floor and mandatory v6 ENS evidence are unchanged.
+
+Resolve only four overlapping text surfaces: source_rationale joins the WRH and
+KNMI descriptions; requirements retains both existing official dependency blocks;
+the current-target and station-adapter test files retain both sets of antibodies.
+The upstream dense-station research artifacts and all other upstream changes are
+preserved without running their research or download scripts. This harmonizes the
+existing per-file registry under INV-06/14/47; no new provider or authority is added.
+
+Run guarded offline affected source/clock/adapter/current-target tests and original
+physical/WRH acceptance controls against example-only settings and isolated fixture
+state. Record exact failures and dependency limits; prior baseline results are not
+new green evidence. Independent final review and parent approval own publication.
+No live environment, production state, venue action, deployment or restart is in scope.
+
+### Observation-drift validation record
+
+The source/test merge is `4061d727bf874a6846acf663f2c20d32e691e42e`, tree
+`ab6ae11870776b1f23d3711fe567049ddeaba94a`. Its parents are frozen `47a6cd88f`
+and upstream `e3411078c`. The final candidate still changes 44 files relative
+to that upstream tip. All upstream research artifacts and workflows, plus the
+seven untouched native-role rollback files, remain identical to upstream.
+Both conflicting test files retain every test function from both parents.
+The only production delta from frozen 47a6 is upstream's four changed files:
+day0_fast_obs, day0_oracle_anomaly, station_temperature_adapters and time_context.
+The current-target planner already had the same next-local-midnight correction.
+
+Guarded core/acceptance/carrier/structural checks: 889 passed, one Wellington
+failure and 11 skipped. The failed node and assertion exactly match frozen 47a6.
+Required data checks: 386 passed. All 16 classifier-selected relationship suites
+pass 2,168 tests on this source/test freeze, with genuine retained XML. Counts
+overlap and are not additive. Full affected observation/clock/adapter/current-
+target suites: candidate 549 passed/34 failed/one skipped; untouched e341
+542 passed/the same 34 failed/one skipped. Every failed node and failure message
+matches after normalizing only checkout paths and runtime object addresses;
+there are no candidate-only failures. All 29 expanded cases from upstream's 17
+new DST/KMA/KNMI test functions pass. The initial candidate run had seven more
+failures because sparse checkout omitted tracked audit fixtures; that initial
+41-failure evidence is retained separately, and both paired final runs use the
+same materialized tracked fixtures without executing the research scripts.
+
+The one affected-suite skip is the KNMI recorded-provider parser case:
+`test_recorded_provider_response_and_ledger_validation[knmi_observations-knmi]`.
+The exact upstream netCDF4==1.7.4 and cftime==1.6.6 pins are retained alongside
+eccodes==2.49.0/ecmwf-opendata==0.3.34. This cloud environment lacks netCDF4/cftime;
+a proposed official-binary-wheel resolution was blocked by automatic approval
+review under its offline-scope interpretation. No installation, alternate route,
+escalation or retry followed. This parser/dependency verification is incomplete.
+
+Schema fingerprint, money-path test-quality metadata, semantic object registration,
+required invariant coverage, source-rationale delta, and scoped planning/map/
+freshness checks pass. The full release selection was not rerun for this drift;
+prior 2697-pass/51-matched-baseline-failure evidence belongs to frozen 47a6 and does
+not make this integration globally green. The 34 affected-suite failures likewise
+remain unresolved baseline debt. Logs and XML are retained outside the temporary
+filesystem for independent review. No production readiness is inferred.
+
+## 2026-10-07 offline compatibility with the upstream native-role rollback
+
+PR535 preserves the exact approved tree for review; no merge or deployment is
+authorized. Live advanced to6f9bca665, restoring ten native-series runtime files
+and nine coupled tests to620a because its commit report says mandatory full-Y
+native completion blocked all current posterior serving. Production claims in
+that report are not independently verified here.
+
+This separate cloud-only candidate starts from6f9bca665 and reapplies only the
+original8997 physical-exit/current-WRH repair, then ports its independently
+proved persisted-carrier revision fix. Do not restore the reverted native-role
+series or require full-Y 2t completion to serve current v6 ENS evidence. Preserve
+all other upstream preflight/recovery/observation/CI changes. Revalidate source
+correction/EMPTY, identity transport, positive-q lawful exit and command/fill
+fences against the restored regime. Add a decisive partial/absent-native control
+for the existing serving shape; do not weaken general source or action guards.
+
+Parent review of scope and test results is required before any materially
+changed remote payload. Only offline compatibility edits/tests are active here;
+no branch update, merge, deploy, restart or production data action is authorized.
+
+### Bounded compatibility integration and CI disposition
+
+The retained `ecmwf_open_data` collector and GRIB readers still import official
+`ecmwf-opendata` and `eccodes`; their explicit pinned dependencies remain needed
+by current source-custody tests despite the native-role rollback. Adding their
+existing tested wheels restores reproducible imports, not a full-Y admission
+requirement. The latest base88e0 changes only two preflight-test skip lines; those
+upstream lines are preserved and do not change this repair’s runtime proof.
+
+Candidate `c7f092f245b71fb2465a66a6beada30eabce5972` combines the
+restored-regime optional-carrier fix, composite station-adapter registry and
+strengthened original acceptance. The seven unowned native-model files remain
+byte-identical to `6f9bca665`. Original acceptance passed 51 tests; the strengthened
+slice passed 55, including real v6 READY/public ENTRY and HELD/SELL with native
+2t absent or PARTIAL, and refusal when required v6 ENS evidence is missing.
+Carrier replay reproduced 17 failures and 6 passes before its patch, then all
+23 passed, with 42 existing controls. These are isolated synthetic fixtures.
+WRH's composed acceptance retains a controlled fusion seam, now explicitly
+named; the HKO absent/PARTIAL controls use the real fusion/materialization path.
+Independent combined review and required CI comparison remain in progress.
+
+The published draft's checks ran synthetic merge `aca9d8f` of `d973d221e`
+into `6f9bca665`, not the standalone approved tree. All 12 workflows reached a
+terminal state: eight successful, one draft-only skip, three failed. The source
+rationale gate's four `station_temperature` findings are fixed by registering
+its existing composite adapter; no runtime provider admission is granted, and
+unknown-provider rejection remains tested. Two selected relationship failures
+and the release/integration failures require matched-baseline classification;
+they are not declared historical merely because they are outside the new tests.
+
+The two exchange-reconciliation failures are independently reproduced on
+untouched6f9. Earlier295d8e458 removed unsafe absence-based administrative close;
+9eeae6855 added later definite-chain debt drainage. The one-file test repair
+now proves four retry-state/proof-loss combinations preserve canonical rows,
+events, economics and order ownership with idempotent review debt. Full exchange
+suite237 and focused12 pass; runtime handle_exit_pending_missing is unchanged.
+
+Paired full release selection on c7f and untouched6f9 completed with
+76 failed/2670 passed versus51 failed/2695 passed:50 shared,26 candidate-only,
+and one baseline-only SQLite deadline timing failure. The two-file fixture
+repair uses the actual current-product writer and retained body for London,
+canonical forecast ownership for Chicago with a foreign-owner negative, and
+complete empty schema/current-product facts for two Day0 kernel tests. All26
+differential failures plus13 strict source/custody/ownership controls pass39.
+No runtime guard changed. The AMBER test consumes a canonical-fact-built event;
+it does not certify scheduled trigger execution. The full final release
+selection completed with2697 passed and51 failed. The51 failed node IDs exactly
+match untouched6f9; no candidate-only failure remains. This is matched baseline
+classification, not a globally green gate or a diagnosis of all baseline failures.
+
+Three free-cash tests fail identically before and after this repair on6f9 due
+to stale fixture coordinate/source provenance; an incomplete fixture patch was
+reverted. They remain explicit baseline CI debt, not a claimed passed gate.
+Core runs pass791 with11 skips and one Wellington source-selection assertion
+also reproduced on untouched6f9; combined focused checks pass98, required data
+checks pass386, and the16 selected relationship suites pass2168. Counts overlap
+and must not be added as distinct coverage. Independent bounded checks pass41
+on ca14 and39 on f009; the final two-file fixture review reports no Critical or
+Important finding in its named slice. No live readiness follows. A combined
+final core run passes889 with11 skips and the same single Wellington baseline
+failure. Recovery after an execution-host change lost temporary logs; final
+core/data/release and independent evidence were saved durably. The earlier
+2168-pass selected relationship run remains a completed recorded result; its
+temporary XML was lost, so no missing XML is represented as preserved evidence.
+
+The registry harmonizes its existing per-file adapter rationale with the
+provider-key detector under FC-07 and INV-06/INV-14. Touched authority surfaces
+are source_rationale and test_topology; existing provider roles, detector and
+runtime source eligibility are unchanged. The integrator independently read
+the final two-file registry diff before acceptance.
+
+## 2026-10-06 cloud-only physical-evidence exit repair
+
+Operator-authorized implementation is isolated source and synthetic-fixture work,
+initially based on remote live `6fa8f663dcbe2e3337cdcc12d18892b411c09c2a`,
+then reconciled onto `620a0b5f50e9d0dc12563611b08a6b84f3da29dc`. No production
+database, credentials, settings, venue connection, daemon, deployment, remote
+publication or accounting repair is authorized by this slice. The existing
+inclusive [0.05, 0.95] execution band is unchanged. The objective is the earliest
+causally justified exit while lawful executable depth remains, including positive-q
+statistical exits under the current global action law; it is not a price stop-loss
+or a promise that a profitable exit window always exists.
+
+Execution owner: exit_lifecycle.py, executor.py, cycle_runtime.py and paired tests.
+Reproduce the exact-payoff branchwise path losing its immediate order intent;
+carry distinct verified authority through marketable FAK and legal lot handling,
+without granting numerical/statistical zero hard-fact authority. Reevaluate a
+liquidity-wait position when a new exact-token executable book arrives only after
+live/unknown command and cancel/fill fences clear. Reuse canonical terminal-partial
+reduction and reauthorize only the proved residual, never infer fills from ACK.
+
+Upstream owner: main.py, ingest_main.py, physical_current_delivery.py,
+replacement_forecast_current_target_plan.py, day0_hard_fact_exit.py,
+station_temperature_adapters.py, monitor_refresh.py and paired tests as required.
+Preserve product/view/station/unit/date/body/receipt/correction identity. Raw
+print maxima are not absorbing authority when complete snapshot membership or
+deletion/retraction evidence is missing. Prefer an existing canonical product
+writer over a parallel authority. Independently repair revision delivery and
+effective availability, including late older-clock corrections and decisive
+retractions. Any bounded publication marker is derived transport bookkeeping,
+not source or decision-completion truth, and advances only after durable publish.
+
+Independent acceptance owner adds real-selector early-exit/churn relationship
+tests, with no production source edits. The integrator owns this plan and changed
+source/test/artifact registries. Parallel children use separate cloud worktrees.
+
+SCOPE: one exact held condition and qualified evidence/quote/command identities.
+DRAIN: existing post-commit family wake and held-monitor/redecision machinery.
+RESET: genuinely new admissible evidence/book and reconciled command state, not
+elapsed time alone, renewed source clocks or a fabricated probability certificate.
+Preserve INV-01/02/05/06/21/28/37/47 and current ENTRY/HELD probability parity.
+
+Acceptance uses clean-environment pytest, temporary synthetic databases, fake
+venue responses and a non-loopback-network guard. Baseline and candidate run the
+same focused suites; pre-existing failures remain separately enumerated. Required
+cases include YES/NO and high/low twins, exact-proof .10/.12/.01 FAK, numeric-zero
+rejection, bid loss at JIT followed by return inside the prior 120-second wait,
+terminal partial/late-fill/duplicate-ACK/unknown-order fences, and positive-q
+physical deterioration whose real global selector chooses taker SELL before the
+above-floor book window closes. HOLD/other-winner and stale reentry controls are
+mandatory. Final diff receives independent review; no merge/deploy readiness is
+inferred from fixture passes. Rollback is a code revert, never deletion of facts.
+
+### First-slice work record (2026-10-06, offline only)
+
+Branch: `fix/physical-exit-current-20261006`. Task: preserve strict exact-proof
+marketability, release proven restored-liquidity redecision debt, and deliver
+causal physical revision hints. Changed files are the seven execution/delivery
+source owners above and paired tests; source_rationale/test_topology describe
+the same existing owners, without changing invariant law or source eligibility.
+
+The original six-commit candidate `71ce90aad69c41a54518b28888f3032b309a62a1`
+passed all 479 execution/independent acceptance cases in one frozen run.
+Independent review of byte-identical contents established no remaining
+Critical/Important defect in its seven changed production files. Separate
+acceptance+delivery run: 55 passed and seven explicitly excluded pre-existing
+13-field fixtures against the current 14-field posterior contract. Those two
+fixture definitions are now repaired without changing their assertions;
+all 22 delivery cases then pass. The original execution baseline had 14 missing
+Mac public-funder-resolver fixture failures; unchanged production source plus
+the same synthetic public-identity fixture passed all 390 baseline cases.
+Production signing/venue integration remains unverified.
+
+Peer drift through `620a0b5f5` is preserved, including source-clock residual
+budgeting, HKO witness forwarding and global-model city routing. The only shared
+production file is ingest_main; physical-tick changes and peer anchor-drain
+changes apply in distinct sections. Current-base reruns are recorded at the
+final candidate, not inferred from the earlier baseline.
+
+Further adversarial review found an Important delivery liveness defect in the
+first frozen slice: a 50,000-revision current-day scope repeatedly exhausts its
+50 ms read budget without progress; 20,000 can do so under CPU contention.
+The original no-remaining-findings review is superseded for that issue. Publication
+is blocked until bounded continuation/restart/no-new-data progress passes.
+The source-only correction race is now independently reproduced as well: a real
+canonical correction committed after MONITOR but before SDK invalidates the
+current exact-family proof without a new MONITOR event, yet the frozen executor
+still sends FAK. Publication is also blocked on source-currentness proof at the
+pre-SDK boundary. Residual second-order dispatch remains an explicit acceptance
+question, not inferred from a partial reduction or a superseding-monitor test.
+
+Current-base verification before that continuation repair: exit safety 439 and
+complete delivery 22 pass together; independent acceptance 40 and source-city
+routing 14 pass. Full neighboring Day0 bridge: 229 pass / 16 failures on both the untouched `620a0b5f5` base and
+candidate, with no new failure names or normalized assertions/traces. Full live safety: 537 pass / 67 failures
+on both baseline and candidate, with identical failure names and normalized
+assertions/traces (only checkout/temp paths, runtime object addresses and shifted
+traceback line numbers normalized). These suites are not green; no claim that
+all baseline failures are environment-only. Scoped freshness/map/planning checks
+pass; whole-repository source/test topology is non-green on both baselines.
+
+Next: independently review complete WRH current-product ownership and all
+current-q correction consumers before integrating that separate slice. The first
+slice has no dependency on it or a schema migration and does not claim that
+WRH empty/retraction completeness is solved. Immediate physical-wake coverage
+of venue-confirmed exposure awaiting chain projection is also unproved because
+the reused fast-path held filter requires chain shares/cost basis. Shared-ledger
+churn replay starts from an admitted BUY remainder and confirms a partial exit;
+original BUY admission, full liquidation and genuine corrected-source reentry
+are not represented as end-to-end proven. No runtime or capital-readiness claim.
+
+### Corrected first-slice freeze (2026-10-06)
+
+Both adversarial blockers above are repaired in the corrected first slice.
+Source-currentness commit `365fa9ca4` reproduces the qualified current source at
+pre-SDK; the identical real-source matrix is 14 failed / 6 passed before repair
+and 20 passed after. Full execution suite is 469 passed. The adaptive delivery
+repair `bd90d007c` passes 15 independent frozen controls, including first-turn
+dense/sparse hints, retained progress, long accepted clocks, failed-direct replay
+and lower-rowid future receipts becoming causal. Under CPU/GIL stress whole
+calls took about 1.3–1.6 seconds; there is no hard 50 ms wall-time guarantee or
+claim of complete stressed-backlog drainage.
+
+On current-base source target `2db52c88c`, all 42 independent source-bound
+acceptance cases pass, including actual +10-second monitoring recovery and
+YES/NO first-confirmed-partial, chain reconciliation, fresh residual order,
+canonical closure and late duplicate-fill idempotency before a synthetic
+30-second above-floor window closes. The full core run gives 630 passed,
+one Wellington legacy margin assertion failure and 11 skips. Untouched
+`620a0b5f5` hard-fact baseline has that same 24-versus-26 failure and 11 skips.
+Broad live-safety, bridge, target-plan and topology debt remains separately
+reported; no whole-repository green or production readiness claim.
+
+The remote live head was rechecked as `620a0b5f5` at 16:31 UTC. Registry/doc
+changes after the source target do not alter runtime logic. No merge, push,
+PR, deployment or live action is authorized by this record. The separately
+owned complete-current-WRH writer, acquisition scheduling, current-q membership
+identity and missing-event monitor work remains under independent review and
+is not a dependency or claimed completion of this first slice.
+
+### Complete-current-WRH integration (2026-10-06, offline candidate)
+
+This additive slice starts at corrected first-slice `2b49ac184` and preserves the
+same remote base `620a0b5f5`, rechecked at 17:53 UTC. It has no schema migration.
+It does change the canonical WRH writer/reader and adds a dedicated acquisition
+job; these are separate deployment/compatibility considerations from the
+standalone first slice. No deployment or remote publication has occurred.
+
+Qualified complete current WRH products retain native body, station-batch,
+product/view, unit, local-day coverage and request/receipt provenance. They can
+replace and journal full membership, including downward corrections and EMPTY.
+Intraday/EMPTY remains UNVERIFIED for settlement; only reproduced nonempty
+complete-day evidence is settlement-ready. Generic disputed/backfill writes do
+not gain current-owner authority. Source preparation and body I/O occur before
+the short canonical FORECAST+WORLD write lease, and the commit compares the
+prepared row image. Unknown/unreadable claimed ownership does not revive an old
+max, old event, stale current fact or an obsolete WU absence permission.
+
+Dedicated WRH scheduling is isolated from other providers. Current exposure has
+priority; bounded aged completion recovery advances fairly even when one oldest
+scope fails, and completed EMPTY remains eligible for late nonempty publication
+when exposure has closed. Native objects, store and in-memory cache are bounded.
+Current/finality semantic identity and first source possession clocks do not
+renew on a metadata-only confirmation. Immutable referenced custody is not
+ordinary disposable scratch.
+
+The current-state delivery identity includes the qualified complete membership,
+even when the newest point is unchanged or a different qualified feed supplies
+the current point. An admitted WRH source can supply an in-memory provisional
+family carrier when no stored DAY0 event exists. Corrected lower extrema replace
+obsolete event overlays; genuine BLOCKED carriers, EMPTY and unknown current
+owner remain non-authorizing. No synthetic monotone WORLD event is persisted.
+
+Runtime/test target `af5240d33` contains owner `155c388aa`/`804755e78`/`d49c4457c`,
+monitor `32f09c69b`, membership identity `ad6bf200c` and test-only
+`d0e91cee3`/`a13682309`. Its combined eight-suite run has 830 passed, one unchanged
+Wellington 24-versus-26 baseline failure and 11 skips. The ten required data suites separately pass 332 tests on both untouched `620a0b5f5`
+and the integrated candidate. These are synthetic cloud fixtures with network
+denied, not production state or venue evidence. Independent
+owner review before the final quota probe passed 141 product/recovery checks and
+15 selected scheduling/parser/cache checks. Broader owner comparison retains
+53 failed test names on both the earlier baseline and candidate (389 versus 430
+passed); this is not a claim that all failure details or causes are identical.
+
+Nine new native-WRH relationship tests use actual writer, current reader,
+materializer, held q, global selector and submit-time probability reproof. A held
+HIGH/NO 30-degree bin changes q from 0.0890358 to 0.0360761 while the newest point
+stays fixed. At the same 0.07 bid the lawful action changes HOLD to taker SELL.
+Actual JIT/lifecycle/executor receives a synthetic CONFIRMED two-share FAK fill
+at +61 seconds, before the finite +120-second above-floor window ends, leaving
+three shares. A stale selected SELL cannot submit again. Downward/deletion,
+irrelevant member, metadata NOOP, EMPTY, competing BUY and below-floor controls
+are included. No new probability threshold or price stop-loss is introduced.
+
+Canonical fee is separately proved as 6,510 micros. Existing lifecycle projection
+records gross -0.10; separately calculated fee-net realized PnL is -0.10651.
+Accounting code is unchanged. The test explicitly composes queue/materializer
+and batch-to-executor scheduling boundaries; it does not prove daemon latency,
+a native-WRH stale BUY/rest cancellation, a second residual order or LOW/YES
+positive-q execution. Earlier first-slice residual/reentry evidence retains its
+own scope. Deployed source availability/book/fill replay remains absent.
+
+The additional custody probe found a real operational stall: byte-distinct
+semantic NOOP confirmations filled a reduced three-object store despite no
+semantic revision, blocking even a later real correction. Repair `0425bc79d`
+(integrated as `e0e3430a6`) validates incoming native bytes before a strictly typed
+transport-order receipt, while retaining the first semantic body and clocks.
+Eleven NOOPs/restarts now consume one body; a genuine correction then commits
+with two. Malformed controls, legacy full confirmations, missing main-body
+recovery and late changed responses retain their fences. No native body is
+deleted, cap raised or semantic proof replaced by an administrative receipt.
+An already-full legacy directory or a store full of real retained semantic
+history remains an explicit capacity condition requiring authorized archival;
+there is no automatic custody sweep or infinite-retention promise.
+
+Final integrated runtime/test target `e0e3430a689b9fe9e76df2d897ba486142779e19`
+passes 841 core/relationship tests, with the same Wellington baseline failure
+and 11 skips. The ten data suites pass 332 again. Independent final WRH/control
+and membership-identity review passes 154 checks: all 145 product tests, five
+membership identity tests and four complementary custody/control probes. The
+review confirms that control-only confirmations change neither first source
+clocks, current-state identity, hard-fact evidence, finality nor wake identity;
+missing main custody still blocks authority. The earlier full owner/scheduler
+review and first-slice execution review retain their separately stated scope.
+
+The remote live head was rechecked unchanged at `620a0b5f5` at 18:11 UTC. Scoped
+freshness, map maintenance and planning checks pass. Source topology has 455
+existing issues and test topology has 540 (baseline 541); artifact topology has
+four identical absent-base-tree liminal paths. No new issue keys were introduced,
+and new importer companions are registered. Whole-repository debt is not repaired
+or relabelled as green. Later documentation-only freeze does not change runtime.
+This intermediate freeze is superseded by the final named-refusal guard below.
+
+### Final integrated freeze after known-refusal retention guard
+
+A final same-quota check reproduced custody accumulation before the writer
+returned `existing_disputed` for a real typed QUARANTINED row. Five preparation
+lines in `6fda26b67` return the same exact-row-CAS-bound noncommitting disposition
+before old-body retention/recovery I/O. Five refused incoming products now leave
+body count, canonical row and journal unchanged; a changed row after preparation
+still fails CAS and must be prepared anew. Current captured schema does not admit
+DISPUTED, so that defensive legacy spelling is source-reviewed, not claimed as a
+runtime fixture test. This is the last named retention follow-up, not a broad
+cleanup or garbage-collection change.
+
+Final runtime/test target `73cc249d674d7072a207c8f89cf76bd959657c36` passes 842
+combined core/relationship tests, with one identical pre-existing Wellington
+failure and 11 skips. All ten required data suites pass 332 again. Independent
+final owner/identity/control review passes 156: 146 complete-product, five
+membership-identity and five complementary probes. The earlier NOOP and later
+quarantine quota counterexamples both have retained RED logs and passing final
+antibodies. No remaining Critical/Important finding is open in that bounded
+review; the broader limitations and baseline suite debt above remain.
+
+The full slice introduces persisted WRH provenance/control formats and native
+body storage despite no SQL schema migration. Treat writer, readers and scheduler
+as one coordinated version. Mixed old/new operation and code rollback after new
+format writes have not been validated. Never remove immutable bodies or journal
+facts to roll back code; revalidate fail-closed reader behavior. The independently
+usable first slice does not introduce these WRH owner-format dependencies.
+
+This is an offline tested patch for review. No push, PR, merge, production load,
+trade or funding-readiness claim follows from this freeze.
+
 ## 2026-10-02 immutable Day0 serving-window parity
 
 Verified source-to-q-consumer defect: the materializer passes the request's
@@ -21662,3 +22132,1544 @@ This is the fourth forecast-live load of this series that blocked serving.
 The re-land path is the producer/consumer split recorded above. Native capture
 must reach COMPLETE under v6 serving first. No forecast-live load may move
 the replay gate after the reload.
+
+## 2026-10-07 physical-exit compatibility freeze through b452210d5
+
+This bounded repair preserves the upstream runtime rollback and source law.
+Source/test freeze is `2c111e4ee6b41e2166b5408f5e1f057d8854cafb`, based on
+`b452210d52749042908bfa3944b03ec822c5bd6c`. The subsequent evidence commit
+changes this record and the scheduler test's audit-date comments only.
+The price band remains inclusive 0.05–0.95. No live state was inspected here.
+
+Two independently reviewed adaptations are integrated. Current-full and
+completed-owner WRH requests use the same request budget as the fast batch.
+Cold token acquisition precedes slot reservation in all three closures;
+snapshot request clocks follow the slot. The first fix failed a concurrent
+cold-token challenge, with simultaneous actual requests despite separated
+reservations. Its correction separates actual HTTP starts and preserves typed
+403/429/cache behavior and acquisition outside database write leases.
+
+Final-daily evidence applies the existing source-publication classifier at
+the shared reader. UNKNOWN HKO decimal publication cannot mint exact held q
+or survive current-source SELL reproof. Real-path offline YES/NO gateway
+counterexamples reached one fake FAK SELL at 0.10 before this gate and zero
+commands/SDK calls afterward. Qualified WRH HIGH/LOW and YES/NO controls remain
+valid; correction, unreadable source and body-revision guards remain active.
+A separately qualified Gamma integer does not qualify the HKO decimal.
+The separate HKO dual-table persistence race is not changed by this slice.
+
+Validation is versioned, overlapping evidence, not additive pass totals:
+
+- Integrated `b0e801ad1`: 2,170 selected relationship tests passed; 391 required
+  data tests passed. Core acceptance: 904 passed, 2 failed, 11 skipped. Both
+  Wellington and Houston failure IDs/messages reproduce on untouched 900b
+  and untouched b452. They remain unresolved baseline failures.
+- HKO changed-suite comparison: 1,792 passed, 44 failed, 11 skipped versus
+  preservation base 6b37's 1,777 passed, the same 44 failed, 11 skipped. All
+  failed IDs/messages match exactly. Independent HKO review adds 16 chain,
+  44 focused and 76 source/Gamma checks; the merged-tip composition has 38
+  passes. These selections overlap.
+- Independent corrected WRH-budget review: 12 challenge and 391 required
+  data passes; 360 broader passes, one matching Houston failure, and two
+  explicit missing-netCDF4 skips. No dependency installation was retried.
+- Upstream b452's 12-line anchor-drain change is retained with its harness
+  and two tests. The sole EOF append conflict preserves our dedicated WRH
+  job test as well. Independent byte/AST preservation review passed.
+  Affected scheduler/current-delivery/physical-q suites on 2c111e4: 139
+  passed, seven scheduler failures. Untouched b452 reproduces all seven;
+  six messages match exactly and one differs only in unordered set display.
+- Schema, semantic registration, test quality, invariant coverage, source
+  rationale, planning, map and freshness checks pass on the integrated repair.
+
+All runs use isolated synthetic state, example settings and blocked external
+Python networking. An initial invariant-check invocation error and a test
+collection attempt before resolving the EOF conflict are retained separately;
+neither is a successful product test. Full release selection has not been
+rerun for this freeze. Automatic deployed scheduling, live fills, source
+availability and genuine corrected-source reentry remain unverified.
+
+The previous base-pinned e031 tree was published as draft PR #535 head
+0bdb9e2fe5d05830716c605cadfbb5ac05938571. Its sole push topology advisory
+passed; nonmergeable PR checks did not run. This new compatible source tree
+still requires exact remote publication and hosted check results. No merge,
+deployment, restart, production database operation or trade is authorized by
+this evidence record, and no loss-elimination or funding guarantee is made.
+
+
+## 2026-10-08 scheduled physical-exit replay: admitted bounded slice
+
+Published baseline: PR535 head f5181ebe18ea87c1b8c009ca56aa1bc2141675f9,
+tree52ebdab62e69e7f4e38d50e61fd4b7ea2bb629c9. This new offline slice starts
+from actual CI merge3fbfa0f6c878dd5dcb3d29fa49c435c561317d4a, preserving
+current livee552a588 source. It does not authorize deployment or live actions.
+
+Acceptance requires real registered scheduler dispatch, qualified native
+WRH/forecast inputs, canonical ownership and durable wake/queue delivery,
+normal materialization and held selection, command persistence, fake venue
+ingestion, and canonical confirmed-fill reconciliation. No direct posterior,
+authoritative receipt, decision or fill-projection injection may bypass these
+handoffs. The deterministic scheduler/event clock and synthetic executable
+book window are assumptions, not measured wall-clock or production latency.
+The inclusive existing [0.05,0.95] action band remains unchanged. Cases cover
+exact-dead YES/NO and positive-q deterioration, restored liquidity, partial
+residual redecision, corrected/unreadable source refusal, restart/duplicate
+events/late fills and stale-evidence reentry refusal.
+
+First genuine scheduled RED, frozen as test-only0b67e6414b2f6b035bbd4ed6a59afe4b1214a07d:
+registered WRH acquisition receives a qualified native product but commits
+zero because the outer world_write_mutex already owns the WORLD live flock
+that get_forecasts_connection_with_world(write_class=live,blocking=False)
+acquires through another descriptor. Real canonical writer controls succeed
+immediately before and after the job. Independent Linux reproduction has
+two assertion failures and no teardown errors. Earlier tests substituted
+mutex/DB context and did not cover this production handoff. No production
+incident or platform-wide occurrence is inferred from this cloud evidence.
+
+Authorized minimal runtime scope: only _day0_current_noaa_wrh_tick drops its
+redundant outer WORLD acquisition and relies on the existing canonical,
+nonblocking FORECASTS-to-WORLD writer owner. Do not change the global lock
+implementation or make protection permissive. Require real cross-thread
+exclusion, contention deferral, rollback/no-wake, prepared-CAS correction
+races, and no provider/body I/O under either writer lease. Wake publication
+remains after commit and lease release. Independently review the frozen fix,
+then continue downstream scheduled replay to expose later genuine gaps.
+
+Separately review test-only repairs for deterministic public fake funder
+resolution and owned HKO source clocks. Preserve missing-identity and same-
+certificate expiry negatives, native causal clocks, source/receipt/gateway
+checks and canonical fill-before-reduction assertions. Do not silence other
+red tests or change source/SELL law to make fixtures pass. The inherited
+deadline-label race has equal transient retry/backoff for both outcomes and
+is lower priority than restoring the blocked producer-to-fill proof.
+
+
+Scheduled replay second boundary (2026-10-08): normal cold startup can lazily
+discover canonical overdue debt after targeted claim admission. Already
+admitted same-family debt was treated as newly outside scope and preempted
+that first pass. Targeted run_exit_monitor_cycle then returned True without
+MONITOR_REFRESHED, suppressing immediate same-wake retry. Normal periodic
+fallback produces a refresh at+5 simulated seconds; a predeclared synthetic
+bid0.10 until+4s then0.04 demonstrates the avoidable refresh-window miss for
+YES and NO. This is an inherited cold-start latency/completion defect, not
+permanent debt loss or yet proof of a lost live fill.
+
+Authorized narrow runtime scope: main recognizes target families already
+admitted to the claim when classifying unabsorbed debt; genuinely new other
+families still preempt. exit_lifecycle applies its existing canonical and
+discharged-ID completion predicate to the filtered targeted portfolio. A
+preempted/incomplete pass returns typed COVERAGE_INCOMPLETE and preserves the
+durable wake through existing one-turn fairness; no retry spin, global debt
+waiver or risk/source/price-band relaxation. Durable DATA_DEGRADED/no-action
+verdicts, empty/discharged targets and existing artifact-defer behavior retain
+their contracts. Cold/restart and duplicate coverage remains explicit.
+
+Author freeze: main914b10c9cd5bd28ed279b35c6efa6e0afe2300eb, completion
+7e94b15e7c3f7b50d4dbb5e89f0533c372de678a. Independent review completed the named runtime changes with 41 passing
+post-repair checks, preserved genuine cold YES/NO RED, and no remaining
+Critical or Important finding in that scope. The integrated scheduled suite
+passes 23 tests. Memory-reset replay is not an OS-process restart, and the
+review corrected a fixture-only mixed wall/simulated lifecycle clock before
+accepting repeated-cycle evidence.
+The source-to-real-producer posterior milestone is distinct from the still
+incomplete fixed-book before/after decision and normal fill-confirmation
+handoff. Simulated deadlines and book windows are not wall-clock SLAs.
+
+
+Scheduled replay third boundary (2026-10-08): the exact-zero refresh deletes
+its old monitor probability receipt but does not bind the typed hard-fact
+verdict already obtained by its caller. The existing protective semantic
+gate then rejects PROTECTIVE_AUTHORITY_ERROR before any command or SDK call.
+The test-only RED is 837a53ac06bd39c9450ac3ea110523b900954277, with genuine
+scheduled YES/NO failures. Static comparison to untouched e552 confirms the
+refresh, both callers, exit context and receipt-required gate already have
+this mismatch; the candidate's added current-source reproof is later and
+cannot cause the earlier missing-receipt rejection. Native scheduled RED
+was executed on the candidate, not attributed to a live holding.
+
+Authorized bounded repair propagates the existing typed hard-fact verdict
+through both normal and q-only refresh callers and constructs the existing
+monitor receipt with its native evidence and snapshot identity. It creates
+no new authority or numeric-zero shortcut. Reject incomplete, wrong-family,
+wrong-side, unknown-source, future/stale or tiny-positive evidence, and prove
+that source correction, retraction or unreadability after refresh still
+blocks the real final semantic recheck. Continue the ordinary readiness,
+command, venue-ingest and canonical confirmed-fill chain after this repair;
+a persisted receipt or a later readiness refusal is not fill acceptance.
+
+Receipt source freeze ffaa7ec38dd4e633dc4ff354e906b52088545807 and paired
+test freeze 5ff3af2e0baf91788dccf1c9c4d235e19da9231e passed the integrated
+47-test scheduled suite. Independent bounded review passed 63 checks across
+native YES/NO, HIGH/LOW, exact loss/win, q-only/full overlay parity, malformed
+or scalar evidence, final source changes and wrong identity controls. No
+Critical or Important finding remains in this receipt slice. A shape-valid
+but wrong-date/source-identity diagnostic receipt still fails current-source
+semantic reproof; the constructor does not replace that final authority gate.
+The ordinary exact replay advances to its explicit offline readiness block,
+not yet a confirmed fill. No deployment readiness is claimed.
+
+Scheduled replay fourth boundary (2026-10-08): a normally captured full book
+at 0.49 one second before source arrival remains valid for the native
+180-second selection lifetime. The qualified exact-dead held lane reuses it
+while an external 0.10 bid remains executable for a declared 30-second window.
+Its FAK receives a deterministic no-match. The +5-second registered monitor
+retains that snapshot and the rejected command identity instead of capturing
+0.10. Supplying a genuinely new normal 0.10 snapshot at +1 allows the same
++5 monitor to submit. This is a cache/retry failure in the bounded held lane,
+not a newer-row precedence defect or proof that every independent market
+refresh lane fails. Broader generic reactor consumption is outside that probe.
+
+The authorized repair requires fresh executable capture for qualified
+immediate protective execution, preserving exact global handoff authority,
+source reproof, request admission, inclusive price band and idempotency. Do
+not clear rejected command IDs, make a market fall an exit reason, or disable
+all snapshot caching. Capture and external I/O stay outside canonical write
+leases. Unavailable depth, expiry, correction, duplicate wake, and concurrently
+committed snapshot behavior need explicit negative/positive controls. Source
+ownership for this bounded change is exit_lifecycle and focused exit tests.
+
+Scheduled replay fifth boundary (2026-10-08): normal REST polling persists a
+CONFIRMED partial SELL trade while its command remains ACKED. Frozen-source
+recovery selectors exclude that state despite positive confirmed quantity;
+full recovery priming does include the exact order, so absent point collection
+is not the established cause. The native WebSocket first-delivery path emits
+PARTIAL_FILL_OBSERVED, but the same trade arriving through WebSocket after REST
+returns as a duplicate before that transition. A later independent chain
+mirror changes holdings 5 to 3; this is not by itself canonical economic-fill
+journaling or residual redecision proof. The selector probe reads only the
+identified synthetic test DB, whose bytes remain unchanged.
+
+Repair only the inconsistent derived command transition under existing
+canonical native fill authority. Preserve duplicate/crash/restart safety,
+confirmed quantity conservation and terminal-order proof; do not infer fills
+or cash from ACK, relax unknown-side-effect gates, or edit accounting truth.
+The real user-channel handler and registered polling/recovery owners remain
+separate acceptance paths. Preserve original polling offsets and budgets;
+normal external input may be delivered through its registered native handler.
+
+The source-to-first signed submission milestone is distinct from full exit:
+registered YES and cold NO actuation pass, while a matched ACK leaves all five
+canonical shares unchanged. Polling first ingests confirmed two at simulated
++90 seconds and chain mirror updates at +120. The original +4-second residual
+window remains unproved. Later restored-depth windows are separate recovery
+controls, not retrospective proof that the earlier exit window was met.
+Wall execution time is recorded independently because synchronous callbacks
+can run while the deterministic scheduler clock stays fixed.
+
+Full statistical actuation additionally needs genuine initial ENTRY policy,
+certificate and filled-command lineage. The bare synthetic holding is not an
+authoritative substitute. Build a normal offline BUY/fake-confirmed-fill
+prelude from coherent current source inputs, then demonstrate prior HOLD to
+positive-q SELL through actual global actuation using the predeclared book and
+unchanged action law. No manually injected authority receipt or entry lineage
+may make the final scheduled proof appear complete.
+
+Polling follow-up freeze bc2aef617762e1bc0d42a0d57801e3b4e8ea5dd0 passed
+independent review: 77 focused/scheduled checks and a separate actual native
+WS/REST interleaving. Initial 44ee allowed two partial command events during
+one duplicate-delivery race, without a second trade fact, cash or holding
+mutation; an atomic proof-and-append savepoint fixes that exact race. The
+missing economic journal was separately traced to a constant fixture clock:
+intent and command had equal time, violating the unchanged causal binder.
+Advancing the event clock by one microsecond at submit yields the normal
+confirmed two-share journal, basis 0.24 and PnL -0.04. No economics runtime
+change was made. The first attempted copied DB labels were unreliable and
+must not be used; subsequent backups follow each case's explicit XML path.
+
+The fresh-capture freeze c6638bff1e87bbacad4835e2f973babbdf0cb003 passed
+523 exit-safety tests versus 471 on untouched source, and independent native
+scheduled controls. A subsequent persistent-empty negative exposes a separate
+quote-origin gap: a prefetched old selection quote is stamped with the monitor
+run time and falsely releases liquidity debt before capture again sees empty
+depth. No order is created, but debt/capture churn is not genuine recovery.
+The bounded correction preserves per-token quote capture time through the
+existing prefetch and monitor receipt, excludes pre-absence cache only for
+liquidity waits, and uses the existing bounded current-quote read. Recovery
+must use quote time, not monitor event time; missing/future/mismatched proof
+cannot grant recovery. The 120-second fallback and command fences remain.
+Owned runtime surfaces extend to cycle_runtime and monitor_refresh solely for
+that existing quote witness; no new price/source exit law is authorized.
+
+Full-depth hard-fact replay freeze 277c3865b996a2f0d435129254eeb7b6a3bf39a4
+passes the combined 79-case scheduled/partial modules. Cold YES and NO quote
+100 shares with a predeclared five-share match cap. All five match at T+1us,
+inside the synthetic four-second book window; native CONFIRMED arrives at
++1 second and normal canonical closure at +5, with no open position and PnL
+-0.10. Recorded source-to-submit wall times are 0.585s and 0.087s for those
+specific runs, not latency guarantees. Cash receipt authority remains UNKNOWN.
+The partial case explicitly caps its transport match at two despite displayed
+depth100; it establishes confirmed reduction and later restored-depth recovery,
+not a guarantee that displayed depth clears the whole order. Native duplicate
+confirmation and process-memory reset preserve quantity and do not reopen it.
+Independent full-depth review and statistical full-actuation remain separate.
+
+The normal statistical entry prelude first preserves a cash10 no-entry control:
+its one-dollar risk cap is below the current 1.046 minimum all-in BUY cost.
+A separately predeclared cash20 scenario keeps books, fees and law unchanged.
+Its missing ECMWF native raw capture must be supplied by the normal downloader
+from the same native anchor body, not by editing posterior provenance. This
+fixture extension does not validate the older legacy-model free-cash CI setup,
+whose wider current-source migration remains explicitly deferred.
+
+Per-token quote-origin correction is frozen at
+10672600a797c2d6977cd1f736fb63579ab2c20d. Independent review found and closed
+both mixed-result errors before this freeze: collapsing native token clocks
+to a batch minimum, and renewing a cached fallback with a newer network
+clock. Independent final checks pass 24 native/network and 30 focused cases;
+persistent empty through registered +5/+35 monitors retains one forced
+capture and emits no liquidity-release event, while a genuine new +5 quote
+recovers normally. The full exit-safety suite passes 541 cases. Selected
+engine/monitor failures and skips match their exact pre-change baselines and
+are retained as limits, not a global green result.
+
+Integrated source e4d25e0fc0a7c71c71757c2454dca07a5c9dd168 passes all 620
+scheduled/partial/exit-safety checks. Independent 277c full-depth/partial/
+restart review separately passed five cases and inspected canonical facts.
+This establishes the bounded hard-fact closure and recovery slices. It does
+not establish statistical Day0 action-role consistency or deployed behavior.
+
+The initial missing-vector statistical RED is now classified correctly:
+the fixture advanced from 14:58 acquisition to 18:00 beyond the existing
+three-hour bound. Fresh normal inputs restore actual causal bundle/vector
+proof and fresh positive q without any probability source or monitor change.
+The stale case remains a refusal control. A subsequent fixture version uses
+normal deterministic fetch/cache/parser and ENS metadata/body paths over
+explicit repeated external-response bodies; this is an offline availability
+assumption, not an observation of a real provider. Native trade messages omit
+fee_paid_micro, use documented five-decimal modeled fees and match SELL at
+the external bid; canonical fee and on-chain cash proof remain UNKNOWN.
+
+The unchanged full-window statistical replay does submit inside its declared
+window and closes after fixing the same causal microtime seam. Its own exact
+held request delays construction until a successor loses exact qualification;
+that is a measured delay, not proof that the original window was missed.
+The final action consumes changed-source posterior4 but scalar/non-Day0 q
+0.00802038, while current monitor remaining-day q is 0.00346185. The lawful
+final information-set/role selection remains under audit, including the
+ordinary registered catch-up emitter. No reactor or probability-source repair
+is included in this staged candidate for that unresolved question.
+
+Admitted current-WRH probability-role repair (2026-10-08): the full normal
+periodic EDLI catch-up control preserves the split. Its scanner accepts
+observation_prints carriers but intentionally excludes current_wrh_product;
+adding the actual configured cadence emits no Day0 event for this scenario.
+The monitor already constructs a validated read-only current-WRH carrier and
+consumes the remaining-day witness. Auction/JIT preparation sees only persisted
+Day0 events and consumes scalar posterior4 instead. Existing observation-domain
+precedence makes the final current information-set binding the active issue;
+an equality check on two arbitrary q values is not the authority test.
+
+Share the existing current-snapshot carrier constructor with global family
+scope/preparation and final JIT. Preserve PROVISIONAL_CURRENT_SNAPSHOT,
+validated body custody, station/date/unit, snapshot membership, effective
+availability, correction/retraction and invalid-owner semantics. Re-read
+current ownership before cache reuse and at submit; unknown/stale/current-
+source failures stay family-scoped. Never persist an invented monotone event,
+change the durable wake/claim identity, manufacture vector fields or weaken
+source eligibility. ENTRY and HELD consume the same lawful current evidence
+while retaining their independent economic, readiness and risk gates.
+
+Keep the reactor construction experiment out of this repair. Its proposed
+owned-debt exemption failed independent unknown-state controls, and the
+unchanged original window still permits an eventual SELL. The exact measured
+self-delay and successor qualification loss remain diagnostic evidence, not
+an asserted loss or permission to relax construction cancellation.
+
+The statistical replay's post-close reentry work also retains normal process
+readiness: boot fill-bridge and source-health refusal are not stale-specific
+or corrected-source eligibility proofs. Exercise those normal owners or state
+the limitation; do not inject a success/completion flag to obtain a BUY.
+
+Current-WRH role integration is frozen for final verification at the source
+slice f54572b58d, after independent d35 review proved the actual claim,
+receipt, positive-q action and canonical close. The initial shared reader
+overreached historical source-date policy and unrelated typed Day0 carriers;
+its 26 added failures were removed without migrating fixtures. The paired
+355-test suite then matched its 345-pass/10-failure baseline. Final legacy
+Day0 submit-time reproof also rejects a changed current WRH owner before
+selected-q replay. No extra universe scan or reactor exemption is included.
+
+The registered native replay consumes Day0 remaining-day q
+0.003461845154150711 at the actual selected SELL, with matching probability
+and capital receipt identities. Its 12.5-share match at
+18:02:08.000001 precedes the declared 18:02:30 book expiry; confirmation at
+18:02:32 and canonical closure at 18:02:37 follow it. Changed-source
+availability to submit is 62.000001 simulated seconds; one independent run
+measured 16.0484 wall seconds. These are specific offline observations, not
+runtime latency or real-exchange fill guarantees.
+
+Post-close correction recovery required canonical queue directory names in
+the fixture; normal source producers then materialize the returning 26C
+revision. The first eligible unchanged-source auction rejects the exited
+token1003 and selects the different token1001. The single-token synthetic
+transport cannot execute that alternative, and its unknown outcome blocks
+later admission. Consequently neither a whole-window stale-reentry pass nor
+corrected-source BUY eligibility is claimed. The test retains this explicit
+coverage limit instead of changing the action law or external books.
+
+Upstream 843b4589061dc4c5815265732ad4bbe5503e00a0 is preserved by the
+integration. Its post-selection epoch deadline change passes all six supplied
+controls, including stale-epoch refusal and urgent cancellation. It is
+independent of the rejected reactor construction exemption. Final integrated
+checks and independent review remain required before publishing this stage.
+
+Final integrated runtime f8f790db62 passes 643 scheduled/source/partial/exit
+safety/epoch checks and 1963 lifecycle relationships. Independent final
+current-WRH/JIT/ABA review passes 19 cases on that same runtime. All scoped
+source-rationale, test-quality, semantic/invariant, planning, map, freshness
+and DB schema-fingerprint checks pass. The unrelated topology registry schema
+omissions previously recorded are not relabeled as repaired.
+
+The broader boundary acceptance module initially exposed four obsolete
+fixture interfaces: per-token capture clocks and canonical quote persistence
+were missing, hard-fact input lacked its qualified FORECAST-owned evidence,
+and its simulated datetime class rejected ordinary datetime instances. The
+test-only e4aa585356 repair preserves native capture and receipt validation;
+all 46 cases pass, including the original +10s retry and two-order residual
+assertions. These are fixture corrections, not additional runtime repairs.
+
+Same-selected-cut comparison reproduces the complete native Day0 payload,
+500-by-3 samples, full simplex, role, bands and token bindings across monitor
+and final JIT, with exact monitor reload stability. Composite outer witness
+hashes differ between lanes; their full preimage was not captured, and no
+single-field explanation or universal hash-equality claim is made. Actual
+selected JIT and final receipt identities match exactly.
+
+The narrowed reentry diagnostic 3050e4bdab refreshes terminal command facts
+and allows XFAIL only for the exact known alternate-token transport assertion.
+Its actual assertion tail was checked against the immutable
+completed replay. It does not hide another unknown-submit cause or establish
+corrected-source entry eligibility. Full native alternate-token execution,
+real venue cash/fees, deployed scheduler performance and broad repository CI
+remain separate deployment-review evidence gaps. This is a tested offline
+candidate for the existing draft PR, not authority to merge, deploy or fund.
+
+Hosted candidate 84c956b2 exposed one additional cache-compatibility regression:
+the current-source wrapper copied an unchanged cached ineligible receipt.
+The exact existing test passes on untouched upstream843 and fails on bfbe1cd
+at object identity, while preparation still runs only once. Preserve the
+original receipt when the current-source reader leaves the trigger unchanged;
+converted native carriers still restore the durable trigger identity. The
+current-owner read remains before every preparation/cache decision. This
+bounded correction needs the existing cache-invalidation antibody and native
+current-WRH source/JIT controls before another draft-branch update.
+
+## Bounded exact ENTRY to corrected statistical HELD transition
+
+The original multi-token no-churn acceptance continues offline from published
+source9ada873. The public PR/CI snapshot at6ab2d5c remains frozen. Test-only
+05d88d05 removes the synthetic venue's token1003-only restriction while
+preserving all six original books, prices, fees, depth, windows and normal
+source/decision/signature/fill owners. Six original controls pass; the full
+reentry run now fails at a genuine entry-policy handoff, independently
+reproduced. No production database or accounting mutation is part of this work.
+
+Token1001 is bought as a typed exact structural winner (q1,
+SETTLEMENT_LOCKED_BUY), then reaches native CONFIRMED/FILLED and canonical
+attribution. Before correction it receives WIN-HOLD monitoring. A qualified
+current-product retraction invalidates the exact bound; a fresh statistical
+posterior subsequently exists, but held redecision rejects the certificate's
+bare market_anchored_correction={applied:false} as
+HELD_ENTRY_CALIBRATION_BASELINE_BINDING_INVALID. The exact-payoff calibration
+skip itself is lawful. It does not justify fabricating an insufficient-fit
+SourceIdentityBaseline or treating this as a generic Day0 ENTRY failure.
+
+Admitted scope is a minimal explicit exact-entry policy/provenance contract,
+its normal certificate/audit production, and authenticated HELD consumption.
+Establish the existing policy semantics before runtime edits. Preserve
+immutable exact ENTRY evidence and distinguish it from the current statistical
+witness after correction. No policy may be inferred from a scalar q1 or a
+bare applied:false marker; unknown/malformed policy and unavailable/refuted
+current source remain non-authorizing. Existing fitted and insufficient-fit
+policies keep their own meaning. No historical calibration, training support,
+source receipt, readiness flag or canonical fill may be invented.
+
+This slice protects source/certificate identity and causal probability
+authority (INV-12/14), authority-loss behavior (INV-20), lifecycle/confirmed
+facts (INV-01) and single-owner write boundaries (INV-37), with the existing
+inclusive0.05–0.95 price law. It adds no price stop, cooldown, forced winner,
+new probability threshold or settlement/accounting rule. Scope is the exact
+entry holding and its authenticated family/token/side. Drain/reset must use
+normal qualified current evidence and lawful redecision, not an unscoped
+incident bypass. Schema/truth rewrites are outside the proposed scope.
+
+Acceptance requires pre-correction WIN-HOLD; causal refusal while current
+evidence/posterior is unavailable; then fresh statistical q and the normal
+economic decision after qualified correction, including confirmed exit when
+selected. Preserve the original position and command lineage across lawful
+other-token entry and possible corrected reentry. Unknown-policy, mismatched
+identity, stale/refuted source, duplicate/late confirmation and receive-handler
+restart controls must remain meaningful. Report chain-mirror and native cash
+limits separately. Independent review covers the actual transition and its
+policy provenance; it is not permission to weaken the existing held reader.
+
+Semantic reconciliation before implementation: EXACT_PAYOFF_ENTRY_V1 will
+seal the canonical statistical CalibrationPolicySpec/config and original
+metric/execution mode/contract alongside authenticated exact-entry evidence.
+Constructing it reads policy metadata only and must not fit a proved payoff.
+After loss of exact authority, keep the sealed policy/config and ENTRY feature
+semantics while selecting a causal current fit for the qualified current raw
+revision; current raw q is permitted only after genuine current-scope
+insufficient-support proof. Numeric p0 comes from the current book under those
+ENTRY feature semantics, never from SELL proceeds or a frozen old fill price.
+Policy/config mismatch and unavailable/refuted evidence remain blocked.
+Legacy bare applied:false receipts did not seal this contingent policy: they
+remain explicitly EXACT_ENTRY_POLICY_MISSING, with historical fill attribution
+preserved and no database mutation or invented recovery. New-entry transition
+coverage must not be reported as legacy-holding recovery.
+
+### Native order recovery conservation continuation
+
+Composing the production post-trade daemon's existing two-minute chain read
+with the registered replay exposed an inherited recovery path before the
+multi-token correction could finish. The order recovery
+retains native submit making/taking amounts, but neither provider trade IDs nor
+transaction identity; it then creates an anonymous order_fact trade aggregate.
+The unsupported boundary is missing economic identity, not missing amount fields. When the delayed real CONFIRMED
+trade arrives, the economic reader counts both under the same command/order:
+25 shares for one 12.5-share SELL. Independent immutable-database reproduction
+confirms the conservation failure. This is synthetic replay evidence, not a
+claim about production occurrences. Stronger authenticated MATCHED economics
+already have their own supported recovery contract and are not categorically
+forbidden or relabeled as native CONFIRMED settlement.
+
+The admitted continuation is narrow: prevent that unsupported anonymous order
+fallback from minting economic trade/confirmed-command authority, and make
+positively identified already-persisted no-native-ID/transaction recovery
+aggregates remain provisional and non-economic through the consumed readers,
+both before and after genuinely bound native trade facts arrive. Real native
+partial quantities, rather than a guessed aggregate remainder, own economics. Authenticate structured
+producer provenance, command, order, token, side and native economics; neither
+a name prefix nor equal quantity alone establishes an alias. Preserve raw
+append-only facts, distinguish economic projection from native confirmation,
+and leave ambiguous identities non-authorizing. No database rewrite, balance
+adjustment, broad status policy or unrelated reconciliation redesign is in
+scope. This protects INV-01 confirmed lifecycle facts, INV-12/14 identity and
+causality, and INV-37 transaction ownership.
+
+Acceptance includes the exact delayed-confirmation RED, one economic quantity
+per execution, two distinct legitimate partial fills, truthful partial/full
+residual closure, distinct order/token/side and malformed provenance negatives,
+both reader parity, duplicate/concurrent delivery and receive-handler restart.
+The existing authenticated transaction-backed MATCHED recovery stays covered.
+After the narrow owner fix, rerun the full declared-window multi-token replay
+without injecting chain shares, probability, selected action or fill projection.
+Legacy economic-reader normalization is not permission to rewrite historical
+position events or claim every historical projection repaired.
+
+### Expired publication-claim continuation
+
+The native reentry run with the first proxy repair now clears the original
+SELL's native confirmation and exact quantity, and normal chain synchronization
+covers the new alternate holding. Qualified correction produces a fresh
+statistical SELL and its EXIT_INTENT, but no command: a complete publish_claimed
+row is written after its own completion deadline and then fences later fresh
+attempts. Its position/generation is distinct from the original closed holding.
+This preserved replay refusal is not yet proof that expiration alone permits
+releasing a publisher, and no timer-only ownership bypass is admitted.
+
+The bounded continuation covers this holding's publication-claim lifecycle:
+prove the existing request, wake, receipt and command ownership; prevent an
+already-expired attempt from acquiring unsupported ownership; and use exact
+canonical generation/attempt CAS for any safe drain. Preserve active or
+ambiguous publisher fences, live/unknown command exclusion, fresh probability
+and executable book reproof, immutable earlier evidence and normal idempotency.
+Concurrent publishers, delayed acknowledgement, duplicate wake and restart
+must not release another owner's claim or create duplicate commands. Do not
+redesign general leases, relax action law or treat expiry as a fill/closure.
+This extends the same INV-01/12/14/37/47 early-exit liveness scope. The proxy
+identity/clock review and this ownership proof remain separate acceptance
+obligations, followed by the unchanged-window multi-token native replay.
+
+The terminal-receipt drain proposal is withheld: actual V4 publication routes
+can republish after an outside-lease receipt read and canonical CAS. A terminal
+answer does not prove publisher inactivity. Existing active or ambiguous claims
+remain fenced; a bounded same-owner publication protocol requires a separate
+reviewed proposal. No timeout-only drain or historical projection rewrite is
+part of the prevention slice.
+
+The first prevention candidate proves the full fresh multi-token scenario but
+introduces ten genuine recovery regressions relative to the 52-pass baseline.
+Canonical post-only-cross and FAK zero-fill producers intentionally create
+unarmed V4 debt without a request, attempt or completion deadline. Requiring
+that deadline before the normal requester prepares it blocks lawful drainage.
+The admitted correction uses existing prepare_only support: prepare current
+q/book/request outside the writer lease; then recheck canonical debt event,
+generation, attempt, token and command ownership before claiming; after commit,
+publish that exact prepared object. Never rebuild or renew its time authority
+after claiming. Tests must preserve unarmed debt and exercise real preparation,
+not add future deadlines to old debt fixtures. Malformed armed authority,
+expired attempts and ambiguous previous owners remain refused. Restore the
+paired 52 controls and five ambiguous-owner cases, verify paused/concurrent
+publication and delayed acknowledgement, and rerun the full native seven-case
+matrix on the integrated candidate. Fresh-scenario success does not establish
+legacy-claim repair or mixed-version publication safety.
+
+The bounded preparation source is independently accepted at 47d4b1672866:
+69 admission/preparation/identity/concurrency controls and 42 caller-migration
+controls pass. It closes the actual forced-refresh quote transaction through
+its existing owner boundary before queue I/O; claim and acknowledgement retain
+exact canonical identity, and default acknowledgement is atomic and bound to
+the obligation actually published. Cold restart remains explicit: normal family
+preparation is requested while unarmed debt stays unowned, then current canonical
+monitor evidence enables genuine typed preparation. Failed or ambiguous actual
+publication retains its fence; no legacy or in-flight expiry drain is claimed.
+
+The full native composition is green at bcbcac1d5754 (production source47d4,
+byte-identical source/tests in integrated d868870f93): standalone strong case
+1 passed in252.48 wall seconds, the full seven-case module passed in498.58 wall
+seconds, and eight runtime controls passed. The actual two-minute chain reader
+and immediate/thirty-second collateral owner run from their literal registered
+schedules over declared raw synthetic transports. Initial immediate collateral
+capture precedes native confirmation. BUY follows its existing visible asks;
+finite liquidity windows constrain SELL bids. Later confirmations follow actual
+posts at the existing cadence; original delayed first-exit confirmation remains.
+No source, price, depth, allocation, action-law or bid-window input was tuned.
+
+The original holding and alternate holding both reach real synthetic native
+CONFIRMED fills and canonical economic closure; corrected original-token entry
+has a distinct position/command/certificate. Corrected alternate SELL uses fresh
+nonzero q0.025012941714596226 and the same selected-cut source/probability/receipt
+through native submission, with expected EV +0.9249741166. Exact first alternate
+BUY cut is identified by immutable certificate event identity, not a neighboring
+same-candidate cut. Per-run action times are retained separately. The unchanged
+evidence tail reaches18:10 with exact per-token native/canonical inventory and
+no duplicate command/event/POST after repeated or restarted-handler delivery.
+These are synthetic event-clock, transport and inventory facts, not wall-clock
+production latency, real fills or OS-restart proof. Native cash remains UNKNOWN
+and canonical fee remains NULL. Legacy absent policy, unsupported statistical
+multi-certificate cohorts and ambiguous publishers remain explicit limits.
+
+Current upstream reconciliation is separately pinned to e865afcff96e after five
+commits beyond843b4589061d. Preserve upstream independent fixes, strengthen its
+zero-support FAK path with the existing private canonical source proof, retain
+original proof quantity before conservative command quantization, and respect
+the unchanged mode-specific snapshot/envelope/final-SDK size laws. Those laws
+allow legal non-post-only FAK share quantities below the resting-order floor;
+no price-band or actual venue/risk gate is waived. Publication and current-base
+validation follow the reconciled tree, not this predecessor native result.
+
+Final changed-surface semantic classification identified three unregistered
+tokens. Register the two existing prepare/ack refusal diagnostics and the
+existing V2 human-amount serialization contract in money_path_objects.yaml,
+with their actual owners and behavioral tests. This harmonizes descriptive
+registry coverage with the reviewed source, without adding lifecycle states,
+economic authority or a runtime migration (INV-01/12/14/37/47). Re-run semantic
+classification, invariant coverage and test-quality gates; independently review
+the registry delta while the frozen source/test native matrix completes.
+
+Admitted current-page hard-fact compatibility repair (2026-10-08): independent
+native-owner probes on frozen ad8de950 reproduce false exact-zero exits from
+degF grid-clock rows: HIGH 75.92 can revise to 75.2, and LOW 80.06 to 80.6.
+The provisional statistical carrier correctly preserves the raw current page,
+but the shared hard-fact owner had rounded that raw value into an absorbing
+boundary without applying upstream's common-ending bound (INV-06/14/17).
+
+In the existing hard-fact owner only, transform every eligible current-page
+row through noaa_page_absorbing_value_f before reducing HIGH/LOW. Preserve
+native raw extrema, membership, original-body identity and correction clocks;
+record the derived bound and its contributing raw row/value/clock separately.
+Monitor receipts and final submit reproof retain their existing exact evidence
+comparison. A legacy scalar page witness can prove its own weaker directional
+bound without inventing missing membership. complete_day=True stays a separate
+exact-value read with the existing validated post-day acquisition/coverage
+requirements; a conservative directional bound is never a final settlement.
+
+Scope: day0_hard_fact_exit.py, its source-rationale entry, the existing page
+revision tests and registry, and this plan. Add HIGH/LOW YES/NO false-death and
+structural-win twins, real owner/receipt/submit reproof, competing-row/view/date
+reduction, correction and unavailable-owner controls, off-grid/Celsius controls
+and qualified/incomplete final-day tests. Keep the raw statistical carrier and
+inclusive .05-.95 band unchanged. No source promotion, new threshold, live data,
+external acquisition, deployment or trade is authorized by this offline slice.
+
+The bounded hard-fact repair proves all eight new HIGH/LOW, finite/shoulder,
+YES/NO false-payoff cases RED on unchanged ad8 source and GREEN on the repaired
+owner. The 78 page/absence checks pass; four competing-row cases also pass
+with added real verdict/receipt assertions after the initial green run.
+The existing hard-fact consumer selection remains 26 passed / 2 failed on
+both ad8 and the repair: its bare-fast-tail and WU synthetic receipt fixtures
+are rejected by the unchanged exact-source receipt gate. These failures are
+not suppressed or claimed green. Map and freshness checks pass. Independent
+review and the lead-owned native acceptance remain required before publication.
+
+### Bounded deadline and HKO continuation (2026-10-09)
+
+Preserve the reviewed published4169 milestone and its exact source/test/CI
+evidence. Two further offline lanes address the original physical-exit goal;
+they do not expand into general baseline cleanup or authorize live operations.
+Relevant protected contracts are INV-01/14/37/47: truthful canonical state,
+source/attempt identity, single-owner writes, and scoped defer/drain/reset.
+
+The deadline lane must first reproduce real SQLite contention at the bounded
+work boundary and trace the actual reactor disposition, pending debt and normal
+retry. Integer-millisecond wait truncation must not convert a deferred attempt
+into falsely completed work. Choose the smallest correction supported by the
+owner contract; preserve raw causes and non-contention errors, absolute work
+budgets, command ownership, and source/book freshness. Do not extend deadlines,
+retry arbitrary side-effecting statements, or classify every lock error as an
+expired deadline. Scope is the existing deadline helper/caller boundary and
+dedicated behavioral tests, with independent review before integration.
+
+The HKO lane isolates the existing HIGH/LOW print/reseed fixture from its
+unrelated explicit newer scalar capture. Keep real remaining-vector persistence
+and all prior-row stability, source-clock, produced-q, held/exit witness,
+YES/NO mapping, HOLD-to-SELL, EV/log-growth, quote-floor, source/readiness
+expiry and duplicate assertions. Do not replace the obsolete zero-row assertion with a permissive
+count or fabricate q/readiness/decisions. The scenario proves combined current
+evidence redecision, not a numerical effect attributable only to one print.
+If the intact downstream assertions expose a production boundary failure,
+record it and establish the minimal additional scope before changing source.
+
+The two lanes use separate cloud worktrees and commits. The HKO owner edits its
+existing fixture; the deadline owner prefers dedicated tests to avoid shared
+test-file edits. The lead owns this plan and integration; each source/test
+delta receives a pinned independent review. Preserve genuine REDs and readiness
+gaps; do not weaken the other inherited authority/fallback cases for green CI.
+
+
+#### Bounded continuation disposition (2026-10-09)
+
+The two lanes are independently accepted and combined in local source 19be65b8.
+HKO 2854a8b is fixture-only: remove the unrelated scalar acquisition and its
+obsolete zero-row assertion while retaining 41 assertions and every downstream
+producer/consumer statement. Eight independent controls pass. The probability
+change remains combined vector-plus-print evidence, and the expiry negative is
+source/readiness expiry, not an expired-quote test.
+
+Deadline 0dc92af fixes truthful classification at the integer-millisecond SQLite
+busy-timeout boundary. Exact native SQLITE_BUSY, actual deadline clipping and
+less than one millisecond remaining are jointly required; wait only the original
+remainder, replay no SQL, retain cancellation priority and chain the native
+cause. The review caught and corrected a one-shot watcher-cancellation race.
+The inherited reactor already retries both reason labels, so this is not proof
+of repaired event loss. Real-lock REDs establish unchanged pending debt before
+the reason assertion. Final 38 selected controls, 20 parameterized repetitions of
+the unchanged original real-clock test, and 21 independent controls pass; the
+review also reproduces 3 baseline REDs. Counts overlap.
+
+Same-event HIGH/LOW retry controls use the same simulated decision timestamp.
+They establish fresh source selection and truthful HOLD completion or pending
+SELL preflight, not wall-clock retry cadence or a confirmed fill. The complete
+scheduled native module is the separate downstream acceptance surface, with
+its original finite bid windows, genuine scheduled collateral retry, native
+confirmations and canonical closure. Its immutable integrated run and exact-head
+hosted checks must accompany publication. Simulated source/account/venue input,
+UNKNOWN native cash, NULL fees and handler-only restart limits remain explicit.
+The other inherited authority/fallback cases and fixture/protocol debts are not
+weakened or declared harmless; failed required release gates remain blocking.
+
+
+### Bounded METAR revision-authority continuation (2026-10-09)
+
+Preserve published 8684 and its independently reviewed source/test/CI evidence.
+This offline continuation addresses only the nine inherited METAR provisional
+revision-authority failures: the partial-exact fallback case and the eight
+full-statistical-family/exact-sibling cases. The original physical-exit objective
+and inclusive price band remain unchanged; no live operation is in scope.
+
+First reproduce the untouched failures and trace the current canonical producer,
+revision owner and reader. Establish the actual station, source role, metric,
+local date, units, causal issue/availability/capture clocks, membership and
+correction identity required by the existing law. Classify missing fixture proof
+separately from a product failure to consume lawful canonical evidence. A faithful
+fixture repair must use real owners and preserve every original HIGH/LOW,
+YES/NO, BUY/SELL, JIT, exact-sibling and economic assertion. Do not inject q,
+revision likelihood, authority/readiness or historical calibration merely to
+satisfy a guard, and do not weaken expected outcomes solely for green tests.
+
+Record the earliest genuine owner-to-reader failure before any production edit.
+A change to source qualification, revision probability or fallback policy requires
+a separate bounded scope decision; stop that dependent work while retaining the
+counterexample. Preserve unreadable, stale, unknown-source, correction and
+mismatched-identity refusals. No broad cleanup of the other inherited CI failures.
+
+Use isolated cloud child worktrees, guarded offline execution, exact source pins
+and paired RED/GREEN evidence. The lead owns this plan and integration; a separate
+reviewer challenges source semantics and the frozen repair before publication.
+The completed outcome must state what is proved by synthetic canonical evidence,
+what remains unavailable, and which live readiness facts were not accessed.
+
+
+#### METAR fixture disposition (2026-10-09)
+
+The nine failures are fixture source-role defects, not demonstrated runtime
+failures. Their handwritten observation_instants do not provide the canonical
+strict-prior AWC-to-later-OGIMET report pairs, and even lawful revision history
+keeps METAR provisional. It cannot alone support the tests' exact sibling.
+
+The fixture-only repair in 9edd9cd8 uses the existing qualified WRH producer and
+real observation reader for those exact-witness scenarios. All original assertions
+and parameterizations are unchanged. The explicit point-vector/READY stubs remain
+isolated witness-selection and JIT test boundaries, not produced-q evidence.
+Separate HIGH/LOW controls pass synthetic AWC responses through its native parser
+and writer, use the OGIMET canonical append owner, and consume the real statistical
+revision reader. Missing ledger/history, foreign station, different report and
+post-cut possession do not fabricate a pair. Valid prior pairs yield the existing
+statistical likelihood; a current physical METAR fact still cannot become exact,
+even with a forged monotone declaration. No production law or source code changes.
+
+Baseline nine cases fail; corrected nine pass. The owner passes 43 focused cases,
+and independent review passes 34 cases including false-finality, source identity,
+future receipt, body/membership, correction/retraction/empty and no-op controls.
+Counts overlap. Independent AST review verifies original assertions/decorators
+and all production source/config/architecture remain unchanged. The earlier
+8684 scheduled/native acceptance is retained with explicit byte identity rather
+than represented as a newly executed run. Publication requires exact tree/ref
+verification and terminal hosted CI; remaining inherited failures stay blocking.
+
+
+### Bounded fast-residual identity continuation (2026-10-09)
+
+Preserve published f89e and investigate only the inherited fast-residual bundle
+versus current remaining-window probability case. Reproduce the current identity
+refusal first, then trace the normal producer-owned conditioning, bundle/shape/
+snapshot identities and their source, metric, station, unit and causal clocks.
+An obsolete or internally inconsistent test object is not evidence of a runtime
+failure. Do not make it pass by stamping a matching hash or changing its source
+label, and do not let an old fast-residual posterior replace current valid q.
+
+A valid positive control must obtain the relevant identity from its actual owner.
+Retain stale, missing, mismatched and future identity/source refusals, correction
+and unreadable-source handling, and the original remaining-window selection law.
+Existing isolated numerical test doubles must remain explicit and cannot be
+presented as generated-q or live availability proof. Preserve the genuine RED and
+original behavioral assertions. If lawful canonical producer output is rejected,
+record the earliest failing handoff and minimal proposal before production edits;
+any source/probability/fallback policy change requires a separate scope decision.
+
+Use guarded cloud execution and a separate frozen independent review. No broader
+cleanup of the other inherited failures, no live operations or production DB.
+Retain exact source pins and paired technical evidence. Publication requires a
+verified ordinary branch append and terminal checks on its exact new head.
+
+
+#### Fast-residual fixture disposition (2026-10-09)
+
+The inherited specimen is intrinsically invalid: it manually constructs retired
+same_station_causal_residual_v1 identity, whereas the normal producer owns the
+v2 product-minus-fast contract. It also contains a source cycle after its decision
+cut. The baseline RED reaches the v1 validator first; it is not an independent
+proof of future-cycle refusal or evidence that valid runtime output is rejected.
+
+Fixture-only 7efa8328 replaces the positive with the existing canonical KORD LOW/F
+writers, materializer, readiness/public readers and normal event producer. Its
+remaining-components numerical double is deliberately different from the real
+persisted q and explicitly tests routing only. All 13 original obligations remain
+(12 AST-identical, the exact call clock follows the canonical cut). The original
+38 setup statements remain as a separate early-refusal specimen. No Beijing/WU
+HIGH/C public-wrapper coverage is claimed from the KORD positive; unchanged native
+product and real-kernel controls separately cover their declared mirrors.
+
+The optional native market topology leaves the KORD helper's defaults untouched.
+The positive uses bins where all three outcomes remain possible under the real
+LOW bound. A paired default-topology case retains the known exact-zero sibling
+and proves that the same positive numerical double is rejected by the actual
+payoff-consistency guard. It does not weaken exact authority to make routing pass.
+
+Owner and independent runs each pass 33 focused controls. Independent review
+confirms unchanged production/config/architecture and bounded AST scope. Existing
+native ENTRY/HELD/REDUCE_ONLY/JIT and source mirror controls pass; copied-provenance
+and seam-negative checks retain their narrower scope. No runtime or fallback-policy
+change is justified by this failure. Earlier full scheduled/native acceptance is
+retained through source/module identity, not represented as a new native run.
+The remaining inherited required-CI failures still need separate disposition.
+
+
+### Bounded post-local final-observation continuation (2026-10-09)
+
+Preserve published 2d729 and examine only the WU and NOAA/OGIMET parameters of
+the completed-hourly-to-exact-global-simplex test. Reproduce both current failures
+before editing. Trace the actual source producer, canonical owner and reader for
+station/product, metric/unit, local-day geometry, causal possession and final
+value. Hourly rows, a completed-day flag, a same-station mirror and a verified
+settlement-matched daily value are distinct proofs; do not grant one from another.
+
+Separate lawful incomplete post-local held/reduce-only statistical continuation
+from exact final authority. Preserve intended payoff obligations through source-
+honest positive/refusal cases, ENTRY refusal before final proof, and invalid
+station/source/late-evidence controls.
+A faithful fixture must use the applicable source owner and date-specific product
+contract, not borrow another product's finality or stamp a matching identity.
+Explicit numerical routing doubles remain unit boundaries, not generated-q proof.
+
+If canonical producer output is legitimately authoritative yet rejected, preserve
+the earliest failing handoff and propose the smallest correction before production
+edits. Any source/fallback policy or final settlement proof change requires a
+separate bounded decision. Do not change expectations solely for green CI or
+expand into the other inherited failures. Use guarded cloud execution, exact
+source pins, paired evidence and independent frozen review before publication.
+No production DB, real source acquisition, orders, merge, deployment or restart.
+
+
+#### Post-local fixture disposition (2026-10-09)
+
+Both original failures are legitimate. The WU input lacks canonical revision
+ownership; the OGIMET input is physical-only. More fundamentally, complete raw
+hourly coverage plus a next-day row cannot grant exact final settlement authority.
+There is no admitted WU final-daily producer in this reader. The authorized test-
+only split therefore retains the original July Dallas/WU and Istanbul/OGIMET
+inputs as explicitly nonfinal controls, rather than claiming their old promise
+now works. The direct Dallas check uses its historical WU contract, not today's
+NOAA configuration. Readable-empty WU revision ownership separately proves the
+existing held prior-only permission and ENTRY history refusal; no statistical q
+production is claimed by that isolated policy check.
+
+Separate September KATL/F and EGLC/C positives use retained station envelopes
+with explicitly synthetic full observation arrays (clocks, temperatures, METAR
+text and pressure). No station is relabeled. Their real native parser, canonical
+writer/reader and global preparation reproduce the original F/C exact payoff
+arrays and NO complements without forecast/q injection. They do not establish
+Dallas or Istanbul native acquisition. Final qualification requires a request
+begun after local-day end, full requested coverage and possession before the cut;
+late receipt alone or a forged complete_day flag cannot substitute for that proof.
+
+Source station/unit/body/membership checks remain strict. Corrections at ten
+seconds and an empty product at twenty seconds revoke the selected source within
+its thirty-second freshness window, distinguishing source invalidation from
+expiry. Native exact final values remain distinct from directional bounds; the
+independent reader probe discriminates F73.76 rounded74 from its bound rounded73.
+All three probability-use roles consume only the qualified exact proof.
+
+Frozen 3f29fe62 and its independent review each pass nine selected cases, including
+existing complete-hourly/DST refusal controls. Production/config/architecture and
+unrelated module definitions are unchanged. No runtime defect, source-policy or
+fallback expansion is established or implemented. Earlier scheduled/native
+acceptance is retained through source/module identity, not claimed as a new run.
+Exact-head hosted checks and remaining inherited failures stay separate gates.
+
+
+### Bounded post-ACK rollback test-clock continuation (2026-10-09)
+
+Preserve published b610b228 and its terminal CI: the two post-local failures are
+removed, fourteen prior failed nodes remain, and one newly observed post-ACK
+rollback test failure is independently reproduced on both prior and current
+trees. The changed post-local integration module is absent from that hosted job's
+identical selected-test lists. This attribution does not turn red CI green.
+
+The rollback completes, but the real one-hundred-millisecond maintenance slice
+can expire before the test's second snapshot sentinel. Its expected exception is
+then unreachable despite correct deferred behavior and exact accounting rollback.
+The authorized correction is test-only: control monotonic time for the existing
+sentinel path, preserve all original fact/state assertions, and separately test
+exhaustion after rollback with one capture, truthful deferred summary and exact
+command/trade/position/execution/collateral table preservation. Keep source clocks
+and the simulated test clock distinct. Do not extend runtime deadlines, swallow
+exceptions, make the sentinel optional or alter production recovery behavior.
+
+Retain the genuine hosted RED and deterministic paired reproductions. Review the
+frozen correction independently, including successful projection and unchanged
+rollback/retry controls. Do not absorb the separate scheduler-deadline diagnostic
+or other inherited source/fallback failures into this repair. Publish only the
+reviewed tests and this existing plan through an ordinary append, then follow
+exact-head CI to terminal. No live operations or production database access.
+
+
+#### Post-ACK test-clock disposition (2026-10-09)
+
+Frozen 6afc0616 controls only the existing test's monotonic clock; all original
+statements, eight assertions, False/True parametrization and required second-
+capture RuntimeError remain intact. The new separate case runs the real successful
+exit projection, injects its original failure, lets the real bounded transaction
+roll back, and spends the maintenance slice after a real maintenance pass. It
+requires exactly one snapshot, an unexpired outer scheduler deadline, truthful
+budget-deferred/full-sweep fields and exact equality across eleven accounting,
+command, venue-fact, execution and position tables. Pending exposure stays open.
+
+Owner focused three-case and neighboring twenty-six-case runs pass; the independent
+three-case run and AST/source-scope review pass. These counts overlap. Production
+code and budgets are unchanged. The preserved paired diagnostic proves a sufficient
+inherited timing mechanism on both trees; hosted logs lack the returned timing
+summary and do not prove which precise pass exhausted the budget there. No missing
+telemetry is invented. This correction does not absorb the separate outer-scheduler
+read-deadline diagnostic, other source/fallback disputes or broader fixture debt.
+
+Only the reviewed recovery test and this existing plan are published. Prior
+scheduled/native evidence remains pinned to its original run, with unchanged
+source/module identity; no new native-cash, fees, restart, source acquisition or
+live execution claim is made. Required hosted checks on the exact new head remain
+the next release gate, and existing red gates cannot be waived by this local pass.
+
+
+### Bounded optional-hint clock and remaining-gate review (2026-10-09)
+
+Preserve published f3c596d9 and its terminal checks: the post-ACK rollback failure
+is removed, with fourteen prior failed nodes and no new failed node. Review only
+that exact remaining set. The next proposed correction is the two optional-
+universe-hint tests that must protect the normal claim window. Reproduce the
+current failure and its baseline before changing the clock fixture. Trace the
+real deadline and tracing clocks; a missing method on a time-module double is
+not evidence that the runtime consumed the claim window.
+
+If the fixture contract is unambiguously obsolete, repair only its clock seam
+while preserving both hint cases, every original assertion and the intended
+deadline/economic obligations. Never enlarge the runtime budget, omit a clock-
+sensitive branch, replace a failed requirement with a weaker expectation or
+silence a real database/source error. If a faithful fixture reveals a runtime
+defect, preserve that earliest failure and propose its minimal scope first.
+
+Independently classify the other twelve exact failed nodes without editing
+their source or tests. KMA source ownership and fallback disputes need a policy
+disposition before changes; missing proof is never permission to bypass it.
+Stop at these named gates rather than widening into unrelated repository debt.
+Freeze and independently review any unambiguous same-scope correction, retain
+paired evidence, then publish a normal reviewed append and follow exact-head CI.
+No live operations, production database access or attachment preparation.
+
+
+#### Optional-hint clock fixture disposition (2026-10-09)
+
+Both original cases fail identically on the current candidate and untouched
+1e3db865 before queue-claim execution: the queue-local time double omits
+perf_counter required by producer tracing. It also omits thread_time. This is
+a fixture failure before the intended claim-window proof, not evidence of a
+runtime deadline defect. The real optional hint retains its quarter-second
+slice and the normal claim retains its ten-second window.
+
+Frozen c2dfd1ef changes only the time-double expression. It copies the real time
+module's attributes into the local double and overrides only monotonic for the
+existing simulated deadline clock. No global clock or production budget changes.
+All eight original assertions, both hint parameters and the entire remaining
+file AST are unchanged. The owner's two target cases pass; the independent
+thirteen-case run also covers neighboring universe/admission/reset, deadline
+defer/retry, non-deadline error propagation, normal runner and claim fences.
+Counts overlap. Actual wall-clock latency is not proved by simulated deadlines.
+
+Production code, source authority and economic laws are unchanged. The other
+twelve failed nodes remain a separate read-only classification and are not
+waived by this fixture correction. Publish only this reviewed test and existing
+plan, verify the exact resulting tree/ref, and retain terminal hosted CI before
+any release-readiness assessment.
+
+
+### Preserve existing unavailable-trace provenance (2026-10-09)
+
+checked=2026-W41; basis=exact-e6 source, paired offline tests and independent
+slice review; until=recheck-on-use. Continue the existing repair's data and
+probability auditability without combining unfinished source/probability chains.
+The base is published e6d576abe0144d5ab9628e28996873741c38aa05, tree
+13c6b17f908663de77e7278b37f52538fd2610d6, on base 1e3db865. Required CI still has
+twelve previously classified failed nodes; this narrow change does not waive them.
+
+The native producer already emits probability_clock_utc, loaded_revision,
+loaded_revision_status, input_identities and carrier_content_identity in a READY
+held-point trace. A later optional-kernel failure sent that trace through the
+UNAVAILABLE projection, whose allowlist discarded those five existing fields.
+Both preserved pre-fix cases fail with missing probability_clock_utc. Retain only
+those five supplied fields in the existing projection. Preserve UNAVAILABLE
+status/reason, compact recipe validation, canonical size/compression limits and
+replay refusal. No producer, q, authority, source policy, execution or label law
+changes. The existing producer_identity_recipe already survives.
+
+The exact local three-file patch received independent source review and a cloud
+run of 108 corpus plus 10 native-producer cases. Two complementary cases additionally
+assert all enriched fields after real receipt/corpus persistence, reopening the
+fixture DB and reading its committed bytes from a fresh Python process. Those two
+cases are included in the existing corpus test module for the final freeze. The
+direct UNAVAILABLE case also preserves the adjacent center-offset refusal reason
+as opaque diagnostics; it does not implement or validate that separate policy. The
+initial cloud /tmp filesystem is only 4.9 GiB; its sixteen persistence refusals were
+the unchanged 8 GiB free-disk guard acting correctly. Moving fixture files to the
+workspace filesystem with 24 GiB free produced 120 passes without relaxing the guard
+or any assertion. The final integrated test module run passes 110 corpus cases
+plus 10 native-producer cases, including the two persisted-reader controls.
+Example-only settings, private test state and external-network blocking were used. This is not crash, pending-queue or service-restart recovery.
+
+Preserve exact missing/null/types, nested freeze ownership, old-format reads and
+same-cut no-overwrite behavior. Adding diagnostic content changes new trace-bearing
+v2 family_state_id values through the existing content hash. Its algorithm and
+schema stay unchanged; cut/topology/q/book/leg content and old committed bindings
+stay intact. The existing retry path does not gain a new conflict detector.
+
+Early native UNAVAILABLE paths can return before provenance assembly; this fix
+cannot create never-produced fields or repair historical evidence. loaded_revision
+is an opaque boot identity that may be Git HEAD or a truncated runtime-source
+fingerprint; the trace omits the discriminator. producer_identity_recipe describes
+witness reconstruction, not complete forecast/configuration attribution.
+origin_live_revision remains a semantic revision. No current-recipe quality or
+historical-label-custody claim follows from preserving these bytes. Family
+manifests and label-version history remain separately scoped design work.
+
+Publish only this projection change, its reviewed tests and this existing plan
+through an ordinary append to the draft repair branch after owner-overlap and
+remote-pin checks. Keep other source-chain integration and PR-body edits held.
+Follow exact-head hosted checks to terminal. No deployment, real orders, production
+DB access or funding-readiness conclusion is part of this slice.
+
+A narrow local snapshot-diff audit found adjacent committed center-offset refusal
+work at b665d641c7c7f1eff475e8e62cca93b2b80f327c, with no change to this allowlist
+or schema/hash and no relevant dirty helper files. That is coordination evidence,
+not communication with its owner or a combined-tree test. Preserve its zero-offset
+legacy compatibility and nonzero-offset rejection on any later agreed merge.
+
+
+### Adopt the existing qualified cash-test owner (2026-10-09)
+
+checked=2026-W41; basis=exact-1345019 isolated owner port, current offline
+relationships and independent slice review; until=recheck-on-use. The three
+inherited cash-test failures used an unqualified historical probability fixture.
+Do not replace that source refusal with fabricated readiness or another runtime
+cash policy. Adopt the existing cash owner from 42945b16 instead of integrating
+a duplicate repair. Its cash file remains byte-identical (SHA256
+`a42d5dfcef91c69516df3bc79cc67b989074518bdd49cf7228967ebb5ec88a02`).
+Port only its independent Day1 helper and source/RESET control into the existing
+materializer test module; preserve that module's public-base prefix and avoid
+importing the unfinished native source chain.
+
+The helper creates future-target Hong Kong entity bytes before normal custody,
+materialization and public ENTRY/HELD reads. It retains source removal/restore,
+exact target topology and +1-minute rematerialization without rewriting the
+anchor artifact. Controlled canonical ENS rows and private market/venue inputs
+remain synthetic fixtures, not live source readiness or calibration evidence.
+The cash fixture uses the real global mean selector, stores its receipt and
+consumes its owning reference. Unknown cash remains a typed transient refusal.
+
+A separate supplemental module closes two discriminating gaps without changing
+the owner's file. A positive cash value below the SAME persisted winner's spend
+must reject with GLOBAL_ACTUATION_FREE_CASH_SUPERSEDED, zero stake and no intent;
+it must not resize the sealed winner. Two different ample cash values preserve
+that winner's stake, token, economics and persisted receipt bytes. The original
+small-cash fixture alone prebounded selection and could not prove this later
+cash binding; its baseline and large providers also both equaled 1000.
+
+Global actuation with no cash binding correctly rejects. This is distinct from
+the still-present nonglobal injected-bankroll API branch that passes None to
+legacy recapture. Two older positive adapter tests still fail and provide no current
+branch-reachability proof.
+The genuine HKO nonglobal probe instead stops earlier at
+an all-six-candidate refusal whose best rejection names
+CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE. A named negative
+characterization preserves that precise refusal and proves recapture was not
+called. It explicitly does NOT establish positive legacy no-clamp compatibility.
+Existing maker-sample producers bind the prepared global family/book epoch; the
+nonglobal maker-proof branch does not consume that witness map. No source,
+execution-mode or fill-witness gate is relaxed to force this test through.
+
+Final frozen offline selection: 256 passed, comprising all 253 deterministic
+money-path cases plus the Day1 original/RESET, expired coverage and future-import
+controls. The earlier 7-case and 252-case runs overlap this selection. Independent
+review accepted the source/receipt boundaries and all three supplemental cases.
+A retained earlier supplemental run had a normal physical-capture scan-budget
+setup error; an unchanged rerun and the final aggregate passed. The budget was
+not enlarged. The initial full-gate invocation also retained five test-temp-root
+validation errors; a consistent private TMPDIR under the workspace corrected
+that harness path without changing runtime validation or the external-network
+guard. Example-only settings and private fixture databases were used throughout.
+
+This test-only slice changes no production code, cash/source law, q, schema,
+price band, native chain or active user worktree. Global minimum-lot owner-path
+coverage and positive nonglobal omission remain explicit limits. Publish the
+reviewed owner portion, separate controls and this existing record through an
+ordinary append to the same draft branch; then inspect exact-head CI. Other
+required failures are not waived, and no live operation or funding-readiness
+claim follows from this offline evidence.
+
+Required test registration: harmonize the existing FINDING-B description with
+its actual fixed-proposal global scope and add the supplemental module's
+MP-EXT-002 falsifying-proof entry in architecture/test_quality.yaml. The existing
+quality gate, accepted proof types, invariant list and all other entries remain
+unchanged. This is metadata for the reviewed tests, not a new cash policy.
+
+
+### Adopt the existing fused-shape authority fixture owner (2026-10-09)
+
+checked=2026-W41; basis=exact-71374152 owner port, paired offline execution and
+independent review; until=recheck-on-use. Continue alignment with the existing
+local test owner 7460d6d6e5a857a5e96587f7179041f929507627 instead of implementing
+a competing fix or importing its unfinished source chain. This slice touches
+only tests/test_replacement_fused_q_shape.py and this existing record.
+
+Both original failing nodes reproduce the missing required request/conn error
+on the public base. Preserve all existing numerical decomposition, absolute
+center-disagreement, member and probability assertions. Supply a typed request
+and private canonical schema for the offline shapes, and explicitly prove their
+snapshot is absent. A surface hash alone must not authorize a shape with no
+canonical snapshot or current serving originals; the old surface-hash-only True
+expectation therefore becomes False. These no-original fixtures have other
+unqualified inputs and are not claimed as isolated single-fault source cases.
+
+The separate positive uses the already adopted normal Day1 HKO materializer and
+public ENTRY/HELD reader helper. It binds the persisted q vector, posterior
+identity and computation cut, requires live shape authority, removes the real
+anchor body to require refusal, then restores identical bytes and authority
+without changing its artifact row. This exact evidence change discriminates
+custody from numerical shape construction. Controlled canonical ENS and private
+HTTP/market fixtures do not prove native GRIB acquisition or current real-source
+forecast quality. This slice does not exercise the separate pinned JIT reader.
+
+The received owner patch is preserved exactly in the review evidence, with
+original file SHA256 a9f5ac6b54649ee1b6aae0d5bd74b5cc07da1e1af399e2dbe09eda54c98d09c5.
+The only port correction removes /JIT from its coverage comment; ASTs are identical.
+The final file SHA256 is
+47ebc31895625aed306c1bb053b8f17c196103a19a6c6ce92ccd9b3a517c4b7a.
+No shared helper, runtime authority or probability algorithm changes.
+
+Paired local evidence: two original nodes fail before the port; the complete
+owner module and money directory then pass 273 cases (20 fused shape plus 253
+money). After the comment-only correction, all 20 fused-shape cases pass again.
+Counts overlap. Independent review finds no blocking issue in this bounded
+slice and confirms all original math assertions survive. Preserve the original
+REDs, exact owner lineage and the distinction between offline algebra and
+canonical live evidence. Other required CI failures remain unresolved until
+separately dispositioned; this change does not relax KMA fallback or native-token
+policy. Publish an ordinary append to the existing draft repair branch, verify
+its exact tree and follow hosted checks to terminal. No deployment, real trade,
+production database operation or PR-body edit is included.
+
+
+### Adopt the existing KMA invalid-frontier test owner (2026-10-09)
+
+checked=2026-W41; basis=exact-94c92fa owner port, paired offline execution and
+independent review; until=recheck-on-use. Adopt only the 66-insertion/5-deletion
+test delta from existing owner 48a35656163b01c92e48337de321aa7450eebd68.
+Do not import
+the later native source chain or the whole local pricing file. The received
+patch SHA256 is
+914c3636deeac09a2b6408bc588d61ce68614745482d44ae80b385ab4db14628.
+Only the old header-date context required adaptation to the public base;
+all added owner test bytes remain unchanged. The final pricing test SHA256 is
+86c5fcce22b7997090ecf86241e0f5850181853d220d991f899a047e60f7096f.
+
+All six original damage cases and the lawful KMA fixtures remain. Each invalid
+claimed frontier must produce its precise KmaObservationUnavailable reason,
+make the current-temperature reader unavailable, and leave the older 29 C AWC
+ledger row byte-for-byte intact. This aligns the fixture with the existing
+source law: invalid evidence cannot be silently treated as source absence.
+A separate no-frontier positive passes a controlled normal AWC API body through
+the real parser and ledger writer to the current-temperature reader, proving
+its raw report, station, unit, publication/receipt clocks, physical value and
+unchanged ledger. It authorizes physical-current evidence only, not settlement
+certainty or an exit probability by itself. No source or fallback policy changes.
+
+Paired evidence: all six original assertions fail on the exact public tree
+before this port; all 577 pricing-module tests pass after it. The full pricing
+plus adjacent fast-observation run is 916 passed and two failed. Both failures
+are unchanged KMA cursor fixtures using a September 22 raw METAR stamp against
+the actual October 9 response clock: current month inference selects a future
+October 22 report and truthfully rejects it. Both exact failures and messages
+reproduce in a separate clean 94c92fa worktree. These adjacent fixtures remain
+unmodified, and the combined suite is not claimed green. Independent review
+finds no introduced Critical/Important issue and independently executes the
+nine damaged, lawful/correction and genuine-absence cases: 9 passed. Counts
+overlap, and all evidence uses private offline fixtures and the network guard.
+
+This bounded append changes only tests/test_day0_remaining_day_pricing.py and
+this existing record. Keep the native structural-protocol classifier question
+separate; do not restore rolled-back runtime features, lower proof counts or
+weaken authority merely to green CI. Publish this reviewed owner portion by
+ordinary append to the existing draft repair branch, verify exact tree/head,
+and follow hosted checks to terminal. Red required checks still block release;
+there is no deployment, real order, production database operation, PR-body edit
+or live/funding-readiness claim.
+
+
+### Align source-protocol declarations with the rollback epoch (2026-10-09)
+
+checked=2026-W41; basis=exact-b10e6a5 source inspection and scoped owner audit;
+until=recheck-on-use. Planned surfaces are architecture/money_path_objects.yaml,
+tests/test_money_path_semantic_ci.py, and this existing record. Harmonize the
+active declaration registry with the actual producer epoch while preserving
+MP-EXT-001, MP-EXT-002 and fail-closed classification of unknown money objects.
+The rollback removed the declared ECMWF/forecast-daemon owner uses for
+native_temperature_diagnostic_reason, native_scheduler_diagnostic_reason and
+native_temperature_ingest_mode; keeping their declarations active does not prove
+their structural use. ARCHIVE_BACKFILL and SCHEDULED_LIVE still occur in the
+separate source-run repository/schema contract, which those owner-scoped
+declarations never covered. Those uses remain untouched. No runtime native
+feature or classifier algorithm will be restored or changed for this repair.
+
+Retire only those three stale registry blocks. Replace the historical hard-coded
+native-token count assertion with nonempty proof over all currently active
+source-protocol declarations and every exact owner/token occurrence. The three
+actual upgrade-refusal reasons in the two current owner scripts must all remain
+structurally qualified; filtering missing tokens into an empty pass is forbidden.
+Use the classifier's existing --objects input to give generic synthetic defenses
+an explicit test-only registry. Preserve wrong-owner, mixed money-use, SQL/Enum
+and unknown-mode rejection; prove that reintroducing retired UNKNOWN/BACKFILL
+values without renewed registration fails. Keep original RED evidence, run the
+full classifier/self-defense and static gates, and independently review before
+publication. Later native-chain integration must restore its own qualified
+registration together with its real producers, not transplant a count-only fix.
+Implementation retains the planned three-path scope. The original full
+self-defense module reproduces one obsolete-proof failure and 24 passes. The
+final module has 40 passing cases; the four selected market/schema relationship
+cases also pass, 44 total. Independent review separately runs the same selected
+44 cases successfully and probes all three real active positive tokens, 18
+mutated producer/registry controls and all 26 retired UNKNOWN/BACKFILL values at
+their exact former owners. Each retired reintroduction fails under the real
+active registry, independently of the synthetic registry used for generic AST
+mechanism tests. These counts overlap and are not extra trading replay cases.
+
+Static scoped classification, invariant coverage, test quality, semantic lint,
+YAML exact-retirement comparison and diff checks pass. The registry SHA256 is
+448823bba5684b3bf6bebbbfcfe90fcc6bd52202a891edb9bae548acdd57ffe6;
+the final self-defense test SHA256 is
+42b662715d6f64c0e71dc40259593e47ba55df6ad97894bc927ebf92dcf837ac.
+Independent review reports no remaining Critical/Important finding. Runtime
+owner, source-run repository/schema and classifier implementation bytes remain
+identical to the published base b10e6a5.
+
+Unknown-mode refusal is proven for an explicitly declared protocol in the
+synthetic registry. Neutral SCHEDULED_LIVE/SURPRISE_PROTOCOL spellings alone
+are not newly detected at the retired, now-unregistered ECMWF owner; this slice
+does not invent a repository-wide unknown-mode detector. Any later native
+integration must restore its qualified owner registration with its actual
+producer and re-prove the changed epoch. No source policy or parser fallback
+is relaxed, and no incomplete local native chain is combined here.
+
+The published KMA milestone b10e6a5 is CI-terminal: release 2,759 passed, money
+253 passed, and selected relationships 2,378 passed with the same inherited
+classifier failure. Publish this independently reviewed registry/test alignment
+only by ordinary append to
+the same draft repair branch, verify exact head/tree and follow all hosted
+checks to terminal. No active user worktree, runtime policy, production database,
+deployment, trade or PR-body edit is in this slice. Offline classifier proof is
+not production execution or funding-readiness evidence.
+
+
+### Repair two inherited full-sweep collection consumers (2026-10-09)
+
+checked=2026-W41; basis=exact-b98 collection, exact-1e3 paired import errors and
+narrow local-owner audit; until=recheck-on-use. Named hosted gates are green,
+but the offline full sweep stops during collection. Seven missing hook files
+are a sparse-checkout issue resolved only from exact tracked blobs. The two
+source/import defects reproduce on unmodified 1e3 and all five implicated files
+are identical between that base and b98. No existing owner fix or dirty overlap
+was found in the current narrow local audit. This scoped continuation addresses
+only those two consumers, not the protected writer/materializer/shared helpers.
+
+Touched paths are scripts/backfill_widened_observation_instants.py,
+tests/scripts/test_backfill_widened_observation_instants.py,
+tests/test_settlement_sigma_floor_current_shape_wiring.py,
+architecture/script_manifest.yaml, architecture/test_topology.yaml and this
+existing PLAN. The two registries harmonize only the changed consumer's actual
+operational boundary and these audited tests; unrelated stale descriptions stay
+outside this slice.
+Preserve MP-EXT-001/002, canonical writer truth/audit ordering and current-evidence
+probability authority. The historical backfill consumer must use the current
+writer's exact field semantics without resurrecting its removed private SQL
+alias or guessing temp_current/source_file from absent revision metadata.
+Preserve default dry-run and the historical extrema-widening candidate universe.
+The prior settled-only/no-live-exposure assertion was prose, not enforced proof;
+both public apply_backfill and CLI --apply must therefore refuse operational
+writes unconditionally. A private fixture kernel retains the actual BULK writer
+lock, single SAVEPOINT, stale-current comparison and per-row audit rollback
+tests without enabling a production apply route. A separate reviewed authority
+contract is required before any operational re-enablement. Derivation that cannot
+be proven safe remains blocked rather than filled with a default. Canonical
+ownership remains WORLD for observation_instants and observation_revisions;
+the initially suspected forecasts retarget was refuted by db_table_ownership and
+is not implemented. No production database operation is part of this work.
+
+The orphan sigma-floor test currently expects a fitted historical floor to
+change current q, contrary to current source law. Replace only that obsolete
+test expectation using the existing genuine qualified fixture: fitted floor
+must not alter current q or its bounds. Preserve real source authority and
+causality; do not restore deleted helper doubles or modify any probability
+algorithm, writer, materializer, cycle-policy or shared equivalence helper.
+
+Separate disjoint implementation and independent review will retain original
+collection REDs, current-producer controls, transactional/metadata negatives and
+runtime-scope limits. Recheck collection without ignoring errors before claiming
+that the full sweep can execute. Publication waits for reviewed frozen evidence
+and the same-task scope check; no native-chain integration, merge, deployment,
+real order, production DB access or PR-body edit is included.
+
+The frozen backfill consumer passes 39 focused cases, independently repeated,
+plus 60 selected unchanged writer controls (62 other writer cases explicitly
+deselected). Two complementary independent probes show a WAL peer commit after
+the candidate reread is not overwritten and a trigger-suppressed audit insert
+rolls back current/history state. The eight original behavioral tests remain;
+missing/duplicate/contradictory snapshot metadata and a mismatched journal
+payload hash refuse rather than invent custody. These counts overlap in scope
+and do not establish operational backfill eligibility. The unchanged diagnostic
+summary still assumes numeric extrema; a nullable extremum can raise TypeError
+in that summary. This inspected pre-existing read-only limitation is deferred,
+not hidden by an operational-repair success claim.
+
+The floor module passes ten focused cases and sixteen independent adjacent
+source/math controls. The former applied-floor/catch-all-cap live expectations
+are retired explicitly; the lawful slack-floor invariance and Day0 neutral
+provenance/storage obligations remain. HIGH/LOW current q and bounds retain the
+physical sigma, an independent HKO shoulder CDF oracle, and an actual v2 carrier
+with 500 coherent stored draws. Existing canonical source fixtures are used
+with controlled fusion, future-member and revision-likelihood inputs; this is
+not a complete scheduled producer or live calibration-quality proof. Both
+independent reviews found no remaining Critical/Important issue in their named
+slices. Protected source writer, materializer and shared helper are unchanged.
+
+Changed-surface classification, invariant coverage, test-quality metadata,
+semantic lint, freshness headers, YAML parsing, planning/map and whitespace
+checks pass. The offline runner uses Python 3.12 and installed dependencies, whereas
+hosted full-sweep uses Python 3.13 plus timeout/rerun plugins. Unavailable package
+and plugin coverage remains explicit; no denied install is retried. Preserve
+the original b98 and 1e3 import REDs and do not bypass collection errors.
+
+The immutable bd8fb032 candidate (tree 35da4f5b, parent b98f993) completed full
+guarded collection: 36,941 collected, 36,921 selected, 20 explicit marker
+exclusions, zero errors, exit 0 in 113.70 seconds. Both repaired modules were
+included. The subsequent bounded sweep stopped at its declared maxfail=20:
+486 passed, 20 failed, four collection-level module skips, 20 deselected, exit 1
+in 312.30 seconds. Three module skips lack eccodes and one lacks a structured
+override catalog; these are not executed selected tests. Only 506 selected nodes
+executed, leaving 36,415 selected tests never executed; this is not a full-suite
+pass. All twenty exact failed nodes reproduce on clean 1e3db865 under the same
+guard in 24.23 seconds, and all six failed test files are byte-identical between
+base and candidate. No candidate-only failure is established in this observed
+set. The failures concern the unreadable-capture lease case, three static
+member-source assertions, two Day0 mixture structure assertions, five historical
+remaining-bias cases, four terminal-residual fingerprints and five EMOS cases.
+Their obligations and owner alignment require separate bounded review; none are
+weakened or omitted here to manufacture a full green result. This final evidence
+append changes only PLAN after the tested candidate, not its source/test bytes.
+
+### Isolate unreadable captures without blocking healthy requests (2026-10-09)
+
+checked=2026-W41; basis=paired 4db885bd/1e3 unreadable-capture RED and narrow
+local-owner audit; until=recheck-on-use. The normal background queue and
+migration reconciliation both run a terminal-receipt precheck before the shared
+capture classifier. That precheck catches only the typed unreadable-receipt
+error, while listing an unreadable capture directory raises ordinary OSError.
+The exception bypasses the classifier's existing UNKNOWN result and strands an
+unrelated healthy pending request. No existing fix or dirty overlap was found
+by the narrow local audit; its committed queue differences concern other scope.
+
+Independent review also reproduced a distinct false-terminal case: a listable
+payload directory without search permission has a matching readable receipt,
+but entry lstat fails. The generic regular-entry helper turns that failure into
+False, which cannot establish that the entry is a known alias. The receipt
+proof now requires its own successful no-follow lstat; it leaves the global
+helper unchanged. Failed receipt or entry metadata reads reach the same UNKNOWN
+classifier. Readable nonregular entries retain their existing terminal meaning.
+
+The integrator owns only src/data/replacement_forecast_live_materialization_queue.py
+capture precheck/receipt proof, tests/adversarial/test_lease_v1_round7_boundaries.py, exact
+source/test registry descriptions and this PLAN. Preserve MP-EXT-001/002 and
+INV-47: SCOPE is one unreadable capture, DRAIN is the normal later classifier
+reread after filesystem readability returns, and RESET is its ordinary terminal
+receipt or restoration. Unknown is never settled or quiescent. No chmod, deletion,
+alias following, stale lease expiry, priority/source/carrier policy change or
+authority upgrade is a recovery operation in this slice.
+
+Retain the genuine baseline RED. Strengthen the healthy-work check to observe a
+fresh request reach the normal queue's worker handoff and durable terminal
+receipt, with an explicitly fake worker result rather than expired-request
+cleanup. Test directory/receipt unreadability, dry-run/apply classification,
+normal permission-restoration RESET, raw-body/inode preservation and existing
+crash/held-flock controls. Independent review and frozen checks precede another
+publication-scope check. No production database, venue action, native-chain
+integration, merge, deployment or PR-body edit is authorized by these tests.
+
+The strengthened original directory case fails on unchanged 4db885bd before
+the precheck correction; five selected receipt controls pass. Separate symlink
+and FIFO cases fail before the no-follow metadata correction because unreadable
+metadata is falsely accepted as terminal. With both corrections, all 32 focused
+round-7 cases pass, including eleven real child-crash cuts. These tests establish
+capture isolation and truthful queue worker handoff, not canonical posterior
+generation, source-to-exit latency or a live trading result.
+
+Final independent acceptance passes sixteen complementary cases plus two crash
+controls on identical source/test bytes. These include forged matching receipts
+on regular payloads, metadata EIO, disappearance between listing and stat,
+capture inode replacement, held flock, and normal restored-readability RESET.
+The seven adjacent lease/recovery modules pass 153 cases; all 159 tests selected
+for the changed external-truth invariants pass. Classification, invariant
+coverage, test-quality metadata, AST lint, freshness, planning/map maintenance,
+YAML parsing and whitespace checks pass. No Critical/Important finding remains
+in this bounded capture slice.
+
+A separately labeled data/events diagnostic on preceding public 4db885bd
+collected 2,716 tests, then stopped at maxfail=20 with 235 passed and 20 failed.
+The 2,461 unexecuted tests include all 1,819 events cases. All twenty newly
+observed failures reproduce on clean 1e3db865 with matching normalized messages
+and tracebacks; they concern anchor transport, blocked-attempt fingerprints,
+freshness row selection and fusion-upgrade fixtures/contracts. They are distinct
+from the previous full-sweep failures and are not repaired or hidden by this
+capture change. Neither bounded diagnostic qualifies the full suite.
+
+### Close only materializable physical-input debt (2026-10-09)
+
+checked=2026-W41; basis=frozen fca30260 scheduled capture replay, actual
+source-routing trace and narrow local-owner alignment; until=recheck-on-use.
+The stronger replay runs the registered acquisition, delivery and queue owners
+with the real materialization CLI composed synchronously. An effective unreadable
+private capture remains UNKNOWN while a healthy request reaches a committed
+posterior. The baseline nevertheless repeats 58 seeds for the same corrected WRH
+revision: it asks for remaining-carrier provenance that this source epoch cannot
+consume. The actual exit still succeeds. This demonstrates unnecessary
+rematerialization and an unclosed producer obligation, not repeated trades or a
+missed exit caused by that obligation.
+
+The existing source law admits official WRH into scalar conditioning and
+independently re-reads its complete current snapshot for action probability.
+It excludes WRH from the provisional shared materializer carrier. Copying an
+unused request revision into posterior provenance would fabricate consumption;
+silently broadening source admission would change policy. Suppressing all WRH
+debt is also wrong: a same-clock scalar correction can require a fresh scalar
+posterior before the current action payload agrees with its base.
+
+The fusion producer now selects its obligation from the same canonical
+conditioning payload used to build the request and the materializer's existing
+source-admission predicate. SCOPE is the selected family/scalar identity or
+eligible carrier revision. DRAIN remains the existing station-priority fusion
+publication, transition CAS and queue; physical wake publication remains
+independent. Scalar RESET requires matching real consumed conditioning, latest
+tradeable grade and unchanged strong readiness/coverage on an owned read-only
+snapshot. Other provider, vector and family obligations remain independent.
+Missing canonical qualification cannot prove carrier RESET. Queue coverage,
+materializer source eligibility, probability mathematics and source clocks are
+unchanged. The inherited wholly absent/errored current-state comparison remains
+outside this bounded repair; these tests do not claim every unknown-source
+recovery path is closed.
+
+The focused relationship suite uses real source owners and materializer commits
+for scalar correction and HIGH/LOW carrier RESET. It also covers invalid,
+expired and unready refusal, A-B-A publication/CAS and revision-only durable wake
+delivery. Independent execution passes 17 cases. Eight existing isolated
+comparison fixtures separately receive their explicitly intended canonical
+carrier inputs, preserving original expectations, carrier=False parameters,
+missing-input rejection and the HKO twin. Independent execution passes all
+eight. These synthetic comparison inputs are not source-authority proofs. The
+complete two-file fixture suite retains exactly its sixteen baseline failures;
+the protected shared materializer helper and parallel native source chains are
+not copied or modified.
+
+Scheduled acceptance binds actual CLI request bytes and family/scalar fields to
+the committed posterior, then follows the independently read physical revision
+through preparation, normal token rebinding and the consumed held witness.
+Every recorded chain requires preparation <= rebinding <= consumption, followed
+by the same-cut persisted held probability. Same-clock downward correction
+requires a real scalar successor and coverage RESET; an unchanged-extrema
+revision must still reach fresh held redecision without impossible carrier debt.
+These are separate obligations, not equality between lane-specific identities.
+
+The declared synthetic bid window ends at 18:02:30 UTC. Full and partial cases
+require actual signed FAK matches before that cut. The first partial match is
+capped externally at five of 12.5 shares; native confirmation and truthful
+terminal remainder feed the real owners, which must separately select and
+authorize the 7.5-share residual. Canonical per-order quantity, price, trade ID,
+position lineage and closure are checked, as are late duplicates and a fresh
+receive-handler instance. Other lawful outcome actions remain permitted.
+Native cash stays UNKNOWN and exact fees remain NULL. SQLite readiness time is
+bound to the declared replay clock without changing its expiry predicate.
+Simulated event-time windows, measured test wall time, synchronous CLI execution
+and receive-handler restart are distinct; no live latency, OS-worker restart,
+deployment readiness or funding-safety claim follows.
+
+Final scheduled acceptance passes all four cases on identical source/test bytes
+in 472.31 seconds of measured wall time. The full match occurs at simulated
+18:01:42.000001, with native confirmation deliberately delayed beyond the bid
+window; the partial case separately matches five and 7.5 shares within that
+same declared window. Actual completed scalar-request coverage is true and
+unchanged physical debt does not recur. The revision-only and downward controls
+bind the corrected source to actual held-monitor consumption before the
+five-minute fallback, with the latter requiring a genuine successor commit.
+No receipt, q, decision, order or canonical fill projection is injected.
+
+Test-quality validation passes. Whole-repository module-boundary, semantic-lint
+and source/test-topology checks remain red with the exact same error sets on
+clean fca30260 under matching example configuration: one boundary error,
+23 semantic findings, 325 source-topology errors and 46 test-topology errors.
+No new finding is attributable to this bounded patch; this is not a global
+static-validation or full-suite pass, and none of those checks is disabled or
+weakened. Existing native-chain alignment and live runtime proof remain separate
+gates before any merge or deployment decision.

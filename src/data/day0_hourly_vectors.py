@@ -306,13 +306,23 @@ class Day0CurrentTemperatureState:
     clock_evidence: Mapping[str, object] | None = None
     # The exact ledger row/event read; telemetry provenance, never identity.
     input_ref: Mapping[str, object] | None = field(default=None, compare=False)
+    # A complete current-product revision can change older extrema while its
+    # latest point remains identical. Only the qualified snapshot owner sets
+    # this immutable body dependency; repeat transport clocks do not renew it.
+    source_revision_identity: str | None = None
 
     def identity(self) -> dict[str, object]:
-        return {
+        identity = {
             "value_native": float(self.value_native),
             "observed_at_utc": self.observed_at.astimezone(UTC).isoformat(),
             "source": str(self.source),
         }
+        if self.source_revision_identity is not None:
+            revision = str(self.source_revision_identity)
+            if len(revision) != 64 or any(char not in "0123456789abcdef" for char in revision):
+                raise ValueError("CURRENT_TEMPERATURE_SOURCE_REVISION_INVALID")
+            identity["source_revision_identity"] = revision
+        return identity
 
 
 @dataclass(frozen=True)
@@ -4517,13 +4527,42 @@ def read_day0_current_temperature_state(
     )
     if kma_state is not None:
         return kma_state
+    latest_state = None
+    latest_clock = None
+    page_owned = False
+    wrh_claimed_unavailable = False
+    wrh_revision_identity = None
+    if source_type == "noaa":
+        from src.data.daily_observation_writer import read_current_noaa_wrh_snapshot
+        owned, snapshot = read_current_noaa_wrh_snapshot(
+            conn, city=city, target_date=target_date, as_of=decision_time,
+        )
+        page_owned = owned is not False
+        wrh_claimed_unavailable = page_owned
+        if snapshot is not None:
+            wrh_revision_identity = snapshot.response_sha256
+            members = [row for row in snapshot.rows if snapshot.view == "all" or row.is_official_report]
+            if members:
+                wrh_claimed_unavailable = False
+                current = max(members, key=lambda row: row.utc)
+                latest_clock = (current.utc, 1, current.utc, snapshot.received_at)
+                latest_state = Day0CurrentTemperatureState(
+                    value_native=current.air_temp, observed_at=current.utc, source=snapshot.source,
+                    source_revision_identity=snapshot.response_sha256,
+                    clock_evidence={"available_at_utc": snapshot.received_at.isoformat(),
+                                    "raw_payload_sha256": snapshot.response_sha256,
+                                    "provider_issued_at": None, "provider_public_available_at": None},
+                )
     attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
     schema = "world" if "world" in attached else "main"
     table = "world.observation_prints" if schema == "world" else "observation_prints"
     if conn.execute(
         f"SELECT 1 FROM {schema}.sqlite_master WHERE type = 'table' AND name = 'observation_prints'"
     ).fetchone() is None:
-        return None
+        if latest_state is None and wrh_claimed_unavailable:
+            from src.contracts.exceptions import ObservationUnavailableError
+            raise ObservationUnavailableError(f"WRH_CURRENT_SNAPSHOT_UNAVAILABLE:{city_name}:{target_date}")
+        return latest_state
     start = datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
     end = datetime.combine(target + timedelta(days=1), datetime_time.min, tzinfo=tz).astimezone(UTC)
     placeholders = ",".join("?" for _ in channels)
@@ -4550,12 +4589,17 @@ def read_day0_current_temperature_state(
             ),
         ).fetchall()
     except sqlite3.Error:
-        return None
-    latest_state = None
-    latest_clock = None
+        if latest_state is None and wrh_claimed_unavailable:
+            from src.contracts.exceptions import ObservationUnavailableError
+            raise ObservationUnavailableError(f"WRH_CURRENT_SNAPSHOT_UNAVAILABLE:{city_name}:{target_date}")
+        return latest_state
     decision_utc = decision_time.astimezone(UTC)
     for publish_raw, value_raw, unit_raw, station_raw, channel_raw, raw_report, fetched_raw, row_id in rows:
         channel = str(channel_raw or "").strip().lower()
+        # Complete current page membership supersedes old print projections,
+        # including removed newest observations. Other sources keep their roles.
+        if page_owned and channel == f"noaa_wrh_{station.lower()}":
+            continue
         station_raw = str(station_raw or "").strip().upper()
         if station_raw != station and not station_raw.startswith(f"{station}:"):
             continue
@@ -4680,7 +4724,11 @@ def read_day0_current_temperature_state(
                 source=str(channel_raw),
                 clock_evidence=clock_evidence,
                 input_ref={"print_id": int(row_id)},
+                source_revision_identity=wrh_revision_identity,
             )
+    if latest_state is None and wrh_claimed_unavailable:
+        from src.contracts.exceptions import ObservationUnavailableError
+        raise ObservationUnavailableError(f"WRH_CURRENT_SNAPSHOT_UNAVAILABLE:{city_name}:{target_date}")
     return latest_state
 
 

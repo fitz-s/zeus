@@ -88,6 +88,41 @@ economic_objects:
         meaning: "Settlement source finality time."
 
 state_machines:
+  held_sell_reauction_publication_diagnostics:
+    owner: src/execution/exit_lifecycle.py
+    description: >
+      Refusal results from the existing prepare, exact claim, same-object
+      publication and acknowledgement path, not position or venue states.
+      PREPARATION_REJECTED retains unclaimed debt for normal fresh preparation.
+      RESERVED_ACK_REFUSED retains the current exact owner when a delayed or
+      mismatched acknowledgement cannot prove that it published that owner.
+      SCOPE is the canonical holding, debt event and publication attempt.
+      DRAIN is fresh normal preparation for unclaimed debt, or the existing
+      exact publisher/recovery path for a claimed attempt. RESET requires the
+      actual current request/claim identity; time alone never clears an
+      ambiguous publisher and these labels never prove a fill.
+    states:
+      - PREPARATION_REJECTED
+      - RESERVED_ACK_REFUSED
+    invariant_tests:
+      - tests/execution/test_global_sell_publication_deadline.py
+      - tests/test_exit_safety.py
+      - tests/test_runtime_guards.py
+  venue_submit_amount_serialization_contract:
+    owner: src/venue/polymarket_v2_adapter.py
+    description: >
+      Existing native V2 response serialization marker for human-unit submit
+      amounts, not a venue state or trade identity. The shared fill reader
+      uses the marker only with authenticated original command, envelope,
+      order, token, side, quantity and source clocks to classify a legacy
+      anonymous order observation. The marker alone cannot establish an
+      economic fill or supersede an identified native trade.
+    states:
+      - POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS
+    invariant_tests:
+      - tests/state/test_unidentified_exit_order_proxy.py
+      - tests/test_executor_command_split.py
+      - tests/test_v2_adapter.py
   day0_original_metadata_bracket_diagnostics:
     owner: src/data/day0_hourly_vectors.py
     description: >
@@ -1223,6 +1258,9 @@ state_machines:
       - tests/test_run_mode_failure_surfaces.py
 
 source_protocol_objects:
+  # The rollback epoch has only the upgrade-refusal producers below. Native
+  # source reasons/modes must return with qualified producers and registration
+  # together; a historical token count is not structural proof (MP-EXT-001/002).
   probability_upgrade_preflight_diagnostic_reason:
     owner: scripts/check_live_restart_preflight.py
     kind: source_diagnostic_reason
@@ -1240,71 +1278,6 @@ source_protocol_objects:
     uses:
       false_reason_return: true
     invariant_tests: [tests/test_money_path_semantic_ci.py, tests/test_ops_scripts_smoke.py]
-  native_temperature_diagnostic_reason:
-    owner: src/data/ecmwf_open_data.py
-    kind: source_diagnostic_reason
-    description: >
-      Scoped original-body, physical qualification and retention refusal reasons,
-      not lifecycle states, observation authority or source clocks. Only these
-      declared structural reason uses may be classified outside money states.
-    values:
-      - NATIVE_2T_CAPTURE_UNKNOWN
-      - NATIVE_2T_GRID_OR_PROCESS_UNKNOWN
-      - NATIVE_2T_QUALIFIED_PREFIX_OR_BRACKET_UNKNOWN
-      - ROLE_RETENTION_REFERENCE_SCOPE_UNKNOWN
-      - ROLE_RETENTION_NATIVE_CANDIDATES_UNKNOWN
-      - ROLE_RETENTION_NATIVE_FRONTIER_UNKNOWN
-      - ROLE_RETENTION_POSTERIOR_REFERENCE_UNKNOWN
-      - ROLE_RETENTION_QUEUE_DIRECTORY_UNKNOWN
-      - ROLE_RETENTION_UNFINISHED_REFERENCE_UNKNOWN
-      - ROLE_RETENTION_COMMAND_CERTIFICATE_UNKNOWN
-      - ROLE_RETENTION_COMMAND_REFERENCE_UNKNOWN
-      - ROLE_RETENTION_COMMAND_AUTHORITY_UNKNOWN
-      - ROLE_RETENTION_RAW_DIRECTORY_UNKNOWN
-      - ROLE_RETENTION_SNAPSHOT_REFERENCE_UNKNOWN
-      - ROLE_RETENTION_CAPTURE_REFERENCE_UNKNOWN
-      - ROLE_RETENTION_CANONICAL_REFERENCE_UNKNOWN
-      - ROLE_RETENTION_REFERENCE_REVALIDATION_UNKNOWN
-      - ROLE_ORIGINAL_GC_FILE_UNKNOWN
-      - ROLE_ORIGINAL_CANONICAL_CLOCK_UNKNOWN
-      - ROLE_ORIGINAL_CANONICAL_CAPTURE_UNKNOWN
-      - ROLE_ORIGINAL_CANONICAL_IDENTITY_UNKNOWN
-      - ROLE_ORIGINAL_INDEX_UNKNOWN
-      - ROLE_ORIGINAL_REPLICA_ORIGIN_UNKNOWN
-      - NATIVE_2T_PRIORITY_UNKNOWN
-    uses:
-      dictionary_fields: [reason]
-      exception_calls: [ValueError]
-      append_receivers: [errors, reference_errors]
-      keyword_fields: [role_reference_errors]
-      positional_arguments: {NativeTemperatureSource: 4}
-      membership_bindings: [global_unknown]
-    invariant_tests:
-      - tests/test_ecmwf_open_data_collect_cycle.py
-      - tests/test_money_path_semantic_ci.py
-  native_scheduler_diagnostic_reason:
-    owner: src/ingest/forecast_live_daemon.py
-    kind: source_diagnostic_reason
-    values: [NATIVE_2T_TARGET_OR_MANDATORY_PLAN_UNKNOWN]
-    uses:
-      dictionary_fields: [reason]
-    invariant_tests:
-      - tests/test_forecast_live_daemon.py
-      - tests/test_money_path_semantic_ci.py
-  native_temperature_ingest_mode:
-    owner: src/data/ecmwf_open_data.py
-    kind: source_ingest_mode
-    description: >
-      Original source provenance role, not a trading runtime or action state.
-      ARCHIVE_BACKFILL never qualifies as SCHEDULED_LIVE consumer possession.
-    values: [ARCHIVE_BACKFILL, SCHEDULED_LIVE]
-    uses:
-      parameter_fields: [ingest_mode]
-      dictionary_get_fields: [ingest_mode]
-      membership_bindings: [ingest_mode, mode]
-    invariant_tests:
-      - tests/test_ecmwf_open_data_collect_cycle.py
-      - tests/test_money_path_semantic_ci.py
 
 single_live_evidence_contexts:
   {

@@ -6004,14 +6004,17 @@ def _capture_settled(capture: Path) -> bool:
 
     try:
         return _capture_receipted(capture)
-    except _ReceiptUnreadable:
+    except OSError:
+        # This precheck proves no terminal state when the receipt or directory
+        # is unreadable. The normal flocked classifier owns UNKNOWN/gone and
+        # rereads on the next pass; unrelated requests retain their own progress.
         return False
 
 
 def _capture_receipted(capture: Path) -> bool:
     """Whether the capture holds a terminal receipt naming its quarantined entry.
 
-    Raises ``_ReceiptUnreadable`` when a receipt exists but cannot be read.
+    Raises ``OSError`` when receipt or entry metadata cannot be read.
     """
 
     entries = _capture_entries(capture)
@@ -6020,8 +6023,11 @@ def _capture_receipted(capture: Path) -> bool:
         if receipt is None:
             continue
         named = receipt.get("request_name")
-        if len(entries) == 1 and entries[0].name == named and not _is_regular_entry(entries[0]):
-            return True
+        if len(entries) == 1 and entries[0].name == named:
+            # A failed no-follow stat is unknown evidence, not proof of an
+            # alias. Let the caller's existing UNKNOWN handling retain it.
+            if not _stat_mode.S_ISREG(os.lstat(entries[0]).st_mode):
+                return True
     return False
 
 
