@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused or audited: 2026-05-24
+# Last reused or audited: 2026-10-09 (physical-current round off the METAR lane; STALE_REWRITE of fabbf0e94 lane choice)
 # Authority basis: operator "Zeus Data Ingest + Collection Efficiency Refactor" spec §7
 #   (Scheduler adapter / executor classes) + §"Scheduler/concurrency efficiency";
 #   docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6); src/data/source_job_registry.py.
@@ -11,6 +11,9 @@ DB-heavy jobs starve heartbeats:
 
     source_clock_db     — latency-critical source publication -> short live write
     hko_source_clock_db — HKO conditional HTTP + short live write, isolated from METAR
+    physical_current_db — station-route round (every physical-current provider, one round per
+                          tick), isolated from METAR: a slow provider round must not hold the
+                          METAR source clock
     hko_final_source_clock_db — finalized HKO Daily Extract, isolated from realtime polling
     forecast_clock_db   — replacement forecast publication clock + scoped capture
     forecast_repair_db  — minute-bounded replacement maintenance, separate from recalibration
@@ -47,6 +50,7 @@ from src.data.source_job_registry import JOB_REGISTRY, SourceJobSpec
 ExecutorClass = Literal[
     "source_clock_db",
     "hko_source_clock_db",
+    "physical_current_db",
     "hko_final_source_clock_db",
     "forecast_clock_db",
     "forecast_repair_db",
@@ -89,9 +93,10 @@ def executor_class_for(spec: SourceJobSpec) -> ExecutorClass:
         if spec.job_id in {
             "ingest_day0_metar_source_clock",
             "ingest_day0_metar_commit_retry",
-            "ingest_day0_fmi_temperature",
         }:
             return "source_clock_db"
+        if spec.job_id == "ingest_day0_fmi_temperature":
+            return "physical_current_db"
         if spec.job_id == "ingest_k2_hko_tick":
             return "hko_source_clock_db"
         if spec.job_id == "ingest_k2_hko_daily_final":
@@ -311,6 +316,7 @@ def registry_executor_pools() -> dict[str, object]:
     return {
         "source_clock_db": ThreadPoolExecutor(max_workers=1),
         "hko_source_clock_db": ThreadPoolExecutor(max_workers=1),
+        "physical_current_db": ThreadPoolExecutor(max_workers=1),
         "hko_final_source_clock_db": ThreadPoolExecutor(max_workers=1),
         "forecast_clock_db": ThreadPoolExecutor(max_workers=1),
         "forecast_repair_db": ThreadPoolExecutor(max_workers=1),
@@ -408,6 +414,7 @@ def validate_lane_separation(specs: list[JobBuildSpec] | None = None) -> list[st
         if s.executor_class in {
             "source_clock_db",
             "hko_source_clock_db",
+            "physical_current_db",
             "forecast_clock_db",
             "oracle_guard_db",
             "observation_db",

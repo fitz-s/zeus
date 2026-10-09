@@ -4887,6 +4887,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
         assert j["executor"] in (
             "source_clock_db",
             "hko_source_clock_db",
+            "physical_current_db",
             "hko_final_source_clock_db",
             "forecast_clock_db",
             "forecast_repair_db",
@@ -4935,6 +4936,9 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
         assert j["executor"] == executor_class_for(JOB_REGISTRY[j["id"]])
     by_id = {j["id"]: j for j in sched.jobs}
     assert by_id["ingest_day0_metar_source_clock"]["executor"] == "source_clock_db"
+    # A physical-current round can run minutes (one round per tick across every provider); it
+    # held the one-worker METAR lane for 33 h of 72 h of >60 s METAR gaps (2026-10-05..09).
+    assert by_id["ingest_day0_fmi_temperature"]["executor"] == "physical_current_db"
     assert by_id["ingest_k2_hko_tick"]["executor"] == "hko_source_clock_db"
     assert (
         by_id["ingest_k2_hko_daily_final"]["executor"]
@@ -5310,3 +5314,22 @@ def test_ecmwf_changed_wave_that_commits_does_not_also_drain_residual(monkeypatc
     )
     assert ("wave", None) in calls
     assert not any(kind == "residual" for kind, _ in calls)
+
+
+def test_physical_current_round_never_shares_the_metar_source_clock_worker() -> None:
+    """A slow physical-current round must not hold the METAR source clock.
+
+    Both pools are single-worker; sharing one serialized every METAR tick behind the
+    physical-current round (100% of 602 METAR gaps > 60 s over 2026-10-05..09 overlapped a
+    running round), which is the receipt tail behind late unheld Day0 prints.
+    """
+    from src.data.scheduler_adapter import executor_class_for, registry_executor_pools
+    from src.data.source_job_registry import JOB_REGISTRY
+
+    metar = executor_class_for(JOB_REGISTRY["ingest_day0_metar_source_clock"])
+    retry = executor_class_for(JOB_REGISTRY["ingest_day0_metar_commit_retry"])
+    physical = executor_class_for(JOB_REGISTRY["ingest_day0_fmi_temperature"])
+    assert metar == retry == "source_clock_db"
+    assert physical == "physical_current_db"
+    pools = registry_executor_pools()
+    assert pools[physical] is not pools[metar]
