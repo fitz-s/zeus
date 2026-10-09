@@ -309,3 +309,7 @@ Next:
   - Verified: byte-identity with digests; cache and alias keep .asos5; reader isolation; savepoint behaviour; Δhold about 1 ms.
   - Failure-set over 56 modules: 3835/214 vs 3820/214, NEW 0.
   - Rebased to f2af8cfe3 and pushed at 512a00c98. Conditional landing request sent to Data.
+- 2026-10-09 23:00Z asos5 first-hour ACCEPTANCE (live 248cc37c2, loaded 21:58:25Z): PASS on correctness.
+  - 10/10 °F stations writing; 0 ASOS5_PRINTS_UNRECORDED; page rows unaffected.
+  - Density: 4–8 new clocks/h, not 12. The gaps are null air_temp cells on the NOAA page itself (KDAL 22:00/05/30/35 carry METAR text with temp null), not drops. Effective density is ~6–8 values/h, about 6× the hourly prints.
+  - First-appearance lag: n=62, p50 12.6, p90 18.3, max 20.1 min. Receipt cadence is limited by the physical round plus the 60 s route poll; the G13 fix is in flight.
