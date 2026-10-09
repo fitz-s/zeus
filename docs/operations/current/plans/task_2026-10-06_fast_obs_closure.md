@@ -303,3 +303,9 @@ Next:
   - OK: A2 and WU (WU current is not a settlement channel); A3 survival binding; merge with Data's queue branch, 0 NEW.
   - Sent back to the agent with B1 alternative = a seed-side 900 s gate.
 - The plan docs were swept by converge at 19:27Z (untracked for 24 h). Restored and committed on branch docs/fast-obs-plans (00b8afe2e). Updates continue there.
+- 2026-10-09 ~21:00Z: asos5 review (Sol) of 4a7b49d4f was NO-GO as-is. 0 BLOCKER / 1 HIGH / 1 MEDIUM.
+  - HIGH (Data's collector, round5_closeout.py:836): asos5 rows are counted as MISSING_EXACT_REVISION_SOURCE_COMMIT. Data's exclusion ba87e86c8 must land before or with asos5.
+  - MEDIUM: an ASOS-only round returned early and lost rows. Fixed by coordinator in 512a00c98: the tick proceeds if either channel has rows, and page-only work is guarded. The new test fails on the old tick.
+  - Verified: byte-identity with digests; cache and alias keep .asos5; reader isolation; savepoint behaviour; Δhold about 1 ms.
+  - Failure-set over 56 modules: 3835/214 vs 3820/214, NEW 0.
+  - Rebased to f2af8cfe3 and pushed at 512a00c98. Conditional landing request sent to Data.
