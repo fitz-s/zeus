@@ -12553,3 +12553,190 @@ def test_day0_carrier_preflight_reopens_when_a_new_current_temperature_print_lan
              "day0_current_temperature_state": {"value_native": 30.0, "source": "aviationweather_metar",
                                                 "observed_at_utc": observed.astimezone(UTC).isoformat()}}
     assert fingerprint(later) != before
+
+
+def _normal_hko_day1_qualified_context(tmp_path, monkeypatch, *, on_qualified_context=None):
+    """New future-target originals, never a relabeled Day0 certificate."""
+    from zoneinfo import ZoneInfo
+    from src.config import runtime_cities_by_name
+    from src.contracts.settlement_semantics import SettlementSemantics, settlement_preimage_offsets
+    from src.data import bayes_precision_fusion_download as dl, station_ground_evidence as ground
+    from tests.test_config import _official_hko_registry
+    from scripts.download_replacement_forecast_current_targets import _precision_metadata
+    from src.data.openmeteo_ecmwf_ifs9_anchor import (
+        OpenMeteoEcmwfIfs9AnchorRequest, build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
+        extract_openmeteo_ecmwf_ifs9_localday_anchor,
+    )
+    from src.data.raw_forecast_artifact_manifest import write_manifest_to_db
+    from src.data.replacement_forecast_readiness import ReplacementForecastReadinessDecision
+    from src.data import replacement_forecast_bundle_reader as bundle_reader
+    from src.data.replacement_forecast_bundle_reader import (
+        ReplacementForecastAuthorityPurpose, read_replacement_forecast_bundle,
+    )
+    city = runtime_cities_by_name()["Hong Kong"]
+    semantics = SettlementSemantics.for_city(city)
+    assert semantics.measurement_unit == "C" and semantics.precision == 1.
+    assert settlement_preimage_offsets(semantics.rounding_rule, half_step=.5) == (0., 1.)
+    topology = bundle_reader._market_bin_topology_payload_from_rows((
+        {"range_label": "cool", "range_low": None, "range_high": 22., "condition_id": "day1-cool"},
+        {"range_label": "warm", "range_low": 23., "range_high": 23., "condition_id": "day1-warm"},
+        {"range_label": "hot", "range_low": 24., "range_high": None, "condition_id": "day1-hot"},
+    ), city=city.name)
+    assert topology is not None
+    bins = tuple(_TemperatureBin(item["bin_id"], lower_c=item["lower_c"], upper_c=item["upper_c"],
+        center_c=item["center_c"], display_unit=item["display_unit"], settlement_unit=item["settlement_unit"],
+        rounding_rule=item["rounding_rule"]) for item in topology)
+    target = date(2026, 10, 2)
+    cycle, capture, cut = _hko_dt(12), _hko_dt(12, 10), _hko_dt(20)
+    assert target == cut.astimezone(ZoneInfo(city.timezone)).date() + timedelta(days=1)
+    _official_hko_registry(tmp_path, monkeypatch)
+    monkeypatch.setattr(ground, "_store_root", lambda: tmp_path / "station-ground")
+    class GroundClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _hko_dt(19, 59).astimezone(tz or UTC)
+    monkeypatch.setattr(ground, "datetime", GroundClock)
+    db = tmp_path / "day1-forecast.db"
+    conn = _low_revision_authority_conn(db, include_legacy_provider_fixtures=False,
+        include_retired_incumbent=False, target_date=target, source_cycle=cycle)
+    sql_builtins = sqlite3.connect(":memory:")
+    sql_clock = [capture + timedelta(minutes=1)]
+    def canonical_insert_clock(fmt, value):
+        if (fmt, value) == ("%Y-%m-%dT%H:%M:%f+00:00", "now"):
+            return sql_clock[0].isoformat(timespec="milliseconds")
+        return sql_builtins.execute("SELECT strftime(?,?)", (fmt, value)).fetchone()[0]
+    conn.create_function("strftime", 2, canonical_insert_clock)
+    class CaptureClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return capture.astimezone(tz) if tz else capture.replace(tzinfo=None)
+    monkeypatch.setattr(dl, "datetime", CaptureClock)
+    anchor_payload = json.loads(_hko_raw_openmeteo_bytes())
+    # Choose the physical target before producing any entity bytes or rows.
+    anchor_payload["hourly"]["time"] = [f"{target.isoformat()}T{hour:02d}:00" for hour in range(24)]
+    anchor_payload["_zeus_current_target_scope"] = {
+        "city": city.name, "target_date": target.isoformat(), "metric": "low"}
+    anchor_bytes = (json.dumps(anchor_payload, sort_keys=True) + "\n").encode()
+    def fetch(url, params, **kwargs):
+        is_icon = params["models"] == "icon_global"
+        is_ifs = params["models"] == "ecmwf_ifs"
+        payload = {"latitude": anchor_payload["latitude"] if is_ifs else 22.25 if is_icon else 22.3125,
+            "longitude": anchor_payload["longitude"] if is_ifs else 114.125 if is_icon else 114.1875, "elevation": 32.,
+            "timezone": city.timezone, "utc_offset_seconds": 28800,
+            "hourly_units": {"temperature_2m": "°C"},
+            "hourly": {"time": [f"{target.isoformat()}T{hour:02d}:00" for hour in range(24)],
+                "temperature_2m": [22. if is_icon else 24.] * 24}}
+        body = (json.dumps(payload, indent=2) + "\n").encode()
+        kwargs["capture_entity_body"](body, capture.timestamp())
+        if "capture_network_response" in kwargs:
+            kwargs["capture_network_response"](body, capture.timestamp(), {"content-type": "application/json"})
+        return json.loads(body)
+    monkeypatch.setattr("src.data.openmeteo_client.fetch", fetch)
+    try:
+        dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=db, cycle=cycle,
+            targets=[dl.BayesPrecisionFusionDownloadTarget(city=city.name, metric="low",
+                target_date=target.isoformat(), lead_days=2, latitude=city.lat, longitude=city.lon,
+                timezone_name=city.timezone)], models=("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"),
+            include_previous_runs=False, prune_after=False)
+        anchor_path = tmp_path / "day1-anchor.json"
+        anchor_path.write_bytes(anchor_bytes)
+        manifest = build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest(anchor_path,
+            request=OpenMeteoEcmwfIfs9AnchorRequest(city.lat, city.lon, cycle, city.timezone),
+            metric="low", source_available_at=cycle + timedelta(minutes=5), captured_at=capture,
+            product_metadata={"city": city.name, "target_date": target.isoformat()})
+        anchor_id = write_manifest_to_db(conn, manifest)
+        guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+            OpenMeteoIfs9PrecisionMetadata(**_precision_metadata(city.name, target.isoformat(),
+                anchor_sigma_c=3., raw_payload_bytes=anchor_bytes, analysis_at=cut)),
+            raw_payload_bytes=anchor_bytes, decision_at=cut)
+        assert guard.passable_for_live_materialization, guard.reason_codes
+        request = replace(_low_revision_request(), target_date=target, bins=bins,
+            openmeteo_anchor=extract_openmeteo_ecmwf_ifs9_localday_anchor(anchor_payload,
+                city_timezone=city.timezone, target_local_date=target, source_cycle_time=cycle),
+            openmeteo_raw_payload_bytes=anchor_bytes, openmeteo_precision_guard=guard,
+            anchor_artifact_id=anchor_id, day0_observation_state=None)
+        sql_clock[0] = cut
+        conn.commit()
+        ground.archive_station_ground_evidence(db, [city.name])
+        result = materialize_replacement_forecast_live(conn, request)
+        assert result.ok, result.reason_codes
+        conn.commit()
+        posterior = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (result.posterior_id,)).fetchone()
+        fusion = json.loads(posterior["provenance_json"])["bayes_precision_fusion"]
+        assert set(fusion["used_models"]) == set(fusion["current_value_serving"]) == {
+            "ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km"}
+        ifs = fusion["current_value_serving"]["ecmwf_ifs"]
+        assert ifs["physical_response"]["frozen_entity_body"]
+        assert ifs["physical_response"]["source_cell_geometry_proof"]["static_asset_audit"]
+        cert = conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?", (result.readiness_id,)).fetchone()
+        readiness = ReplacementForecastReadinessDecision(readiness_id=cert["readiness_id"],
+            status=cert["status"], reason_codes=tuple(json.loads(cert["reason_codes_json"])),
+            dependency_json=json.loads(cert["dependency_json"]), provenance_json=json.loads(cert["provenance_json"]),
+            expires_at=datetime.fromisoformat(cert["expires_at"]))
+        class ReaderClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+        monkeypatch.setattr(bundle_reader, "datetime", ReaderClock)
+        def public(purpose):
+            return read_replacement_forecast_bundle(conn,
+                baseline_bundle=_BaselineBundle(_Evidence("new12")), readiness=readiness,
+                city=city.name, target_date=target, temperature_metric="low", decision_time=cut.isoformat(),
+                current_bin_topology_hash=posterior["bin_topology_hash"], enforce_raw_input_hwm=True,
+                authority_purpose=purpose)
+        for purpose in ReplacementForecastAuthorityPurpose:
+            served = public(purpose)
+            assert served.ok, (purpose, served.reason_code)
+            assert served.bundle.posterior_id == result.posterior_id
+            original = anchor_path.read_bytes()
+            anchor_path.unlink()
+            try:
+                assert not public(purpose).ok
+            finally:
+                anchor_path.write_bytes(original)
+            restored = public(purpose)
+            assert restored.ok, restored.reason_code
+            assert dict(restored.bundle.q) == pytest.approx(dict(served.bundle.q), abs=1e-12)
+        assert posterior["target_date"] == target.isoformat()
+        assert datetime.fromisoformat(posterior["computed_at"]) == cut
+        original_artifact = tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",
+            (anchor_id,)).fetchone())
+        cut += timedelta(minutes=1)
+        request = replace(request, computed_at=cut)
+        sql_clock[0] = cut
+        reset = materialize_replacement_forecast_live(conn, request)
+        assert reset.ok, reset.reason_codes
+        conn.commit()
+        posterior = conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
+            (reset.posterior_id,)).fetchone()
+        cert = conn.execute("SELECT * FROM readiness_state WHERE readiness_id=?", (reset.readiness_id,)).fetchone()
+        readiness = ReplacementForecastReadinessDecision(readiness_id=cert["readiness_id"],
+            status=cert["status"], reason_codes=tuple(json.loads(cert["reason_codes_json"])),
+            dependency_json=json.loads(cert["dependency_json"]), provenance_json=json.loads(cert["provenance_json"]),
+            expires_at=datetime.fromisoformat(cert["expires_at"]))
+        for purpose in ReplacementForecastAuthorityPurpose:
+            restored = public(purpose)
+            assert restored.ok, (purpose, restored.reason_code)
+            assert dict(restored.bundle.q) == pytest.approx(dict(served.bundle.q), abs=1e-12)
+        assert tuple(conn.execute("SELECT * FROM raw_forecast_artifacts WHERE artifact_id=?",
+            (anchor_id,)).fetchone()) == original_artifact
+        if on_qualified_context is not None:
+            on_qualified_context(conn=conn, request=request, bundle=restored.bundle)
+    finally:
+        try:
+            conn.close()
+        finally:
+            sql_builtins.close()
+
+@pytest.mark.usefixtures("_hko_source_surface")
+def test_normal_hko_day1_context_has_future_public_originals_and_reset(tmp_path, monkeypatch):
+    contexts = []
+    _normal_hko_day1_qualified_context(tmp_path, monkeypatch,
+        on_qualified_context=lambda **context: contexts.append(context["request"]))
+    assert len(contexts) == 1
+    assert contexts[0].target_date == date(2026, 10, 2)
+    assert contexts[0].day0_observation_state is None
+    assert [(item.lower_c, item.upper_c) for item in contexts[0].bins] == [(None, 22.), (23., 23.), (24., None)]
+    assert [item.center_c for item in contexts[0].bins] == [21., 23., 25.]
+    assert all(item.rounding_rule == "oracle_truncate" for item in contexts[0].bins)

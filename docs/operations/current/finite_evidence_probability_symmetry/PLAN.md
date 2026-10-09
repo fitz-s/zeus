@@ -23200,3 +23200,71 @@ work at b665d641c7c7f1eff475e8e62cca93b2b80f327c, with no change to this allowli
 or schema/hash and no relevant dirty helper files. That is coordination evidence,
 not communication with its owner or a combined-tree test. Preserve its zero-offset
 legacy compatibility and nonzero-offset rejection on any later agreed merge.
+
+
+### Adopt the existing qualified cash-test owner (2026-10-09)
+
+checked=2026-W41; basis=exact-1345019 isolated owner port, current offline
+relationships and independent slice review; until=recheck-on-use. The three
+inherited cash-test failures used an unqualified historical probability fixture.
+Do not replace that source refusal with fabricated readiness or another runtime
+cash policy. Adopt the existing cash owner from 42945b16 instead of integrating
+a duplicate repair. Its cash file remains byte-identical (SHA256
+`a42d5dfcef91c69516df3bc79cc67b989074518bdd49cf7228967ebb5ec88a02`).
+Port only its independent Day1 helper and source/RESET control into the existing
+materializer test module; preserve that module's public-base prefix and avoid
+importing the unfinished native source chain.
+
+The helper creates future-target Hong Kong entity bytes before normal custody,
+materialization and public ENTRY/HELD reads. It retains source removal/restore,
+exact target topology and +1-minute rematerialization without rewriting the
+anchor artifact. Controlled canonical ENS rows and private market/venue inputs
+remain synthetic fixtures, not live source readiness or calibration evidence.
+The cash fixture uses the real global mean selector, stores its receipt and
+consumes its owning reference. Unknown cash remains a typed transient refusal.
+
+A separate supplemental module closes two discriminating gaps without changing
+the owner's file. A positive cash value below the SAME persisted winner's spend
+must reject with GLOBAL_ACTUATION_FREE_CASH_SUPERSEDED, zero stake and no intent;
+it must not resize the sealed winner. Two different ample cash values preserve
+that winner's stake, token, economics and persisted receipt bytes. The original
+small-cash fixture alone prebounded selection and could not prove this later
+cash binding; its baseline and large providers also both equaled 1000.
+
+Global actuation with no cash binding correctly rejects. This is distinct from
+the still-present nonglobal injected-bankroll API branch that passes None to
+legacy recapture. Two older positive adapter tests still fail and provide no current
+branch-reachability proof.
+The genuine HKO nonglobal probe instead stops earlier at
+an all-six-candidate refusal whose best rejection names
+CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE. A named negative
+characterization preserves that precise refusal and proves recapture was not
+called. It explicitly does NOT establish positive legacy no-clamp compatibility.
+Existing maker-sample producers bind the prepared global family/book epoch; the
+nonglobal maker-proof branch does not consume that witness map. No source,
+execution-mode or fill-witness gate is relaxed to force this test through.
+
+Final frozen offline selection: 256 passed, comprising all 253 deterministic
+money-path cases plus the Day1 original/RESET, expired coverage and future-import
+controls. The earlier 7-case and 252-case runs overlap this selection. Independent
+review accepted the source/receipt boundaries and all three supplemental cases.
+A retained earlier supplemental run had a normal physical-capture scan-budget
+setup error; an unchanged rerun and the final aggregate passed. The budget was
+not enlarged. The initial full-gate invocation also retained five test-temp-root
+validation errors; a consistent private TMPDIR under the workspace corrected
+that harness path without changing runtime validation or the external-network
+guard. Example-only settings and private fixture databases were used throughout.
+
+This test-only slice changes no production code, cash/source law, q, schema,
+price band, native chain or active user worktree. Global minimum-lot owner-path
+coverage and positive nonglobal omission remain explicit limits. Publish the
+reviewed owner portion, separate controls and this existing record through an
+ordinary append to the same draft branch; then inspect exact-head CI. Other
+required failures are not waived, and no live operation or funding-readiness
+claim follows from this offline evidence.
+
+Required test registration: harmonize the existing FINDING-B description with
+its actual fixed-proposal global scope and add the supplemental module's
+MP-EXT-002 falsifying-proof entry in architecture/test_quality.yaml. The existing
+quality gate, accepted proof types, invariant list and all other entries remain
+unchanged. This is metadata for the reviewed tests, not a new cash policy.
