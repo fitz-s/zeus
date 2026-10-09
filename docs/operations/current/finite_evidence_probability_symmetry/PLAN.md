@@ -23139,3 +23139,64 @@ twelve failed nodes remain a separate read-only classification and are not
 waived by this fixture correction. Publish only this reviewed test and existing
 plan, verify the exact resulting tree/ref, and retain terminal hosted CI before
 any release-readiness assessment.
+
+
+### Preserve existing unavailable-trace provenance (2026-10-09)
+
+checked=2026-W41; basis=exact-e6 source, paired offline tests and independent
+slice review; until=recheck-on-use. Continue the existing repair's data and
+probability auditability without combining unfinished source/probability chains.
+The base is published e6d576abe0144d5ab9628e28996873741c38aa05, tree
+13c6b17f908663de77e7278b37f52538fd2610d6, on base 1e3db865. Required CI still has
+twelve previously classified failed nodes; this narrow change does not waive them.
+
+The native producer already emits probability_clock_utc, loaded_revision,
+loaded_revision_status, input_identities and carrier_content_identity in a READY
+held-point trace. A later optional-kernel failure sent that trace through the
+UNAVAILABLE projection, whose allowlist discarded those five existing fields.
+Both preserved pre-fix cases fail with missing probability_clock_utc. Retain only
+those five supplied fields in the existing projection. Preserve UNAVAILABLE
+status/reason, compact recipe validation, canonical size/compression limits and
+replay refusal. No producer, q, authority, source policy, execution or label law
+changes. The existing producer_identity_recipe already survives.
+
+The exact local three-file patch received independent source review and a cloud
+run of 108 corpus plus 10 native-producer cases. Two complementary cases additionally
+assert all enriched fields after real receipt/corpus persistence, reopening the
+fixture DB and reading its committed bytes from a fresh Python process. Those two
+cases are included in the existing corpus test module for the final freeze. The
+direct UNAVAILABLE case also preserves the adjacent center-offset refusal reason
+as opaque diagnostics; it does not implement or validate that separate policy. The
+initial cloud /tmp filesystem is only 4.9 GiB; its sixteen persistence refusals were
+the unchanged 8 GiB free-disk guard acting correctly. Moving fixture files to the
+workspace filesystem with 24 GiB free produced 120 passes without relaxing the guard
+or any assertion. The final integrated test module run passes 110 corpus cases
+plus 10 native-producer cases, including the two persisted-reader controls.
+Example-only settings, private test state and external-network blocking were used. This is not crash, pending-queue or service-restart recovery.
+
+Preserve exact missing/null/types, nested freeze ownership, old-format reads and
+same-cut no-overwrite behavior. Adding diagnostic content changes new trace-bearing
+v2 family_state_id values through the existing content hash. Its algorithm and
+schema stay unchanged; cut/topology/q/book/leg content and old committed bindings
+stay intact. The existing retry path does not gain a new conflict detector.
+
+Early native UNAVAILABLE paths can return before provenance assembly; this fix
+cannot create never-produced fields or repair historical evidence. loaded_revision
+is an opaque boot identity that may be Git HEAD or a truncated runtime-source
+fingerprint; the trace omits the discriminator. producer_identity_recipe describes
+witness reconstruction, not complete forecast/configuration attribution.
+origin_live_revision remains a semantic revision. No current-recipe quality or
+historical-label-custody claim follows from preserving these bytes. Family
+manifests and label-version history remain separately scoped design work.
+
+Publish only this projection change, its reviewed tests and this existing plan
+through an ordinary append to the draft repair branch after owner-overlap and
+remote-pin checks. Keep other source-chain integration and PR-body edits held.
+Follow exact-head hosted checks to terminal. No deployment, real orders, production
+DB access or funding-readiness conclusion is part of this slice.
+
+A narrow local snapshot-diff audit found adjacent committed center-offset refusal
+work at b665d641c7c7f1eff475e8e62cca93b2b80f327c, with no change to this allowlist
+or schema/hash and no relevant dirty helper files. That is coordination evidence,
+not communication with its owner or a combined-tree test. Preserve its zero-offset
+legacy compatibility and nonzero-offset rejection on any later agreed merge.

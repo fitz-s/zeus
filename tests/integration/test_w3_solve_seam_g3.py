@@ -51320,6 +51320,15 @@ def test_held_point_trace_observes_normal_hko_consumer_without_changing_witness(
             assert trace["producer_witness_identity"] == baseline.probability_witness.witness_identity
             assert trace["lane"] == use.value
             assert trace["decision_at_utc"] == fixture.cut.isoformat()
+            # A later optional-kernel downgrade retains native producer evidence.
+            trace["kernel"]["operator"] = "unsupported"
+            unavailable = json.loads(corpus.freeze_held_sell_point_trace(trace))
+            assert unavailable["status"] == "UNAVAILABLE"
+            for field in ("probability_clock_utc", "loaded_revision", "loaded_revision_status",
+                          "input_identities", "carrier_content_identity", "producer_identity_recipe"):
+                assert unavailable[field] == trace[field]
+            assert "kernel" not in unavailable and "diurnal" not in unavailable
+            assert unavailable["q_version"] == baseline.probability_witness.q_version
         # The exact same certificate must stop serving when its current ENS
         # coverage expires, even if a caller retains the earlier decision cut.
         before = tuple(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",

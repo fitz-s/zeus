@@ -93,13 +93,15 @@ def decode_payload(blob: bytes) -> object:
 
 
 def _point_trace_unavailable(reason: str, trace: Mapping[str, object] | None = None) -> bytes:
-    # Preserve only the consumed witness's diagnostic binding, never a partial
-    # kernel that could be mistaken for replayable point authority.
+    # Preserve existing binding and provenance bytes, never a partial kernel
+    # that could be mistaken for replayable point authority.
     fields = {"lane", "decision_at_utc", "family", "final_yes_q", "bindings",
               "producer_witness_identity", "probability_content_identity", "q_version",
               "source_truth_identity", "posterior_identity_hash", "consumer_witness_identity",
               "consumer_bindings", "consumer_yes_q", "consumer_captured_at_utc",
-              "selected_lane", "role", "producer_identity_recipe"}
+              "selected_lane", "role", "producer_identity_recipe",
+              "probability_clock_utc", "loaded_revision", "loaded_revision_status",
+              "input_identities", "carrier_content_identity"}
     value = {key: value for key, value in (trace or {}).items() if key in fields}
     value.update(schema="held_sell_point_kernel_trace_v1",status="UNAVAILABLE",reason=reason)
     try:

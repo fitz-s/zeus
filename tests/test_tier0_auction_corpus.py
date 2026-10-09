@@ -1,5 +1,5 @@
 # Created: 2026-09-27
-# Last audited: 2026-09-30
+# Last audited: 2026-10-09
 # Authority basis: correction design review REQ-20260925-223704 §2 (every cut,
 #   raw q before any rejection), §3 (complete ordered family simplex, quotes
 #   stored with reasons, never patched), §10 (idempotent immutable identities,
@@ -1386,3 +1386,170 @@ def test_corpus_transaction_disables_autocheckpoint_and_restores_it(tmp_path):
     )
     assert seen == [0]
     assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 777
+
+
+_PROVENANCE_FIELDS = ("probability_clock_utc", "loaded_revision", "loaded_revision_status",
+                      "input_identities", "carrier_content_identity")
+
+
+def _producer_provenance_trace(monkeypatch, identity_source="git_head"):
+    from src.engine import event_reactor_adapter as era
+    witness, raw = _controlled_point_trace()
+    trace = json.loads(raw)
+    # BOOT_IDENTITY is opaque here: fingerprint and Git HEAD share this slot.
+    monkeypatch.setattr(sys.modules["__main__"], "_BOOT_STATE",
+        {"sha": "a"*40, "identity_source": identity_source}, raising=False)
+    inputs = {"city": "Hong Kong", "unit": "C", "station_id": "HKO",
+              "current_path_state": {"temperature_native": 29.2, "source": "hko"}}
+    capture = {"kernel": json.dumps(trace["kernel"]).encode(),
+               "base_yes_q": json.dumps(witness.yes_point_q.tolist()).encode(),
+               "carrier_content_identity": b"public-weather-carrier",
+               "input_identities": json.dumps(inputs).encode(),
+               "source_clocks": json.dumps({"observation_time": AT.isoformat(),
+                   "observation_available_at": AT.isoformat()}).encode()}
+    raw = era._freeze_prepared_held_point_trace(capture, SimpleNamespace(probability_witness=witness),
+                                               lane="HELD_EXIT", at=AT)
+    return witness, capture, json.loads(raw)
+
+
+@pytest.mark.parametrize("identity_source", ("git_head", "runtime_source_fingerprint"))
+def test_later_unavailable_preserves_existing_producer_provenance(monkeypatch, identity_source):
+    _, _, trace = _producer_provenance_trace(monkeypatch, identity_source)
+    assert trace["status"] == "READY"
+    assert trace["loaded_revision"] == "a"*40
+    assert trace["loaded_revision_status"] == "BOOT_IDENTITY"
+    assert "identity_source" not in trace
+    bad = {**trace, "kernel": {**trace["kernel"], "operator": "unsupported"}}
+    unavailable = json.loads(corpus.freeze_held_sell_point_trace(bad))
+    assert unavailable["status"] == "UNAVAILABLE"
+    assert unavailable["reason"] == "UNSUPPORTED_POINT_KERNEL"
+    for key in (*_PROVENANCE_FIELDS, "producer_identity_recipe"):
+        assert unavailable[key] == trace[key]
+    assert "kernel" not in unavailable and "diurnal" not in unavailable
+    with pytest.raises(ValueError, match="HELD_POINT_TRACE_UNAVAILABLE"):
+        corpus.replay_held_sell_point_trace(corpus._canonical(unavailable))
+
+
+@pytest.mark.parametrize("status", ("READY", "UNAVAILABLE"))
+@pytest.mark.parametrize("value", (None, "", [], 42))
+@pytest.mark.parametrize("field", _PROVENANCE_FIELDS)
+def test_provenance_projection_does_not_coerce_existing_values(monkeypatch, status, value, field):
+    _, _, trace = _producer_provenance_trace(monkeypatch)
+    trace.update(status=status)
+    trace[field] = value
+    frozen = json.loads(corpus.freeze_held_sell_point_trace(trace))
+    assert frozen[field] == value and type(frozen[field]) is type(value)
+    assert frozen["q_version"] == trace["q_version"]
+
+
+def test_unavailable_freezes_nested_evidence_without_defaults(monkeypatch):
+    from src.engine import event_reactor_adapter as era
+    witness, capture, trace = _producer_provenance_trace(monkeypatch)
+    trace["status"] = "UNAVAILABLE"
+    frozen = corpus.freeze_held_sell_point_trace(trace)
+    trace["input_identities"]["current_path_state"]["temperature_native"] = 99
+    assert json.loads(frozen)["input_identities"]["current_path_state"]["temperature_native"] == 29.2
+    for key in _PROVENANCE_FIELDS:
+        trace.pop(key)
+    absent = json.loads(corpus.freeze_held_sell_point_trace(trace))
+    assert all(key not in absent for key in _PROVENANCE_FIELDS)
+    capture["unavailable"] = b"POINT_KERNEL_CAPTURE_FAILED"
+    early = json.loads(era._freeze_prepared_held_point_trace(capture,
+        SimpleNamespace(probability_witness=witness), lane="HELD_EXIT", at=AT))
+    assert early["status"] == "UNAVAILABLE"
+    assert all(key not in early for key in _PROVENANCE_FIELDS)
+
+
+def test_added_trace_evidence_keeps_old_cut_binding_and_content_rows(tmp_path, monkeypatch):
+    witness, _, trace = _producer_provenance_trace(monkeypatch)
+    # Consumer binding uses the already-consumed witness, not diagnostic replay.
+    trace.update(status="UNAVAILABLE", consumer_witness_identity=witness.witness_identity,
+                 consumer_bindings=trace["bindings"], consumer_yes_q=trace["final_yes_q"])
+    enriched = corpus.freeze_held_sell_point_trace(trace)
+    legacy = corpus._canonical({k:v for k,v in json.loads(enriched).items()
+                               if k not in _PROVENANCE_FIELDS})
+    conn = _trade_db(tmp_path)
+    try:
+        decision = _no_winner_decision(witness)
+        _store(conn, decision, witness=witness, epoch="same-cut", point_traces=(legacy,))
+        old_snapshot = dict(_only(conn, "tier0_family_snapshot"))
+        old_cut = dict(_only(conn, "tier0_auction_cut"))
+        old_link = dict(_only(conn, "tier0_cut_family"))
+        topology_id = bytes(_only(conn, "tier0_family_topology")["topology_id"])
+        # Existing cut returns before changing its link, even if staged content
+        # rows append a new snapshot. A later new cut may bind that new content.
+        _store(conn, decision, witness=witness, epoch="same-cut", point_traces=(enriched,))
+        assert dict(_only(conn, "tier0_auction_cut")) == old_cut
+        assert dict(_only(conn, "tier0_cut_family")) == old_link
+        stored = conn.execute("SELECT * FROM tier0_family_snapshot WHERE family_state_id=?",
+                              (old_snapshot["family_state_id"],)).fetchone()
+        assert dict(stored) == old_snapshot
+        _store(conn, decision, witness=witness, epoch="new-cut", point_traces=(enriched,))
+        states = conn.execute("SELECT family_state_id,payload FROM tier0_family_snapshot").fetchall()
+        assert len(states) == 2 and states[0]["family_state_id"] != states[1]["family_state_id"]
+        assert bytes(_only(conn, "tier0_family_topology")["topology_id"]) == topology_id
+        values = [corpus.decode_payload(r["payload"]) for r in states]
+        for value in values: value.pop("held_sell_point_traces")
+        assert values[0] == values[1]
+        links = conn.execute("SELECT state_seq FROM tier0_cut_family ORDER BY cut_seq").fetchall()
+        assert len(links) == 2 and links[0][0] != links[1][0]
+        # Old-format evidence still reads without manufacturing provenance.
+        assert all(k not in json.loads(legacy) for k in _PROVENANCE_FIELDS)
+        assert json.loads(corpus.freeze_held_sell_point_trace(json.loads(legacy))) == json.loads(legacy)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("path", ("direct", "later_downgrade"))
+def test_unavailable_provenance_persists_across_fresh_reader(tmp_path, monkeypatch, path):
+    import subprocess
+
+    from src.engine import event_reactor_adapter as era
+
+    witness, capture, _ = _producer_provenance_trace(monkeypatch)
+    expected_input = {
+        "city": "Hong Kong", "unit": "C", "station_id": "HKO",
+        "current_path_state": {"value_native": 29.2,
+            "observed_at_utc": AT.isoformat(), "source": "hko",
+            "source_revision_identity": "b" * 64},
+    }
+    capture["input_identities"] = json.dumps(expected_input).encode()
+    trace = json.loads(era._freeze_prepared_held_point_trace(capture,
+        SimpleNamespace(probability_witness=witness), lane="HELD_EXIT", at=AT))
+    assert trace["status"] == "READY"
+    assert trace["input_identities"]["current_path_state"] == expected_input["current_path_state"]
+    original = {key: trace[key] for key in _PROVENANCE_FIELDS}
+    if path == "direct":
+        trace.update(status="UNAVAILABLE", reason="POINT_KERNEL_CENTER_OFFSET_UNSUPPORTED")
+    else:
+        trace["kernel"]["operator"] = "unsupported"
+    trace.update(consumer_witness_identity=witness.witness_identity,
+                 consumer_bindings=trace["bindings"], consumer_yes_q=trace["final_yes_q"])
+    frozen = corpus.freeze_held_sell_point_trace(trace)
+    expected = json.loads(frozen)
+    assert expected["status"] == "UNAVAILABLE"
+    assert all(expected[key] == original[key] for key in _PROVENANCE_FIELDS)
+    trace["input_identities"]["current_path_state"]["value_native"] = 999
+    assert json.loads(frozen)["input_identities"]["current_path_state"]["value_native"] == 29.2
+    conn = _trade_db(tmp_path)
+    _store(conn, _no_winner_decision(witness), witness=witness,
+                   epoch="review-" + path, point_traces=(frozen,))
+    before = bytes(_only(conn, "tier0_family_snapshot")["payload"])
+    conn.close()
+    reopened = sqlite3.connect(tmp_path / "trade.db")
+    row = reopened.execute("SELECT payload FROM tier0_family_snapshot").fetchone()
+    reopened.close()
+    assert bytes(row[0]) == before
+    snapshot = corpus.decode_payload(row[0])
+    assert snapshot["held_sell_point_traces"] == [expected]
+    # New Python process reads committed bytes; this is not crash/queue recovery.
+    child = """import json,sqlite3,sys
+from src.engine.tier0_auction_corpus import decode_payload
+conn=sqlite3.connect(sys.argv[1])
+row=conn.execute('SELECT payload FROM tier0_family_snapshot').fetchone()
+conn.close()
+print(json.dumps(decode_payload(row[0])['held_sell_point_traces'],sort_keys=True))
+"""
+    result = subprocess.run([sys.executable, "-c", child, str(tmp_path / "trade.db")],
+        capture_output=True, text=True, check=True, timeout=30)
+    assert json.loads(result.stdout) == [expected]
