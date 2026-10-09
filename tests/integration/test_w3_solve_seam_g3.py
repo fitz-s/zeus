@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-09 (HKO print and qualified exact-source fixtures)
+# Last reused/audited: 2026-10-09 (HKO, qualified exact-source and canonical FAST routing fixtures)
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -10973,9 +10973,183 @@ def test_day0_bundle_binding_clears_inherited_certificate_when_selected_missing(
     assert "_edli_day0_causal_evidence_bundle" not in payload
 
 
+@pytest.mark.parametrize(
+    "native_market_bins",
+    [
+        pytest.param(
+            (("52F or below", None, 52), ("53-54F", 53, 54), ("55F or above", 55, None)),
+            id="statistical-family",
+        ),
+        pytest.param(None, id="exact-zero-refuses-positive-double"),
+    ],
+)
 def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
+    tmp_path, monkeypatch, _noaa_native_sources, native_market_bins,
+):
+    """Canonical LOW/F FAST authority reaches the isolated current-q routing seam.
+
+    Source bodies/clocks are controlled inputs to the normal KORD owners. Only
+    the final remaining-components output is a numerical double here; the
+    separate KORD producer/ENTRY/held/JIT relationship tests exercise real q.
+    This replaces the obsolete Beijing HIGH/C carrier, not its source contract.
+    """
+    from src.data import day0_fast_obs as fast
+    from src.data import replacement_forecast_bundle_reader as reader
+    from src.data import replacement_forecast_materializer as materializer
+    from src.events import opportunity_event as event_module
+    from src.events.opportunity_event import OpportunityEvent
+    from tests.test_replacement_forecast_materializer import _assert_wu_fast_pinned_contract
+
+    # Each bin remains possible below the real LOW settlement-channel bound.
+    # The ordinary fixture's >=59F sibling is exact-zero at 57.2F and cannot
+    # lawfully accept this all-statistical routing double.
+    fixture = _kord_normal_prior_fixture(
+        tmp_path, monkeypatch, native_market_bins=native_market_bins,
+    )
+    try:
+        cut, fast_conditioning = _kord_causal_fast_inputs(fixture, monkeypatch)
+        fixture.request = replace(
+            fixture.request,
+            computed_at=cut,
+            day0_observation_state=None,
+            day0_observed_extreme_c=fast_conditioning.observed_extreme_c,
+            day0_observed_extreme_source=fast.FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+            day0_observed_extreme_observation_time=fast_conditioning.observation_time,
+            day0_observed_extreme_sample_count=fast_conditioning.sample_count,
+            day0_observed_extreme_unit=fast_conditioning.unit,
+        )
+        fixture.sql_clock[0] = cut
+        fixture.result = materializer.materialize_replacement_forecast_live(
+            fixture.conn, fixture.request,
+        )
+        assert fixture.result.ok, fixture.result.reason_codes
+        fixture.conn.commit()
+        bundles = _kord_public_bundles(fixture, monkeypatch, at=cut)
+        bundle = bundles[reader.ReplacementForecastAuthorityPurpose.ENTRY]
+        # Copied-provenance corruption checks exercise the real pin component;
+        # they do not stand in for full public-wrapper negative tests.
+        _assert_wu_fast_pinned_contract(
+            bundle.provenance_json, city=fixture.city.name,
+            target_date=str(fixture.request.target_date), metric="low",
+            decision_time=cut,
+        )
+        conditioning = era._day0_replacement_conditioning(
+            bundle, provisional=True, metric="low", unit="F",
+            decision_time=cut, entry_authority=True,
+        )
+        assert conditioning["fast_residual_likelihood"]["identity_hash"] == (
+            fast_conditioning.likelihood.identity_hash
+        )
+        assert _dt.datetime.fromisoformat(bundle.source_cycle_time) <= cut
+        assert _dt.datetime.fromisoformat(bundle.source_available_at) <= cut
+
+        class ClockType(type):
+            def __instancecheck__(cls, value):
+                return isinstance(value, _dt.datetime)
+
+        class ConsumerClock(_dt.datetime, metaclass=ClockType):
+            @classmethod
+            def now(cls, tz=None):
+                return cut.astimezone(tz) if tz else cut.replace(tzinfo=None)
+
+        monkeypatch.setattr(event_module, "datetime", ConsumerClock)
+        monkeypatch.setattr(reader, "datetime", ConsumerClock)
+        source = fast.fast_obs_source_for_city(fixture.city, fixture.request.target_date)
+        prefetch = fast.FastObsPrefetch(
+            eligible=((fixture.city, source, str(fixture.request.target_date)),),
+            reports=fixture.current_reports, freshness_status=fast.FETCH_FRESH,
+            cache_age_s=0.0, decision_time=cut, ledger_reports=fixture.current_reports,
+            station_statuses=(("KORD", fast.FETCH_FRESH, 0.0),),
+        )
+        assert fast.Day0FastObsEmitter().emit_prefetched(
+            world_conn=fixture.conn, prefetch=prefetch,
+            received_at=cut.isoformat(), persist_ledger=False,
+        ) > 0
+        row = dict(fixture.conn.execute(
+            "SELECT * FROM opportunity_events WHERE event_type='DAY0_EXTREME_UPDATED' "
+            "AND json_extract(payload_json,'$.metric')='low' ORDER BY rowid DESC LIMIT 1"
+        ).fetchone())
+        event = OpportunityEvent(**{
+            field: row[field] for field in OpportunityEvent.__dataclass_fields__
+        })
+
+        # This test proves which component the adapter selects. The double is
+        # deliberately different from the real producer's persisted full q.
+        remaining_q = (0.3, 0.6, 0.1)
+        assert [bundle.q[bin.bin_id] for bin in fixture.bins] != pytest.approx(
+            list(remaining_q)
+        )
+        remaining_calls: list[_dt.datetime] = []
+
+        def remaining_components(*_args, **kwargs):
+            remaining_calls.append(kwargs["decision_time"])
+            return (
+                np.asarray([remaining_q] * 400, dtype=float),
+                np.asarray(remaining_q, dtype=float),
+                era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+            )
+
+        monkeypatch.setattr(
+            era, "_day0_remaining_global_probability_components", remaining_components,
+        )
+        day0_payload: dict[str, object] = {}
+
+        def prepare():
+            return era._prepare_current_global_probability_family(
+                event, forecast_conn=fixture.conn, topology_conn=fixture.conn,
+                observation_conn=fixture.conn, decision_time=cut,
+                max_age=_dt.timedelta(seconds=30), raw_input_hwm_conn=fixture.conn,
+                day0_payload_out=day0_payload,
+                probability_use=era._CurrentProbabilityUse.ENTRY,
+            )
+
+        if native_market_bins is None:
+            # Canonical 57.2F LOW evidence makes the default >=59F sibling
+            # impossible. An inconsistent positive double cannot erase it.
+            with pytest.raises(
+                ValueError, match="^exact payoff witness disagrees with parent q$",
+            ):
+                prepare()
+            assert remaining_calls == [cut]
+            return
+
+        prepared = prepare()
+
+        witness = prepared.probability_witness
+        assert remaining_calls == [cut]
+        assert witness.yes_point_q.tolist() == pytest.approx(list(remaining_q))
+        assert witness.yes_q_samples[0].tolist() == pytest.approx(list(remaining_q))
+        assert witness.band_basis == (
+            era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
+        )
+        assert witness.posterior_identity_hash != bundle.posterior_identity_hash
+        assert day0_payload["_edli_global_day0_binding"][
+            "probability_base_identity"
+        ] == bundle.posterior_identity_hash
+        assert prepared.candidate_payoff_q_lcb_caps == ()
+        assert day0_payload["_edli_global_day0_binding"][
+            "statistical_probability_conditioning"
+        ] == conditioning
+        assert day0_payload["probability_authority"] == (
+            "day0_remaining_day_global_probability_v1"
+        )
+        assert day0_payload["q_source"] == "day0_remaining_day"
+        assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
+        remaining_action = {
+            **day0_payload,
+            "event_type": "DAY0_EXTREME_UPDATED",
+        }
+        assert not era._uses_replacement_probability_authority(remaining_action)
+        assert era._day0_maker_only_required(remaining_action)
+    finally:
+        fixture.conn.close()
+        fixture.builtin.close()
+
+
+def test_legacy_fast_residual_day0_bundle_is_refused_before_remaining_q(
     monkeypatch,
 ):
+    """Retain the old v1/future-cycle specimen as invalid, never relabel its q."""
     import src.data.replacement_forecast_bundle_reader as bundle_reader
     import src.data.replacement_forecast_current_target_plan as current_target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
@@ -11287,50 +11461,29 @@ def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
         payload=event_payload,
         causal_snapshot_id=str(event_payload["snapshot_id"]),
     )
-    day0_payload: dict[str, object] = {}
-    prepared = era._prepare_current_global_probability_family(
-        event,
-        forecast_conn=forecast,
-        topology_conn=forecast,
-        observation_conn=observations,
-        decision_time=_dt.datetime(
-            2026, 7, 11, 10, 0, tzinfo=_dt.timezone.utc
-        ),
-        max_age=_dt.timedelta(seconds=30),
-        day0_payload_out=day0_payload,
-        probability_use=era._CurrentProbabilityUse.ENTRY,
-    )
-
-    witness = prepared.probability_witness
-    assert remaining_calls == [
-        _dt.datetime(2026, 7, 11, 10, 0, tzinfo=_dt.timezone.utc)
-    ]
-    assert witness.yes_point_q.tolist() == pytest.approx(list(remaining_q))
-    assert witness.yes_q_samples[0].tolist() == pytest.approx(list(remaining_q))
-    assert witness.band_basis == (
-        era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
-    )
-    assert witness.posterior_identity_hash != bundle.posterior_identity_hash
-    assert day0_payload["_edli_global_day0_binding"][
-        "probability_base_identity"
-    ] == bundle.posterior_identity_hash
-    assert prepared.candidate_payoff_q_lcb_caps == ()
-    assert day0_payload["_edli_global_day0_binding"][
-        "statistical_probability_conditioning"
-    ] == conditioning
-    assert day0_payload["probability_authority"] == (
-        "day0_remaining_day_global_probability_v1"
-    )
-    assert day0_payload["q_source"] == "day0_remaining_day"
-    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
-    remaining_action = {
-        **day0_payload,
-        "event_type": "DAY0_EXTREME_UPDATED",
-    }
-    assert not era._uses_replacement_probability_authority(remaining_action)
-    assert era._day0_maker_only_required(remaining_action)
-    forecast.close()
-    observations.close()
+    try:
+        with pytest.raises(
+            ValueError, match="^GLOBAL_DAY0_FAST_RESIDUAL_POSTERIOR_IDENTITY_INVALID$",
+        ):
+            era._prepare_current_global_probability_family(
+                event,
+                forecast_conn=forecast,
+                topology_conn=forecast,
+                observation_conn=observations,
+                decision_time=_dt.datetime(
+                    2026, 7, 11, 10, 0, tzinfo=_dt.timezone.utc
+                ),
+                max_age=_dt.timedelta(seconds=30),
+                probability_use=era._CurrentProbabilityUse.ENTRY,
+            )
+        assert remaining_calls == []
+        assert conditioning["fast_residual_likelihood"]["semantics_revision"] == (
+            "same_station_causal_residual_v1"
+        )
+        assert bundle.source_cycle_time == "2026-07-11T12:00:00+00:00"
+    finally:
+        forecast.close()
+        observations.close()
 
 
 def test_post_local_incomplete_day0_fact_is_reduce_only_probability_authority():
@@ -51305,7 +51458,9 @@ def test_wrh_empty_forecast_owner_is_distinct_from_unavailable_foreign_projectio
         conn.close()
 
 
-def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None):
+def _kord_normal_prior_fixture(
+    tmp_path, monkeypatch, *, target_date=None, native_market_bins=None,
+):
     """Ordinary KORD physical writers; controlled forecasts/ENS, not live weather."""
     from dataclasses import replace
     from datetime import date, datetime, timedelta, timezone
@@ -51426,7 +51581,8 @@ def _kord_normal_prior_fixture(tmp_path, monkeypatch, *, target_date=None):
         sort_keys=True).encode()
     anchor = extract_openmeteo_ecmwf_ifs9_localday_anchor(json.loads(raw), city_timezone=city.timezone,
         target_local_date=target, source_cycle_time=cycle, require_full_localday=True)
-    native_market_bins = (("56F or below", None, 56), ("57-58F", 57, 58), ("59F or above", 59, None))
+    if native_market_bins is None:
+        native_market_bins = (("56F or below", None, 56), ("57-58F", 57, 58), ("59F or above", 59, None))
     for index,(label,lower,upper) in enumerate(native_market_bins):
         conn.execute("""INSERT INTO market_events (market_slug,city,target_date,temperature_metric,
             condition_id,token_id,range_label,range_low,range_high,created_at,recorded_at)

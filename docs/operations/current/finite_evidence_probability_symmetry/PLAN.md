@@ -22916,3 +22916,60 @@ and all production source/config/architecture remain unchanged. The earlier
 8684 scheduled/native acceptance is retained with explicit byte identity rather
 than represented as a newly executed run. Publication requires exact tree/ref
 verification and terminal hosted CI; remaining inherited failures stay blocking.
+
+
+### Bounded fast-residual identity continuation (2026-10-09)
+
+Preserve published f89e and investigate only the inherited fast-residual bundle
+versus current remaining-window probability case. Reproduce the current identity
+refusal first, then trace the normal producer-owned conditioning, bundle/shape/
+snapshot identities and their source, metric, station, unit and causal clocks.
+An obsolete or internally inconsistent test object is not evidence of a runtime
+failure. Do not make it pass by stamping a matching hash or changing its source
+label, and do not let an old fast-residual posterior replace current valid q.
+
+A valid positive control must obtain the relevant identity from its actual owner.
+Retain stale, missing, mismatched and future identity/source refusals, correction
+and unreadable-source handling, and the original remaining-window selection law.
+Existing isolated numerical test doubles must remain explicit and cannot be
+presented as generated-q or live availability proof. Preserve the genuine RED and
+original behavioral assertions. If lawful canonical producer output is rejected,
+record the earliest failing handoff and minimal proposal before production edits;
+any source/probability/fallback policy change requires a separate scope decision.
+
+Use guarded cloud execution and a separate frozen independent review. No broader
+cleanup of the other inherited failures, no live operations or production DB.
+Retain exact source pins and paired technical evidence. Publication requires a
+verified ordinary branch append and terminal checks on its exact new head.
+
+
+#### Fast-residual fixture disposition (2026-10-09)
+
+The inherited specimen is intrinsically invalid: it manually constructs retired
+same_station_causal_residual_v1 identity, whereas the normal producer owns the
+v2 product-minus-fast contract. It also contains a source cycle after its decision
+cut. The baseline RED reaches the v1 validator first; it is not an independent
+proof of future-cycle refusal or evidence that valid runtime output is rejected.
+
+Fixture-only 7efa8328 replaces the positive with the existing canonical KORD LOW/F
+writers, materializer, readiness/public readers and normal event producer. Its
+remaining-components numerical double is deliberately different from the real
+persisted q and explicitly tests routing only. All 13 original obligations remain
+(12 AST-identical, the exact call clock follows the canonical cut). The original
+38 setup statements remain as a separate early-refusal specimen. No Beijing/WU
+HIGH/C public-wrapper coverage is claimed from the KORD positive; unchanged native
+product and real-kernel controls separately cover their declared mirrors.
+
+The optional native market topology leaves the KORD helper's defaults untouched.
+The positive uses bins where all three outcomes remain possible under the real
+LOW bound. A paired default-topology case retains the known exact-zero sibling
+and proves that the same positive numerical double is rejected by the actual
+payoff-consistency guard. It does not weaken exact authority to make routing pass.
+
+Owner and independent runs each pass 33 focused controls. Independent review
+confirms unchanged production/config/architecture and bounded AST scope. Existing
+native ENTRY/HELD/REDUCE_ONLY/JIT and source mirror controls pass; copied-provenance
+and seam-negative checks retain their narrower scope. No runtime or fallback-policy
+change is justified by this failure. Earlier full scheduled/native acceptance is
+retained through source/module identity, not represented as a new native run.
+The remaining inherited required-CI failures still need separate disposition.
