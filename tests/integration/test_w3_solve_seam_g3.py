@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-10-08
+# Last reused/audited: 2026-10-09 (HKO print-only producer handoff)
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -53810,8 +53810,10 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
         previous = prepare(era._CurrentProbabilityUse.HELD_MONITOR)
         original = dict(fixture.conn.execute("SELECT * FROM forecast_posteriors WHERE posterior_id=?",
                                             (fixture.result.posterior_id,)).fetchone())
-        # A real newest run begins inside this local day. Its suffix may feed
-        # the independent remaining-vector lane, never a full-day scalar/HWM.
+        # Refresh the remaining-vector evidence without capturing a new scalar
+        # forecast release. Together with the current print below, these paths
+        # exercise combined current-evidence redecision; no q delta is attributed
+        # to the temperature print alone.
         from src.data import day0_hourly_vectors as hourly,openmeteo_model_updates as updates
         from src.data import bayes_precision_fusion_download as dl
         from src.data.replacement_forecast_cycle_policy import replacement_source_cycle_max_age_hours
@@ -53870,14 +53872,6 @@ def test_hko_minute_mean_normal_tick_wakes_real_seed_without_changing_extreme(tm
                                           (ens,ens_hash,hourly.OPENMETEO_ENSEMBLE_URL)):
                 assert hourly.persist_day0_hourly_vectors(rows,target_date="2026-09-30",conn=fixture.conn,
                     request_hash=identity,endpoint=endpoint,now=remaining_capture) == len(rows)
-            models = tuple(hourly.day0_hourly_models_for_city(fixture.city))
-            scoped = dl.download_bayes_precision_fusion_extra_raw_inputs(forecast_db=fixture.db,cycle=remaining_run,
-                targets=[dl.BayesPrecisionFusionDownloadTarget(city=fixture.city.name,target_date="2026-09-30",
-                    metric=metric,latitude=fixture.city.lat,longitude=fixture.city.lon,
-                    timezone_name=fixture.city.timezone,lead_days=0)],models=models,
-                frozen_source_runs={model:(remaining_run,remaining_run+_dt.timedelta(minutes=5)) for model in models},
-                include_previous_runs=False,prune_after=False)
-            assert scoped["written_row_count"] == 0
         assert [tuple(row) for row in fixture.conn.execute(
             "SELECT raw_model_forecast_id,model,metric,source_cycle_time,source_available_at,captured_at,recorded_at,artifact_id,raw_sha256 "
             "FROM raw_model_forecasts ORDER BY raw_model_forecast_id")] == prior_rows

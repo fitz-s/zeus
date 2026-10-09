@@ -22791,3 +22791,69 @@ both ad8 and the repair: its bare-fast-tail and WU synthetic receipt fixtures
 are rejected by the unchanged exact-source receipt gate. These failures are
 not suppressed or claimed green. Map and freshness checks pass. Independent
 review and the lead-owned native acceptance remain required before publication.
+
+### Bounded deadline and HKO continuation (2026-10-09)
+
+Preserve the reviewed published4169 milestone and its exact source/test/CI
+evidence. Two further offline lanes address the original physical-exit goal;
+they do not expand into general baseline cleanup or authorize live operations.
+Relevant protected contracts are INV-01/14/37/47: truthful canonical state,
+source/attempt identity, single-owner writes, and scoped defer/drain/reset.
+
+The deadline lane must first reproduce real SQLite contention at the bounded
+work boundary and trace the actual reactor disposition, pending debt and normal
+retry. Integer-millisecond wait truncation must not convert a deferred attempt
+into falsely completed work. Choose the smallest correction supported by the
+owner contract; preserve raw causes and non-contention errors, absolute work
+budgets, command ownership, and source/book freshness. Do not extend deadlines,
+retry arbitrary side-effecting statements, or classify every lock error as an
+expired deadline. Scope is the existing deadline helper/caller boundary and
+dedicated behavioral tests, with independent review before integration.
+
+The HKO lane isolates the existing HIGH/LOW print/reseed fixture from its
+unrelated explicit newer scalar capture. Keep real remaining-vector persistence
+and all prior-row stability, source-clock, produced-q, held/exit witness,
+YES/NO mapping, HOLD-to-SELL, EV/log-growth, quote-floor, source/readiness
+expiry and duplicate assertions. Do not replace the obsolete zero-row assertion with a permissive
+count or fabricate q/readiness/decisions. The scenario proves combined current
+evidence redecision, not a numerical effect attributable only to one print.
+If the intact downstream assertions expose a production boundary failure,
+record it and establish the minimal additional scope before changing source.
+
+The two lanes use separate cloud worktrees and commits. The HKO owner edits its
+existing fixture; the deadline owner prefers dedicated tests to avoid shared
+test-file edits. The lead owns this plan and integration; each source/test
+delta receives a pinned independent review. Preserve genuine REDs and readiness
+gaps; do not weaken the other inherited authority/fallback cases for green CI.
+
+
+#### Bounded continuation disposition (2026-10-09)
+
+The two lanes are independently accepted and combined in local source 19be65b8.
+HKO 2854a8b is fixture-only: remove the unrelated scalar acquisition and its
+obsolete zero-row assertion while retaining 41 assertions and every downstream
+producer/consumer statement. Eight independent controls pass. The probability
+change remains combined vector-plus-print evidence, and the expiry negative is
+source/readiness expiry, not an expired-quote test.
+
+Deadline 0dc92af fixes truthful classification at the integer-millisecond SQLite
+busy-timeout boundary. Exact native SQLITE_BUSY, actual deadline clipping and
+less than one millisecond remaining are jointly required; wait only the original
+remainder, replay no SQL, retain cancellation priority and chain the native
+cause. The review caught and corrected a one-shot watcher-cancellation race.
+The inherited reactor already retries both reason labels, so this is not proof
+of repaired event loss. Real-lock REDs establish unchanged pending debt before
+the reason assertion. Final 38 selected controls, 20 parameterized repetitions of
+the unchanged original real-clock test, and 21 independent controls pass; the
+review also reproduces 3 baseline REDs. Counts overlap.
+
+Same-event HIGH/LOW retry controls use the same simulated decision timestamp.
+They establish fresh source selection and truthful HOLD completion or pending
+SELL preflight, not wall-clock retry cadence or a confirmed fill. The complete
+scheduled native module is the separate downstream acceptance surface, with
+its original finite bid windows, genuine scheduled collateral retry, native
+confirmations and canonical closure. Its immutable integrated run and exact-head
+hosted checks must accompany publication. Simulated source/account/venue input,
+UNKNOWN native cash, NULL fees and handler-only restart limits remain explicit.
+The other inherited authority/fallback cases and fixture/protocol debts are not
+weakened or declared harmless; failed required release gates remain blocking.

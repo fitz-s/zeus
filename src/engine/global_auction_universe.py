@@ -158,6 +158,38 @@ _IN_MEMORY_WORK_SQLITE_FENCE = threading.RLock()
 _SHARED_WORK_SQLITE_FENCE = threading.RLock()
 
 
+def _checkpoint_sqlite_error(
+    error: sqlite3.OperationalError,
+    work_context: WorkContext,
+    *,
+    stage: str,
+    deferred: Sequence[WorkDeferred],
+    deadline_clipped: bool,
+) -> None:
+    try:
+        if deferred:
+            raise deferred[0]
+        remaining = work_context.checkpoint(f"{stage}:sql_error")
+        if (
+            deadline_clipped
+            and getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_BUSY
+            and 0.0 < remaining < 0.001
+        ):
+            # SQLite's integer-ms timeout can exhaust just before our absolute
+            # deadline. SCOPE: only this deadline-clipped BUSY's final fraction
+            # of a millisecond. DRAIN: checkpoint the original remainder without
+            # replaying any SQL; cancellation still wins. RESET: the caller's
+            # next fresh cut. Shorter owner timeouts and early/extended BUSY,
+            # LOCKED, external interrupts and other errors retain their cause.
+            while True:
+                _time.sleep(remaining)
+                if deferred:
+                    raise deferred[0]
+                remaining = work_context.checkpoint(f"{stage}:sql_error")
+    except WorkDeferred as exc:
+        raise exc from error
+
+
 def _work_sqlite_main_path(conn: sqlite3.Connection) -> str | None:
     for _sequence, name, path in conn.execute("PRAGMA database_list"):
         if str(name) == "main":
@@ -243,10 +275,11 @@ def bounded_work_sqlite(
             try:
                 try:
                     yield conn
-                except sqlite3.OperationalError:
-                    if deferred:
-                        raise deferred[0]
-                    work_context.checkpoint(f"{stage}:sql_error")
+                except sqlite3.OperationalError as exc:
+                    _checkpoint_sqlite_error(
+                        exc, work_context, stage=stage, deferred=deferred,
+                        deadline_clipped=remaining_ms < prior_busy_timeout,
+                    )
                     raise
                 if deferred:
                     raise deferred[0]
@@ -311,10 +344,11 @@ def bounded_work_sqlite(
     try:
         try:
             yield read_conn
-        except sqlite3.OperationalError:
-            if deferred:
-                raise deferred[0]
-            work_context.checkpoint(f"{stage}:sql_error")
+        except sqlite3.OperationalError as exc:
+            _checkpoint_sqlite_error(
+                exc, work_context, stage=stage, deferred=deferred,
+                deadline_clipped=remaining_ms < 5_000,
+            )
             raise
         if deferred:
             raise deferred[0]

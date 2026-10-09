@@ -28,6 +28,7 @@ test_trust_policy:
   # Machine-readable registry: tests with valid lifecycle headers.
   # Tests not in this list require audit before running.
   trusted_tests:
+    tests/engine/test_sqlite_work_deadline_deferral.py: {created: "2026-10-09", last_used: "2026-10-09", note: "Real exclusive SQLite contention at the truncated busy-timeout boundary, original exception/code custody, reactor retry and completion-debt retention; early lock and unrelated error controls. Controlled monotonic boundary only; no production state or SQL replay."}
     tests/execution/test_global_sell_publication_deadline.py: {created: "2026-10-08", last_used: "2026-10-08", note: "V4 publication admission preserves aware live deadlines, exact prepared attempt identity and existing active or ambiguous owner fences. Unarmed debt must reach normal preparation; expiry is never publisher-inactivity proof."}
     tests/state/test_unidentified_exit_order_proxy.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Anonymous order-proxy prevention, strict producer-provenance refusal, real partial/full fill conservation, scoped and attached-schema reader parity, and pending-position no-retry on ambiguity. Raw facts remain append-only; historical projections are not rewritten."}
     tests/calibration/test_exact_payoff_entry_policy.py: {created: "2026-10-08", last_used: "2026-10-08", note: "Typed exact ENTRY metadata, authenticated held policy binding, current causal fit or genuine insufficient-support selection, original ENTRY price-feature semantics, and malformed/legacy/refuted-source refusal. No fitting of exact payoff or inferred historical policy."}
@@ -943,6 +944,7 @@ test_trust_policy:
 
 categories:
   core_law_antibody:
+    - tests/engine/test_sqlite_work_deadline_deferral.py
     - tests/test_current_temperature_delivery.py
     - tests/test_fill_cash_proof.py
     - tests/test_fill_cash_observer.py
@@ -1880,6 +1882,15 @@ relationship_test_manifests:
       - tests/test_runtime_guards.py
 
 test_metadata:
+  tests/engine/test_sqlite_work_deadline_deferral.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+    - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+    - docs/authority/zeus_current_architecture.md
+    notes: Genuine SQLite contention with controlled sub-millisecond deadline timing preserves native exception custody and the reactor's existing pending retry and completion debt. HIGH/LOW normal retries rebuild real current-source HOLD or in-band statistical SELL selection; an intentionally stopped preflight is not a fill. Early and owner-limited BUSY, unlimited work, native LOCKED/BUSY_SNAPSHOT/ERROR/external INTERRUPT and one-shot cancellation remain distinct. No SQL replay, deadline extension or production-state claim.
+    created: '2026-10-09'
+    last_reused_or_audited: '2026-10-09'
   tests/execution/test_global_sell_publication_deadline.py:
     cohort: law_antibody
     trust: trusted
