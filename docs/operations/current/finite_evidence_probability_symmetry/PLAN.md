@@ -22973,3 +22973,66 @@ and seam-negative checks retain their narrower scope. No runtime or fallback-pol
 change is justified by this failure. Earlier full scheduled/native acceptance is
 retained through source/module identity, not represented as a new native run.
 The remaining inherited required-CI failures still need separate disposition.
+
+
+### Bounded post-local final-observation continuation (2026-10-09)
+
+Preserve published 2d729 and examine only the WU and NOAA/OGIMET parameters of
+the completed-hourly-to-exact-global-simplex test. Reproduce both current failures
+before editing. Trace the actual source producer, canonical owner and reader for
+station/product, metric/unit, local-day geometry, causal possession and final
+value. Hourly rows, a completed-day flag, a same-station mirror and a verified
+settlement-matched daily value are distinct proofs; do not grant one from another.
+
+Separate lawful incomplete post-local held/reduce-only statistical continuation
+from exact final authority. Preserve intended payoff obligations through source-
+honest positive/refusal cases, ENTRY refusal before final proof, and invalid
+station/source/late-evidence controls.
+A faithful fixture must use the applicable source owner and date-specific product
+contract, not borrow another product's finality or stamp a matching identity.
+Explicit numerical routing doubles remain unit boundaries, not generated-q proof.
+
+If canonical producer output is legitimately authoritative yet rejected, preserve
+the earliest failing handoff and propose the smallest correction before production
+edits. Any source/fallback policy or final settlement proof change requires a
+separate bounded decision. Do not change expectations solely for green CI or
+expand into the other inherited failures. Use guarded cloud execution, exact
+source pins, paired evidence and independent frozen review before publication.
+No production DB, real source acquisition, orders, merge, deployment or restart.
+
+
+#### Post-local fixture disposition (2026-10-09)
+
+Both original failures are legitimate. The WU input lacks canonical revision
+ownership; the OGIMET input is physical-only. More fundamentally, complete raw
+hourly coverage plus a next-day row cannot grant exact final settlement authority.
+There is no admitted WU final-daily producer in this reader. The authorized test-
+only split therefore retains the original July Dallas/WU and Istanbul/OGIMET
+inputs as explicitly nonfinal controls, rather than claiming their old promise
+now works. The direct Dallas check uses its historical WU contract, not today's
+NOAA configuration. Readable-empty WU revision ownership separately proves the
+existing held prior-only permission and ENTRY history refusal; no statistical q
+production is claimed by that isolated policy check.
+
+Separate September KATL/F and EGLC/C positives use retained station envelopes
+with explicitly synthetic full observation arrays (clocks, temperatures, METAR
+text and pressure). No station is relabeled. Their real native parser, canonical
+writer/reader and global preparation reproduce the original F/C exact payoff
+arrays and NO complements without forecast/q injection. They do not establish
+Dallas or Istanbul native acquisition. Final qualification requires a request
+begun after local-day end, full requested coverage and possession before the cut;
+late receipt alone or a forged complete_day flag cannot substitute for that proof.
+
+Source station/unit/body/membership checks remain strict. Corrections at ten
+seconds and an empty product at twenty seconds revoke the selected source within
+its thirty-second freshness window, distinguishing source invalidation from
+expiry. Native exact final values remain distinct from directional bounds; the
+independent reader probe discriminates F73.76 rounded74 from its bound rounded73.
+All three probability-use roles consume only the qualified exact proof.
+
+Frozen 3f29fe62 and its independent review each pass nine selected cases, including
+existing complete-hourly/DST refusal controls. Production/config/architecture and
+unrelated module definitions are unchanged. No runtime defect, source-policy or
+fallback expansion is established or implemented. Earlier scheduled/native
+acceptance is retained through source/module identity, not claimed as a new run.
+Exact-head hosted checks and remaining inherited failures stay separate gates.
