@@ -355,16 +355,19 @@ def test_no_reader_admits_asos5_rows(monkeypatch, tmp_path):
     decision = datetime.now(UTC).replace(second=0, microsecond=0)
     target = decision.astimezone(ZoneInfo(cities_by_name[city].timezone)).date().isoformat()
     path = _world(tmp_path)
-    _seed_page_and_awc(path, city=city, station=station, decision=decision, days=3)
+    paired = _seed_page_and_awc(path, city=city, station=station, decision=decision, days=3)
     before = _read_all(path, city=city, target=target, decision=decision)
     assert before[("fact", "high", True)] is not None and before["state"] is not None
     assert before[("residual", "high")] is not None and before["oracle"] is not None
 
-    # asos5 rows that would move every extreme and the latest clock if any reader admitted them.
+    # asos5 rows that would move every extreme, the latest clock and every residual pair if any
+    # reader admitted them: the 5-minute grid of the day, plus each paired page/METAR clock.
+    grid = []
+    for minutes in range(5, 24 * 60, 5):
+        at = decision - timedelta(minutes=minutes)
+        grid.append(at.replace(minute=at.minute - at.minute % 5, second=0, microsecond=0))
     with sqlite3.connect(path) as conn:
-        for minutes in range(5, 24 * 60, 5):
-            at = (decision - timedelta(minutes=minutes))
-            at = at.replace(minute=at.minute - at.minute % 5, second=0, microsecond=0)
+        for at in grid + [clock for clock, _ in paired]:
             for value in (140.0, -40.0):
                 append_print(conn, city=city, station_id=station, source_channel="asos5_kdal",
                              publish_ts_utc=at.isoformat(), value_native=value, unit="F",
