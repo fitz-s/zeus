@@ -326,3 +326,54 @@ Next:
 
   - With the background worker, round duration drops to p90 21 s / p99 50 s, from 59 / 443 s.
   - Decision: background reseed worker (single thread, batch of all pending keys, retry on failsoft) plus a bounded physical WORLD write.
+- 2026-10-09 21:55:59Z trade WAL TRUNCATED: 24.07 GB → 0 (manual fail-fast PRAGMA wal_checkpoint(TRUNCATE) loop, busy_timeout 800 ms, after f2af8cfe3 removed the second pinning reader and price-channel-ingest was restarted). Disk free 0.8 GiB → 23 GiB. Root causes: candidate-fold whole-table fetchall (af48569b1) + daily corpus-growth whole-table LENGTH() sum (f2af8cfe3). Standing defect: automatic TRUNCATE at src/main.py:9429 requires log_frames == checkpointed, which never holds under ~500 frames/s; must become "outstanding below a small bound" so this cannot recur.
+- 2026-10-09 21:58Z asos5 LANDED after the collector fix (b0f164936 + 1a65c25c7: asos5 excluded from the revision cohort, counted in acquisition_only_prints, relation test). asos5 248cc37c2 (Sol GO; 17 tests). data-ingest restarted 21:58:25Z; best forecast runs the first-hour check at +60 min.
+- 2026-10-09 9ebbd044d (landed, NOT loaded: lives in MAIN src/main.py): WAL TRUNCATE attempted when ≤16 MiB outstanding instead of only at exactly 0 (never true under continuous writes → 24 GB growth). Fail-fast busy_timeout 0 kept. Loads with the next MAIN restart (pending: geoblocked ENTRY d40a182c in REVIEW_REQUIRED blocks the obligation gate). Note: the manual TRUNCATE that reclaimed 24 GB took ~98 s and cost 47 SQLITE_BUSY in price-channel and one held-monitor deadline in MAIN.
+
+## 2026-10-09 wake retirement 81fd300a (fix/forecast-wake-retirement) — Sol review interim: HOLD
+- Blocker 1: past_day_idle consults only reach.open_families; its warm-rest resolver silently drops REVIEW_REQUIRED/unresolvable-family ENTRY rests, so idle retires while HeldMonitorBook._entry_rest reads unknown (fail-open; even with valued=False).
+- Blocker 2: _standing_entry_wake_valued checks only "authority loaded"; real valuation reads the newest 100 wakes per reason, so an older held + ENTRY-rest scope is never captured while the gate reads True → held_monitored retires it.
+- Clean: read_reactor_wake / day0_hint_finished AST identical to base; DST boundary pure-function probe passes.
+- "100 failures disappear" was an artifact: no .git in the worktree copy → 102 HEAD assertions; with a git shim base = head = 6 fail / 254 pass, same fail set.
+- Await final report (monitor-lag/cost); then fix both to fail closed (unknown rest → keep; valuation gate must prove the specific family was valued).
+- Correction from the reviewer: the "102 HEAD assertions" figure came from a single transient grep. Saved logs show:
+  - Without .git: base 108 fail / 152 pass; head the same.
+  - With a git shim: base 6 fail / 254 pass; head the same.
+  - The fail sets are identical in both pairs.
+  - The author's 100-failure environment is UNVERIFIED.
+- The two "new" failures are wall-clock-dependent test bugs, present on both base and head:
+  - test_openmeteo_daily_429_blocks_until_next_utc_day: asserts >3600 s, so it always fails after 23Z.
+  - test_day0_priority_lane_claims_while_background_runner_is_blocked: its Ankara UTC-date fixture is ended by the city-local TARGET_DAY_ENDED after 21Z.
+  - Separate test-hygiene item.
+- Reviewer repro: pure fake SQL against the real HeldMonitorBook, the real main gate and the real wake_served_reason.
+  - Setup: held position p1 has a MONITOR_REFRESHED at publish+9 min; there is also a REVIEW_REQUIRED ENTRY with position_id None and an unresolvable token.
+  - Result: _entry_rest=True (unknown) and Day0 covered=False, yet monitored_since=True and the authority gate=True → retired as held_monitored.
+  - So the unknown rest fails OPEN in BOTH new branches (past_day_idle and held_monitored).
+  - Telemetry limit: one id can emit both WAKE_RECEIVED and WAKE_RETIRED, so the "exactly one terminal stage per id" claim is false. Document it; this is not a blocker.
+- Fix dispatched to the branch author (same branch, new commits, no push):
+  - idle uses the fail-closed ENTRY resolver; an unknown result keeps the wake.
+  - held proof blocked by any known/unknown ENTRY rest unless that wake's scope was actually captured and completed.
+  - C3 defer/lock-busy is not completion proof.
+  - Evidence refs: reactor_wake.py 3471-3478, 3643-3651, 3718-3730; events/reactor.py 7595-7596, 7670-7673; main.py 7734-7744, 7814-7818, 9031-9032, 9094-9109.
+- Blocker 3 (reviewer, independently Read-verified): HeldMonitorBook SQL (~3430-3440) reads only event_type and occurred_at.
+  - harvester.py:584-614 writes MONITOR_REFRESHED (PARTIAL_EXIT_ECONOMICS_REPAIRED) without reading a belief.
+  - cycle_runtime.py:3973-3978 writes the same type for INPUTS_UNAVAILABLE / REFRESH_DEADLINE.
+  - So a non-belief row can retire a targeted exit wake.
+  - Fix: the proof must require a causal belief read ≥ publish, or drop held_monitored.
+  - The 90 s wall-clock vs 75 s monotonic mismatch is noted.
+  - Not issues: duplicate receipts (dedup exists); WAL snapshot pin (none). Live 0.24 s cost unverified.
+
+## 2026-10-09 19:10–19:20 CDT disk-full incident (second)
+- Free space fell to 1.3 GiB; zeus_trades.db-wal reached 12.77 GB because MAIN (boot 1e3db865) only runs PASSIVE checkpoints.
+- Effects: ENOSPC in GLOBAL_AUCTION ("[Errno 28] No space left on device"; 8 retried, 4 dead); RiskGuard "unable to open database file" → RED; all session agents blocked.
+- Actions:
+  - Stopped all 5 research/fix agents.
+  - Ran the bounded TRUNCATE loop (scratchpad/truncate_loop.py): (0,0,0); WAL 12.77 GB → 0; free 16 GiB.
+- MAIN was SIGKILLed (launchd status −9) and respawned at 19:17:51 on 9ebbd044d (boot_sha=9ebbd044), so the TRUNCATE-when-small policy is now LOADED. Killer not identified (no deploy log line); likely the watchdog/launchd under the disk stall. UNVERIFIED.
+- Post-restart: trades WAL 64 MiB; TRUNCATE is attempted (DEFERRED busy=1 at 19:20:24, retried each cycle); RiskGuard GREEN 19:18–19:19.
+- Remaining pressure: zeus-forecasts.db-wal is 2.07 GB and growing (log_frames 501k, checkpointed 494k stuck: a reader pins it).
+- Forecasts WAL root cause: data-ingest (pid 41588, booted 16:58) held read mark 4 at frame 494455 from about 19:11. That followed ENOSPC errors in ingest at 19:12 (27 "Errno 28 / database or disk is full" lines), presumably a connection left holding an open read transaction after a failed write. UNVERIFIED which job.
+- Action: deploy_live restart data-ingest at 19:27 (gate ok, HEAD == origin/live 9ebbd044d; no code delta for ingest since 248cc37c2). Afterwards nBackfill tracks mxFrame (511337 / 512185) and the pin is gone. The forecasts WAL file stays allocated at 2.1 GB (TRUNCATE busy under continuous readers) but is no longer growing.
+- Trades WAL back to 64 MiB under MAIN 9ebbd044d. Free disk 21 GiB.
+- Scratch cleanup: deleted stale repo tree copies/tars (base*, head, tree_*, baseline) ≈ 1.6 GB.
+- Lesson: an ENOSPC during a write can leave a long-lived daemon with a pinned read snapshot. After any disk-full event, check the -shm read marks of every DB and restart the pin holder.
