@@ -69,13 +69,18 @@ def world(monkeypatch, tmp_path):
                         lambda: SimpleNamespace(lease=lease))
     monkeypatch.setattr(production, "_replacement_forecast_live_materialization_queue_config", lambda: {})
     monkeypatch.setattr("src.data.physical_current_delivery.current_temperature_priority_families", lambda: {})
-    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", set())
+    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", {})
     monkeypatch.setattr(ingest, "_physical_current_reseed_thread", None)
     seen.path = path
     yield seen
     worker = ingest._physical_current_reseed_thread
     if worker is not None:
         worker.join(10)
+
+
+def _pend(*keys):
+    for key in keys:
+        ingest._mark_physical_current_wake(key)
 
 
 def _join_worker():
@@ -131,7 +136,7 @@ def test_round_returns_while_the_reseed_is_still_running(world, monkeypatch):
     result = _tick(monkeypatch)
     assert result["status"] == "COMMITTED"
     assert entered.wait(10) and ingest._physical_current_reseed_thread.is_alive()
-    assert ingest._physical_current_pending_wakes == {KDAL}
+    assert set(ingest._physical_current_pending_wakes) == {KDAL}
     release.set()
     _join_worker()
     assert not ingest._physical_current_pending_wakes
@@ -150,12 +155,29 @@ def test_key_added_during_a_batch_survives_into_the_next_batch(world, monkeypatc
     monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed", enqueue)
     _tick(monkeypatch)
     assert entered.wait(10)
-    with ingest._physical_current_reseed_lock:
-        ingest._physical_current_pending_wakes.add(KORD)
+    ingest._mark_physical_current_wake(KORD)
     ingest._defer_physical_current_reseed()
     release.set()
     _join_worker()
     assert calls == [{"Dallas"}, {"Chicago"}]
+    assert not ingest._physical_current_pending_wakes
+
+
+def test_key_re_added_during_its_own_batch_gets_a_second_enqueue(world, monkeypatch):
+    calls = []
+
+    def enqueue(cfg, **kw):
+        calls.append(kw["scopes"])
+        if len(calls) == 1:
+            # The round's add path: a newer print for the same station committed
+            # after this batch read WORLD.
+            ingest._mark_physical_current_wake(KDAL)
+        return OK
+
+    monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed", enqueue)
+    _tick(monkeypatch)
+    _join_worker()
+    assert len(calls) == 2
     assert not ingest._physical_current_pending_wakes
 
 
@@ -164,10 +186,10 @@ def test_batch_exception_keeps_every_key(world, monkeypatch):
         raise RuntimeError("enqueue down")
 
     monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed", boom)
-    ingest._physical_current_pending_wakes.update({KDAL, KORD})
+    _pend(KDAL, KORD)
     ingest._defer_physical_current_reseed()
     _join_worker()
-    assert ingest._physical_current_pending_wakes == {KDAL, KORD}
+    assert set(ingest._physical_current_pending_wakes) == {KDAL, KORD}
     assert ingest._physical_current_reseed_thread is None
 
 
@@ -176,10 +198,10 @@ def test_failsoft_report_keeps_every_key_then_next_signal_retries(world, monkeyp
     calls = []
     monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed",
                         lambda cfg, **kw: calls.append(kw["scopes"]) or reports.pop(0))
-    ingest._physical_current_pending_wakes.update({KDAL, KORD})
+    _pend(KDAL, KORD)
     ingest._defer_physical_current_reseed()
     _join_worker()
-    assert ingest._physical_current_pending_wakes == {KDAL, KORD} and len(calls) == 1
+    assert set(ingest._physical_current_pending_wakes) == {KDAL, KORD} and len(calls) == 1
     ingest._defer_physical_current_reseed()
     _join_worker()
     assert not ingest._physical_current_pending_wakes and len(calls) == 2
@@ -190,7 +212,7 @@ def test_one_batch_makes_one_enqueue_over_the_union_of_scopes(world, monkeypatch
     calls = []
     monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed",
                         lambda cfg, **kw: calls.append(kw) or OK)
-    ingest._physical_current_pending_wakes.update({KDAL, KORD})
+    _pend(KDAL, KORD)
     ingest._defer_physical_current_reseed()
     _join_worker()
     assert len(calls) == 1

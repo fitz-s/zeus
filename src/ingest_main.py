@@ -2132,7 +2132,9 @@ def _physical_current_poll_seconds() -> float:
 
 
 _PHYSICAL_CURRENT_WRITE_BUDGET_S = 0.3
-_physical_current_pending_wakes: set[tuple[str, str, str]] = set()
+# key -> generation: bumped on every advance, so a batch that read WORLD before a
+# later commit cannot discard the key that commit re-added.
+_physical_current_pending_wakes: dict[tuple[str, str, str], int] = {}
 _physical_current_reseed_lock = threading.Lock()
 _physical_current_reseed_thread: threading.Thread | None = None
 _physical_source_next_poll: dict[tuple[str, str, str], float] = {}
@@ -2156,8 +2158,9 @@ def _current_temperature_delivery_tick() -> dict[str, object]:
 def _physical_current_reseed_worker() -> None:
     """Drain pending wakes in batches; the round never waits on this thread.
 
-    A batch discards only its own snapshot's keys, only after a non-failsoft
-    report. Failsoft or an exception keeps every key and ends the worker: the
+    A batch discards only the snapshot keys whose generation is unchanged, only
+    after a non-failsoft report. Failsoft or an exception keeps every key and
+    ends the worker: the
     next committed round re-signals, and the delivery reconcile is the backstop.
     """
     global _physical_current_reseed_thread
@@ -2170,7 +2173,7 @@ def _physical_current_reseed_worker() -> None:
 
     while True:
         with _physical_current_reseed_lock:
-            batch = frozenset(_physical_current_pending_wakes)
+            batch = dict(_physical_current_pending_wakes)
             if not batch:
                 _physical_current_reseed_thread = None
                 return
@@ -2203,7 +2206,14 @@ def _physical_current_reseed_worker() -> None:
                 _physical_current_reseed_thread = None
             return
         with _physical_current_reseed_lock:
-            _physical_current_pending_wakes.difference_update(batch)
+            for key, gen in batch.items():
+                if _physical_current_pending_wakes.get(key) == gen:
+                    del _physical_current_pending_wakes[key]
+
+
+def _mark_physical_current_wake(key: tuple[str, str, str]) -> None:
+    with _physical_current_reseed_lock:
+        _physical_current_pending_wakes[key] = _physical_current_pending_wakes.get(key, 0) + 1
 
 
 def _defer_physical_current_reseed() -> str:
@@ -2402,9 +2412,9 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
 
     wake_status = "NO_NEW_SOURCE_REVISION"
     wake_key = (city.name, station_id, source_channel)
+    if advanced:
+        _mark_physical_current_wake(wake_key)
     with _physical_current_reseed_lock:
-        if advanced:
-            _physical_current_pending_wakes.add(wake_key)
         pending = wake_key in _physical_current_pending_wakes
     if pending:
         # The scoped reseed is slower than the round it would stall; the worker

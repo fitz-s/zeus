@@ -652,7 +652,7 @@ def test_source_tick_emits_one_source_commit_per_inserted_row(monkeypatch,tmp_pa
     monkeypatch.setattr(production,"_replacement_forecast_live_materialization_queue_config",lambda:{})
     monkeypatch.setattr("src.data.physical_current_delivery.current_temperature_priority_families",lambda:{})
     monkeypatch.setattr(production,"_enqueue_fusion_upgrade_reseeds_if_needed",lambda cfg,**kw:{"status":"FUSION_UPGRADE_TRIGGER"})
-    monkeypatch.setattr(ingest,"_physical_current_pending_wakes",set())
+    monkeypatch.setattr(ingest,"_physical_current_pending_wakes",{})
     before=time.time_ns()//1_000_000
     result=ingest._day0_current_temperature_source_tick(city,route)
     assert result["status"]=="COMMITTED" and result["inserted"]==2

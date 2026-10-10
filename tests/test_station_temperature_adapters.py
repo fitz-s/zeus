@@ -1025,7 +1025,7 @@ def test_native_temperature_ingest_reseeds_after_durable_world_commit(monkeypatc
         calls.append(kw)
         return {'status':'FUSION_UPGRADE_TRIGGER'}
     monkeypatch.setattr(production,'_enqueue_fusion_upgrade_reseeds_if_needed',enqueue)
-    monkeypatch.setattr(ingest,'_physical_current_pending_wakes',set())
+    monkeypatch.setattr(ingest,'_physical_current_pending_wakes',{})
     result=ingest._day0_current_temperature_source_tick(city,route)
     worker=ingest._physical_current_reseed_thread
     if worker is not None:worker.join(10)

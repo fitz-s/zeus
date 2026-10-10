@@ -189,7 +189,7 @@ def _tick(monkeypatch, path, prints, *, city_name="Dallas", station="KDAL"):
     monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed",
                         lambda cfg, **kw: {"status": "FUSION_UPGRADE_TRIGGER"})
     monkeypatch.setattr("src.data.physical_current_delivery.current_temperature_priority_families", lambda: {})
-    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", set())
+    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", {})
     return ingest._day0_current_temperature_source_tick(cities_by_name[city_name], _route(station))
 
 

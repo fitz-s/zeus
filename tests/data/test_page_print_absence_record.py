@@ -147,7 +147,7 @@ def test_tick_records_page_absence_in_the_print_transaction(monkeypatch, tmp_pat
                         lambda cfg, **kw: {"status": "FUSION_UPGRADE_TRIGGER"})
     monkeypatch.setattr("src.data.physical_current_delivery.current_temperature_priority_families",
                         lambda: {})
-    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", set())
+    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", {})
     result = ingest._day0_current_temperature_source_tick(city, route)
     assert result["status"] == "COMMITTED"
     with sqlite3.connect(path) as conn:
@@ -203,7 +203,7 @@ def test_absence_failure_never_costs_the_print_write(monkeypatch, tmp_path, fail
                         lambda cfg, **kw: {"status": "FUSION_UPGRADE_TRIGGER"})
     monkeypatch.setattr("src.data.physical_current_delivery.current_temperature_priority_families",
                         lambda: {})
-    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", set())
+    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", {})
     result = ingest._day0_current_temperature_source_tick(city, route)
     assert len(calls) == 1, "the absence record must have been attempted"
     assert result["status"] == "COMMITTED" and result["inserted"] == 2

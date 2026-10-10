@@ -206,7 +206,7 @@ def test_new_print_uses_world_coordinator_and_wakes_only_helsinki(monkeypatch, t
     monkeypatch.setattr("src.config.runtime_cities_by_name", lambda: {"Helsinki": CITY})
     # Empty HIGH daytime mask must not disable physical-current observations.
     monkeypatch.setattr(ingest, "_active_window_cities", lambda _: [])
-    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", set())
+    monkeypatch.setattr(ingest, "_physical_current_pending_wakes", {})
     monkeypatch.setattr(fmi, "fetch_temperature", lambda **_: (sample,))
     monkeypatch.setattr(db, "world_write_mutex", lambda: threading.Lock())
     monkeypatch.setattr(db, "get_world_connection", lambda **_: sqlite3.connect(path))
