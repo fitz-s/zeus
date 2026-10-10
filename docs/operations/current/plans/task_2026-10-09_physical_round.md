@@ -94,17 +94,20 @@ At the enqueue layer, exactly-once is the trigger's own property: it reserves se
 semantic transition key, and a duplicate reports `already_enqueued`. A key enqueued by
 both the worker and the reconcile pass therefore yields one seed.
 
-For the in-memory key:
-- Add: the round thread adds it under the lock, after the WORLD commit.
-- Take: the worker snapshots the set under the lock and does not clear it.
-- Discard: under the lock, the worker removes only the snapshot's keys, and only after
-  a non-failsoft report.
+For the in-memory key (corrected 2026-10-10, see Implementation note):
+- Add: the round thread bumps the key's generation under the lock, after the WORLD commit.
+  The pending set is a dict key -> generation.
+- Take: the worker snapshots `{key: generation}` under the lock and does not clear it.
+- Discard: under the lock, the worker deletes only snapshot keys whose current generation
+  equals the snapshot's, and only after a non-failsoft report. A key whose generation
+  advanced stays, and the worker loops into another batch.
 
-A key that was re-added during the batch was already in the snapshot, so a successful
-batch discards it. That is correct: the enqueue's `computed_at` is taken after the
-snapshot, so the batch read WORLD after that commit and covers the newer print. A key
-first added during the batch is not in the snapshot, so it survives into the next
-batch.
+The earlier argument that a key re-added during the batch is covered by the batch was
+wrong. `computed_at` is fixed at batch start, and the enqueue reads WORLD at some point
+inside the call; a print committed after that read is newer than what the batch saw, yet
+the round's re-add finds the live worker thread (no new thread) and the old batch then
+discarded the key. That second revision missed the latency path until the reconcile pass.
+The generation makes "re-added since the snapshot" observable instead of assumed.
 
 ## Implementation (2026-10-10)
 
@@ -166,3 +169,12 @@ Residual risk:
   is then called with an empty tuple, which was not exercised in tests.
 - Pytest here needs `config/settings.json` (gitignored); it was copied from the main tree
   into the worktree and is not committed.
+
+### Note 2026-10-10: mid-batch re-add
+
+Review found the key-loss above. Fixed in `_mark_physical_current_wake` and the worker's
+discard step in `src/ingest_main.py`; `_physical_current_pending_wakes` is now
+`dict[key, int]`. New test `test_key_re_added_during_its_own_batch_gets_a_second_enqueue`
+fails with discard-all and passes with the generation check. Related modules after the fix:
+13 failed, 357 passed (9 tests in the worker file), failure set identical to 9ebbd044d,
+0 NEW failures.
