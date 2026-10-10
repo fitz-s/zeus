@@ -381,3 +381,16 @@ Next:
 - 2026-10-10 METAR lane after G12, 2026-10-09 17:00–2026-10-10 08:40 CDT: 10911 ticks, 368 skipped (max instances, 3.4%), 2045 commits completed, 388 deferred (332 world_writer_busy, 36 sqlite_busy, 20 world_writer_gate_busy), about 25 deferrals/h, consistent with the first post-G12 hour (37). Receipt p90 was not re-measured in this pass.
 - 2026-10-10 G13 re-dispatched (agent physical-round-g13) in a scratchpad worktree at 92851fb8f. Route-kinds r3 (B1/H1/H2) is parked because quota is tight; it remains NO-GO.
 - 2026-10-10 13:41Z G13 agent failed at start ("Credit balance is too low"), with no commits. Branch fix/physical-round-bounded-write-batched-enqueue is still at 92851fb8f (design only). Next action: implement from task_2026-10-09_physical_round.md once quota allows.
+- 2026-10-10 14:20Z G13 implemented on fix/physical-round-bounded-write-batched-enqueue, head 18bfbb67d (not landed, not loaded).
+  - Change: a background reseed worker batches pending city keys. The WORLD write has one 0.3 s budget covering mutex, lease, connect and busy timeout. db.get_world_connection now passes deadline_monotonic through.
+  - Sol review of 988bda365: NO-GO, 1 HIGH, 0 BLOCKER. A key re-added mid-batch was cleared by the old batch, so the second revision lost the fast path. Sol reproduced it deterministically (enqueue_calls=1, pending empty).
+  - Fixed in 19fd8367e: pending wakes are a key → generation map, and the worker deletes only keys whose generation is unchanged. The new test re-adds the same KDAL key inside the enqueue and asserts a second enqueue happens. It fails on 988bda365 and passes now.
+  - Sol verified clean:
+    - The empty-check and the thread-slot reset share one lock, so no wake is lost.
+    - The WAL bootstrap deadline is honoured (measured: 100 ms deadline gives "database is locked" at 116 ms) and maps to the existing WRITE_DEFERRED rollback.
+    - No SQLite connection crosses threads.
+  - Accepted as designed: the 0.3 s budget bounds acquisition and connect, not the post-connect SELECT/BEGIN/INSERT/COMMIT. This matches the METAR lane.
+  - Open test gap (LOW): the budget test only checks parameters ≤ 300 ms and does not simulate budget consumption or a real WAL wait.
+  - Sol did not re-review 18bfbb67d; the coordinator reviewed the generation diff.
+  - Tests: worker file 9/9; related modules 13 failed / 357 passed, with the same 13 pre-existing failures as 9ebbd044d, so 0 NEW.
+  - Landing (Data owns): ingest-only, restart data-ingest. First hour after load, check round-duration p90 (replay estimate 21 s), the PHYSICAL_CURRENT_WRITE_DEFERRED rate (the budget changed from 0.1+0.2 s to 0.3 s total), PHYSICAL_CURRENT_RESEED_BATCH_TRACE enqueue_return_ms, and asos5 first-appearance p50 (now 11.8 min).
