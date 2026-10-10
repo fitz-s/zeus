@@ -1,7 +1,7 @@
 # Physical-current round: bounded WORLD write, reseed off the round
 
 Branch: `fix/physical-round-bounded-write-batched-enqueue` (from origin/live 9ebbd044d).
-Status: IN PROGRESS. Rollback point: 140aae290 (anchor). Code-only; no schema, registry or config change.
+Status: IMPLEMENTED on branch (see Implementation). Rollback point: 140aae290 (anchor). Code-only; no schema, registry or config change.
 
 ## Goal and acceptance
 
@@ -106,7 +106,63 @@ snapshot, so the batch read WORLD after that commit and covers the newer print. 
 first added during the batch is not in the snapshot, so it survives into the next
 batch.
 
-## Next action
+## Implementation (2026-10-10)
 
-Implement the worker and the bounded write, then the tests, the failure-set diff and
-the metrics script.
+Commits: 219d33c9c (worker), d06efd0ff (bounded write), bbbd76541 (existing tests follow the
+deferral), 4c61dd1a0 (new tests).
+
+What changed, all in `src/ingest_main.py` plus one pass-through in `src/state/db.py`:
+- `_physical_current_reseed_worker` (~2156) and `_defer_physical_current_reseed` (~2209):
+  one lazily created daemon thread `physical-current-reseed`. Each loop snapshots
+  `_physical_current_pending_wakes` under `_physical_current_reseed_lock` without
+  clearing, makes one `_enqueue_fusion_upgrade_reseeds_if_needed` call over
+  `current_temperature_delivery_scopes` of the batch's cities, and discards only the
+  snapshot's keys after a non-failsoft report. Failsoft, `None` report or an exception
+  keeps every key and ends the worker (thread slot cleared); the next committed round
+  re-signals and `reconcile_current_temperature_delivery` is the backstop. Not reusing
+  `_defer_anchor_residual_reseed`, whose failure path drops the batch.
+- `_day0_current_temperature_source_tick`: the inline enqueue is gone. After commit it adds
+  the key under the lock and returns `enqueue_status=DEFERRED_TO_RESEED_WORKER`;
+  `world_to_enqueue_return_ms` is removed from PHYSICAL_CURRENT_CHAIN_TRACE.
+  PHYSICAL_CURRENT_REDECISION_SEED is now one line per batch;
+  PHYSICAL_CURRENT_RESEED_BATCH_TRACE (new) carries `enqueue_return_ms`, routes, scopes,
+  status. A worker exception logs PHYSICAL_CURRENT_RESEED_FAILED.
+- Write bound: `_PHYSICAL_CURRENT_WRITE_BUDGET_S = 0.3` starts a deadline before the mutex
+  wait; mutex timeout, lease `deadline_ms`, `busy_timeout_ms`, the post-connect PRAGMA, and
+  a new `deadline_monotonic` on `get_world_connection` (already supported by `_connect`,
+  which bounds the `PRAGMA journal_mode=WAL` wait) are each the time remaining. Expiry
+  raises inside the existing try and returns WRITE_DEFERRED; before, mutex 0.1 s + lease
+  200 ms + 100 ms busy let connect wait up to 30 s. asos5 and G10 savepoints untouched.
+- Shutdown: the worker is a daemon thread and nothing joins it.
+
+Tests: `tests/data/test_physical_round_worker.py`, 8 tests, all 8 ERROR at 9ebbd044d
+(no `_physical_current_reseed_thread`; the budget test also needs the new constant) and
+8 pass now: no inline enqueue; round returns while reseed blocks; key added during a batch
+survives to the next batch; exception keeps all keys; failsoft keeps all keys and the next
+signal retries; one enqueue over the union of scopes; budget expiry returns
+WRITE_DEFERRED and the retry commits once, with a repeat inserting 0; one budget bounds
+mutex, lease and connect. Existing tests that asserted the inline enqueue
+(`test_fmi_airport_temperature.py` helsinki, `test_station_temperature_adapters.py`
+reseeds_after_durable_world_commit) now join the worker and assert DEFERRED status.
+
+Related modules (asos5_ingest, scheduler_adapter, fmi_airport_temperature,
+station_temperature_adapters, fast_obs_receipt_chain, observation_reaction_chain,
+page_print_absence_record):
+- 9ebbd044d: 13 failed, 348 passed. This branch: 13 failed, 348 passed (353 + 8 new tests
+  in the new file, which are not in this count).
+- Failure set diff by test id: identical, 0 NEW failures. The 13 are pre-existing:
+  test_alias_cities_share_one_provider_fetch_even_when_it_fails (1),
+  fmi helsinki[False] (1, base fails on `assert 5 == 1` in its enqueue stub),
+  observation_reaction_chain materializes_then_serves (4), scheduler_adapter (7).
+
+Residual risk:
+- A worker whose batch is failsoft or raises exits; retry waits for the next advanced
+  round on any route or the reconcile pass (p50 91 s, p90 291 s apart on 10-09), not a
+  timer. The set is in memory, so a process loss relies on the reconcile backstop.
+- A 0.3 s total budget is tighter than the old 0.1 + 0.2 sequence only in the worst case;
+  expect WRITE_DEFERRED counts to move, not to rise materially. Check after deploy.
+- Not measured live; replay estimate remains p90 round 21 s.
+- A city missing from `runtime_cities_by_name` yields no scopes for its keys; the enqueue
+  is then called with an empty tuple, which was not exercised in tests.
+- Pytest here needs `config/settings.json` (gitignored); it was copied from the main tree
+  into the worktree and is not committed.
