@@ -377,3 +377,6 @@ Next:
 - Trades WAL back to 64 MiB under MAIN 9ebbd044d. Free disk 21 GiB.
 - Scratch cleanup: deleted stale repo tree copies/tars (base*, head, tree_*, baseline) ≈ 1.6 GB.
 - Lesson: an ENOSPC during a write can leave a long-lived daemon with a pinned read snapshot. After any disk-full event, check the -shm read marks of every DB and restart the pin holder.
+- 2026-10-10 13:41Z asos5 15.7 h recheck (since 22:00Z, live 248cc37c2): 10/10 channels writing, 165–184 rows each, rows == clocks (no duplicates), 0 ASOS5_PRINTS_UNRECORDED. Density 10.5–11.7/h, p≈11.3/h. This CORRECTS the first-hour figure (4–8/h): the nulls were concentrated in that hour, not a standing source property. First-appearance lag n=1740: p50 11.8, p90 17.6, max 34.4 min. The cadence is still bound by the physical round (G13 in flight).
+- 2026-10-10 METAR lane after G12, 2026-10-09 17:00–2026-10-10 08:40 CDT: 10911 ticks, 368 skipped (max instances, 3.4%), 2045 commits completed, 388 deferred (332 world_writer_busy, 36 sqlite_busy, 20 world_writer_gate_busy), about 25 deferrals/h, consistent with the first post-G12 hour (37). Receipt p90 was not re-measured in this pass.
+- 2026-10-10 G13 re-dispatched (agent physical-round-g13) in a scratchpad worktree at 92851fb8f. Route-kinds r3 (B1/H1/H2) is parked because quota is tight; it remains NO-GO.
