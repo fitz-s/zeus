@@ -148,7 +148,7 @@ reseeds_after_durable_world_commit) now join the worker and assert DEFERRED stat
 Related modules (asos5_ingest, scheduler_adapter, fmi_airport_temperature,
 station_temperature_adapters, fast_obs_receipt_chain, observation_reaction_chain,
 page_print_absence_record):
-- 9ebbd044d: 13 failed, 348 passed. This branch: 13 failed, 348 passed (353 + 8 new tests
+- 9ebbd044d: 13 failed, 348 passed. This branch: 13 failed, 348 passed (361 tests; the 8 new tests
   in the new file, which are not in this count).
 - Failure set diff by test id: identical, 0 NEW failures. The 13 are pre-existing:
   test_alias_cities_share_one_provider_fetch_even_when_it_fails (1),
