@@ -394,3 +394,4 @@ Next:
   - Sol did not re-review 18bfbb67d; the coordinator reviewed the generation diff.
   - Tests: worker file 9/9; related modules 13 failed / 357 passed, with the same 13 pre-existing failures as 9ebbd044d, so 0 NEW.
   - Landing (Data owns): ingest-only, restart data-ingest. First hour after load, check round-duration p90 (replay estimate 21 s), the PHYSICAL_CURRENT_WRITE_DEFERRED rate (the budget changed from 0.1+0.2 s to 0.3 s total), PHYSICAL_CURRENT_RESEED_BATCH_TRACE enqueue_return_ms, and asos5 first-appearance p50 (now 11.8 min).
+- 2026-10-10 14:26Z Sol re-review of 18bfbb67d: GO, 0 BLOCKER/HIGH/MEDIUM. Mutation check: making the generation delete unconditional fails the new test (assert 1 == 2). Remaining LOW: the budget test (:243) would pass if each stage got its own 300 ms. A stage-consumption test and a real-WAL contention test remain to add. Landing request sent to Data.
