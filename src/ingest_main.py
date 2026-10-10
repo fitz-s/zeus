@@ -2132,6 +2132,8 @@ def _physical_current_poll_seconds() -> float:
 
 
 _physical_current_pending_wakes: set[tuple[str, str, str]] = set()
+_physical_current_reseed_lock = threading.Lock()
+_physical_current_reseed_thread: threading.Thread | None = None
 _physical_source_next_poll: dict[tuple[str, str, str], float] = {}
 
 
@@ -2148,6 +2150,71 @@ def _current_temperature_delivery_tick() -> dict[str, object]:
     except Exception as exc:  # one replay turn must not stop acquisition/serving
         logger.warning("CURRENT_TEMPERATURE_DELIVERY_DEFERRED error=%s", type(exc).__name__)
         return {"status": "DELIVERY_DEFERRED", "error_class": type(exc).__name__}
+
+
+def _physical_current_reseed_worker() -> None:
+    """Drain pending wakes in batches; the round never waits on this thread.
+
+    A batch discards only its own snapshot's keys, only after a non-failsoft
+    report. Failsoft or an exception keeps every key and ends the worker: the
+    next committed round re-signals, and the delivery reconcile is the backstop.
+    """
+    global _physical_current_reseed_thread
+    from src.config import runtime_cities_by_name
+    from src.data.physical_current_delivery import current_temperature_delivery_scopes
+    from src.data.replacement_forecast_production import (
+        _enqueue_fusion_upgrade_reseeds_if_needed,
+        _replacement_forecast_live_materialization_queue_config,
+    )
+
+    while True:
+        with _physical_current_reseed_lock:
+            batch = frozenset(_physical_current_pending_wakes)
+            if not batch:
+                _physical_current_reseed_thread = None
+                return
+        report = None
+        try:
+            by_name = runtime_cities_by_name()
+            # Read/seed after receipt, never at the pre-request scheduling clock.
+            started = time.monotonic()
+            decision_time = datetime.now(timezone.utc)
+            scopes = current_temperature_delivery_scopes(
+                tuple(by_name[name] for name in sorted({key[0] for key in batch}) if name in by_name),
+                now=decision_time,
+            )
+            report = _enqueue_fusion_upgrade_reseeds_if_needed(
+                _replacement_forecast_live_materialization_queue_config(),
+                scopes=scopes,
+                changed_sources=("day0_current_temperature_state",),
+                computed_at=decision_time,
+            )
+            status = (report or {}).get("status")
+            logger.info("PHYSICAL_CURRENT_REDECISION_SEED routes=%d status=%s", len(batch), status)
+            logger.info("PHYSICAL_CURRENT_RESEED_BATCH_TRACE %s", json.dumps({
+                "routes": len(batch), "scopes": len(scopes), "status": status,
+                "enqueue_return_ms": (time.monotonic() - started) * 1000,
+            }, sort_keys=True))
+        except Exception as exc:  # noqa: BLE001 - keys stay pending for the next signal
+            logger.warning("PHYSICAL_CURRENT_RESEED_FAILED routes=%d error=%s", len(batch), type(exc).__name__)
+        if report is None or report.get("status") == "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED":
+            with _physical_current_reseed_lock:
+                _physical_current_reseed_thread = None
+            return
+        with _physical_current_reseed_lock:
+            _physical_current_pending_wakes.difference_update(batch)
+
+
+def _defer_physical_current_reseed() -> str:
+    """Wake the single lazily created reseed worker without waiting on it."""
+    global _physical_current_reseed_thread
+    with _physical_current_reseed_lock:
+        if _physical_current_reseed_thread is None:
+            _physical_current_reseed_thread = threading.Thread(
+                target=_physical_current_reseed_worker, name="physical-current-reseed", daemon=True,
+            )
+            _physical_current_reseed_thread.start()
+    return "DEFERRED_TO_RESEED_WORKER"
 
 
 @_scheduler_job("ingest_day0_fmi_temperature")
@@ -2325,32 +2392,14 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
 
     wake_status = "NO_NEW_SOURCE_REVISION"
     wake_key = (city.name, station_id, source_channel)
-    if advanced:
-        _physical_current_pending_wakes.add(wake_key)
-    if wake_key in _physical_current_pending_wakes:
-        from src.data.replacement_forecast_production import (
-            _enqueue_fusion_upgrade_reseeds_if_needed,
-            _replacement_forecast_live_materialization_queue_config,
-        )
-
-        # Read/seed after receipt, never at the pre-request scheduling clock.
-        # The existing fusion input-revision marker owns durable per-family
-        # publication and periodic catch-up if this immediate scoped pass fails.
-        decision_time = datetime.now(timezone.utc)
-        from src.data.physical_current_delivery import current_temperature_delivery_scopes
-        affected_scopes = current_temperature_delivery_scopes((city,), now=decision_time)
-        report = _enqueue_fusion_upgrade_reseeds_if_needed(
-            _replacement_forecast_live_materialization_queue_config(),
-            scopes=affected_scopes,
-            changed_sources=("day0_current_temperature_state",),
-            computed_at=decision_time,
-        )
-        status = (report or {}).get("status")
-        wake_status = status or "ENQUEUE_UNAVAILABLE"
-        if report is not None and status != "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED":
-            _physical_current_pending_wakes.discard(wake_key)
-        logger.info("PHYSICAL_CURRENT_REDECISION_SEED city=%s station=%s status=%s",
-                    city.name, station_id, status)
+    with _physical_current_reseed_lock:
+        if advanced:
+            _physical_current_pending_wakes.add(wake_key)
+        pending = wake_key in _physical_current_pending_wakes
+    if pending:
+        # The scoped reseed is slower than the round it would stall; the worker
+        # reads WORLD after this commit, so the print is covered either way.
+        wake_status = _defer_physical_current_reseed()
     if not prints:
         # ASOS-only round: the derived channel carries no page identity to trace.
         return {"status": "COMMITTED", "inserted": 0, "advanced": False, "clock_trace": None}
@@ -2370,7 +2419,6 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
         "source_http_ms": (source_received_ns - chain_started_ns) / 1_000_000,
         "source_round_cache_hit": cached is not None,
         "receipt_to_world_ms": (world_committed_ns - source_received_ns) / 1_000_000,
-        "world_to_enqueue_return_ms": (time.monotonic_ns() - world_committed_ns) / 1_000_000,
         "enqueue_status": wake_status,
         # q_served_at_ms / venue_ack_at_ms are deliberately absent here:
         # OBSERVATION_REACTION_TRACE emits them only when those async stages
