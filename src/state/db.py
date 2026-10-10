@@ -702,12 +702,14 @@ def get_world_connection(
     *,
     write_class: WriteClass | str | None = None,
     busy_timeout_ms: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
     """Shared world data DB (settlements, calibration, ENS)."""
     return _connect(
         ZEUS_WORLD_DB_PATH,
         write_class=write_class,
         busy_timeout_ms=busy_timeout_ms,
+        deadline_monotonic=deadline_monotonic,
     )
 
 

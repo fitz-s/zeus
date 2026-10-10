@@ -2131,6 +2131,7 @@ def _physical_current_poll_seconds() -> float:
     return physical_current_poll_seconds()
 
 
+_PHYSICAL_CURRENT_WRITE_BUDGET_S = 0.3
 _physical_current_pending_wakes: set[tuple[str, str, str]] = set()
 _physical_current_reseed_lock = threading.Lock()
 _physical_current_reseed_thread: threading.Thread | None = None
@@ -2282,8 +2283,15 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
     if not prints and not getattr(prints, "asos5", ()):
         return {"status": "NO_NEW_PRINT"}
 
+    # One budget spans mutex wait, lease deadline and connect, each bounded by
+    # what remains; expiry defers and the next tick's window re-offers the prints.
+    deadline = time.monotonic() + _PHYSICAL_CURRENT_WRITE_BUDGET_S
+
+    def left_ms() -> int:
+        return max(1, int((deadline - time.monotonic()) * 1000))
+
     mutex = world_write_mutex()
-    if not mutex.acquire(timeout=0.1):
+    if not mutex.acquire(timeout=left_ms() / 1000):
         return {"status": "WORLD_WRITER_BUSY"}
     inserted = 0
     advanced = False
@@ -2291,11 +2299,13 @@ def _day0_current_temperature_source_tick(city, route, *, fetch_cache=None) -> d
     try:
         with default_runtime_write_coordinator().lease(
             (DBIdentity.WORLD,), owner="day0_fmi_temperature",
-            write_class="live", deadline_ms=200, max_hold_ms=300,
+            write_class="live", deadline_ms=left_ms(), max_hold_ms=300,
         ) as lease:
-            conn = get_world_connection(write_class="live")
+            conn = get_world_connection(
+                write_class="live", busy_timeout_ms=left_ms(), deadline_monotonic=deadline,
+            )
             try:
-                conn.execute("PRAGMA busy_timeout = 100")
+                conn.execute(f"PRAGMA busy_timeout = {left_ms()}")
                 newest_row = conn.execute(
                     "SELECT publish_ts_utc, value_native FROM observation_prints "
                     "WHERE city = ? AND station_id = ? AND source_channel = ? "
