@@ -168,6 +168,13 @@ def test_late_first_fetch_of_old_sample_falls_back_to_legal_source():
     conn.close()
 
 
+def _drain_reseed_worker(ingest):
+    worker = ingest._physical_current_reseed_thread
+    if worker is not None:
+        worker.join(10)
+        assert not worker.is_alive()
+
+
 @pytest.mark.parametrize("retry_wake", [False, True])
 def test_new_print_uses_world_coordinator_and_wakes_only_helsinki(monkeypatch, tmp_path, retry_wake):
     import src.ingest_main as ingest
@@ -217,13 +224,15 @@ def test_new_print_uses_world_coordinator_and_wakes_only_helsinki(monkeypatch, t
     monkeypatch.setattr(production, "_enqueue_fusion_upgrade_reseeds_if_needed", enqueue)
 
     report = ingest._day0_fmi_temperature_tick()
+    _drain_reseed_worker(ingest)
     assert {key: report[key] for key in ("status", "inserted", "advanced")} == {"status": "COMMITTED", "inserted": 1, "advanced": True}
     trace = report["clock_trace"]
     assert trace["provider_observed_at_ms"] == int(sample.observed_at.timestamp()*1000)
     assert trace["response_received_at_ms"] == int(sample.fetched_at.timestamp()*1000)
     assert trace["provider_published_at_ms"] is None
     assert trace["source_http_ms"] >= 0 and trace["receipt_to_world_ms"] >= 0
-    assert trace["world_to_enqueue_return_ms"] >= 0
+    assert "world_to_enqueue_return_ms" not in trace
+    assert trace["enqueue_status"] == "DEFERRED_TO_RESEED_WORKER"
     assert "q_served_at_ms" not in trace and "venue_ack_at_ms" not in trace
     assert trace["completion_trace"] == "OBSERVATION_REACTION_TRACE"
     assert trace["input_identity"] == {
@@ -242,9 +251,11 @@ def test_new_print_uses_world_coordinator_and_wakes_only_helsinki(monkeypatch, t
         row = conn.execute("SELECT source_channel, value_native, fetched_at_utc FROM observation_prints").fetchone()
         assert row == (SOURCE_CHANNEL, 15.8, now.isoformat())
     assert ingest._day0_fmi_temperature_tick()["advanced"] is False
+    _drain_reseed_worker(ingest)
     assert len(wake_calls) == (2 if retry_wake else 1)
     assert not ingest._physical_current_pending_wakes
     ingest._day0_fmi_temperature_tick()
+    _drain_reseed_worker(ingest)
     assert len(wake_calls) == (2 if retry_wake else 1)
 
 
